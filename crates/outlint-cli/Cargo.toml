@@ -1,0 +1,15 @@
+[package]
+name = "outlint"
+description = "Lint the header structure of Markdown documents against a schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "outlint"
+path = "src/main.rs"
+
+[dependencies]
+outlint-core = { path = "../outlint-core", version = "0.1.0" }
+serde_json = "1"

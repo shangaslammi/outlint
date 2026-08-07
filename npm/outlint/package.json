@@ -1,0 +1,9 @@
+{
+  "name": "outlint",
+  "version": "0.1.0",
+  "description": "Lint the header structure of Markdown documents against a schema",
+  "license": "MIT",
+  "repository": "github:sami/outlint",
+  "bin": { "outlint": "bin.js" },
+  "files": ["bin.js"]
+}
