@@ -6,8 +6,9 @@ use std::{
 };
 
 use outlint_core::{
-    load_schema_with_label, parse_markdown, validate, Diagnostic, InvalidSchema, LoadedSchema,
-    MarkdownOptions, SchemaError, SchemaLocations, SchemaNode, SchemaSources, SourceLabel,
+    load_schema_with_label, parse_markdown, validate, Diagnostic, DiagnosticReference,
+    FrontmatterRef, FrontmatterScalar, InvalidSchema, LoadedSchema, MarkdownOptions, Matcher,
+    RefAnchor, RuleRef, SchemaError, SchemaLocations, SchemaNode, SchemaSources, SourceLabel,
     SourceRange,
 };
 use serde_json::{json, Map, Value};
@@ -152,12 +153,6 @@ enum ParseOutcome<T> {
 }
 
 fn parse_check_args(args: &[String]) -> Result<ParseOutcome<CheckOptions>, String> {
-    if args
-        .iter()
-        .any(|argument| argument == "--help" || argument == "-h")
-    {
-        return Ok(ParseOutcome::Help);
-    }
     let mut files = Vec::new();
     let mut schema = None;
     let mut format = OutputFormat::Human;
@@ -170,6 +165,7 @@ fn parse_check_args(args: &[String]) -> Result<ParseOutcome<CheckOptions>, Strin
         } else {
             match argument.as_str() {
                 "--" => positional_only = true,
+                "--help" | "-h" => return Ok(ParseOutcome::Help),
                 "-s" | "--schema" => {
                     let value = option_value(args, &mut index, argument)?;
                     set_once(&mut schema, value, "--schema")?;
@@ -204,12 +200,6 @@ fn parse_check_args(args: &[String]) -> Result<ParseOutcome<CheckOptions>, Strin
 }
 
 fn parse_schema_args(args: &[String]) -> Result<ParseOutcome<SchemaOptions>, String> {
-    if args
-        .iter()
-        .any(|argument| argument == "--help" || argument == "-h")
-    {
-        return Ok(ParseOutcome::Help);
-    }
     let mut schemas = Vec::new();
     let mut format = OutputFormat::Human;
     let mut color = ColorChoice::Auto;
@@ -221,6 +211,7 @@ fn parse_schema_args(args: &[String]) -> Result<ParseOutcome<SchemaOptions>, Str
         } else {
             match argument.as_str() {
                 "--" => positional_only = true,
+                "--help" | "-h" => return Ok(ParseOutcome::Help),
                 "--format" => {
                     format = parse_format(option_value(args, &mut index, argument)?)?;
                 }
@@ -290,9 +281,16 @@ struct InvocationOutput {
 
 #[derive(Debug)]
 struct ValidationResult {
+    kind: ResultKind,
     path: String,
     schema: String,
     diagnostics: Vec<RenderedDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultKind {
+    Document,
+    Schema,
 }
 
 #[derive(Debug)]
@@ -303,7 +301,10 @@ struct RenderedDiagnostic {
     line: u32,
     column: u32,
     header_path: Option<Vec<String>>,
+    schema_node: Option<RenderedSchemaNode>,
     schema_location: Option<RenderedLocation>,
+    involved_headers: Vec<RenderedInvolvedHeader>,
+    references: Vec<RenderedReference>,
 }
 
 #[derive(Debug)]
@@ -313,79 +314,199 @@ struct RenderedLocation {
     column: u32,
 }
 
+#[derive(Debug)]
+enum RenderedSchemaNode {
+    Title,
+    Frontmatter,
+    FrontmatterSchemaDeclaration,
+    FrontmatterSchemaDocument,
+    Rule { scope: Vec<usize>, index: usize },
+    Constraint { scope: Vec<usize>, index: usize },
+}
+
+#[derive(Debug)]
+struct RenderedInvolvedHeader {
+    header_path: Vec<String>,
+    line: u32,
+    column: u32,
+}
+
+#[derive(Debug)]
+enum RenderedReference {
+    Rule {
+        anchor: &'static str,
+        path: Vec<String>,
+        matcher: RenderedMatcher,
+    },
+    Frontmatter {
+        path: Vec<String>,
+        equals: Option<RenderedScalar>,
+    },
+}
+
+#[derive(Debug)]
+enum RenderedMatcher {
+    Exact(String),
+    Glob(String),
+    Regex(String),
+    Any,
+}
+
+#[derive(Debug)]
+enum RenderedScalar {
+    Null,
+    Boolean(bool),
+    Integer(String),
+    Float(String),
+    String(String),
+}
+
 fn execute_check(options: CheckOptions) -> u8 {
     let mut output = InvocationOutput {
         results: Vec::new(),
         operational_errors: Vec::new(),
     };
     let mut stdin_source = None;
-
+    let mut schema_groups = options
+        .schema
+        .as_ref()
+        .map(|schema| {
+            vec![SchemaGroup {
+                path: PathBuf::from(schema),
+                display: schema.clone(),
+                load: SchemaLoad::Pending,
+                emitted: false,
+            }]
+        })
+        .unwrap_or_default();
+    let mut inputs = Vec::new();
     for file in &options.files {
-        let schema_path = match &options.schema {
-            Some(schema) => PathBuf::from(schema),
-            None => match discover_schema(Path::new(file)) {
-                Ok(path) => path,
-                Err(message) => {
-                    output.operational_errors.push(message);
-                    continue;
-                }
-            },
-        };
-        let schema_display = display_path(&schema_path);
-        let loaded = match read_and_load_schema(&schema_path, &schema_display) {
-            Ok(Ok(loaded)) => loaded,
-            Ok(Err(invalid)) => {
-                let mut diagnostics = render_schema_errors(&invalid, &schema_display);
-                sort_diagnostics(&mut diagnostics);
-                output.results.push(ValidationResult {
-                    path: file.clone(),
-                    schema: schema_display,
-                    diagnostics,
-                });
-                continue;
-            }
-            Err(message) => {
-                output.operational_errors.push(message);
-                continue;
-            }
-        };
-
-        let document_source = if file == "-" {
+        let source = if file == "-" {
             match stdin_source.get_or_insert_with(read_stdin_utf8) {
-                Ok(source) => source.clone(),
+                Ok(source) => Some(source.clone()),
                 Err(message) => {
                     output.operational_errors.push(message.clone());
-                    continue;
+                    None
                 }
             }
         } else {
             match read_utf8_file(Path::new(file), "Markdown input") {
-                Ok(source) => source,
+                Ok(source) => Some(source),
                 Err(message) => {
                     output.operational_errors.push(message);
-                    continue;
+                    None
                 }
             }
         };
-        let document = parse_markdown(
-            &document_source,
-            MarkdownOptions {
-                strip_inline_markup: loaded.schema.options.strip_inline_markup,
-            },
-        );
-        let mut diagnostics = validate(&loaded.schema, &document)
-            .iter()
-            .map(|diagnostic| render_document_diagnostic(file, diagnostic, &loaded))
-            .collect::<Vec<_>>();
-        sort_diagnostics(&mut diagnostics);
-        output.results.push(ValidationResult {
+        let schema_group = if options.schema.is_some() {
+            Some(0)
+        } else {
+            match discover_schema(Path::new(file)) {
+                Ok(path) => Some(schema_group(&mut schema_groups, path)),
+                Err(message) => {
+                    output.operational_errors.push(message);
+                    None
+                }
+            }
+        };
+        inputs.push(PreflightInput {
             path: file.clone(),
-            schema: schema_display,
-            diagnostics,
+            source,
+            schema_group,
         });
     }
 
+    for group in &mut schema_groups {
+        group.load = match read_and_load_schema(&group.path, &group.display) {
+            Ok(Ok(loaded)) => SchemaLoad::Valid(loaded),
+            Ok(Err(invalid)) => SchemaLoad::Invalid(invalid),
+            Err(message) => {
+                output.operational_errors.push(message);
+                SchemaLoad::OperationalError
+            }
+        };
+    }
+
+    for input in inputs {
+        let Some(group_index) = input.schema_group else {
+            continue;
+        };
+        let Some(group) = schema_groups.get_mut(group_index) else {
+            continue;
+        };
+        match &group.load {
+            SchemaLoad::Valid(loaded) => {
+                let Some(source) = input.source else {
+                    continue;
+                };
+                let document = parse_markdown(
+                    &source,
+                    MarkdownOptions {
+                        strip_inline_markup: loaded.schema.options.strip_inline_markup,
+                    },
+                );
+                let mut diagnostics = validate(&loaded.schema, &document)
+                    .iter()
+                    .map(|diagnostic| render_document_diagnostic(&input.path, diagnostic, loaded))
+                    .collect::<Vec<_>>();
+                sort_diagnostics(&mut diagnostics);
+                output.results.push(ValidationResult {
+                    kind: ResultKind::Document,
+                    path: input.path,
+                    schema: group.display.clone(),
+                    diagnostics,
+                });
+            }
+            SchemaLoad::Invalid(invalid) if !group.emitted => {
+                let mut diagnostics = render_schema_errors(invalid, &group.display);
+                sort_diagnostics(&mut diagnostics);
+                output.results.push(ValidationResult {
+                    kind: ResultKind::Schema,
+                    path: group.display.clone(),
+                    schema: group.display.clone(),
+                    diagnostics,
+                });
+                group.emitted = true;
+            }
+            SchemaLoad::Invalid(_) | SchemaLoad::OperationalError | SchemaLoad::Pending => {}
+        }
+    }
+
     finish_invocation(output, options.format, options.color)
+}
+
+struct PreflightInput {
+    path: String,
+    source: Option<String>,
+    schema_group: Option<usize>,
+}
+
+struct SchemaGroup {
+    path: PathBuf,
+    display: String,
+    load: SchemaLoad,
+    emitted: bool,
+}
+
+enum SchemaLoad {
+    Pending,
+    Valid(LoadedSchema),
+    Invalid(InvalidSchema),
+    OperationalError,
+}
+
+fn schema_group(groups: &mut Vec<SchemaGroup>, path: PathBuf) -> usize {
+    if let Some(index) = groups.iter().position(|group| group.path == path) {
+        return index;
+    }
+    let index = groups.len();
+    groups.push(SchemaGroup {
+        display: display_path(&path),
+        path,
+        load: SchemaLoad::Pending,
+        emitted: false,
+    });
+    index
 }
 
 fn execute_schema_check(options: SchemaOptions) -> u8 {
@@ -397,6 +518,7 @@ fn execute_schema_check(options: SchemaOptions) -> u8 {
         let schema_path = Path::new(schema);
         match read_and_load_schema(schema_path, schema) {
             Ok(Ok(_)) => output.results.push(ValidationResult {
+                kind: ResultKind::Schema,
                 path: schema.clone(),
                 schema: schema.clone(),
                 diagnostics: Vec::new(),
@@ -405,6 +527,7 @@ fn execute_schema_check(options: SchemaOptions) -> u8 {
                 let mut diagnostics = render_schema_errors(&invalid, schema);
                 sort_diagnostics(&mut diagnostics);
                 output.results.push(ValidationResult {
+                    kind: ResultKind::Schema,
                     path: schema.clone(),
                     schema: schema.clone(),
                     diagnostics,
@@ -458,18 +581,6 @@ fn decode_utf8(mut bytes: Vec<u8>) -> Result<String, String> {
 }
 
 fn discover_schema(document: &Path) -> Result<PathBuf, String> {
-    let metadata = fs::metadata(document).map_err(|error| {
-        format!(
-            "cannot inspect Markdown input '{}': {error}",
-            document.display()
-        )
-    })?;
-    if metadata.is_dir() {
-        return Err(format!(
-            "Markdown input '{}' is a directory; pass individual files instead",
-            document.display()
-        ));
-    }
     let absolute = if document.is_absolute() {
         document.to_path_buf()
     } else {
@@ -525,7 +636,10 @@ fn render_schema_error(
         line: location.line,
         column: location.column,
         header_path: None,
+        schema_node: None,
         schema_location: Some(location),
+        involved_headers: Vec::new(),
+        references: Vec::new(),
     }
 }
 
@@ -545,7 +659,87 @@ fn render_document_diagnostic(
         line: diagnostic.location.line,
         column: diagnostic.location.column,
         header_path: Some(diagnostic.path.0.clone()),
+        schema_node: diagnostic.schema_node.as_ref().map(render_schema_node),
         schema_location,
+        involved_headers: diagnostic
+            .involved_headers
+            .iter()
+            .map(|header| RenderedInvolvedHeader {
+                header_path: header.path.0.clone(),
+                line: header.location.line,
+                column: header.location.column,
+            })
+            .collect(),
+        references: diagnostic.references.iter().map(render_reference).collect(),
+    }
+}
+
+fn render_schema_node(node: &SchemaNode) -> RenderedSchemaNode {
+    match node {
+        SchemaNode::Title => RenderedSchemaNode::Title,
+        SchemaNode::Frontmatter => RenderedSchemaNode::Frontmatter,
+        SchemaNode::FrontmatterSchemaDeclaration => {
+            RenderedSchemaNode::FrontmatterSchemaDeclaration
+        }
+        SchemaNode::FrontmatterSchemaDocument => RenderedSchemaNode::FrontmatterSchemaDocument,
+        SchemaNode::Rule(path) => RenderedSchemaNode::Rule {
+            scope: path.scope.0.iter().map(|index| index.0).collect(),
+            index: path.index.0,
+        },
+        SchemaNode::Constraint(path) => RenderedSchemaNode::Constraint {
+            scope: path.scope.0.iter().map(|index| index.0).collect(),
+            index: path.index.0,
+        },
+    }
+}
+
+fn render_reference(reference: &DiagnosticReference) -> RenderedReference {
+    match reference {
+        DiagnosticReference::Rule { reference, matcher } => RenderedReference::Rule {
+            anchor: match reference.anchor {
+                RefAnchor::CurrentScope => "current_scope",
+                RefAnchor::SchemaRoot => "schema_root",
+            },
+            path: non_empty_rule_path(reference),
+            matcher: render_matcher(matcher),
+        },
+        DiagnosticReference::Frontmatter(reference) => RenderedReference::Frontmatter {
+            path: non_empty_frontmatter_path(reference),
+            equals: reference.equals.as_ref().map(render_scalar),
+        },
+    }
+}
+
+fn non_empty_rule_path(reference: &RuleRef) -> Vec<String> {
+    std::iter::once(&reference.path.first)
+        .chain(reference.path.rest.iter())
+        .map(|id| id.0.clone())
+        .collect()
+}
+
+fn non_empty_frontmatter_path(reference: &FrontmatterRef) -> Vec<String> {
+    std::iter::once(&reference.path.first)
+        .chain(reference.path.rest.iter())
+        .map(|key| key.0.clone())
+        .collect()
+}
+
+fn render_matcher(matcher: &Matcher) -> RenderedMatcher {
+    match matcher {
+        Matcher::Exact(value) => RenderedMatcher::Exact(value.0.clone()),
+        Matcher::Glob(value) => RenderedMatcher::Glob(value.0.clone()),
+        Matcher::Regex(value) => RenderedMatcher::Regex(value.0.clone()),
+        Matcher::Any => RenderedMatcher::Any,
+    }
+}
+
+fn render_scalar(scalar: &FrontmatterScalar) -> RenderedScalar {
+    match scalar {
+        FrontmatterScalar::Null => RenderedScalar::Null,
+        FrontmatterScalar::Boolean(value) => RenderedScalar::Boolean(*value),
+        FrontmatterScalar::Integer(value) => RenderedScalar::Integer(value.0.clone()),
+        FrontmatterScalar::Float(value) => RenderedScalar::Float(value.0.clone()),
+        FrontmatterScalar::String(value) => RenderedScalar::String(value.clone()),
     }
 }
 
@@ -617,7 +811,14 @@ fn finish_invocation(output: InvocationOutput, format: OutputFormat, color: Colo
         .map(|result| result.diagnostics.len())
         .sum::<usize>();
     let rendered = match format {
-        OutputFormat::Human => render_human(&output.results, color),
+        OutputFormat::Human => {
+            let use_color = match color {
+                ColorChoice::Always => true,
+                ColorChoice::Never => false,
+                ColorChoice::Auto => io::stdout().is_terminal(),
+            };
+            render_human(&output.results, use_color)
+        }
         OutputFormat::Json => render_json(&output.results),
     };
     let output_failed = if rendered.is_empty() {
@@ -634,12 +835,7 @@ fn finish_invocation(output: InvocationOutput, format: OutputFormat, color: Colo
     }
 }
 
-fn render_human(results: &[ValidationResult], color: ColorChoice) -> String {
-    let use_color = match color {
-        ColorChoice::Always => true,
-        ColorChoice::Never => false,
-        ColorChoice::Auto => io::stdout().is_terminal(),
-    };
+fn render_human(results: &[ValidationResult], use_color: bool) -> String {
     let diagnostic_count = results
         .iter()
         .map(|result| result.diagnostics.len())
@@ -650,14 +846,20 @@ fn render_human(results: &[ValidationResult], color: ColorChoice) -> String {
     let mut output = String::new();
     for diagnostic in results.iter().flat_map(|result| &result.diagnostics) {
         let id = if use_color {
-            format!("\u{1b}[31m[{}]\u{1b}[0m", diagnostic.id)
+            format!("\u{1b}[31m[{}]\u{1b}[0m", escape_human(&diagnostic.id))
         } else {
-            format!("[{}]", diagnostic.id)
+            format!("[{}]", escape_human(&diagnostic.id))
         };
         output.push_str(&format!(
-            "{}:{}:{} {} {}\n",
-            diagnostic.source_path, diagnostic.line, diagnostic.column, id, diagnostic.message
+            "{}:{}:{} {} {}",
+            escape_human(&diagnostic.source_path),
+            diagnostic.line,
+            diagnostic.column,
+            id,
+            escape_human(&diagnostic.message)
         ));
+        append_human_details(&mut output, diagnostic);
+        output.push('\n');
     }
     let files = results
         .iter()
@@ -671,6 +873,152 @@ fn render_human(results: &[ValidationResult], color: ColorChoice) -> String {
         plural(files, "file", "files")
     ));
     output
+}
+
+fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
+    if let Some(path) = &diagnostic.header_path {
+        output.push_str("; header_path=\"");
+        output.push_str(&human_header_path(path));
+        output.push('"');
+    }
+    if let Some(node) = &diagnostic.schema_node {
+        output.push_str("; schema_node=");
+        output.push_str(&human_schema_node(node));
+    }
+    if let Some(location) = &diagnostic.schema_location {
+        output.push_str("; schema_location=\"");
+        output.push_str(&escape_human(&location.path));
+        output.push_str(&format!("\":{}:{}", location.line, location.column));
+    }
+    if !diagnostic.involved_headers.is_empty() {
+        output.push_str("; involved_headers=[");
+        for (index, header) in diagnostic.involved_headers.iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            output.push('"');
+            output.push_str(&human_header_path(&header.header_path));
+            output.push_str(&format!("\"@{}:{}", header.line, header.column));
+        }
+        output.push(']');
+    }
+    if !diagnostic.references.is_empty() {
+        output.push_str("; references=[");
+        for (index, reference) in diagnostic.references.iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            output.push_str(&human_reference(reference));
+        }
+        output.push(']');
+    }
+}
+
+fn escape_human(value: &str) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{1b}' => escaped.push_str("\\x1b"),
+            character if character.is_control() => {
+                escaped.push_str(&format!("\\u{{{:x}}}", u32::from(character)));
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn human_header_path(path: &[String]) -> String {
+    path.iter()
+        .map(|part| escape_human(part))
+        .collect::<Vec<_>>()
+        .join(" > ")
+}
+
+fn human_schema_node(node: &RenderedSchemaNode) -> String {
+    match node {
+        RenderedSchemaNode::Title => "title".to_owned(),
+        RenderedSchemaNode::Frontmatter => "frontmatter".to_owned(),
+        RenderedSchemaNode::FrontmatterSchemaDeclaration => {
+            "frontmatter_schema_declaration".to_owned()
+        }
+        RenderedSchemaNode::FrontmatterSchemaDocument => "frontmatter_schema_document".to_owned(),
+        RenderedSchemaNode::Rule { scope, index } => {
+            format!("rule(scope={},index={index})", human_scope(scope))
+        }
+        RenderedSchemaNode::Constraint { scope, index } => {
+            format!("constraint(scope={},index={index})", human_scope(scope))
+        }
+    }
+}
+
+fn human_scope(scope: &[usize]) -> String {
+    format!(
+        "[{}]",
+        scope
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn human_reference(reference: &RenderedReference) -> String {
+    match reference {
+        RenderedReference::Rule {
+            anchor,
+            path,
+            matcher,
+        } => {
+            let prefix = if *anchor == "schema_root" { "$." } else { "" };
+            format!(
+                "{}{}=>{}",
+                prefix,
+                path.iter()
+                    .map(|part| escape_human(part))
+                    .collect::<Vec<_>>()
+                    .join("."),
+                human_matcher(matcher)
+            )
+        }
+        RenderedReference::Frontmatter { path, equals } => {
+            let mut display = format!(
+                "fm.{}",
+                path.iter()
+                    .map(|part| escape_human(part))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            );
+            if let Some(value) = equals {
+                display.push('=');
+                display.push_str(&human_scalar(value));
+            }
+            display
+        }
+    }
+}
+
+fn human_matcher(matcher: &RenderedMatcher) -> String {
+    match matcher {
+        RenderedMatcher::Exact(value) => format!("exact:\"{}\"", escape_human(value)),
+        RenderedMatcher::Glob(value) => format!("glob:\"{}\"", escape_human(value)),
+        RenderedMatcher::Regex(value) => format!("regex:\"{}\"", escape_human(value)),
+        RenderedMatcher::Any => "any".to_owned(),
+    }
+}
+
+fn human_scalar(scalar: &RenderedScalar) -> String {
+    match scalar {
+        RenderedScalar::Null => "null".to_owned(),
+        RenderedScalar::Boolean(value) => value.to_string(),
+        RenderedScalar::Integer(value) | RenderedScalar::Float(value) => escape_human(value),
+        RenderedScalar::String(value) => format!("\"{}\"", escape_human(value)),
+    }
 }
 
 fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
@@ -690,12 +1038,21 @@ fn render_json(results: &[ValidationResult]) -> String {
         .iter()
         .map(|result| {
             json!({
+                "kind": match result.kind {
+                    ResultKind::Document => "document",
+                    ResultKind::Schema => "schema",
+                },
                 "path": result.path,
                 "schema": result.schema,
                 "diagnostics": result.diagnostics.iter().map(diagnostic_json).collect::<Vec<_>>()
             })
         })
         .collect::<Vec<_>>();
+    let document_count = results
+        .iter()
+        .filter(|result| result["kind"] == "document")
+        .count();
+    let schema_count = results.len().saturating_sub(document_count);
     format!(
         "{}\n",
         json!({
@@ -703,6 +1060,8 @@ fn render_json(results: &[ValidationResult]) -> String {
             "results": results,
             "summary": {
                 "files": results.len(),
+                "documents": document_count,
+                "schemas": schema_count,
                 "diagnostics": diagnostic_count
             }
         })
@@ -720,6 +1079,9 @@ fn diagnostic_json(diagnostic: &RenderedDiagnostic) -> Value {
     if let Some(header_path) = &diagnostic.header_path {
         object.insert("header_path".into(), json!(header_path));
     }
+    if let Some(node) = &diagnostic.schema_node {
+        object.insert("schema_node".into(), schema_node_json(node));
+    }
     if let Some(location) = &diagnostic.schema_location {
         object.insert(
             "schema_location".into(),
@@ -730,7 +1092,92 @@ fn diagnostic_json(diagnostic: &RenderedDiagnostic) -> Value {
             }),
         );
     }
+    if !diagnostic.involved_headers.is_empty() {
+        object.insert(
+            "involved_headers".into(),
+            Value::Array(
+                diagnostic
+                    .involved_headers
+                    .iter()
+                    .map(|header| {
+                        json!({
+                            "header_path": header.header_path,
+                            "location": { "line": header.line, "column": header.column }
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if !diagnostic.references.is_empty() {
+        object.insert(
+            "references".into(),
+            Value::Array(diagnostic.references.iter().map(reference_json).collect()),
+        );
+    }
     Value::Object(object)
+}
+
+fn schema_node_json(node: &RenderedSchemaNode) -> Value {
+    match node {
+        RenderedSchemaNode::Title => json!({ "kind": "title" }),
+        RenderedSchemaNode::Frontmatter => json!({ "kind": "frontmatter" }),
+        RenderedSchemaNode::FrontmatterSchemaDeclaration => {
+            json!({ "kind": "frontmatter_schema_declaration" })
+        }
+        RenderedSchemaNode::FrontmatterSchemaDocument => {
+            json!({ "kind": "frontmatter_schema_document" })
+        }
+        RenderedSchemaNode::Rule { scope, index } => {
+            json!({ "kind": "rule", "scope": scope, "index": index })
+        }
+        RenderedSchemaNode::Constraint { scope, index } => {
+            json!({ "kind": "constraint", "scope": scope, "index": index })
+        }
+    }
+}
+
+fn reference_json(reference: &RenderedReference) -> Value {
+    match reference {
+        RenderedReference::Rule {
+            anchor,
+            path,
+            matcher,
+        } => json!({
+            "kind": "rule",
+            "anchor": anchor,
+            "path": path,
+            "matcher": matcher_json(matcher)
+        }),
+        RenderedReference::Frontmatter { path, equals } => {
+            let mut object = Map::new();
+            object.insert("kind".into(), json!("frontmatter"));
+            object.insert("path".into(), json!(path));
+            if let Some(equals) = equals {
+                object.insert("equals".into(), scalar_json(equals));
+            }
+            Value::Object(object)
+        }
+    }
+}
+
+fn matcher_json(matcher: &RenderedMatcher) -> Value {
+    match matcher {
+        RenderedMatcher::Exact(value) => json!({ "kind": "exact", "value": value }),
+        RenderedMatcher::Glob(value) => json!({ "kind": "glob", "value": value }),
+        RenderedMatcher::Regex(value) => json!({ "kind": "regex", "value": value }),
+        RenderedMatcher::Any => json!({ "kind": "any" }),
+    }
+}
+
+fn scalar_json(scalar: &RenderedScalar) -> Value {
+    match scalar {
+        RenderedScalar::Null => json!({ "type": "null", "value": null }),
+        RenderedScalar::Boolean(value) => json!({ "type": "boolean", "value": value }),
+        RenderedScalar::Integer(value) => json!({ "type": "integer", "value": value }),
+        RenderedScalar::Float(value) => json!({ "type": "float", "value": value }),
+        RenderedScalar::String(value) => json!({ "type": "string", "value": value }),
+    }
 }
 
 #[cfg(test)]

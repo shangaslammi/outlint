@@ -61,6 +61,10 @@ outlint check <FILE>... \
 
 `FILE` is a Markdown document path or `-` for standard input.
 
+All command-line arguments, including paths, MUST be valid UTF-8 in v1. A
+non-UTF-8 argument is a usage error. This restriction is separate from file
+contents, which use the UTF-8 rules in §5.
+
 At least one input MUST be specified. The command MUST NOT implicitly read stdin when invoked without files, because doing so can accidentally block interactive invocations.
 
 ### Options
@@ -287,6 +291,23 @@ The exact prose may evolve, but these fields should remain identifiable:
 <source>:<line>:<column> [<diagnostic-id>] <message>
 ```
 
+Applicable structured context follows the message as semicolon-delimited
+fields. Their stable forms are:
+
+```text
+; header_path="Overview > Goals"
+; schema_node=rule(scope=[0],index=1)
+; schema_location=".outlint.yml":22:5
+; involved_headers=["Overview > Goals"@14:1]
+; references=[goals=>exact:"Goals", $.api=>glob:"API *", fm.status=true]
+```
+
+An empty header path is `header_path=""`. Schema nodes without indices use
+their JSON `kind` spelling. Rule-reference matchers use `exact:`, `glob:`, or
+`regex:` followed by a quoted value, or `any`; schema-root references retain
+their `$.` prefix. Frontmatter string equality values are quoted. These fields
+are omitted when the core diagnostic has no corresponding data.
+
 The diagnostic ID is the stable programmatic identity. Consumers MUST NOT need to parse message prose.
 
 ### Summary
@@ -318,6 +339,7 @@ Proposed top-level structure:
   "version": 1,
   "results": [
     {
+      "kind": "document",
       "path": "README.md",
       "schema": ".outlint.yml",
       "diagnostics": [
@@ -342,6 +364,8 @@ Proposed top-level structure:
   ],
   "summary": {
     "files": 1,
+    "documents": 1,
+    "schemas": 0,
     "diagnostics": 1
   }
 }
@@ -366,6 +390,56 @@ The initial CLI should treat the following as part of the compatibility contract
 Additional fields MAY be added compatibly.
 
 Fields that do not apply to a diagnostic SHOULD be omitted rather than emitted as ambiguous sentinel values.
+
+Every result has a `kind` field. A successfully loaded document produces a
+`"document"` result whose `path` is the document argument and whose `schema`
+is the explicit or discovered schema path. `schema check` produces a
+`"schema"` result with `path` and `schema` both naming that schema. During
+`check`, one invalid schema shared by multiple documents produces one
+`"schema"` result, placed where the first dependent document would have
+appeared; dependent document results are omitted because validation did not
+take place. A schema is loaded and its errors are emitted only once per
+resolved path in one invocation.
+
+Document diagnostics additionally expose the normalized data supplied by the
+core validator when it applies:
+
+```json
+{
+  "schema_node": { "kind": "rule", "scope": [0], "index": 1 },
+  "involved_headers": [
+    {
+      "header_path": ["Overview", "Goals"],
+      "location": { "line": 14, "column": 1 }
+    }
+  ],
+  "references": [
+    {
+      "kind": "rule",
+      "anchor": "current_scope",
+      "path": ["goals"],
+      "matcher": { "kind": "exact", "value": "Goals" }
+    }
+  ]
+}
+```
+
+`schema_node.kind` is `title`, `frontmatter`,
+`frontmatter_schema_declaration`, `frontmatter_schema_document`, `rule`, or
+`constraint`. Rule and constraint nodes include their zero-based `scope` rule
+indices and `index`. A rule reference's anchor is `current_scope` or
+`schema_root`. Matchers have kind `exact`, `glob`, `regex`, or `any`; the
+first three include `value`. Frontmatter references have kind `frontmatter`,
+a string `path` array, and, for equality refs, an `equals` object with `type`
+(`null`, `boolean`, `integer`, `float`, or `string`) and a typed `value`.
+Integer and float values are their canonical strings so arbitrary precision is
+preserved; null, boolean, and string values use their corresponding JSON types.
+
+`summary.files` counts result objects: documents actually validated plus
+independently reported invalid schemas. `summary.documents` and
+`summary.schemas` give those counts separately. `summary.diagnostics` counts
+all emitted validation diagnostics. Operationally unreadable inputs do not
+produce result objects.
 
 Frontmatter diagnostics may additionally expose:
 
@@ -438,6 +512,11 @@ Examples returning `2`:
 
 When an invocation contains both validation diagnostics and an operational failure, exit code `2` wins.
 
+Document paths and contents are preflighted independently of schema validity.
+Thus an invalid explicit schema can still be reported together with unreadable,
+directory, or invalid-UTF-8 document errors; the exit code is `2`, and no
+dependent document is partially validated.
+
 This keeps CI usage simple:
 
 ```sh
@@ -464,6 +543,11 @@ Recommended ordering:
 Schema-load diagnostics SHOULD be emitted before document diagnostics that depend on that schema.
 
 JSON result objects SHOULD preserve input argument order.
+
+When schema grouping replaces dependent documents with one schema result, that
+result occupies the position of its first dependent input. Later dependents
+produce no duplicate schema result. Schema diagnostics are ordered by source
+line, column, id, and related schema location.
 
 Deterministic ordering matters for:
 
@@ -502,6 +586,14 @@ For `--color auto`:
 The CLI MUST NOT prompt interactively.
 
 Missing files, missing schemas, and ambiguous invocation state should fail immediately with a useful error rather than asking questions.
+
+Human output escapes untrusted fields so that every diagnostic occupies one
+physical line. Backslash, double quote, newline, carriage return, tab, ESC, and
+other ASCII control characters are rendered respectively as `\\`, `\"`, `\n`,
+`\r`, `\t`, `\x1b`, and `\u{hex}`. This applies to source paths, messages, header paths,
+schema locations, involved headers, and reference/matcher displays. ANSI escape
+sequences may only be emitted by the formatter when color is enabled; with
+`--color never`, untrusted text cannot introduce ANSI bytes.
 
 This keeps behavior safe for CI and subprocess integrations.
 
@@ -553,6 +645,9 @@ Options:
 - formatter choices.
 
 `outlint schema check --help` should document which schema-load-time failures it detects.
+
+`--` ends option parsing for both validation commands. Consequently a later
+`--help` or `-h` is a path, not a help request.
 
 ## 18. Version output
 
