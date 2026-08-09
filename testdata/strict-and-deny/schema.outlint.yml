@@ -1,0 +1,12 @@
+version: 1
+sections:
+  - match: "Overview"
+    required: false
+    strict: true
+    sections:
+      - match: "Allowed"
+  - match: "Forbidden"
+    allow: false
+    sections:
+      - match: "Must not validate"
+        required: true

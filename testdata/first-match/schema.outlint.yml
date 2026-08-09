@@ -1,0 +1,8 @@
+version: 1
+sections:
+  - id: broad
+    match: "API*"
+    required: false
+  - id: denied-api
+    match: "API"
+    allow: false

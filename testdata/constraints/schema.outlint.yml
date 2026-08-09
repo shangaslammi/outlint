@@ -1,0 +1,16 @@
+version: 1
+sections:
+  - id: a
+    match: "A"
+    required: false
+  - id: b
+    match: "B"
+    required: false
+  - id: c
+    match: "C"
+    required: false
+constraints:
+  - one_of: [a, b]
+  - requires: { if: a, then: c }
+  - conflicts: { if: b, then_not: c }
+  - ordered: [a, c]

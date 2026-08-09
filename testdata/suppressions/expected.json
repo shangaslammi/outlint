@@ -1,0 +1,6 @@
+{
+  "file-and-inline.md": [],
+  "absence-inline.md": [
+    { "id": "missing-section", "path": "Need" }
+  ]
+}

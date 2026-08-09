@@ -7,8 +7,10 @@ mod loader;
 mod markdown;
 mod parser;
 mod schema;
+mod validator;
 
 pub use loader::*;
 pub use markdown::*;
 pub use parser::*;
 pub use schema::*;
+pub use validator::*;

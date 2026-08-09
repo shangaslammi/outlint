@@ -1,0 +1,14 @@
+{
+  "pass.md": [],
+  "fail.md": [
+    { "id": "not-allowed", "path": "Wrong" },
+    { "id": "skipped-level", "path": "Wrong > Item > Deep" },
+    { "id": "too-few-sections", "path": "Item" }
+  ],
+  "missing.md": [
+    { "id": "missing-title", "path": "Project" }
+  ],
+  "multiple.md": [
+    { "id": "too-many-sections", "path": "Project" }
+  ]
+}

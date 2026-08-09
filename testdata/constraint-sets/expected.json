@@ -1,0 +1,12 @@
+{
+  "any-of.md": [
+    { "id": "any_of", "path": "" }
+  ],
+  "at-most-one.md": [
+    { "id": "at_most_one", "path": "" }
+  ],
+  "all-or-none.md": [
+    { "id": "all_or_none", "path": "" }
+  ],
+  "pass.md": []
+}

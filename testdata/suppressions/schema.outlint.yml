@@ -1,0 +1,6 @@
+version: 1
+sections:
+  - match: "Need"
+    required: true
+  - match: "Bad"
+    allow: false

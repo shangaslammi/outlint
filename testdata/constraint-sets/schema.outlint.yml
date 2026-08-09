@@ -1,0 +1,15 @@
+version: 1
+sections:
+  - id: a
+    match: "A"
+    required: false
+  - id: b
+    match: "B"
+    required: false
+  - id: c
+    match: "C"
+    required: false
+constraints:
+  - any_of: [a, b]
+  - at_most_one: [a, b]
+  - all_or_none: [b, c]

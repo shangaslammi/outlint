@@ -1,0 +1,7 @@
+{
+  "pass.md": [],
+  "fail.md": [
+    { "id": "unexpected-section", "path": "Overview > Surprise" },
+    { "id": "not-allowed", "path": "Forbidden" }
+  ]
+}

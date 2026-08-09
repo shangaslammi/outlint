@@ -1,0 +1,16 @@
+version: 1
+sections:
+  - id: group
+    match: "Group"
+    required: false
+    sections:
+      - id: child
+        match: "Child"
+        required: false
+    constraints:
+      - requires: { if: child, then: "$.other" }
+  - id: other
+    match: "Other"
+    required: false
+constraints:
+  - any_of: [group.child, other]

@@ -1,0 +1,8 @@
+version: 1
+sections:
+  - id: a
+    match: "A"
+  - id: b
+    match: "B"
+constraints:
+  - ordered: [a, b]
