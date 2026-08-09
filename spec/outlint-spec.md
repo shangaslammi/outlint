@@ -105,7 +105,9 @@ referenced by constraints (§4.4).
 `^(0|[1-9][0-9]*)\.\.((0|[1-9][0-9]*)|n)$` — decimal integers without
 leading zeros or whitespace; `n` denotes unbounded. If `max` is an integer,
 `max >= min` MUST hold and `max >= 1`. Violations are schema error
-`invalid-repeat`.
+`invalid-repeat`. Finite bounds MUST be no greater than 4,294,967,295; this
+limit permits implementations to store section counts and bounds in unsigned
+32-bit integers. A larger bound is `invalid-repeat`.
 
 ### 2.2 Matcher forms
 
