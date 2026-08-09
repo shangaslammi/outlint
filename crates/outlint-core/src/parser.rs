@@ -3,7 +3,9 @@
 //! Source provenance lives in this layer rather than in the semantic
 //! [`Schema`]. A successfully loaded schema can therefore be compared and used
 //! independently of its original formatting while diagnostics can still point
-//! back to the declarations that produced it.
+//! back to the declarations that produced it. Provenance is multi-source so a
+//! load error in an external frontmatter JSON Schema can name that file rather
+//! than being incorrectly anchored to its path in the primary document.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -17,8 +19,8 @@ pub type LoadSchemaResult = Result<LoadedSchema, InvalidSchema>;
 pub struct LoadedSchema {
     /// The final normalized schema.
     pub schema: Schema,
-    /// The source document from which the schema was loaded.
-    pub source: SchemaSource,
+    /// The primary document and any external JSON Schema sources it loaded.
+    pub sources: SchemaSources,
     /// Locations of semantic nodes retained for later diagnostics.
     pub locations: SchemaLocations,
 }
@@ -28,8 +30,9 @@ pub struct LoadedSchema {
 /// No partial semantic schema is exposed on failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidSchema {
-    /// The source document containing the errors.
-    pub source: SchemaSource,
+    /// The primary document and any external JSON Schema sources read before
+    /// loading failed.
+    pub sources: SchemaSources,
     /// One or more syntax, shape, or schema-validation errors.
     pub errors: NonEmpty<SchemaError>,
 }
@@ -43,6 +46,24 @@ pub struct SchemaSource {
     pub text: Arc<str>,
 }
 
+/// All source documents participating in one schema load.
+///
+/// [`SourceId`] values are local to this collection. Keeping source identity
+/// in the parser result, instead of in semantic schema nodes, preserves
+/// position-independent equality for [`Schema`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaSources {
+    /// The Outlint schema document requested by the caller.
+    pub primary: SourceId,
+    /// Source text keyed by the ids used in locations and errors.
+    pub documents: BTreeMap<SourceId, SchemaSource>,
+}
+
+/// The identity of one source within [`SchemaSources`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct SourceId(pub u32);
+
 /// A human-readable name for a schema source.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -54,10 +75,10 @@ pub struct SourceLabel(pub String);
 /// using rule ids, which are optional and only locally unique.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaLocations {
-    /// The range covering the complete schema document.
-    pub document: TextRange,
+    /// The range covering the complete primary Outlint schema document.
+    pub document: SourceRange,
     /// Source ranges for semantic nodes needed by validation diagnostics.
-    pub nodes: BTreeMap<SchemaNode, TextRange>,
+    pub nodes: BTreeMap<SchemaNode, SourceRange>,
 }
 
 /// The address of a semantic schema node with retained source provenance.
@@ -65,6 +86,16 @@ pub struct SchemaLocations {
 pub enum SchemaNode {
     /// The optional title matcher.
     Title,
+    /// The normalized frontmatter policy object.
+    Frontmatter,
+    /// The inline mapping or external path in the policy's `schema` field.
+    FrontmatterSchemaDeclaration,
+    /// The parsed JSON Schema document.
+    ///
+    /// For an inline schema this may share a range with its declaration. For
+    /// an external schema it points into that external source, while
+    /// [`Self::FrontmatterSchemaDeclaration`] remains in the primary source.
+    FrontmatterSchemaDocument,
     /// A section rule at a structural path.
     Rule(RulePath),
     /// A constraint at a structural path.
@@ -119,13 +150,20 @@ pub struct TextRange {
 #[repr(transparent)]
 pub struct ByteOffset(pub usize);
 
+/// A byte range associated with one source in [`SchemaSources`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceRange {
+    pub source: SourceId,
+    pub range: TextRange,
+}
+
 /// A positioned error produced while loading a schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaError {
     /// A machine-readable error category.
     pub kind: SchemaErrorKind,
     /// The primary source range associated with the error.
-    pub range: TextRange,
+    pub range: SourceRange,
     /// Additional declarations or values relevant to the error.
     pub related: Vec<RelatedLocation>,
     /// A human-readable explanation.
@@ -135,7 +173,7 @@ pub struct SchemaError {
 /// A secondary source range attached to a schema error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelatedLocation {
-    pub range: TextRange,
+    pub range: SourceRange,
     pub message: String,
 }
 
@@ -152,6 +190,12 @@ pub enum SchemaErrorKind {
     DuplicateId,
     /// A constraint reference does not resolve to a rule.
     UnresolvedRef,
+    /// A constraint references a rule that denies matching sections.
+    ForbiddenRef,
+    /// A constraint contains the same resolved proposition more than once.
+    DuplicateRef,
+    /// A top-level rule uses the reserved `fm` identifier.
+    ReservedId,
     /// A matcher cannot be normalized or compiled.
     InvalidMatcher,
     /// A repeat declaration is malformed or has inconsistent bounds.
@@ -160,8 +204,12 @@ pub enum SchemaErrorKind {
     OrderedScopeMismatch,
     /// A rule declares both `required` and `repeat`, or denies a cardinality.
     ConflictingCardinality,
+    /// The frontmatter policy both requires and forbids frontmatter.
+    ConflictingFrontmatter,
     /// `root_level` is outside Markdown's supported header levels.
     InvalidRootLevel,
     /// A title matcher was declared while the root scope is at h1.
-    TitleAtRootLevelOne,
+    InvalidTitleLevel,
+    /// A frontmatter JSON Schema is malformed or uses an unsupported dialect.
+    InvalidFrontmatterSchema,
 }

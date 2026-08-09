@@ -2,8 +2,13 @@
 //!
 //! These types intentionally do not mirror the YAML document one-for-one.
 //! Surface syntax such as `required`, dotted references, slash-delimited
-//! regular expressions, and `"n"` repeat bounds is expected to be normalized
-//! by the schema loader before constructing this model.
+//! regular expressions, `fm.` propositions, and `"n"` repeat bounds is
+//! expected to be normalized by the schema loader before constructing this
+//! model.
+
+use std::path::PathBuf;
+
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// A parsed Outlint schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,11 +19,71 @@ pub struct Schema {
     pub title: Option<Matcher>,
     /// Document parsing and matching options, with defaults already applied.
     pub options: Options,
+    /// The normalized frontmatter presence and value-validation policy.
+    pub frontmatter: FrontmatterPolicy,
     /// Rules for headers in the root scope, in first-match order.
     pub sections: Vec<SectionRule>,
     /// Presence and ordering constraints attached to the root scope.
     pub constraints: Vec<Constraint>,
 }
+
+/// The document's normalized frontmatter policy.
+///
+/// This representation makes the invalid `required: true, allow: false`
+/// combination unrepresentable while retaining a schema declared alongside
+/// `allow: false`; if forbidden frontmatter is nevertheless present, the
+/// validation algorithm still evaluates that schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrontmatterPolicy {
+    /// Frontmatter may be absent; validate it against `schema` when present.
+    Optional { schema: Option<FrontmatterSchema> },
+    /// Frontmatter must be present and is validated against `schema`.
+    Required { schema: Option<FrontmatterSchema> },
+    /// Frontmatter must not be present; validate it against `schema` if it is
+    /// nevertheless present.
+    Forbidden { schema: Option<FrontmatterSchema> },
+}
+
+/// A normalized JSON Schema used to validate the frontmatter mapping.
+///
+/// The loader retains the origin distinction because it determines the base
+/// URI used for `$ref` resolution. Compilation belongs to the validation plan,
+/// not to the semantic schema model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrontmatterSchema {
+    /// A JSON Schema written as a mapping inside the Outlint schema.
+    Inline(JsonSchemaObject),
+    /// A JSON Schema loaded from a path relative to the Outlint schema.
+    External(ExternalJsonSchema),
+}
+
+/// A loaded external JSON Schema and its resolved filesystem location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalJsonSchema {
+    /// The resolved path, which is also the base location for `$ref`s.
+    pub path: PathBuf,
+    /// The parsed JSON Schema document.
+    pub schema: JsonSchemaDocument,
+}
+
+/// A parsed JSON Schema document.
+///
+/// JSON Schema permits an object or a boolean at its root. Inline schemas use
+/// [`JsonSchemaObject`] because the Outlint surface syntax specifically
+/// requires a mapping; external files may use either valid root form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonSchemaDocument {
+    Object(JsonSchemaObject),
+    Boolean(bool),
+}
+
+/// A JSON Schema whose root is known to be an object.
+///
+/// Its `$schema` keyword selects the dialect; the loader rejects unsupported
+/// dialects before this value enters a built [`Schema`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct JsonSchemaObject(pub JsonMap<String, JsonValue>);
 
 /// A supported version of the Outlint schema language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -133,27 +198,80 @@ pub struct RuleId(pub String);
 /// A cross-section presence or ordering constraint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Constraint {
-    /// Exactly one referenced rule path must be satisfied.
-    OneOf(NonEmpty<RuleRef>),
-    /// At least one referenced rule path must be satisfied.
-    AnyOf(NonEmpty<RuleRef>),
-    /// Zero or one referenced rule path may be satisfied.
-    AtMostOne(NonEmpty<RuleRef>),
-    /// Either all referenced rule paths or none of them must be satisfied.
-    AllOrNone(NonEmpty<RuleRef>),
+    /// Exactly one proposition must be satisfied.
+    OneOf(AtLeastTwo<Proposition>),
+    /// At least one proposition must be satisfied.
+    AnyOf(AtLeastTwo<Proposition>),
+    /// Zero or one proposition may be satisfied.
+    AtMostOne(AtLeastTwo<Proposition>),
+    /// Either all propositions or none of them must be satisfied.
+    AllOrNone(AtLeastTwo<Proposition>),
     /// If `condition` is satisfied, every `consequence` must be satisfied.
     Requires {
-        condition: RuleRef,
-        consequences: NonEmpty<RuleRef>,
+        condition: Proposition,
+        consequences: NonEmpty<Proposition>,
     },
     /// If `condition` is satisfied, every `exclusion` must be unsatisfied.
     Conflicts {
-        condition: RuleRef,
-        exclusions: NonEmpty<RuleRef>,
+        condition: Proposition,
+        exclusions: NonEmpty<Proposition>,
     },
-    /// First occurrences must follow the order of these references.
-    Ordered(NonEmpty<RuleRef>),
+    /// Every occurrence of each satisfied ref must precede every occurrence of
+    /// the next satisfied ref (`last(A) < first(B)`).
+    ///
+    /// Frontmatter propositions are excluded because they have no document
+    /// position among headers.
+    Ordered(AtLeastTwo<RuleRef>),
 }
+
+/// A proposition accepted by presence constraints.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Proposition {
+    /// Presence of a concrete rule path in the section tree.
+    Rule(RuleRef),
+    /// Presence or typed equality of a value in document frontmatter.
+    Frontmatter(FrontmatterRef),
+}
+
+/// A normalized `fm.` frontmatter proposition.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FrontmatterRef {
+    /// One or more mapping keys below the frontmatter root.
+    pub path: NonEmpty<FrontmatterKey>,
+    /// A typed scalar for the equality form, or `None` for presence alone.
+    pub equals: Option<FrontmatterScalar>,
+}
+
+/// A frontmatter mapping key addressable by the `fm.` syntax.
+///
+/// The loader ensures this is non-empty and contains neither `.` nor `=`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct FrontmatterKey(pub String);
+
+/// A scalar resolved according to the YAML 1.2 core schema.
+///
+/// Integer and float values retain arbitrary precision as canonical strings.
+/// Their distinct variants preserve the spec's typed equality (`1` is not
+/// equal to `1.0`) without forcing a numeric precision limit on schema input.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FrontmatterScalar {
+    Null,
+    Boolean(bool),
+    Integer(CanonicalInteger),
+    Float(CanonicalFloat),
+    String(String),
+}
+
+/// The canonical, arbitrary-precision value of a YAML integer scalar.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct CanonicalInteger(pub String);
+
+/// The canonical, arbitrary-precision value of a YAML float scalar.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct CanonicalFloat(pub String);
 
 /// A normalized reference to a rule path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -169,7 +287,8 @@ pub struct RuleRef {
 pub enum RefAnchor {
     /// Resolve from the direct-child scope where the constraint is attached.
     CurrentScope,
-    /// Resolve from the schema's root scope; the normalized form of `$`.
+    /// Resolve from the schema's root scope; the normalized form of a leading
+    /// `$.` in source. `$` alone is not a valid reference.
     SchemaRoot,
 }
 
@@ -177,5 +296,13 @@ pub enum RefAnchor {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NonEmpty<T> {
     pub first: T,
+    pub rest: Vec<T>,
+}
+
+/// A collection statically guaranteed to contain at least two items.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AtLeastTwo<T> {
+    pub first: T,
+    pub second: T,
     pub rest: Vec<T>,
 }
