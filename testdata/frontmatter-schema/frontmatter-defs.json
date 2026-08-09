@@ -1,0 +1,12 @@
+{
+  "$defs": {
+    "frontmatter": {
+      "type": "object",
+      "required": ["status", "owner"],
+      "properties": {
+        "status": { "enum": ["draft", "final"] },
+        "owner": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

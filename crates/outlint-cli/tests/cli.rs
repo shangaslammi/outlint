@@ -156,6 +156,65 @@ fn json_check_has_stable_fields_and_order() {
 }
 
 #[test]
+fn check_validates_yaml_frontmatter_with_a_linked_json_schema() {
+    let directory = TempDir::new("linked-frontmatter");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  required: true\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write(
+        "frontmatter.schema.json",
+        r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$ref":"definitions.json#/$defs/frontmatter"}"#,
+    );
+    directory.write(
+        "definitions.json",
+        r#"{"$defs":{"frontmatter":{"type":"object","required":["status"],"properties":{"status":{"enum":["draft","final"]}}}}}"#,
+    );
+    directory.write("valid.md", "---\nstatus: draft\n---\n\n# Document\n");
+    directory.write("invalid.md", "---\nstatus: review\n---\n\n# Document\n");
+
+    let valid = run(
+        &directory,
+        &[
+            "check",
+            "valid.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(valid.status.code(), Some(0));
+
+    let invalid = run(
+        &directory,
+        &[
+            "check",
+            "invalid.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(invalid.status.code(), Some(1));
+    let diagnostic = &json_output(&invalid)["results"][0]["diagnostics"][0];
+    assert_eq!(diagnostic["id"], "frontmatter-schema");
+    assert_eq!(diagnostic["json_pointer"], "/status");
+    assert_eq!(
+        diagnostic["frontmatter_range"],
+        serde_json::json!({"start_line": 1, "end_line": 3})
+    );
+    assert_eq!(
+        diagnostic["schema_node"],
+        serde_json::json!({"kind": "frontmatter_schema_document"})
+    );
+    assert!(diagnostic["schema_location"]["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("frontmatter.schema.json")));
+}
+
+#[test]
 fn schema_check_reports_schema_diagnostics_as_validation_output() {
     let directory = TempDir::new("schema-invalid");
     directory.write("invalid.yml", "version: 2\nsections: []\n");

@@ -3,10 +3,12 @@ name = "outlint-core"
 description = "Markdown outline schema validator (core library)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+jsonschema = { version = "0.49.2", default-features = false, features = ["arbitrary-precision", "resolve-file"] }
 marked-yaml = "0.8"
 num-bigint = "0.4"
 pulldown-cmark = { version = "0.13", default-features = false }

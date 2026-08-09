@@ -52,7 +52,11 @@ level exceeds its parent's level by more than 1 is a structural error
 very first line of the file is the document's frontmatter. It is not part of
 the section tree. If present it MUST parse as a YAML mapping; a scalar or
 sequence at top level is diagnostic `invalid-frontmatter`. TOML (`+++`)
-frontmatter is out of scope for v1.
+frontmatter is out of scope for v1. A first-line opening delimiter without a
+closing `---` line is `invalid-frontmatter` spanning the remainder of the
+document. For delegated JSON Schema validation, mapping keys MUST be strings;
+a non-string key is `invalid-frontmatter` because JSON object member names are
+strings.
 
 ---
 
@@ -147,11 +151,18 @@ frontmatter:
 language for frontmatter. If `schema` is given, it is a JSON Schema, either
 inline as a YAML mapping or a path relative to the outlint schema file. The
 dialect is selected by the JSON Schema's own `$schema` keyword; absent
-`$schema`, the dialect is draft 2020-12. Implementations MUST support
-draft 2020-12 and MAY support earlier drafts; an unsupported `$schema` is
-schema error `invalid-frontmatter-schema`. `$ref` resolution: for an
+`$schema`, the dialect is draft 2020-12. An external schema path MUST name a
+UTF-8 JSON document whose root is an object or boolean. Implementations MUST
+support draft 2020-12 and MAY support earlier drafts; an unsupported `$schema`
+is schema error `invalid-frontmatter-schema`. `$ref` resolution: for an
 external schema file the base URI is that file's location; for an inline
-schema it is the outlint schema file's location. The parsed frontmatter
+schema it is the outlint schema file's location. V1 resolves local file and
+fragment `$ref`s. Network retrieval is not performed; a remote `$ref` is
+schema error `invalid-frontmatter-schema`. Circular fragment references within
+one JSON Schema document are supported. The external file-reference graph MUST
+be acyclic; a cycle between JSON Schema files is
+`invalid-frontmatter-schema`. An unreadable, invalid-UTF-8, or invalid-JSON
+external schema is also `invalid-frontmatter-schema`. The parsed frontmatter
 mapping is validated against it; each JSON Schema error is reported as one
 diagnostic `frontmatter-schema` carrying the JSON Pointer of the failing
 location and the validator's message. Absent frontmatter with

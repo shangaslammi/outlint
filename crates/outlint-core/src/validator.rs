@@ -5,11 +5,13 @@
 
 use regex::RegexBuilder;
 
+use crate::loader::{file_uri, NoExternalRetrieve};
 use crate::{
     AtLeastTwo, ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
-    FrontmatterRef, Heading, HeadingLocation, Matcher, NonEmpty, Proposition, RefAnchor, RuleIndex,
-    RuleOutcome, RuleRef, Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange,
-    UpperBound,
+    DocumentFrontmatter, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef, FrontmatterSchema,
+    Heading, HeadingLocation, JsonSchemaDocument, Matcher, NonEmpty, Proposition, RefAnchor,
+    RuleIndex, RuleOutcome, RuleRef, Schema, SchemaNode, ScopePath, Section, SectionRule,
+    TextRange, UpperBound,
 };
 
 /// A stable identifier from the diagnostic vocabulary in specification §6.
@@ -140,16 +142,35 @@ pub struct Diagnostic {
     pub involved_headers: Vec<InvolvedHeader>,
     /// Normalized references participating in a constraint violation.
     pub references: Vec<DiagnosticReference>,
+    /// Frontmatter-specific range and JSON Pointer details.
+    pub frontmatter: Option<FrontmatterDiagnostic>,
     /// Human-readable context; callers should key behavior on [`Self::id`].
     pub message: String,
 }
 
+/// Extra data carried by a diagnostic about a frontmatter block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterDiagnostic {
+    /// One-based inclusive line range of the complete frontmatter block.
+    pub line_range: FrontmatterLineRange,
+    /// JSON Pointer of a value rejected by JSON Schema, when applicable.
+    pub json_pointer: Option<String>,
+}
+
+/// One-based inclusive line range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrontmatterLineRange {
+    /// First line covered by the range.
+    pub start_line: u32,
+    /// Last line covered by the range.
+    pub end_line: u32,
+}
+
 /// Validates an already parsed document against a normalized schema.
 ///
-/// Frontmatter parsing is intentionally not simulated here. Until the document
-/// model represents frontmatter, every [`Proposition::Frontmatter`] evaluates
-/// to false. This still gives correct behavior for all constraints containing
-/// only rule references and for implications guarded by absent frontmatter.
+/// Frontmatter presence and linked JSON Schema validation are evaluated here.
+/// `fm.` constraint propositions remain deliberately deferred and therefore
+/// evaluate to false even when parsed frontmatter is present.
 pub fn validate(schema: &Schema, document: &Document) -> Vec<Diagnostic> {
     Validator::new(schema, document).run()
 }
@@ -157,6 +178,7 @@ pub fn validate(schema: &Schema, document: &Document) -> Vec<Diagnostic> {
 struct ValidationPlan {
     title: Option<PreparedMatcher>,
     sections: Vec<PreparedRule>,
+    frontmatter: Option<jsonschema::Validator>,
 }
 
 impl ValidationPlan {
@@ -167,7 +189,35 @@ impl ValidationPlan {
                 .as_ref()
                 .map(|matcher| PreparedMatcher::new(matcher, schema.options.match_case)),
             sections: prepare_rules(&schema.sections, schema.options.match_case),
+            frontmatter: frontmatter_schema(&schema.frontmatter)
+                .and_then(compile_frontmatter_schema),
         }
+    }
+}
+
+fn frontmatter_schema(policy: &FrontmatterPolicy) -> Option<&FrontmatterSchema> {
+    match policy {
+        FrontmatterPolicy::Optional { schema }
+        | FrontmatterPolicy::Required { schema }
+        | FrontmatterPolicy::Forbidden { schema } => schema.as_ref(),
+    }
+}
+
+fn compile_frontmatter_schema(schema: &FrontmatterSchema) -> Option<jsonschema::Validator> {
+    let (document, base_uri) = match schema {
+        FrontmatterSchema::Inline(object) => (JsonSchemaDocument::Object(object.clone()), None),
+        FrontmatterSchema::External(external) => {
+            (external.schema.clone(), file_uri(&external.path).ok())
+        }
+    };
+    let value = match document {
+        JsonSchemaDocument::Object(object) => serde_json::Value::Object(object.0),
+        JsonSchemaDocument::Boolean(value) => serde_json::Value::Bool(value),
+    };
+    let options = jsonschema::draft202012::options().with_retriever(NoExternalRetrieve);
+    match base_uri {
+        Some(base_uri) => options.with_base_uri(base_uri).build(&value).ok(),
+        None => options.build(&value).ok(),
     }
 }
 
@@ -262,6 +312,7 @@ impl<'a> Validator<'a> {
 
     fn run(mut self) -> Vec<Diagnostic> {
         let plan = ValidationPlan::new(self.schema);
+        self.validate_frontmatter(plan.frontmatter.as_ref());
         let mut all = Vec::new();
         collect_sections(&self.document.sections, &mut all);
         self.validate_title(&all, plan.title.as_ref());
@@ -294,6 +345,107 @@ impl<'a> Validator<'a> {
         self.diagnostics
     }
 
+    fn validate_frontmatter(&mut self, validator: Option<&jsonschema::Validator>) {
+        let required = matches!(self.schema.frontmatter, FrontmatterPolicy::Required { .. });
+        let forbidden = matches!(self.schema.frontmatter, FrontmatterPolicy::Forbidden { .. });
+        match &self.document.frontmatter {
+            DocumentFrontmatter::Absent => {
+                if required {
+                    self.emit_frontmatter(
+                        DiagnosticId::MissingFrontmatter,
+                        None,
+                        "the document is missing required frontmatter".into(),
+                        None,
+                    );
+                }
+            }
+            DocumentFrontmatter::Invalid { location, message } => {
+                if forbidden {
+                    self.emit_frontmatter(
+                        DiagnosticId::ForbiddenFrontmatter,
+                        Some(*location),
+                        "frontmatter is forbidden by the schema".into(),
+                        None,
+                    );
+                }
+                self.emit_frontmatter(
+                    DiagnosticId::InvalidFrontmatter,
+                    Some(*location),
+                    message.clone(),
+                    None,
+                );
+            }
+            DocumentFrontmatter::Mapping { value, location } => {
+                if forbidden {
+                    self.emit_frontmatter(
+                        DiagnosticId::ForbiddenFrontmatter,
+                        Some(*location),
+                        "frontmatter is forbidden by the schema".into(),
+                        None,
+                    );
+                }
+                let Some(validator) = validator else {
+                    return;
+                };
+                let instance = serde_json::Value::Object(value.clone());
+                let mut errors = validator
+                    .iter_errors(&instance)
+                    .map(|error| (error.instance_path().as_str().to_owned(), error.to_string()))
+                    .collect::<Vec<_>>();
+                errors.sort();
+                for (pointer, message) in errors {
+                    self.emit_frontmatter(
+                        DiagnosticId::FrontmatterSchema,
+                        Some(*location),
+                        message,
+                        Some(pointer),
+                    );
+                }
+            }
+        }
+    }
+
+    fn emit_frontmatter(
+        &mut self,
+        id: DiagnosticId,
+        location: Option<FrontmatterLocation>,
+        message: String,
+        json_pointer: Option<String>,
+    ) {
+        let diagnostic_location =
+            location.map_or_else(root_location, |location| DiagnosticLocation {
+                range: location.range,
+                line: location.start_line,
+                column: 1,
+            });
+        let details = location.map(|location| FrontmatterDiagnostic {
+            line_range: FrontmatterLineRange {
+                start_line: location.start_line,
+                end_line: location.end_line,
+            },
+            json_pointer,
+        });
+        let schema_node = if id == DiagnosticId::FrontmatterSchema {
+            Some(SchemaNode::FrontmatterSchemaDocument)
+        } else {
+            Some(SchemaNode::Frontmatter)
+        };
+        self.emit(
+            Diagnostic {
+                id,
+                path: HeaderPath::default(),
+                location: diagnostic_location,
+                schema_node,
+                involved_headers: Vec::new(),
+                references: Vec::new(),
+                frontmatter: details,
+                message,
+            },
+            None,
+            false,
+        );
+    }
+
     fn validate_title(&mut self, sections: &[&Section], prepared: Option<&PreparedMatcher>) {
         let Some(matcher) = &self.schema.title else {
             return;
@@ -318,6 +470,7 @@ impl<'a> Validator<'a> {
                     schema_node: Some(SchemaNode::Title),
                     involved_headers: Vec::new(),
                     references: Vec::new(),
+                    frontmatter: None,
                     message: "the document has no required title".into(),
                 },
                 None,
@@ -336,6 +489,7 @@ impl<'a> Validator<'a> {
                         schema_node: Some(SchemaNode::Title),
                         involved_headers: Vec::new(),
                         references: Vec::new(),
+                        frontmatter: None,
                         message: "the title does not match the schema title matcher".into(),
                     },
                     Some(&title.heading),
@@ -353,6 +507,7 @@ impl<'a> Validator<'a> {
                     schema_node: Some(SchemaNode::Title),
                     involved_headers: Vec::new(),
                     references: Vec::new(),
+                    frontmatter: None,
                     message: "the document has more than one title".into(),
                 },
                 Some(&excess.heading),
@@ -380,6 +535,7 @@ impl<'a> Validator<'a> {
                         schema_node: None,
                         involved_headers: Vec::new(),
                         references: Vec::new(),
+                        frontmatter: None,
                         message: "the heading skips a level below its parent".into(),
                     },
                     Some(&section.heading),
@@ -510,6 +666,7 @@ impl<'a> Validator<'a> {
                     schema_node: schema_node.clone(),
                     involved_headers: Vec::new(),
                     references: Vec::new(),
+                    frontmatter: None,
                     message: format!(
                         "matched {count} sections, but at least {} are required",
                         cardinality.min
@@ -543,6 +700,7 @@ impl<'a> Validator<'a> {
                 schema_node,
                 involved_headers: Vec::new(),
                 references: Vec::new(),
+                frontmatter: None,
                 message: format!("more than {max} sections match this rule"),
             },
             Some(&excess.section.heading),
@@ -586,6 +744,7 @@ impl<'a> Validator<'a> {
                     })),
                     involved_headers: involved,
                     references: constraint_references(constraint, rules, &self.schema.sections),
+                    frontmatter: None,
                     message: format!("the `{}` constraint is not satisfied", id.as_str()),
                 },
                 parent,
@@ -627,6 +786,7 @@ impl<'a> Validator<'a> {
                 schema_node,
                 involved_headers: Vec::new(),
                 references: Vec::new(),
+                frontmatter: None,
                 message: message.into(),
             },
             Some(heading),
@@ -1212,6 +1372,77 @@ mod tests {
                 scope: ScopePath(Vec::new()),
                 index: RuleIndex(0),
             }))
+        );
+    }
+
+    #[test]
+    fn validates_required_frontmatter_against_json_schema() {
+        let mut schema = load_schema("version: 1\nfrontmatter: { required: true }\nsections: []\n")
+            .expect("test schema is valid")
+            .schema;
+        let object = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "required": ["status"],
+            "properties": { "status": { "enum": ["draft", "final"] } }
+        });
+        let serde_json::Value::Object(object) = object else {
+            panic!("test JSON Schema is an object")
+        };
+        schema.frontmatter = FrontmatterPolicy::Required {
+            schema: Some(FrontmatterSchema::Inline(crate::JsonSchemaObject(object))),
+        };
+
+        let absent = parse_markdown("# Title\n", MarkdownOptions::default());
+        assert_eq!(
+            validate(&schema, &absent)[0].id,
+            DiagnosticId::MissingFrontmatter
+        );
+
+        let invalid = parse_markdown(
+            "---\nstatus: proposed\n---\n# Title\n",
+            MarkdownOptions::default(),
+        );
+        let diagnostics = validate(&schema, &invalid);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].id, DiagnosticId::FrontmatterSchema);
+        let details = diagnostics[0]
+            .frontmatter
+            .as_ref()
+            .expect("frontmatter diagnostic details are present");
+        assert_eq!(details.json_pointer.as_deref(), Some("/status"));
+        assert_eq!(
+            (details.line_range.start_line, details.line_range.end_line),
+            (1, 3)
+        );
+        assert_eq!(
+            diagnostics[0].schema_node,
+            Some(SchemaNode::FrontmatterSchemaDocument)
+        );
+
+        let valid = parse_markdown(
+            "---\nstatus: final\n---\n# Title\n",
+            MarkdownOptions::default(),
+        );
+        assert!(validate(&schema, &valid).is_empty());
+    }
+
+    #[test]
+    fn reports_invalid_and_forbidden_frontmatter_without_schema_execution() {
+        let schema = load_schema("version: 1\nfrontmatter: { allow: false }\nsections: []\n")
+            .expect("test schema is valid")
+            .schema;
+        let document = parse_markdown("---\n- item\n---\n", MarkdownOptions::default());
+        let ids = validate(&schema, &document)
+            .into_iter()
+            .map(|diagnostic| diagnostic.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                DiagnosticId::ForbiddenFrontmatter,
+                DiagnosticId::InvalidFrontmatter
+            ]
         );
     }
 }

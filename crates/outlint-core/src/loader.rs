@@ -8,7 +8,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs, io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -21,12 +21,13 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     AtLeastTwo, ByteOffset, CanonicalFloat, CanonicalInteger, Cardinality, Constraint,
-    ConstraintIndex, ConstraintPath, ExactText, FrontmatterKey, FrontmatterPolicy, FrontmatterRef,
-    FrontmatterScalar, GlobPattern, HeaderLevel, InvalidSchema, LoadSchemaResult, LoadedSchema,
-    Matcher, NonEmpty, Options, Proposition, RefAnchor, RegexPattern, RelatedLocation, RuleId,
-    RuleIndex, RuleOutcome, RulePath, RuleRef, Schema, SchemaError, SchemaErrorKind,
-    SchemaLocations, SchemaNode, SchemaSource, SchemaSources, SchemaVersion, ScopePath,
-    SectionRule, SourceId, SourceLabel, SourceRange, TextRange, UpperBound,
+    ConstraintIndex, ConstraintPath, ExactText, ExternalJsonSchema, FrontmatterKey,
+    FrontmatterPolicy, FrontmatterRef, FrontmatterScalar, GlobPattern, HeaderLevel, InvalidSchema,
+    JsonSchemaDocument, JsonSchemaObject, LoadSchemaResult, LoadedSchema, Matcher, NonEmpty,
+    Options, Proposition, RefAnchor, RegexPattern, RelatedLocation, RuleId, RuleIndex, RuleOutcome,
+    RulePath, RuleRef, Schema, SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode,
+    SchemaSource, SchemaSources, SchemaVersion, ScopePath, SectionRule, SourceId, SourceLabel,
+    SourceRange, TextRange, UpperBound,
 };
 
 /// Loads an Outlint schema from UTF-8 source text.
@@ -39,17 +40,175 @@ pub fn load_schema(source: &str) -> LoadSchemaResult {
 
 /// Loads an Outlint schema from source text with a diagnostic display label.
 pub fn load_schema_with_label(source: &str, label: Option<SourceLabel>) -> LoadSchemaResult {
-    Loader::new(Arc::from(source), label).load()
+    Loader::new(Arc::from(source), label, None).load()
 }
 
 /// Reads and loads an Outlint schema file.
 ///
-/// The path becomes the primary source label. Filesystem failures stay in the
-/// thin I/O shell's error channel and never become schema-language errors.
+/// The path becomes the primary source label. Failures reading the primary
+/// file use the I/O error channel. A linked frontmatter schema that cannot be
+/// read is instead reported as `invalid-frontmatter-schema`, positioned at its
+/// declaration, because it makes the otherwise readable schema invalid.
 pub fn load_schema_file(path: &Path) -> io::Result<LoadSchemaResult> {
     let label = SourceLabel(path.display().to_string());
-    let source = fs::read_to_string(path)?;
-    Ok(load_schema_with_label(&source, Some(label)))
+    let bytes = fs::read(path)?;
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    let source = std::str::from_utf8(bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("schema is not valid UTF-8: {error}"),
+        )
+    })?;
+    let external = linked_frontmatter_schema_path(source)
+        .map(|declared| prepare_external_schema(path, &declared));
+    Ok(Loader::new(Arc::from(source), Some(label), external).load())
+}
+
+#[derive(Debug)]
+struct ExternalSchemaInput {
+    path: PathBuf,
+    text: Option<Arc<str>>,
+    result: Result<JsonSchemaDocument, String>,
+}
+
+fn linked_frontmatter_schema_path(source: &str) -> Option<PathBuf> {
+    let value: Value = serde_yaml::from_str(source).ok()?;
+    let frontmatter = yaml_get(value.as_mapping()?, "frontmatter")?.as_mapping()?;
+    yaml_get(frontmatter, "schema")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+}
+
+fn prepare_external_schema(primary_path: &Path, declared: &Path) -> ExternalSchemaInput {
+    let unresolved_path = if declared.is_absolute() {
+        declared.to_path_buf()
+    } else {
+        primary_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(declared)
+    };
+    let path = match fs::canonicalize(&unresolved_path) {
+        Ok(path) => path,
+        Err(error) => {
+            return ExternalSchemaInput {
+                path: unresolved_path,
+                text: None,
+                result: Err(format!("cannot resolve linked JSON Schema path: {error}")),
+            };
+        }
+    };
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return ExternalSchemaInput {
+                path,
+                text: None,
+                result: Err(format!("cannot read linked JSON Schema: {error}")),
+            };
+        }
+    };
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => Arc::<str>::from(text),
+        Err(error) => {
+            return ExternalSchemaInput {
+                path,
+                text: None,
+                result: Err(format!("linked JSON Schema is not valid UTF-8: {error}")),
+            };
+        }
+    };
+    let result = prepare_json_schema(&path, &text);
+    ExternalSchemaInput {
+        path,
+        text: Some(text),
+        result,
+    }
+}
+
+fn prepare_json_schema(path: &Path, source: &str) -> Result<JsonSchemaDocument, String> {
+    let schema: serde_json::Value = serde_json::from_str(source)
+        .map_err(|error| format!("invalid linked JSON Schema document: {error}"))?;
+    if !schema.is_object() && !schema.is_boolean() {
+        return Err("linked JSON Schema root must be an object or boolean".into());
+    }
+    if let Some(dialect) = schema.as_object().and_then(|object| object.get("$schema")) {
+        let supported = dialect.as_str().is_some_and(|dialect| {
+            matches!(
+                dialect,
+                "https://json-schema.org/draft/2020-12/schema"
+                    | "https://json-schema.org/draft/2020-12/schema#"
+            )
+        });
+        if !supported {
+            return Err(format!(
+                "unsupported JSON Schema dialect `{}`; expected draft 2020-12",
+                dialect
+            ));
+        }
+    }
+    if let Err(error) = jsonschema::draft202012::meta::validate(&schema) {
+        return Err(format!("invalid draft 2020-12 JSON Schema: {error}"));
+    }
+    let base_uri = file_uri(path)?;
+    // Resolve external resources at the I/O edge. Circular fragment refs are
+    // retained, but they remain within the stored document and therefore need
+    // no retriever when validation later compiles it.
+    let resolved = jsonschema::draft202012::options()
+        .with_base_uri(base_uri.clone())
+        .dereference(&schema)
+        .map_err(|error| format!("cannot resolve linked JSON Schema: {error}"))?;
+    jsonschema::draft202012::options()
+        .with_base_uri(base_uri)
+        .with_retriever(NoExternalRetrieve)
+        .build(&resolved)
+        .map_err(|error| format!("cannot compile linked JSON Schema: {error}"))?;
+    json_schema_document(resolved)
+}
+
+fn json_schema_document(value: serde_json::Value) -> Result<JsonSchemaDocument, String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            Ok(JsonSchemaDocument::Object(JsonSchemaObject(object)))
+        }
+        serde_json::Value::Bool(value) => Ok(JsonSchemaDocument::Boolean(value)),
+        _ => Err("linked JSON Schema root must be an object or boolean".into()),
+    }
+}
+
+pub(crate) fn file_uri(path: &Path) -> Result<String, String> {
+    let display = path
+        .to_str()
+        .ok_or_else(|| "linked JSON Schema path is not valid UTF-8".to_owned())?
+        .replace('\\', "/");
+    let mut uri = if display.starts_with('/') {
+        "file://".to_owned()
+    } else {
+        "file:///".to_owned()
+    };
+    for byte in display.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+            uri.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(uri, "%{byte:02X}").map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(uri)
+}
+
+/// Refuses retrieval after a linked schema has been bundled at the I/O edge.
+#[derive(Debug)]
+pub(crate) struct NoExternalRetrieve;
+
+impl jsonschema::Retrieve for NoExternalRetrieve {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(format!("unbundled JSON Schema resource `{uri}`").into())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,10 +219,18 @@ struct RawSchema {
     #[serde(default)]
     options: RawOptions,
     #[serde(default)]
-    frontmatter: Option<Value>,
+    frontmatter: Option<RawFrontmatter>,
     sections: Vec<RawRule>,
     #[serde(default)]
     constraints: Vec<Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFrontmatter {
+    required: Option<bool>,
+    allow: Option<bool>,
+    schema: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -101,6 +268,7 @@ const fn default_true() -> bool {
 enum RangeKey {
     DocumentField(String),
     OptionField(String),
+    FrontmatterField(String),
     Rule(RulePath),
     RuleField(RulePath, String),
     Constraint(ConstraintPath),
@@ -150,6 +318,16 @@ impl RangeIndex {
                 if let Some(node) = options.get_node(field) {
                     index.ranges.insert(
                         RangeKey::OptionField(field.into()),
+                        marked_node_range(node, &char_offsets, source),
+                    );
+                }
+            }
+        }
+        if let Some(frontmatter) = mapping.get_mapping("frontmatter") {
+            for field in ["required", "allow", "schema"] {
+                if let Some(node) = frontmatter.get_node(field) {
+                    index.ranges.insert(
+                        RangeKey::FrontmatterField(field.into()),
                         marked_node_range(node, &char_offsets, source),
                     );
                 }
@@ -293,10 +471,15 @@ struct Loader {
     errors: Vec<SchemaError>,
     nodes: BTreeMap<SchemaNode, SourceRange>,
     raw_constraints: BTreeMap<ScopePath, Vec<Value>>,
+    external_schema: Option<ExternalSchemaInput>,
 }
 
 impl Loader {
-    fn new(source: Arc<str>, label: Option<SourceLabel>) -> Self {
+    fn new(
+        source: Arc<str>,
+        label: Option<SourceLabel>,
+        external_schema: Option<ExternalSchemaInput>,
+    ) -> Self {
         let document_range = SourceRange {
             source: SourceId(0),
             range: TextRange {
@@ -305,8 +488,23 @@ impl Loader {
             },
         };
         let ranges = RangeIndex::from_source(&source);
+        let mut sources = primary_sources(Arc::clone(&source), label);
+        if let Some(external) = external_schema
+            .as_ref()
+            .filter(|external| external.text.is_some())
+        {
+            if let Some(text) = &external.text {
+                sources.documents.insert(
+                    SourceId(1),
+                    SchemaSource {
+                        label: Some(SourceLabel(external.path.display().to_string())),
+                        text: Arc::clone(text),
+                    },
+                );
+            }
+        }
         Self {
-            sources: primary_sources(Arc::clone(&source), label),
+            sources,
             source,
             document_range,
             current_range: document_range,
@@ -314,6 +512,7 @@ impl Loader {
             errors: Vec::new(),
             nodes: BTreeMap::new(),
             raw_constraints: BTreeMap::new(),
+            external_schema,
         }
     }
 
@@ -361,15 +560,7 @@ impl Loader {
             None
         };
 
-        if frontmatter_declared {
-            self.use_range(RangeKey::DocumentField("frontmatter".into()));
-            let detail = if raw.frontmatter.is_some() {
-                "frontmatter declarations are not implemented yet"
-            } else {
-                "frontmatter must be an object when support is implemented"
-            };
-            self.error(SchemaErrorKind::InvalidDocumentShape, detail);
-        }
+        let frontmatter = self.build_frontmatter(raw.frontmatter, frontmatter_declared);
 
         let options = self.build_options(&raw.options);
         let title = raw.title.as_deref().and_then(|matcher| {
@@ -394,7 +585,9 @@ impl Loader {
             .insert(root_scope.clone(), raw.constraints);
         let sections = self.build_scope(raw.sections, &root_scope);
 
-        let (Some(version), Some(options), Some(sections)) = (version, options, sections) else {
+        let (Some(version), Some(options), Some(frontmatter), Some(sections)) =
+            (version, options, frontmatter, sections)
+        else {
             self.validate_constraint_lexical_refs();
             return self.failure();
         };
@@ -402,7 +595,7 @@ impl Loader {
             version,
             title,
             options,
-            frontmatter: FrontmatterPolicy::Optional { schema: None },
+            frontmatter,
             sections,
             constraints: Vec::new(),
         };
@@ -490,6 +683,9 @@ impl Loader {
         if let Some(value) = yaml_get(mapping, "options") {
             self.validate_options_shape(value);
         }
+        if let Some(value) = yaml_get(mapping, "frontmatter") {
+            self.validate_frontmatter_shape(value);
+        }
         if let Some(value) = yaml_get(mapping, "sections") {
             self.use_range(RangeKey::DocumentField("sections".into()));
             self.validate_rules_shape(value, &ScopePath(Vec::new()));
@@ -498,6 +694,118 @@ impl Loader {
             self.use_range(RangeKey::DocumentField("constraints".into()));
             self.validate_constraints_shape(value, &ScopePath(Vec::new()));
         }
+    }
+
+    fn validate_frontmatter_shape(&mut self, value: &Value) {
+        self.use_range(RangeKey::DocumentField("frontmatter".into()));
+        let Some(mapping) = value.as_mapping() else {
+            self.shape_error("frontmatter must be a mapping and cannot be null");
+            return;
+        };
+        self.validate_known_fields(
+            mapping,
+            &["required", "allow", "schema"],
+            self.current_range,
+        );
+        for field in ["required", "allow"] {
+            if let Some(value) = yaml_get(mapping, field) {
+                self.use_range(RangeKey::FrontmatterField(field.into()));
+                if !matches!(value, Value::Bool(_)) {
+                    self.shape_error(format!(
+                        "frontmatter.{field} must be a bool and cannot be null"
+                    ));
+                }
+            }
+        }
+        if let Some(value) = yaml_get(mapping, "schema") {
+            self.use_range(RangeKey::FrontmatterField("schema".into()));
+            if !matches!(value, Value::String(_) | Value::Mapping(_)) {
+                self.shape_error(
+                    "frontmatter.schema must be a path string or mapping and cannot be null",
+                );
+            }
+        }
+    }
+
+    fn build_frontmatter(
+        &mut self,
+        raw: Option<RawFrontmatter>,
+        declared: bool,
+    ) -> Option<FrontmatterPolicy> {
+        if !declared {
+            return Some(FrontmatterPolicy::Optional { schema: None });
+        }
+        self.use_range(RangeKey::DocumentField("frontmatter".into()));
+        self.nodes
+            .insert(SchemaNode::Frontmatter, self.current_range);
+        let raw = raw?;
+        let required = raw.required.unwrap_or(false);
+        let allow = raw.allow.unwrap_or(true);
+        if required && !allow {
+            self.error(
+                SchemaErrorKind::ConflictingFrontmatter,
+                "frontmatter cannot be both required and forbidden",
+            );
+            return None;
+        }
+        let schema = match raw.schema {
+            None => None,
+            Some(Value::String(_)) => {
+                self.use_range(RangeKey::FrontmatterField("schema".into()));
+                self.nodes
+                    .insert(SchemaNode::FrontmatterSchemaDeclaration, self.current_range);
+                let Some(external) = self.external_schema.take() else {
+                    self.error(
+                        SchemaErrorKind::InvalidFrontmatterSchema,
+                        "linked frontmatter schema requires a schema file path context",
+                    );
+                    return None;
+                };
+                let document_range =
+                    external
+                        .text
+                        .as_ref()
+                        .map_or(self.current_range, |text| SourceRange {
+                            source: SourceId(1),
+                            range: TextRange {
+                                start: ByteOffset(0),
+                                end: ByteOffset(text.len()),
+                            },
+                        });
+                let document = match external.result {
+                    Ok(document) => document,
+                    Err(message) => {
+                        self.error_at(
+                            SchemaErrorKind::InvalidFrontmatterSchema,
+                            document_range,
+                            message,
+                        );
+                        return None;
+                    }
+                };
+                self.nodes
+                    .insert(SchemaNode::FrontmatterSchemaDocument, document_range);
+                Some(crate::FrontmatterSchema::External(ExternalJsonSchema {
+                    path: external.path,
+                    schema: document,
+                }))
+            }
+            Some(Value::Mapping(_)) => {
+                self.use_range(RangeKey::FrontmatterField("schema".into()));
+                self.error(
+                    SchemaErrorKind::InvalidFrontmatterSchema,
+                    "inline frontmatter JSON Schema is not implemented yet; use a linked JSON file",
+                );
+                return None;
+            }
+            Some(_) => return None,
+        };
+        Some(match (required, allow) {
+            (true, true) => FrontmatterPolicy::Required { schema },
+            (false, false) => FrontmatterPolicy::Forbidden { schema },
+            (false, true) => FrontmatterPolicy::Optional { schema },
+            (true, false) => return None,
+        })
     }
 
     fn validate_constraint_lexical_refs(&mut self) {
@@ -2079,15 +2387,255 @@ constraints:
     }
 
     #[test]
-    fn rejects_declared_frontmatter_until_it_is_implemented() {
-        let kinds = error_kinds(
+    fn normalizes_frontmatter_presence_policy() {
+        let schema = valid(
             r#"
 version: 1
 frontmatter: { required: true }
 sections: []
 "#,
         );
-        assert!(kinds.contains(&SchemaErrorKind::InvalidDocumentShape));
+        assert_eq!(
+            schema.frontmatter,
+            FrontmatterPolicy::Required { schema: None }
+        );
+    }
+
+    #[test]
+    fn linked_frontmatter_schema_requires_file_context() {
+        let kinds = error_kinds(
+            r#"
+version: 1
+frontmatter: { schema: frontmatter.schema.json }
+sections: []
+"#,
+        );
+        assert_eq!(kinds, vec![SchemaErrorKind::InvalidFrontmatterSchema]);
+    }
+
+    #[test]
+    fn loads_and_resolves_linked_frontmatter_schema_with_local_ref() {
+        let directory = TestDirectory::new("linked-frontmatter");
+        directory.write(
+            "defs.json",
+            r#"{"$defs":{"frontmatter":{"type":"object","required":["status"],"properties":{"status":{"enum":["draft","final"]}}}}}"#,
+        );
+        directory.write(
+            "frontmatter.schema.json",
+            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$ref":"defs.json#/$defs/frontmatter"}"#,
+        );
+        let schema_path = directory.write(
+            "schema.outlint.yml",
+            "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        );
+
+        let loaded = load_schema_file(&schema_path)
+            .expect("fixture schema is readable")
+            .expect("linked JSON Schema is valid");
+        let FrontmatterPolicy::Optional {
+            schema: Some(crate::FrontmatterSchema::External(external)),
+        } = &loaded.schema.frontmatter
+        else {
+            panic!("expected an optional linked frontmatter schema")
+        };
+        assert_eq!(
+            external.path,
+            directory.path.join("frontmatter.schema.json")
+        );
+        assert!(loaded.sources.documents.contains_key(&SourceId(1)));
+        assert!(loaded
+            .locations
+            .nodes
+            .contains_key(&SchemaNode::FrontmatterSchemaDocument));
+
+        fs::remove_file(directory.path.join("frontmatter.schema.json"))
+            .expect("remove root JSON Schema after loading");
+        fs::remove_file(directory.path.join("defs.json"))
+            .expect("remove referenced JSON Schema after loading");
+        let document = crate::parse_markdown(
+            "---\nstatus: review\n---\n",
+            crate::MarkdownOptions::default(),
+        );
+        let diagnostics = crate::validate(&loaded.schema, &document);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
+    }
+
+    #[test]
+    fn accepts_circular_fragment_refs_without_validation_time_io() {
+        let directory = TestDirectory::new("circular-linked-frontmatter");
+        directory.write(
+            "frontmatter.schema.json",
+            r##"{
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$ref": "#/$defs/node",
+                "$defs": {
+                    "node": {
+                        "type": "object",
+                        "properties": { "child": { "$ref": "#/$defs/node" } }
+                    }
+                }
+            }"##,
+        );
+        let schema_path = directory.write(
+            "schema.outlint.yml",
+            "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        );
+
+        load_schema_file(&schema_path)
+            .expect("primary schema is readable")
+            .expect("circular local refs are valid");
+    }
+
+    #[test]
+    fn rejects_remote_refs_without_network_retrieval() {
+        let directory = TestDirectory::new("remote-linked-frontmatter");
+        directory.write(
+            "frontmatter.schema.json",
+            r#"{
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$ref": "https://example.invalid/frontmatter.schema.json"
+            }"#,
+        );
+        let schema_path = directory.write(
+            "schema.outlint.yml",
+            "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        );
+
+        let invalid = load_schema_file(&schema_path)
+            .expect("primary schema is readable")
+            .expect_err("remote refs are unsupported");
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(invalid.errors.first.range.source, SourceId(1));
+    }
+
+    #[test]
+    fn rejects_cycles_between_linked_json_schema_files() {
+        let directory = TestDirectory::new("cyclic-files-linked-frontmatter");
+        directory.write(
+            "frontmatter.schema.json",
+            r#"{
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$ref": "other.json"
+            }"#,
+        );
+        directory.write("other.json", r#"{ "$ref": "frontmatter.schema.json" }"#);
+        let schema_path = directory.write(
+            "schema.outlint.yml",
+            "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        );
+
+        let invalid = load_schema_file(&schema_path)
+            .expect("primary schema is readable")
+            .expect_err("cross-file cycles are unsupported");
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(invalid.errors.first.range.source, SourceId(1));
+    }
+
+    #[test]
+    fn positions_invalid_linked_json_schema_in_its_own_source() {
+        let directory = TestDirectory::new("invalid-linked-frontmatter");
+        directory.write("frontmatter.schema.json", "{ invalid json }");
+        let schema_path = directory.write(
+            "schema.outlint.yml",
+            "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        );
+
+        let invalid = load_schema_file(&schema_path)
+            .expect("primary schema is readable")
+            .expect_err("linked JSON Schema is invalid");
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(invalid.errors.first.range.source, SourceId(1));
+        let source = invalid
+            .sources
+            .documents
+            .get(&SourceId(1))
+            .unwrap_or_else(|| panic!("missing linked JSON Schema source"));
+        assert!(source
+            .label
+            .as_ref()
+            .is_some_and(|label| label.0.ends_with("frontmatter.schema.json")));
+    }
+
+    #[test]
+    fn rejects_missing_and_unsupported_linked_json_schemas() {
+        let missing_directory = TestDirectory::new("missing-linked-frontmatter");
+        let missing_schema = missing_directory.write(
+            "schema.outlint.yml",
+            "version: 1\nfrontmatter:\n  schema: missing.json\nsections: []\n",
+        );
+        let missing = load_schema_file(&missing_schema)
+            .expect("primary schema is readable")
+            .expect_err("missing linked schema is invalid");
+        assert_eq!(
+            missing.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(missing.errors.first.range.source, SourceId(0));
+
+        let dialect_directory = TestDirectory::new("unsupported-frontmatter-dialect");
+        dialect_directory.write(
+            "frontmatter.schema.json",
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","type":"object"}"#,
+        );
+        let dialect_schema = dialect_directory.write(
+            "schema.outlint.yml",
+            "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        );
+        let unsupported = load_schema_file(&dialect_schema)
+            .expect("primary schema is readable")
+            .expect_err("unsupported dialect is invalid");
+        assert_eq!(
+            unsupported.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(unsupported.errors.first.range.source, SourceId(1));
+    }
+
+    struct TestDirectory {
+        path: PathBuf,
+    }
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            loop {
+                let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "outlint-core-{label}-{}-{nonce}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self { path },
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => panic!("cannot create {}: {error}", path.display()),
+                }
+            }
+        }
+
+        fn write(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.path.join(name);
+            fs::write(&path, contents)
+                .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
+            path
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 
     #[test]

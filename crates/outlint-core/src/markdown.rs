@@ -32,10 +32,45 @@ impl Default for MarkdownOptions {
 /// A Markdown document represented as the forest of its topmost sections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
+    /// Parsed YAML frontmatter, or its positioned parse failure.
+    pub frontmatter: DocumentFrontmatter,
     /// Sections with no preceding header at a lower level.
     pub sections: Vec<Section>,
     /// Diagnostic ids disabled everywhere in this document.
     pub file_suppressions: Suppressions,
+}
+
+/// Frontmatter extracted from the first lines of a Markdown document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentFrontmatter {
+    /// The document does not start with a YAML frontmatter delimiter.
+    Absent,
+    /// A YAML mapping converted to the JSON value domain used by JSON Schema.
+    Mapping {
+        /// The frontmatter mapping as a JSON object.
+        value: serde_json::Map<String, serde_json::Value>,
+        /// Source location of the complete delimited block.
+        location: FrontmatterLocation,
+    },
+    /// A delimited block exists but is not a valid JSON-compatible YAML mapping.
+    Invalid {
+        /// Source location of the opening delimiter through the closing delimiter
+        /// or end of file.
+        location: FrontmatterLocation,
+        /// Human-readable parse or conversion failure.
+        message: String,
+    },
+}
+
+/// Source extent of a YAML frontmatter block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrontmatterLocation {
+    /// Half-open byte range of the complete delimited block.
+    pub range: TextRange,
+    /// One-based first line, always 1 for v1 YAML frontmatter.
+    pub start_line: u32,
+    /// One-based last line covered by the block.
+    pub end_line: u32,
 }
 
 /// A section opened by one Markdown heading.
@@ -116,7 +151,9 @@ impl Suppressions {
 /// is interpreted according to CommonMark recovery rules.
 pub fn parse_markdown(source: &str, options: MarkdownOptions) -> Document {
     let line_index = LineIndex::new(source);
-    let parser_source = normalize_bare_cr(source);
+    let (frontmatter, frontmatter_range) = parse_frontmatter(source, &line_index);
+    let masked_source = frontmatter_range.map(|range| mask_source_range(source, range));
+    let parser_source = normalize_bare_cr(masked_source.as_deref().unwrap_or(source));
     let mut headings = Vec::new();
     let mut file_suppressions = Suppressions::default();
     let mut line_suppressions = BTreeMap::new();
@@ -177,8 +214,132 @@ pub fn parse_markdown(source: &str, options: MarkdownOptions) -> Document {
     }
 
     Document {
+        frontmatter,
         sections: build_section_tree(headings),
         file_suppressions,
+    }
+}
+
+fn parse_frontmatter(
+    source: &str,
+    lines: &LineIndex,
+) -> (DocumentFrontmatter, Option<std::ops::Range<usize>>) {
+    if lines.line_text(source, 1) != Some("---") {
+        return (DocumentFrontmatter::Absent, None);
+    }
+    let closing_line =
+        (2..=lines.line_count_u32()).find(|line| lines.line_text(source, *line) == Some("---"));
+    let Some(closing_line) = closing_line else {
+        let location = FrontmatterLocation {
+            range: text_range(0, source.len()),
+            start_line: 1,
+            end_line: lines.line_count_u32(),
+        };
+        return (
+            DocumentFrontmatter::Invalid {
+                location,
+                message: "frontmatter opening delimiter has no closing `---` line".into(),
+            },
+            Some(0..source.len()),
+        );
+    };
+    let body_start = lines.line_start(2);
+    let body_end = lines.line_start(closing_line);
+    let block_end = line_terminator_end(source, lines.line_end(closing_line, source.len()));
+    let range = 0..block_end;
+    let location = FrontmatterLocation {
+        range: text_range(range.start, range.end),
+        start_line: 1,
+        end_line: closing_line,
+    };
+    let body = source.get(body_start..body_end).unwrap_or_default();
+    let parsed = serde_yaml::from_str::<serde_yaml::Value>(body)
+        .map_err(|error| format!("invalid YAML frontmatter: {error}"))
+        .and_then(yaml_frontmatter_mapping);
+    let frontmatter = match parsed {
+        Ok(value) => DocumentFrontmatter::Mapping { value, location },
+        Err(message) => DocumentFrontmatter::Invalid { location, message },
+    };
+    (frontmatter, Some(range))
+}
+
+fn yaml_frontmatter_mapping(
+    value: serde_yaml::Value,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let serde_yaml::Value::Mapping(mapping) = value else {
+        return Err("frontmatter must be a YAML mapping".into());
+    };
+    let serde_json::Value::Object(mapping) = yaml_to_json(serde_yaml::Value::Mapping(mapping))?
+    else {
+        return Err("frontmatter must be a YAML mapping".into());
+    };
+    Ok(mapping)
+}
+
+fn yaml_to_json(value: serde_yaml::Value) -> Result<serde_json::Value, String> {
+    match value {
+        serde_yaml::Value::Null => Ok(serde_json::Value::Null),
+        serde_yaml::Value::Bool(value) => Ok(serde_json::Value::Bool(value)),
+        serde_yaml::Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                Ok(serde_json::Value::Number(value.into()))
+            } else if let Some(value) = number.as_u64() {
+                Ok(serde_json::Value::Number(value.into()))
+            } else if let Some(value) = number.as_f64() {
+                serde_json::Number::from_f64(value)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| "frontmatter contains a non-finite number".into())
+            } else {
+                Err("frontmatter contains an unsupported number".into())
+            }
+        }
+        serde_yaml::Value::String(value) => Ok(serde_json::Value::String(value)),
+        serde_yaml::Value::Sequence(values) => values
+            .into_iter()
+            .map(yaml_to_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+        serde_yaml::Value::Mapping(mapping) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in mapping {
+                let serde_yaml::Value::String(key) = key else {
+                    return Err("frontmatter mapping keys must be strings".into());
+                };
+                object.insert(key, yaml_to_json(value)?);
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+        serde_yaml::Value::Tagged(tagged) => yaml_to_json(tagged.value),
+    }
+}
+
+fn line_terminator_end(source: &str, line_end: usize) -> usize {
+    let bytes = source.as_bytes();
+    match (bytes.get(line_end), bytes.get(line_end.saturating_add(1))) {
+        (Some(b'\r'), Some(b'\n')) => line_end.saturating_add(2),
+        (Some(b'\r' | b'\n'), _) => line_end.saturating_add(1),
+        _ => line_end,
+    }
+    .min(source.len())
+}
+
+fn mask_source_range(source: &str, range: std::ops::Range<usize>) -> String {
+    let bytes = source
+        .bytes()
+        .enumerate()
+        .map(|(index, byte)| {
+            if range.contains(&index) && !matches!(byte, b'\r' | b'\n') {
+                b' '
+            } else {
+                byte
+            }
+        })
+        .collect();
+    match String::from_utf8(bytes) {
+        Ok(masked) => masked,
+        // Replacing bytes with ASCII cannot invalidate the original UTF-8,
+        // but retain total behavior if this invariant is ever changed.
+        Err(_) => source.to_owned(),
     }
 }
 
@@ -697,9 +858,12 @@ impl LineIndex {
         source.get(start..end)
     }
 
-    #[cfg(test)]
     fn line_count(&self) -> usize {
         self.starts.len()
+    }
+
+    fn line_count_u32(&self) -> u32 {
+        self.line_count().try_into().unwrap_or(u32::MAX)
     }
 }
 
@@ -962,6 +1126,53 @@ mod tests {
 
         assert!(document.file_suppressions.0.is_empty());
         assert!(document.sections[0].heading.suppressions.0.is_empty());
+    }
+
+    #[test]
+    fn parses_and_masks_yaml_frontmatter_before_heading_scanning() {
+        let source = concat!(
+            "---\n",
+            "title: metadata, not a setext heading\n",
+            "draft: false\n",
+            "tags: [one, two]\n",
+            "---\n",
+            "# Document title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { value, location } = &document.frontmatter else {
+            panic!("expected parsed frontmatter")
+        };
+        assert_eq!(value.get("draft"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(location.start_line, 1);
+        assert_eq!(location.end_line, 5);
+        assert_eq!(headings(&document).len(), 1);
+        assert_eq!(headings(&document)[0].diagnostic_text, "Document title");
+    }
+
+    #[test]
+    fn positions_invalid_or_unclosed_frontmatter() {
+        let scalar = parse_markdown("---\nvalue\n---\n# Title\n", MarkdownOptions::default());
+        let DocumentFrontmatter::Invalid { location, .. } = scalar.frontmatter else {
+            panic!("scalar frontmatter must be invalid")
+        };
+        assert_eq!((location.start_line, location.end_line), (1, 3));
+
+        let unclosed = parse_markdown("---\nkey: value\n", MarkdownOptions::default());
+        let DocumentFrontmatter::Invalid { location, .. } = unclosed.frontmatter else {
+            panic!("unclosed frontmatter must be invalid")
+        };
+        assert_eq!((location.start_line, location.end_line), (1, 3));
+        assert!(unclosed.sections.is_empty());
+    }
+
+    #[test]
+    fn rejects_non_string_frontmatter_mapping_keys() {
+        let document = parse_markdown("---\n1: value\n---\n", MarkdownOptions::default());
+        let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
+            panic!("numeric mapping key must be invalid")
+        };
+        assert!(message.contains("keys must be strings"));
     }
 
     #[test]

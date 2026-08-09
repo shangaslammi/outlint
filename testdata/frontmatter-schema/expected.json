@@ -1,0 +1,13 @@
+{
+  "fail.md": [
+    { "id": "frontmatter-schema", "path": "" },
+    { "id": "frontmatter-schema", "path": "" }
+  ],
+  "invalid.md": [
+    { "id": "invalid-frontmatter", "path": "" }
+  ],
+  "missing.md": [
+    { "id": "missing-frontmatter", "path": "" }
+  ],
+  "pass.md": []
+}

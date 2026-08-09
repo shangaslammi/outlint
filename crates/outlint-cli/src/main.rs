@@ -6,10 +6,9 @@ use std::{
 };
 
 use outlint_core::{
-    load_schema_with_label, parse_markdown, validate, Diagnostic, DiagnosticReference,
-    FrontmatterRef, FrontmatterScalar, InvalidSchema, LoadedSchema, MarkdownOptions, Matcher,
-    RefAnchor, RuleRef, SchemaError, SchemaLocations, SchemaNode, SchemaSources, SourceLabel,
-    SourceRange,
+    load_schema_file, parse_markdown, validate, Diagnostic, DiagnosticReference, FrontmatterRef,
+    FrontmatterScalar, InvalidSchema, LoadedSchema, MarkdownOptions, Matcher, RefAnchor, RuleRef,
+    SchemaError, SchemaLocations, SchemaNode, SchemaSources, SourceLabel, SourceRange,
 };
 use serde_json::{json, Map, Value};
 
@@ -305,6 +304,14 @@ struct RenderedDiagnostic {
     schema_location: Option<RenderedLocation>,
     involved_headers: Vec<RenderedInvolvedHeader>,
     references: Vec<RenderedReference>,
+    frontmatter_range: Option<RenderedLineRange>,
+    json_pointer: Option<String>,
+}
+
+#[derive(Debug)]
+struct RenderedLineRange {
+    start_line: u32,
+    end_line: u32,
 }
 
 #[derive(Debug)]
@@ -543,11 +550,35 @@ fn read_and_load_schema(
     path: &Path,
     display: &str,
 ) -> Result<Result<LoadedSchema, InvalidSchema>, String> {
-    let source = read_utf8_file(path, "schema")?;
-    Ok(load_schema_with_label(
-        &source,
-        Some(SourceLabel(display.to_owned())),
-    ))
+    inspect_regular_file(path, "schema")?;
+    let mut result = load_schema_file(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidData {
+            format!("schema '{display}': input is not valid UTF-8")
+        } else {
+            format!("cannot read schema '{display}': {error}")
+        }
+    })?;
+    let sources = match &mut result {
+        Ok(loaded) => &mut loaded.sources,
+        Err(invalid) => &mut invalid.sources,
+    };
+    if let Some(primary) = sources.documents.get_mut(&sources.primary) {
+        primary.label = Some(SourceLabel(display.to_owned()));
+    }
+    Ok(result)
+}
+
+fn inspect_regular_file(path: &Path, kind: &str) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("cannot inspect {kind} '{}': {error}", path.display()))?;
+    if metadata.is_dir() {
+        Err(format!(
+            "{kind} '{}' is a directory; pass individual files instead",
+            path.display()
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn read_utf8_file(path: &Path, kind: &str) -> Result<String, String> {
@@ -640,6 +671,8 @@ fn render_schema_error(
         schema_location: Some(location),
         involved_headers: Vec::new(),
         references: Vec::new(),
+        frontmatter_range: None,
+        json_pointer: None,
     }
 }
 
@@ -671,6 +704,17 @@ fn render_document_diagnostic(
             })
             .collect(),
         references: diagnostic.references.iter().map(render_reference).collect(),
+        frontmatter_range: diagnostic
+            .frontmatter
+            .as_ref()
+            .map(|frontmatter| RenderedLineRange {
+                start_line: frontmatter.line_range.start_line,
+                end_line: frontmatter.line_range.end_line,
+            }),
+        json_pointer: diagnostic
+            .frontmatter
+            .as_ref()
+            .and_then(|frontmatter| frontmatter.json_pointer.clone()),
     }
 }
 
@@ -912,6 +956,17 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
         }
         output.push(']');
     }
+    if let Some(range) = &diagnostic.frontmatter_range {
+        output.push_str(&format!(
+            "; frontmatter_range={}:{}",
+            range.start_line, range.end_line
+        ));
+    }
+    if let Some(pointer) = &diagnostic.json_pointer {
+        output.push_str("; json_pointer=\"");
+        output.push_str(&escape_human(pointer));
+        output.push('"');
+    }
 }
 
 fn escape_human(value: &str) -> String {
@@ -1114,6 +1169,18 @@ fn diagnostic_json(diagnostic: &RenderedDiagnostic) -> Value {
             "references".into(),
             Value::Array(diagnostic.references.iter().map(reference_json).collect()),
         );
+    }
+    if let Some(range) = &diagnostic.frontmatter_range {
+        object.insert(
+            "frontmatter_range".into(),
+            json!({
+                "start_line": range.start_line,
+                "end_line": range.end_line
+            }),
+        );
+    }
+    if let Some(pointer) = &diagnostic.json_pointer {
+        object.insert("json_pointer".into(), json!(pointer));
     }
     Value::Object(object)
 }

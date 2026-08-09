@@ -1,0 +1,5 @@
+version: 1
+frontmatter:
+  required: true
+  schema: frontmatter.schema.json
+sections: []

@@ -4,9 +4,7 @@ use std::{
     path::Path,
 };
 
-use outlint_core::{
-    load_schema_with_label, parse_markdown, validate, MarkdownOptions, SourceLabel,
-};
+use outlint_core::{load_schema_file, parse_markdown, validate, MarkdownOptions};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -39,18 +37,14 @@ fn shared_testdata_corpus_conforms() {
 
 fn run_fixture(directory: &Path) {
     let schema_path = directory.join("schema.outlint.yml");
-    let schema_source = fs::read_to_string(&schema_path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", schema_path.display()));
-    let loaded = load_schema_with_label(
-        &schema_source,
-        Some(SourceLabel(schema_path.display().to_string())),
-    )
-    .unwrap_or_else(|invalid| {
-        panic!(
+    let loaded = match load_schema_file(&schema_path) {
+        Ok(Ok(loaded)) => loaded,
+        Ok(Err(invalid)) => panic!(
             "invalid fixture schema {}: {invalid:#?}",
             schema_path.display()
-        )
-    });
+        ),
+        Err(error) => panic!("cannot read {}: {error}", schema_path.display()),
+    };
     let expected_path = directory.join("expected.json");
     let expected_source = fs::read_to_string(&expected_path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", expected_path.display()));

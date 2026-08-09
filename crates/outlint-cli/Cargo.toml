@@ -3,6 +3,7 @@ name = "outlint"
 description = "Lint the header structure of Markdown documents against a schema"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
