@@ -377,6 +377,11 @@ the constraint keywords. Schema errors: `duplicate-id`, `unresolved-ref`,
 `ordered-scope-mismatch`, `conflicting-cardinality`,
 `conflicting-frontmatter`.
 
+Schema document parsing and top-level validation additionally use
+`syntax`, `invalid-document-shape`, `unsupported-version`, and
+`invalid-root-level`. These are schema diagnostics with the same stability
+contract as the schema-error ids above.
+
 **Suppression.** An HTML comment
 `<!-- outlint-disable <diag-id>[, <diag-id>...] -->` on the line
 immediately preceding a header suppresses the listed diagnostics *anchored

@@ -213,3 +213,42 @@ pub enum SchemaErrorKind {
     /// A frontmatter JSON Schema is malformed or uses an unsupported dialect.
     InvalidFrontmatterSchema,
 }
+
+impl SchemaErrorKind {
+    /// Returns the stable diagnostic spelling defined by specification §6.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Syntax => "syntax",
+            Self::InvalidDocumentShape => "invalid-document-shape",
+            Self::UnsupportedVersion => "unsupported-version",
+            Self::DuplicateId => "duplicate-id",
+            Self::UnresolvedRef => "unresolved-ref",
+            Self::ForbiddenRef => "forbidden-ref",
+            Self::DuplicateRef => "duplicate-ref",
+            Self::ReservedId => "reserved-id",
+            Self::InvalidMatcher => "invalid-matcher",
+            Self::InvalidRepeat => "invalid-repeat",
+            Self::OrderedScopeMismatch => "ordered-scope-mismatch",
+            Self::ConflictingCardinality => "conflicting-cardinality",
+            Self::ConflictingFrontmatter => "conflicting-frontmatter",
+            Self::InvalidRootLevel => "invalid-root-level",
+            Self::InvalidTitleLevel => "invalid-title-level",
+            Self::InvalidFrontmatterSchema => "invalid-frontmatter-schema",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SchemaErrorKind;
+
+    #[test]
+    fn schema_error_ids_use_the_public_spellings() {
+        assert_eq!(SchemaErrorKind::Syntax.as_str(), "syntax");
+        assert_eq!(SchemaErrorKind::DuplicateId.as_str(), "duplicate-id");
+        assert_eq!(
+            SchemaErrorKind::InvalidFrontmatterSchema.as_str(),
+            "invalid-frontmatter-schema"
+        );
+    }
+}
