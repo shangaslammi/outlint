@@ -4,7 +4,10 @@
 //! fenced-code and Setext-heading behavior aligned with the Markdown model
 //! while this module owns Outlint's section tree and suppression metadata.
 
-use std::collections::BTreeSet;
+use std::{
+    borrow::{Borrow, Cow},
+    collections::{BTreeMap, BTreeSet},
+};
 
 use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag};
 
@@ -89,6 +92,12 @@ pub struct HeadingLocation {
 #[repr(transparent)]
 pub struct SuppressedDiagnostic(pub String);
 
+impl Borrow<str> for SuppressedDiagnostic {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The distinct diagnostic ids disabled at one suppression scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[repr(transparent)]
@@ -97,7 +106,7 @@ pub struct Suppressions(pub BTreeSet<SuppressedDiagnostic>);
 impl Suppressions {
     /// Reports whether a diagnostic id is disabled at this scope.
     pub fn contains(&self, id: &str) -> bool {
-        self.0.iter().any(|suppressed| suppressed.0 == id)
+        self.0.contains(id)
     }
 }
 
@@ -107,15 +116,31 @@ impl Suppressions {
 /// is interpreted according to CommonMark recovery rules.
 pub fn parse_markdown(source: &str, options: MarkdownOptions) -> Document {
     let line_index = LineIndex::new(source);
+    let parser_source = normalize_bare_cr(source);
     let mut headings = Vec::new();
     let mut file_suppressions = Suppressions::default();
-    let mut line_suppressions = Vec::new();
+    let mut line_suppressions = BTreeMap::new();
     let mut active_heading: Option<HeadingBuilder> = None;
+    let mut container_depth = 0_usize;
 
-    for (event, range) in Parser::new_ext(source, CommonMarkOptions::empty()).into_offset_iter() {
+    for (event, range) in
+        Parser::new_ext(&parser_source, CommonMarkOptions::empty()).into_offset_iter()
+    {
         match event {
+            Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item) => {
+                container_depth = container_depth.saturating_add(1);
+            }
+            Event::End(
+                pulldown_cmark::TagEnd::BlockQuote(_)
+                | pulldown_cmark::TagEnd::List(_)
+                | pulldown_cmark::TagEnd::Item,
+            ) => {
+                container_depth = container_depth.saturating_sub(1);
+            }
             Event::Start(Tag::Heading { level, .. }) => {
-                active_heading = Some(HeadingBuilder::new(level, range));
+                active_heading = (container_depth == 0
+                    && is_eligible_heading(source, &range, level, &line_index))
+                .then(|| HeadingBuilder::new(level, range));
             }
             Event::End(pulldown_cmark::TagEnd::Heading(_)) => {
                 if let Some(builder) = active_heading.take() {
@@ -141,7 +166,7 @@ pub fn parse_markdown(source: &str, options: MarkdownOptions) -> Document {
                 collect_suppressions(
                     source,
                     &html,
-                    range.start,
+                    range,
                     &line_index,
                     &mut file_suppressions,
                     &mut line_suppressions,
@@ -155,6 +180,30 @@ pub fn parse_markdown(source: &str, options: MarkdownOptions) -> Document {
         sections: build_section_tree(headings),
         file_suppressions,
     }
+}
+
+fn normalize_bare_cr(source: &str) -> Cow<'_, str> {
+    let has_bare_cr = source.as_bytes().iter().enumerate().any(|(index, byte)| {
+        *byte == b'\r' && source.as_bytes().get(index.saturating_add(1)) != Some(&b'\n')
+    });
+    if !has_bare_cr {
+        return Cow::Borrowed(source);
+    }
+
+    Cow::Owned(
+        source
+            .char_indices()
+            .map(|(index, character)| {
+                if character == '\r'
+                    && source.as_bytes().get(index.saturating_add(1)) != Some(&b'\n')
+                {
+                    '\n'
+                } else {
+                    character
+                }
+            })
+            .collect(),
+    )
 }
 
 struct HeadingBuilder {
@@ -181,21 +230,12 @@ impl HeadingBuilder {
         source: &str,
         options: MarkdownOptions,
         lines: &LineIndex,
-        line_suppressions: &[(u32, Suppressions)],
+        line_suppressions: &BTreeMap<u32, Suppressions>,
     ) -> Heading {
         let safe_range = clamp_range(self.range, source.len());
         let line = lines.line_number(safe_range.start);
         let line_start = lines.line_start(line);
         let line_end = lines.line_end(line, source.len());
-        let line_end = if source
-            .as_bytes()
-            .get(line_end.saturating_sub(1))
-            .is_some_and(|byte| *byte == b'\r')
-        {
-            line_end.saturating_sub(1)
-        } else {
-            line_end
-        };
         let source_block = source.get(safe_range.clone()).unwrap_or_default();
         let source_text = extract_heading_source(source_block);
         let text = if options.strip_inline_markup {
@@ -205,12 +245,9 @@ impl HeadingBuilder {
         };
         let suppressions = line
             .checked_sub(1)
-            .and_then(|prior| {
-                line_suppressions
-                    .iter()
-                    .find(|(directive_line, _)| *directive_line == prior)
-            })
-            .map_or_else(Suppressions::default, |(_, ids)| ids.clone());
+            .and_then(|prior| line_suppressions.get(&prior))
+            .cloned()
+            .unwrap_or_default();
 
         Heading {
             level: self.level,
@@ -225,6 +262,72 @@ impl HeadingBuilder {
             },
             suppressions,
         }
+    }
+}
+
+fn is_eligible_heading(
+    source: &str,
+    range: &std::ops::Range<usize>,
+    event_level: HeadingLevel,
+    lines: &LineIndex,
+) -> bool {
+    let safe_range = clamp_range(range.clone(), source.len());
+    let first_line = lines.line_number(safe_range.start);
+    let line_start = lines.line_start(first_line);
+    let Some(prefix) = source.get(line_start..safe_range.start) else {
+        return false;
+    };
+    if prefix.len() > 3 || !prefix.bytes().all(|byte| byte == b' ') {
+        return false;
+    }
+
+    let Some(first_text) = lines.line_text(source, first_line) else {
+        return false;
+    };
+    if let Some(level) = physical_atx_level(first_text) {
+        return level == convert_level(event_level);
+    }
+
+    if !matches!(event_level, HeadingLevel::H1 | HeadingLevel::H2) {
+        return false;
+    }
+    let last_offset = safe_range.end.saturating_sub(1).max(safe_range.start);
+    let last_line = lines.line_number(last_offset.min(source.len()));
+    lines
+        .line_text(source, last_line)
+        .is_some_and(|line| setext_level(line) == Some(convert_level(event_level)))
+}
+
+fn physical_atx_level(line: &str) -> Option<HeaderLevel> {
+    let bytes = line.as_bytes();
+    let indent = bytes.iter().take_while(|byte| **byte == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let hashes = bytes
+        .get(indent..)?
+        .iter()
+        .take_while(|byte| **byte == b'#')
+        .count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let after = indent.saturating_add(hashes);
+    if bytes.get(after).is_some_and(|byte| *byte != b' ') {
+        return None;
+    }
+    header_level(hashes)
+}
+
+fn header_level(hashes: usize) -> Option<HeaderLevel> {
+    match hashes {
+        1 => Some(HeaderLevel::H1),
+        2 => Some(HeaderLevel::H2),
+        3 => Some(HeaderLevel::H3),
+        4 => Some(HeaderLevel::H4),
+        5 => Some(HeaderLevel::H5),
+        6 => Some(HeaderLevel::H6),
+        _ => None,
     }
 }
 
@@ -259,9 +362,9 @@ fn byte_column(line_start: usize, offset: usize) -> u32 {
 }
 
 fn extract_heading_source(block: &str) -> String {
-    let first_line = block.split_once('\n').map_or(block, |(line, _)| line);
-    let without_cr = first_line.strip_suffix('\r').unwrap_or(first_line);
-    let trimmed_indent = without_cr.trim_start_matches(' ');
+    let mut lines = physical_lines(block);
+    let first_line = lines.first().copied().unwrap_or_default();
+    let trimmed_indent = first_line.trim_start_matches(' ');
     let hash_count = trimmed_indent
         .bytes()
         .take_while(|byte| *byte == b'#')
@@ -271,7 +374,7 @@ fn extract_heading_source(block: &str) -> String {
         && trimmed_indent
             .as_bytes()
             .get(hash_count)
-            .is_none_or(u8::is_ascii_whitespace)
+            .is_none_or(|byte| *byte == b' ')
     {
         return trimmed_indent
             .get(hash_count..)
@@ -280,7 +383,6 @@ fn extract_heading_source(block: &str) -> String {
             .to_owned();
     }
 
-    let mut lines: Vec<&str> = block.lines().collect();
     if lines.last().is_some_and(|line| is_setext_underline(line)) {
         lines.pop();
     }
@@ -294,7 +396,7 @@ fn strip_atx_closing_hashes(content: &str) -> &str {
         && without_hashes
             .as_bytes()
             .last()
-            .is_some_and(u8::is_ascii_whitespace)
+            .is_some_and(|byte| *byte == b' ')
     {
         without_hashes.trim()
     } else {
@@ -303,9 +405,61 @@ fn strip_atx_closing_hashes(content: &str) -> &str {
 }
 
 fn is_setext_underline(line: &str) -> bool {
-    let line = line.trim();
-    !line.is_empty()
-        && (line.bytes().all(|byte| byte == b'=') || line.bytes().all(|byte| byte == b'-'))
+    setext_level(line).is_some()
+}
+
+fn setext_level(line: &str) -> Option<HeaderLevel> {
+    let bytes = line.as_bytes();
+    let indent = bytes.iter().take_while(|byte| **byte == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let marker = bytes.get(indent).copied()?;
+    let level = match marker {
+        b'=' => HeaderLevel::H1,
+        b'-' => HeaderLevel::H2,
+        _ => return None,
+    };
+    let marker_end = bytes
+        .get(indent..)?
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count()
+        .saturating_add(indent);
+    if bytes
+        .get(marker_end..)
+        .is_some_and(|trailing| !trailing.iter().all(|byte| matches!(byte, b' ' | b'\t')))
+    {
+        return None;
+    }
+    Some(level)
+}
+
+fn physical_lines(source: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if matches!(bytes.get(index), Some(b'\r' | b'\n')) {
+            if let Some(line) = source.get(start..index) {
+                lines.push(line);
+            }
+            if bytes.get(index) == Some(&b'\r')
+                && bytes.get(index.saturating_add(1)) == Some(&b'\n')
+            {
+                index = index.saturating_add(1);
+            }
+            start = index.saturating_add(1);
+        }
+        index = index.saturating_add(1);
+    }
+    if start < source.len() {
+        if let Some(line) = source.get(start..) {
+            lines.push(line);
+        }
+    }
+    lines
 }
 
 fn process_inline_text(source: &str) -> String {
@@ -364,27 +518,46 @@ fn expand_escaped_punctuation(
 fn collect_suppressions(
     source: &str,
     html: &str,
-    offset: usize,
+    range: std::ops::Range<usize>,
     lines: &LineIndex,
     file: &mut Suppressions,
-    per_line: &mut Vec<(u32, Suppressions)>,
+    per_line: &mut BTreeMap<u32, Suppressions>,
 ) {
-    let Some((file_wide, suppressions)) = parse_suppression(html) else {
-        return;
-    };
-    if file_wide {
-        file.0.extend(suppressions.0);
-        return;
-    }
+    let safe_range = clamp_range(range, source.len());
+    let (raw_html, base_offset) = source
+        .get(safe_range.clone())
+        .map_or((html, safe_range.start), |raw| (raw, safe_range.start));
+    let mut cursor = 0;
+    while let Some(relative_start) = raw_html.get(cursor..).and_then(|raw| raw.find("<!--")) {
+        let comment_start = cursor.saturating_add(relative_start);
+        let body_start = comment_start.saturating_add("<!--".len());
+        let Some(relative_end) = raw_html.get(body_start..).and_then(|raw| raw.find("-->")) else {
+            break;
+        };
+        let comment_end = body_start
+            .saturating_add(relative_end)
+            .saturating_add("-->".len());
+        let Some(comment) = raw_html.get(comment_start..comment_end) else {
+            break;
+        };
+        cursor = comment_end;
 
-    let line = lines.line_number(offset.min(source.len()));
-    if let Some((_, existing)) = per_line
-        .iter_mut()
-        .find(|(directive_line, _)| *directive_line == line)
-    {
-        existing.0.extend(suppressions.0);
-    } else {
-        per_line.push((line, suppressions));
+        let Some((file_wide, suppressions)) = parse_suppression(comment) else {
+            continue;
+        };
+        if file_wide {
+            file.0.extend(suppressions.0);
+            continue;
+        }
+
+        let absolute_start = base_offset.saturating_add(comment_start).min(source.len());
+        let line = lines.line_number(absolute_start);
+        let is_entire_line = lines
+            .line_text(source, line)
+            .is_some_and(|line_text| line_text.trim() == comment);
+        if is_entire_line {
+            per_line.entry(line).or_default().0.extend(suppressions.0);
+        }
     }
 }
 
@@ -464,18 +637,36 @@ fn children_at_path_mut<'a>(
 
 struct LineIndex {
     starts: Vec<usize>,
+    ends: Vec<usize>,
 }
 
 impl LineIndex {
     fn new(source: &str) -> Self {
         let mut starts = vec![0];
-        starts.extend(
-            source
-                .bytes()
-                .enumerate()
-                .filter_map(|(index, byte)| (byte == b'\n').then_some(index.saturating_add(1))),
-        );
-        Self { starts }
+        let mut ends = Vec::new();
+        let bytes = source.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes.get(index) {
+                Some(b'\r') => {
+                    ends.push(index);
+                    if bytes.get(index.saturating_add(1)) == Some(&b'\n') {
+                        index = index.saturating_add(1);
+                    }
+                    starts.push(index.saturating_add(1));
+                }
+                Some(b'\n') => {
+                    ends.push(index);
+                    starts.push(index.saturating_add(1));
+                }
+                _ => {}
+            }
+            index = index.saturating_add(1);
+        }
+        if ends.len() < starts.len() {
+            ends.push(source.len());
+        }
+        Self { starts, ends }
     }
 
     fn line_number(&self, offset: usize) -> u32 {
@@ -491,10 +682,24 @@ impl LineIndex {
     }
 
     fn line_end(&self, line: u32, source_len: usize) -> usize {
-        usize::try_from(line)
-            .ok()
-            .and_then(|index| self.starts.get(index).copied())
-            .map_or(source_len, |next_start| next_start.saturating_sub(1))
+        line.checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| self.ends.get(index).copied())
+            .unwrap_or(source_len)
+    }
+
+    fn line_text<'a>(&self, source: &'a str, line: u32) -> Option<&'a str> {
+        let start = self.line_start(line);
+        let end = line
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| self.ends.get(index).copied())?;
+        source.get(start..end)
+    }
+
+    #[cfg(test)]
+    fn line_count(&self) -> usize {
+        self.starts.len()
     }
 }
 
@@ -543,6 +748,27 @@ mod tests {
                 (HeaderLevel::H2, "setext two"),
             ]
         );
+    }
+
+    #[test]
+    fn accepts_only_top_level_physical_heading_lines() {
+        let source = concat!(
+            "> # quoted atx\n\n",
+            "- # listed atx\n\n",
+            "> quoted setext\n> ===\n\n",
+            "- listed setext\n  ---\n\n",
+            "- containing item\n\n  ### continued-list atx\n\n",
+            "#\ttab is not the required literal space\n\n",
+            "   ## physical atx\n",
+            "physical setext\n---\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+        let actual: Vec<_> = headings(&document)
+            .into_iter()
+            .map(|heading| heading.text.as_str())
+            .collect();
+
+        assert_eq!(actual, ["physical atx", "physical setext"]);
     }
 
     #[test]
@@ -655,6 +881,73 @@ mod tests {
         assert!(found[0].suppressions.contains("skipped-level"));
         assert!(found[0].suppressions.contains("not-allowed"));
         assert!(found[1].suppressions.0.is_empty());
+    }
+
+    #[test]
+    fn finds_file_suppressions_nested_in_raw_html() {
+        let source = concat!(
+            "<div>\n",
+            "before\n",
+            "<!-- outlint-disable-file missing-section -->\n",
+            "<!-- outlint-disable-file requires, ordered -->\n",
+            "after\n",
+            "</div>\n\n",
+            "# heading\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        assert!(document.file_suppressions.contains("missing-section"));
+        assert!(document.file_suppressions.contains("requires"));
+        assert!(document.file_suppressions.contains("ordered"));
+    }
+
+    #[test]
+    fn requires_header_suppression_to_occupy_its_whole_line() {
+        let source = concat!(
+            "prefix <!-- outlint-disable skipped-level -->\n",
+            "# not suppressed\n",
+            "<!-- outlint-disable skipped-level --> suffix\n",
+            "# also not suppressed\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        assert!(headings(&document)
+            .iter()
+            .all(|heading| !heading.suppressions.contains("skipped-level")));
+    }
+
+    #[test]
+    fn bare_cr_delimits_locations_and_suppression_lines() {
+        let source = concat!(
+            "<!-- outlint-disable skipped-level -->\r",
+            "   ## first\r",
+            "setext\r",
+            "---\r",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+        let found = headings(&document);
+
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].location.line, 2);
+        assert_eq!(found[0].location.column, 4);
+        assert_eq!(found[0].location.line_range, text_range(39, 50));
+        assert!(found[0].suppressions.contains("skipped-level"));
+        assert_eq!(found[1].location.line, 3);
+        assert_eq!(found[1].location.line_range, text_range(51, 57));
+    }
+
+    #[test]
+    fn line_index_treats_crlf_as_one_ending_and_cr_as_an_ending() {
+        let source = "a\r\nb\rc\nd";
+        let lines = LineIndex::new(source);
+        let actual: Vec<_> = (1..=lines.line_count())
+            .map(|line| lines.line_text(source, line as u32))
+            .collect();
+
+        assert_eq!(actual, [Some("a"), Some("b"), Some("c"), Some("d")]);
+        assert_eq!(lines.line_number(3), 2);
+        assert_eq!(lines.line_number(5), 3);
+        assert_eq!(lines.line_number(7), 4);
     }
 
     #[test]
