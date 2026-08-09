@@ -180,6 +180,8 @@ pub struct RelatedLocation {
 /// Machine-readable categories for schema loading failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SchemaErrorKind {
+    /// A source file requested by the caller could not be read.
+    SourceRead,
     /// The input is not syntactically valid YAML or JSON.
     Syntax,
     /// The parsed value does not have the required schema document shape.
