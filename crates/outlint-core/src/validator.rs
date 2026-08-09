@@ -15,23 +15,41 @@ use crate::{
 /// A stable identifier from the diagnostic vocabulary in specification §6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticId {
+    /// A heading is more than one level below its nearest parent.
     SkippedLevel,
+    /// A present heading is denied by its first matching rule or title matcher.
     NotAllowed,
+    /// A heading has no matching rule in a strict scope.
     UnexpectedSection,
+    /// No heading matched a rule whose minimum is nonzero.
     MissingSection,
+    /// Some headings matched a rule, but fewer than its minimum.
     TooFewSections,
+    /// More headings matched a rule than its finite maximum.
     TooManySections,
+    /// The schema declares a title but the document has none.
     MissingTitle,
+    /// Reserved for a required frontmatter block that is absent.
     MissingFrontmatter,
+    /// Reserved for a present frontmatter block forbidden by the schema.
     ForbiddenFrontmatter,
+    /// Reserved for a frontmatter block that is not a YAML mapping.
     InvalidFrontmatter,
+    /// Reserved for a failure from delegated JSON Schema validation.
     FrontmatterSchema,
+    /// An `one_of` constraint does not have exactly one satisfied ref.
     OneOf,
+    /// An `any_of` constraint has no satisfied ref.
     AnyOf,
+    /// An `at_most_one` constraint has more than one satisfied ref.
     AtMostOne,
+    /// An `all_or_none` constraint has some but not all refs satisfied.
     AllOrNone,
+    /// A `requires` condition is satisfied without every consequence.
     Requires,
+    /// A `conflicts` condition and at least one exclusion are both satisfied.
     Conflicts,
+    /// Concrete occurrences violate an `ordered` constraint.
     Ordered,
 }
 
@@ -98,7 +116,9 @@ pub struct InvolvedHeader {
 pub enum DiagnosticReference {
     /// A rule reference paired with its resolved target matcher.
     Rule {
+        /// The normalized relative or schema-root-anchored reference.
         reference: RuleRef,
+        /// Matcher of the rule targeted by `reference`.
         matcher: Matcher,
     },
     /// A document-level frontmatter proposition.
@@ -134,33 +154,95 @@ pub fn validate(schema: &Schema, document: &Document) -> Vec<Diagnostic> {
     Validator::new(schema, document).run()
 }
 
-/// Tests a normalized matcher using the schema's Unicode-aware case policy.
-///
-/// Invalid regex bodies in manually constructed schemas simply do not match;
-/// normally the loader prevents such values from reaching this boundary.
-pub fn matcher_matches(matcher: &Matcher, text: &str, match_case: bool) -> bool {
-    match matcher {
-        Matcher::Any => true,
-        Matcher::Exact(exact) => regex_matches(&regex::escape(&exact.0), text, match_case),
-        Matcher::Glob(glob) => {
-            let body = glob
-                .0
-                .split('*')
-                .map(regex::escape)
-                .collect::<Vec<_>>()
-                .join(".*");
-            regex_matches(&body, text, match_case)
+struct ValidationPlan {
+    title: Option<PreparedMatcher>,
+    sections: Vec<PreparedRule>,
+}
+
+impl ValidationPlan {
+    fn new(schema: &Schema) -> Self {
+        Self {
+            title: schema
+                .title
+                .as_ref()
+                .map(|matcher| PreparedMatcher::new(matcher, schema.options.match_case)),
+            sections: prepare_rules(&schema.sections, schema.options.match_case),
         }
-        Matcher::Regex(pattern) => regex_matches(&pattern.0, text, match_case),
     }
 }
 
-fn regex_matches(body: &str, text: &str, match_case: bool) -> bool {
+struct PreparedRule {
+    matcher: PreparedMatcher,
+    sections: Vec<PreparedRule>,
+}
+
+fn prepare_rules(rules: &[SectionRule], match_case: bool) -> Vec<PreparedRule> {
+    rules
+        .iter()
+        .map(|rule| PreparedRule {
+            matcher: PreparedMatcher::new(&rule.matcher, match_case),
+            sections: prepare_rules(&rule.sections, match_case),
+        })
+        .collect()
+}
+
+enum PreparedMatcher {
+    Exact { text: String, match_case: bool },
+    Pattern(Option<regex::Regex>),
+    Any,
+}
+
+impl PreparedMatcher {
+    fn new(matcher: &Matcher, match_case: bool) -> Self {
+        match matcher {
+            Matcher::Exact(exact) => Self::Exact {
+                text: exact.0.clone(),
+                match_case,
+            },
+            Matcher::Glob(glob) => {
+                let body = glob
+                    .0
+                    .split('*')
+                    .map(regex::escape)
+                    .collect::<Vec<_>>()
+                    .join(".*");
+                Self::Pattern(compile_pattern(&body, match_case, true))
+            }
+            Matcher::Regex(pattern) => {
+                Self::Pattern(compile_pattern(&pattern.0, match_case, false))
+            }
+            Matcher::Any => Self::Any,
+        }
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        match self {
+            Self::Exact {
+                text: expected,
+                match_case: true,
+            } => expected == text,
+            Self::Exact {
+                text: expected,
+                match_case: false,
+            } => unicase::UniCase::unicode(expected) == unicase::UniCase::unicode(text),
+            Self::Pattern(Some(regex)) => regex.is_match(text),
+            Self::Pattern(None) => false,
+            Self::Any => true,
+        }
+    }
+}
+
+fn compile_pattern(
+    body: &str,
+    match_case: bool,
+    dot_matches_new_line: bool,
+) -> Option<regex::Regex> {
     let anchored = format!(r"\A(?:{body})\z");
     RegexBuilder::new(&anchored)
         .case_insensitive(!match_case)
+        .dot_matches_new_line(dot_matches_new_line)
         .build()
-        .is_ok_and(|regex| regex.is_match(text))
+        .ok()
 }
 
 struct Validator<'a> {
@@ -179,9 +261,10 @@ impl<'a> Validator<'a> {
     }
 
     fn run(mut self) -> Vec<Diagnostic> {
+        let plan = ValidationPlan::new(self.schema);
         let mut all = Vec::new();
         collect_sections(&self.document.sections, &mut all);
-        self.validate_title(&all);
+        self.validate_title(&all, plan.title.as_ref());
         if !self.schema.options.allow_skipped_levels {
             self.validate_skipped_levels(&self.document.sections, None, &HeaderPath::default());
         }
@@ -193,6 +276,7 @@ impl<'a> Validator<'a> {
         let root = self.bind_scope(
             &root_sections,
             &self.schema.sections,
+            &plan.sections,
             false,
             &ScopePath(Vec::new()),
             None,
@@ -210,8 +294,11 @@ impl<'a> Validator<'a> {
         self.diagnostics
     }
 
-    fn validate_title(&mut self, sections: &[&Section]) {
+    fn validate_title(&mut self, sections: &[&Section], prepared: Option<&PreparedMatcher>) {
         let Some(matcher) = &self.schema.title else {
+            return;
+        };
+        let Some(prepared) = prepared else {
             return;
         };
         let Some(title_level) = previous_level(self.schema.options.root_level) else {
@@ -239,7 +326,7 @@ impl<'a> Validator<'a> {
             return;
         }
         for title in &titles {
-            if !matcher_matches(matcher, &title.heading.text, self.schema.options.match_case) {
+            if !prepared.matches(&title.heading.text) {
                 let path = HeaderPath(vec![title.heading.diagnostic_text.clone()]);
                 self.emit(
                     Diagnostic {
@@ -308,6 +395,7 @@ impl<'a> Validator<'a> {
         &mut self,
         sections: &[&'d Section],
         rules: &[SectionRule],
+        prepared_rules: &[PreparedRule],
         strict: bool,
         schema_scope: &ScopePath,
         parent: Option<&'d Heading>,
@@ -317,20 +405,24 @@ impl<'a> Validator<'a> {
         let mut occurrences = Vec::new();
         for section in sections {
             let path = appended_path(parent_path, &section.heading.diagnostic_text);
-            let matched = rules.iter().enumerate().find(|(_, rule)| {
-                matcher_matches(
-                    &rule.matcher,
-                    &section.heading.text,
-                    self.schema.options.match_case,
-                )
-            });
-            let Some((rule_index, rule)) = matched else {
+            let matched = rules
+                .iter()
+                .zip(prepared_rules)
+                .enumerate()
+                .find(|(_, (_, prepared))| prepared.matcher.matches(&section.heading.text));
+            let Some((rule_index, (rule, prepared_rule))) = matched else {
                 if strict {
+                    let schema_node = schema_scope.0.split_last().map(|(index, parent_scope)| {
+                        SchemaNode::Rule(crate::RulePath {
+                            scope: ScopePath(parent_scope.to_vec()),
+                            index: *index,
+                        })
+                    });
                     self.emit_present(
                         DiagnosticId::UnexpectedSection,
                         path,
                         &section.heading,
-                        None,
+                        schema_node,
                         "the section is not permitted in this closed scope",
                     );
                 }
@@ -357,6 +449,7 @@ impl<'a> Validator<'a> {
             let child = self.bind_scope(
                 &child_refs,
                 &rule.sections,
+                &prepared_rule.sections,
                 rule.strict,
                 &child_scope_path,
                 Some(&section.heading),
@@ -989,6 +1082,10 @@ mod tests {
         load_schema, parse_markdown, ExactText, GlobPattern, MarkdownOptions, RegexPattern,
     };
 
+    fn matcher_matches(matcher: &Matcher, text: &str, match_case: bool) -> bool {
+        PreparedMatcher::new(matcher, match_case).matches(text)
+    }
+
     #[test]
     fn every_matcher_form_is_fully_anchored() {
         assert!(matcher_matches(
@@ -1031,6 +1128,19 @@ mod tests {
     }
 
     #[test]
+    fn glob_star_matches_newlines_in_multiline_setext_text() {
+        let matcher = Matcher::Glob(GlobPattern("first*last".into()));
+        assert!(matcher_matches(&matcher, "first\nmiddle\nlast", true));
+    }
+
+    #[test]
+    fn exact_matching_does_not_compile_input_as_a_regex() {
+        let text = "x".repeat(1_000_000);
+        let matcher = Matcher::Exact(ExactText(text.clone()));
+        assert!(matcher_matches(&matcher, &text, true));
+    }
+
+    #[test]
     fn case_insensitive_matching_is_unicode_aware_for_all_forms() {
         let matchers = [
             Matcher::Exact(ExactText("ÉCOLE".into())),
@@ -1041,6 +1151,11 @@ mod tests {
             assert!(matcher_matches(&matcher, "école", false));
             assert!(!matcher_matches(&matcher, "école", true));
         }
+        assert!(matcher_matches(
+            &Matcher::Exact(ExactText("Straße".into())),
+            "STRASSE",
+            false
+        ));
     }
 
     #[test]
@@ -1071,6 +1186,26 @@ mod tests {
         assert_eq!(diagnostic.id, DiagnosticId::TooManySections);
         assert_eq!(diagnostic.location.line, 3);
         assert_eq!(diagnostic.path.display(), "Item");
+        assert_eq!(
+            diagnostic.schema_node,
+            Some(SchemaNode::Rule(crate::RulePath {
+                scope: ScopePath(Vec::new()),
+                index: RuleIndex(0),
+            }))
+        );
+    }
+
+    #[test]
+    fn unexpected_section_points_to_the_rule_that_closed_its_scope() {
+        let loaded = load_schema("version: 1\nsections:\n  - match: Parent\n    strict: true\n")
+            .expect("test schema is valid");
+        let document = parse_markdown("## Parent\n### Surprise\n", MarkdownOptions::default());
+        let diagnostics = validate(&loaded.schema, &document);
+
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.id == DiagnosticId::UnexpectedSection)
+            .expect("the strict child scope rejects Surprise");
         assert_eq!(
             diagnostic.schema_node,
             Some(SchemaNode::Rule(crate::RulePath {

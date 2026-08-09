@@ -6,3 +6,5 @@ sections:
     required: true
   - match: "/v[0-9]+/"
     required: true
+  - match: "Multi*line"
+    required: true
