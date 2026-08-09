@@ -455,6 +455,12 @@ Frontmatter diagnostics may additionally expose:
 
 as applicable.
 
+`frontmatter_range` is present for diagnostics about an existing delimited
+block (`forbidden-frontmatter`, `invalid-frontmatter`, and
+`frontmatter-schema`) and absent for `missing-frontmatter`. `json_pointer` is
+present only for `frontmatter-schema`; the empty string denotes the mapping
+root, as defined by JSON Pointer.
+
 ## 10. Output streams
 
 The CLI should keep validation output separate from operational failures.

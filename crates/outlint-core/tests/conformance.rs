@@ -4,7 +4,13 @@ use std::{
     path::Path,
 };
 
-use outlint_core::{load_schema_file, parse_markdown, validate, MarkdownOptions};
+use std::sync::Arc;
+
+use outlint_core::{
+    linked_frontmatter_schema_path, load_schema_with_resources, parse_markdown,
+    JsonSchemaResourceInput, LinkedJsonSchemaInput, MarkdownOptions, PreparedValidator,
+    SourceLabel,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -37,14 +43,60 @@ fn shared_testdata_corpus_conforms() {
 
 fn run_fixture(directory: &Path) {
     let schema_path = directory.join("schema.outlint.yml");
-    let loaded = match load_schema_file(&schema_path) {
-        Ok(Ok(loaded)) => loaded,
-        Ok(Err(invalid)) => panic!(
+    let schema_source = fs::read_to_string(&schema_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", schema_path.display()));
+    let external = linked_frontmatter_schema_path(&schema_source).map(|declared| {
+        let root_name = Path::new(&declared)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| panic!("invalid linked schema path `{declared}`"));
+        let mut resources = fs::read_dir(directory)
+            .expect("fixture directory is readable")
+            .map(|entry| entry.expect("fixture entry is readable").path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .filter(|path| path.file_name().is_some_and(|name| name != "expected.json"))
+            .collect::<Vec<_>>();
+        resources.sort();
+        LinkedJsonSchemaInput {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            resources: resources
+                .into_iter()
+                .map(|path| {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .expect("fixture JSON filename is UTF-8");
+                    let uri = if name == root_name {
+                        "https://outlint.invalid/root.json".into()
+                    } else {
+                        format!("https://outlint.invalid/{name}")
+                    };
+                    JsonSchemaResourceInput {
+                        uri,
+                        label: Some(SourceLabel(path.display().to_string())),
+                        text: Arc::from(fs::read_to_string(&path).unwrap_or_else(|error| {
+                            panic!("cannot read {}: {error}", path.display())
+                        })),
+                    }
+                })
+                .collect(),
+        }
+    });
+    let loaded = match load_schema_with_resources(
+        &schema_source,
+        Some(SourceLabel(schema_path.display().to_string())),
+        external,
+    ) {
+        Ok(loaded) => loaded,
+        Err(invalid) => panic!(
             "invalid fixture schema {}: {invalid:#?}",
             schema_path.display()
         ),
-        Err(error) => panic!("cannot read {}: {error}", schema_path.display()),
     };
+    let validator = PreparedValidator::new(&loaded.schema).expect("fixture validator prepares");
     let expected_path = directory.join("expected.json");
     let expected_source = fs::read_to_string(&expected_path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", expected_path.display()));
@@ -100,7 +152,8 @@ fn run_fixture(directory: &Path) {
                 strip_inline_markup: loaded.schema.options.strip_inline_markup,
             },
         );
-        let actual = validate(&loaded.schema, &document)
+        let actual = validator
+            .validate(&document)
             .into_iter()
             .map(|diagnostic| ExpectedDiagnostic {
                 id: diagnostic.id.as_str().to_owned(),

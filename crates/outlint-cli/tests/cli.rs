@@ -214,6 +214,33 @@ fn check_validates_yaml_frontmatter_with_a_linked_json_schema() {
         .is_some_and(|path| path.ends_with("frontmatter.schema.json")));
 }
 
+#[cfg(unix)]
+#[test]
+fn linked_schema_refs_use_the_symlink_path_as_their_base() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TempDir::new("linked-frontmatter-symlink-base");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write("target/root.json", r#"{"$ref":"defs.json"}"#);
+    directory.write("target/defs.json", "false");
+    directory.write("defs.json", r#"{"type":"object","required":["status"]}"#);
+    symlink(
+        directory.path().join("target/root.json"),
+        directory.path().join("frontmatter.schema.json"),
+    )
+    .expect("schema symlink is creatable");
+    directory.write("document.md", "---\nstatus: draft\n---\n");
+
+    let output = run(
+        &directory,
+        &["check", "document.md", "--schema", "schema.yml"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
 #[test]
 fn schema_check_reports_schema_diagnostics_as_validation_output() {
     let directory = TempDir::new("schema-invalid");

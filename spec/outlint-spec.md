@@ -56,7 +56,9 @@ frontmatter is out of scope for v1. A first-line opening delimiter without a
 closing `---` line is `invalid-frontmatter` spanning the remainder of the
 document. For delegated JSON Schema validation, mapping keys MUST be strings;
 a non-string key is `invalid-frontmatter` because JSON object member names are
-strings.
+strings. YAML integer and finite decimal scalars are converted to JSON numbers
+without an implementation-sized integer limit or binary floating-point
+rounding; implementations MUST preserve their exact mathematical value.
 
 ---
 
@@ -155,13 +157,12 @@ dialect is selected by the JSON Schema's own `$schema` keyword; absent
 UTF-8 JSON document whose root is an object or boolean. Implementations MUST
 support draft 2020-12 and MAY support earlier drafts; an unsupported `$schema`
 is schema error `invalid-frontmatter-schema`. `$ref` resolution: for an
-external schema file the base URI is that file's location; for an inline
-schema it is the outlint schema file's location. V1 resolves local file and
-fragment `$ref`s. Network retrieval is not performed; a remote `$ref` is
-schema error `invalid-frontmatter-schema`. Circular fragment references within
-one JSON Schema document are supported. The external file-reference graph MUST
-be acyclic; a cycle between JSON Schema files is
-`invalid-frontmatter-schema`. An unreadable, invalid-UTF-8, or invalid-JSON
+external schema file the base URI is its lexical path as reached from the
+Outlint schema, before resolving filesystem symlinks; for an inline schema it
+is the Outlint schema file's location. V1 resolves local file and fragment
+`$ref`s, including cycles within or between files. Network retrieval is not
+performed; a remote `$ref` is schema error `invalid-frontmatter-schema`. An
+unreadable, invalid-UTF-8, or invalid-JSON
 external schema is also `invalid-frontmatter-schema`. The parsed frontmatter
 mapping is validated against it; each JSON Schema error is reported as one
 diagnostic `frontmatter-schema` carrying the JSON Pointer of the failing

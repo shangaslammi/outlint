@@ -1,0 +1,9 @@
+{
+  "$defs": {
+    "target": {
+      "type": "object",
+      "required": ["target"]
+    },
+    "never": false
+  }
+}

@@ -14,6 +14,33 @@ use crate::schema::{NonEmpty, Schema};
 /// The result of parsing, validating, and normalizing a schema document.
 pub type LoadSchemaResult = Result<LoadedSchema, InvalidSchema>;
 
+/// A preloaded JSON Schema resource supplied to the pure schema loader.
+///
+/// The outer I/O shell assigns a stable logical `uri` for reference
+/// resolution. The display `label` and source text remain provenance only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonSchemaResourceInput {
+    /// Logical absolute URI used by JSON Schema reference resolution.
+    pub uri: String,
+    /// Human-readable filesystem path or caller label.
+    pub label: Option<SourceLabel>,
+    /// Complete UTF-8 JSON document.
+    pub text: Arc<str>,
+}
+
+/// Complete immutable input graph for one linked frontmatter JSON Schema.
+///
+/// Every local resource reachable from `root_uri` must be present. Missing or
+/// remote resources are reported as `invalid-frontmatter-schema` rather than
+/// being retrieved by core.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedJsonSchemaInput {
+    /// URI of the resource named by `frontmatter.schema`.
+    pub root_uri: String,
+    /// Root and transitive resource documents, keyed by each entry's `uri`.
+    pub resources: Vec<JsonSchemaResourceInput>,
+}
+
 /// A valid semantic schema together with its source provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedSchema {

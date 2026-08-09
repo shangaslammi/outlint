@@ -1,14 +1,18 @@
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     env, fs,
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::Arc,
 };
 
 use outlint_core::{
-    load_schema_file, parse_markdown, validate, Diagnostic, DiagnosticReference, FrontmatterRef,
-    FrontmatterScalar, InvalidSchema, LoadedSchema, MarkdownOptions, Matcher, RefAnchor, RuleRef,
-    SchemaError, SchemaLocations, SchemaNode, SchemaSources, SourceLabel, SourceRange,
+    json_schema_external_references, linked_frontmatter_schema_path, load_schema_with_resources,
+    parse_markdown, Diagnostic, DiagnosticReference, FrontmatterRef, FrontmatterScalar,
+    InvalidSchema, JsonSchemaResourceInput, LinkedJsonSchemaInput, LoadedSchema, MarkdownOptions,
+    Matcher, PreparedValidator, RefAnchor, RuleRef, SchemaError, SchemaLocations, SchemaNode,
+    SchemaSources, SourceLabel, SourceRange,
 };
 use serde_json::{json, Map, Value};
 
@@ -425,7 +429,19 @@ fn execute_check(options: CheckOptions) -> u8 {
 
     for group in &mut schema_groups {
         group.load = match read_and_load_schema(&group.path, &group.display) {
-            Ok(Ok(loaded)) => SchemaLoad::Valid(loaded),
+            Ok(Ok(loaded)) => match PreparedValidator::new(&loaded.schema) {
+                Ok(validator) => SchemaLoad::Valid {
+                    loaded,
+                    validator: Box::new(validator),
+                },
+                Err(error) => {
+                    output.operational_errors.push(format!(
+                        "cannot prepare schema '{}': {}",
+                        group.display, error.message
+                    ));
+                    SchemaLoad::OperationalError
+                }
+            },
             Ok(Err(invalid)) => SchemaLoad::Invalid(invalid),
             Err(message) => {
                 output.operational_errors.push(message);
@@ -442,7 +458,7 @@ fn execute_check(options: CheckOptions) -> u8 {
             continue;
         };
         match &group.load {
-            SchemaLoad::Valid(loaded) => {
+            SchemaLoad::Valid { loaded, validator } => {
                 let Some(source) = input.source else {
                     continue;
                 };
@@ -452,7 +468,8 @@ fn execute_check(options: CheckOptions) -> u8 {
                         strip_inline_markup: loaded.schema.options.strip_inline_markup,
                     },
                 );
-                let mut diagnostics = validate(&loaded.schema, &document)
+                let mut diagnostics = validator
+                    .validate(&document)
                     .iter()
                     .map(|diagnostic| render_document_diagnostic(&input.path, diagnostic, loaded))
                     .collect::<Vec<_>>();
@@ -497,7 +514,10 @@ struct SchemaGroup {
 
 enum SchemaLoad {
     Pending,
-    Valid(LoadedSchema),
+    Valid {
+        loaded: LoadedSchema,
+        validator: Box<PreparedValidator>,
+    },
     Invalid(InvalidSchema),
     OperationalError,
 }
@@ -550,35 +570,129 @@ fn read_and_load_schema(
     path: &Path,
     display: &str,
 ) -> Result<Result<LoadedSchema, InvalidSchema>, String> {
-    inspect_regular_file(path, "schema")?;
-    let mut result = load_schema_file(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::InvalidData {
-            format!("schema '{display}': input is not valid UTF-8")
-        } else {
-            format!("cannot read schema '{display}': {error}")
-        }
-    })?;
-    let sources = match &mut result {
-        Ok(loaded) => &mut loaded.sources,
-        Err(invalid) => &mut invalid.sources,
-    };
-    if let Some(primary) = sources.documents.get_mut(&sources.primary) {
-        primary.label = Some(SourceLabel(display.to_owned()));
-    }
-    Ok(result)
+    let source = read_utf8_file(path, "schema")?;
+    let external = linked_frontmatter_schema_path(&source)
+        .map(|declared| preload_linked_json_schema(path, &declared))
+        .transpose()?;
+    Ok(load_schema_with_resources(
+        &source,
+        Some(SourceLabel(display.to_owned())),
+        external,
+    ))
 }
 
-fn inspect_regular_file(path: &Path, kind: &str) -> Result<(), String> {
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("cannot inspect {kind} '{}': {error}", path.display()))?;
-    if metadata.is_dir() {
-        Err(format!(
-            "{kind} '{}' is a directory; pass individual files instead",
-            path.display()
-        ))
+const LOGICAL_JSON_SCHEMA_ROOT: &str = "https://outlint.invalid/root.json";
+
+fn preload_linked_json_schema(
+    schema_path: &Path,
+    declared: &str,
+) -> Result<LinkedJsonSchemaInput, String> {
+    let schema_path = lexical_absolute(schema_path)?;
+    let root_path = if Path::new(declared).is_absolute() {
+        PathBuf::from(declared)
     } else {
-        Ok(())
+        schema_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(declared)
+    };
+    let root_actual_uri = path_file_uri(&root_path)?;
+    let mut queue = VecDeque::from([(
+        root_actual_uri,
+        LOGICAL_JSON_SCHEMA_ROOT.to_owned(),
+        root_path,
+    )]);
+    let mut visited = HashSet::new();
+    let mut cached = HashMap::<PathBuf, Arc<str>>::new();
+    let mut resources = Vec::new();
+
+    while let Some((actual_uri, logical_uri, lexical_path)) = queue.pop_front() {
+        if !visited.insert(logical_uri.clone()) {
+            continue;
+        }
+        let canonical = fs::canonicalize(&lexical_path).unwrap_or_else(|_| lexical_path.clone());
+        let text = if let Some(text) = cached.get(&canonical) {
+            Arc::clone(text)
+        } else {
+            let Ok(source) = read_utf8_file(&lexical_path, "linked JSON Schema") else {
+                continue;
+            };
+            let text = Arc::<str>::from(source);
+            cached.insert(canonical, Arc::clone(&text));
+            text
+        };
+        resources.push(JsonSchemaResourceInput {
+            uri: logical_uri.clone(),
+            label: Some(SourceLabel(lexical_path.display().to_string())),
+            text: Arc::clone(&text),
+        });
+
+        let Ok(actual_references) = json_schema_external_references(&text, &actual_uri) else {
+            continue;
+        };
+        let Ok(logical_references) = json_schema_external_references(&text, &logical_uri) else {
+            continue;
+        };
+        for (actual, logical) in actual_references.into_iter().zip(logical_references) {
+            let Some(path) = file_uri_path(&actual) else {
+                continue;
+            };
+            queue.push_back((actual, logical, path));
+        }
     }
+
+    Ok(LinkedJsonSchemaInput {
+        root_uri: LOGICAL_JSON_SCHEMA_ROOT.into(),
+        resources,
+    })
+}
+
+fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        env::current_dir()
+            .map(|directory| directory.join(path))
+            .map_err(|error| format!("cannot determine current directory: {error}"))
+    }
+}
+
+fn path_file_uri(path: &Path) -> Result<String, String> {
+    let display = path
+        .to_str()
+        .ok_or_else(|| format!("path '{}' is not valid UTF-8", path.display()))?
+        .replace('\\', "/");
+    let mut uri = if display.starts_with('/') {
+        "file://".to_owned()
+    } else {
+        "file:///".to_owned()
+    };
+    for byte in display.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+            uri.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(uri, "%{byte:02X}").map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(uri)
+}
+
+fn file_uri_path(uri: &str) -> Option<PathBuf> {
+    let encoded = uri.strip_prefix("file://")?;
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut index = 0;
+    while index < encoded.len() {
+        if encoded.as_bytes().get(index) == Some(&b'%') {
+            let hex = encoded.get(index.saturating_add(1)..index.saturating_add(3))?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            index = index.saturating_add(3);
+        } else {
+            bytes.push(*encoded.as_bytes().get(index)?);
+            index = index.saturating_add(1);
+        }
+    }
+    String::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
 fn read_utf8_file(path: &Path, kind: &str) -> Result<String, String> {

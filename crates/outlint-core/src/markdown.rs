@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
+use marked_yaml::{LoaderOptions as MarkedYamlOptions, Node as MarkedNode};
 use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag};
 
 use crate::{ByteOffset, HeaderLevel, TextRange};
@@ -47,8 +48,10 @@ pub enum DocumentFrontmatter {
     Absent,
     /// A YAML mapping converted to the JSON value domain used by JSON Schema.
     Mapping {
-        /// The frontmatter mapping as a JSON object.
-        value: serde_json::Map<String, serde_json::Value>,
+        /// The frontmatter mapping in JSON Schema's value domain.
+        ///
+        /// This is always an object for parser-created documents.
+        value: serde_json::Value,
         /// Source location of the complete delimited block.
         location: FrontmatterLocation,
     },
@@ -253,9 +256,23 @@ fn parse_frontmatter(
         end_line: closing_line,
     };
     let body = source.get(body_start..body_end).unwrap_or_default();
-    let parsed = serde_yaml::from_str::<serde_yaml::Value>(body)
-        .map_err(|error| format!("invalid YAML frontmatter: {error}"))
-        .and_then(yaml_frontmatter_mapping);
+    let yaml = serde_yaml::from_str::<serde_yaml::Value>(body);
+    let options = MarkedYamlOptions::default()
+        .error_on_duplicate_keys(true)
+        .prevent_coercion(true);
+    let marked = marked_yaml::parse_yaml_with_options(0, body, options);
+    let parsed = match (yaml, marked) {
+        (Ok(_), Ok(marked)) => marked_frontmatter_mapping(&marked),
+        // `serde_yaml` remains authoritative for YAML constructs that
+        // marked-yaml deliberately does not model, notably tags.
+        (Ok(yaml), Err(_)) => yaml_frontmatter_mapping(yaml),
+        // serde_yaml cannot represent integers outside u64/i64 even though
+        // they are valid YAML. marked-yaml retains those scalar lexemes.
+        (Err(error), Ok(marked)) if error.to_string().contains("invalid type: integer") => {
+            marked_frontmatter_mapping(&marked)
+        }
+        (Err(error), _) => Err(format!("invalid YAML frontmatter: {error}")),
+    };
     let frontmatter = match parsed {
         Ok(value) => DocumentFrontmatter::Mapping { value, location },
         Err(message) => DocumentFrontmatter::Invalid { location, message },
@@ -263,9 +280,75 @@ fn parse_frontmatter(
     (frontmatter, Some(range))
 }
 
-fn yaml_frontmatter_mapping(
-    value: serde_yaml::Value,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+fn marked_frontmatter_mapping(value: &MarkedNode) -> Result<serde_json::Value, String> {
+    let Some(mapping) = value.as_mapping() else {
+        return Err("frontmatter must be a YAML mapping".into());
+    };
+    let mut object = serde_json::Map::new();
+    for (key, value) in mapping.iter() {
+        if key.may_coerce()
+            && !matches!(
+                crate::loader::parse_frontmatter_scalar(key.as_str()),
+                crate::FrontmatterScalar::String(_)
+            )
+        {
+            return Err("frontmatter mapping keys must be strings".into());
+        }
+        object.insert(key.as_str().to_owned(), marked_yaml_to_json(value)?);
+    }
+    Ok(serde_json::Value::Object(object))
+}
+
+fn marked_yaml_to_json(value: &MarkedNode) -> Result<serde_json::Value, String> {
+    if let Some(scalar) = value.as_scalar() {
+        if !scalar.may_coerce() {
+            return Ok(serde_json::Value::String(scalar.as_str().to_owned()));
+        }
+        return match crate::loader::parse_frontmatter_scalar(scalar.as_str()) {
+            crate::FrontmatterScalar::Null => Ok(serde_json::Value::Null),
+            crate::FrontmatterScalar::Boolean(value) => Ok(serde_json::Value::Bool(value)),
+            crate::FrontmatterScalar::Integer(value) => json_number(&value.0),
+            crate::FrontmatterScalar::Float(value) => {
+                if matches!(value.0.as_str(), "inf" | "-inf" | "nan") {
+                    Err("frontmatter contains a non-finite number".into())
+                } else {
+                    json_number(&value.0)
+                }
+            }
+            crate::FrontmatterScalar::String(value) => Ok(serde_json::Value::String(value)),
+        };
+    }
+    if let Some(sequence) = value.as_sequence() {
+        return sequence
+            .iter()
+            .map(marked_yaml_to_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array);
+    }
+    let Some(mapping) = value.as_mapping() else {
+        return Err("unsupported YAML frontmatter node".into());
+    };
+    let mut object = serde_json::Map::new();
+    for (key, value) in mapping.iter() {
+        if key.may_coerce()
+            && !matches!(
+                crate::loader::parse_frontmatter_scalar(key.as_str()),
+                crate::FrontmatterScalar::String(_)
+            )
+        {
+            return Err("frontmatter mapping keys must be strings".into());
+        }
+        object.insert(key.as_str().to_owned(), marked_yaml_to_json(value)?);
+    }
+    Ok(serde_json::Value::Object(object))
+}
+
+fn json_number(source: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(source)
+        .map_err(|error| format!("frontmatter number `{source}` is not representable: {error}"))
+}
+
+fn yaml_frontmatter_mapping(value: serde_yaml::Value) -> Result<serde_json::Value, String> {
     let serde_yaml::Value::Mapping(mapping) = value else {
         return Err("frontmatter must be a YAML mapping".into());
     };
@@ -273,7 +356,7 @@ fn yaml_frontmatter_mapping(
     else {
         return Err("frontmatter must be a YAML mapping".into());
     };
-    Ok(mapping)
+    Ok(serde_json::Value::Object(mapping))
 }
 
 fn yaml_to_json(value: serde_yaml::Value) -> Result<serde_json::Value, String> {
@@ -1173,6 +1256,45 @@ mod tests {
             panic!("numeric mapping key must be invalid")
         };
         assert!(message.contains("keys must be strings"));
+    }
+
+    #[test]
+    fn preserves_arbitrary_precision_frontmatter_numbers() {
+        let document = parse_markdown(
+            "---\nbig: 184467440737095516160\nprecise: 0.123456789012345678901234567890\nquoted: \"184467440737095516160\"\n---\n",
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("expected valid numeric frontmatter: {document:?}")
+        };
+        assert_eq!(value["big"].to_string(), "184467440737095516160");
+        assert_eq!(
+            value["precise"].to_string(),
+            "12345678901234567890123456789e-29"
+        );
+        assert_eq!(value["quoted"], "184467440737095516160");
+    }
+
+    #[test]
+    fn serde_yaml_fallback_preserves_explicit_tags() {
+        let document = parse_markdown("---\ntagged: !!str 123\n---\n", MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("expected tagged frontmatter")
+        };
+        assert_eq!(value["tagged"], "123");
+    }
+
+    #[test]
+    fn preserves_yaml_alias_values() {
+        let document = parse_markdown(
+            "---\nbase: &base 42\ncopy: *base\n---\n",
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("expected aliased frontmatter: {document:?}")
+        };
+        assert_eq!(value["base"], 42);
+        assert_eq!(value["copy"], value["base"]);
     }
 
     #[test]

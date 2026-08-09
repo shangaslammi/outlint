@@ -6,9 +6,9 @@
 //! expected to be normalized by the schema loader before constructing this
 //! model.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
 
-use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_json::Value as JsonValue;
 
 /// A parsed Outlint schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,46 +44,18 @@ pub enum FrontmatterPolicy {
     Forbidden { schema: Option<FrontmatterSchema> },
 }
 
-/// A normalized JSON Schema used to validate the frontmatter mapping.
+/// An opaque, normalized JSON Schema resource graph.
 ///
-/// The loader retains the origin distinction because it determines the base
-/// URI used for `$ref` resolution. Compilation belongs to the validation plan,
-/// not to the semantic schema model.
+/// Construction is restricted to the loader, which checks the dialect,
+/// meta-schema, and every reference before this value enters a [`Schema`].
+/// Resource identifiers are logical URIs rather than filesystem locations, so
+/// moving an otherwise identical schema does not change semantic equality.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FrontmatterSchema {
-    /// A JSON Schema written as a mapping inside the Outlint schema.
-    Inline(JsonSchemaObject),
-    /// A JSON Schema loaded from a path relative to the Outlint schema.
-    External(ExternalJsonSchema),
+pub struct FrontmatterSchema {
+    pub(crate) root_uri: String,
+    pub(crate) root: JsonValue,
+    pub(crate) resources: BTreeMap<String, JsonValue>,
 }
-
-/// A loaded external JSON Schema and its resolved filesystem location.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalJsonSchema {
-    /// The resolved path, which is also the base location for `$ref`s.
-    pub path: PathBuf,
-    /// The parsed JSON Schema document.
-    pub schema: JsonSchemaDocument,
-}
-
-/// A parsed JSON Schema document.
-///
-/// JSON Schema permits an object or a boolean at its root. Inline schemas use
-/// [`JsonSchemaObject`] because the Outlint surface syntax specifically
-/// requires a mapping; external files may use either valid root form.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum JsonSchemaDocument {
-    Object(JsonSchemaObject),
-    Boolean(bool),
-}
-
-/// A JSON Schema whose root is known to be an object.
-///
-/// Its `$schema` keyword selects the dialect; the loader rejects unsupported
-/// dialects before this value enters a built [`Schema`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct JsonSchemaObject(pub JsonMap<String, JsonValue>);
 
 /// A supported version of the Outlint schema language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

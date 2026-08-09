@@ -5,13 +5,12 @@
 
 use regex::RegexBuilder;
 
-use crate::loader::{file_uri, NoExternalRetrieve};
+use crate::loader::NoExternalRetrieve;
 use crate::{
     AtLeastTwo, ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
     DocumentFrontmatter, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef, FrontmatterSchema,
-    Heading, HeadingLocation, JsonSchemaDocument, Matcher, NonEmpty, Proposition, RefAnchor,
-    RuleIndex, RuleOutcome, RuleRef, Schema, SchemaNode, ScopePath, Section, SectionRule,
-    TextRange, UpperBound,
+    Heading, HeadingLocation, Matcher, NonEmpty, Proposition, RefAnchor, RuleIndex, RuleOutcome,
+    RuleRef, Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
 };
 
 /// A stable identifier from the diagnostic vocabulary in specification §6.
@@ -166,13 +165,45 @@ pub struct FrontmatterLineRange {
     pub end_line: u32,
 }
 
-/// Validates an already parsed document against a normalized schema.
+/// Failure to prepare a reusable validator from a semantic schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareValidationError {
+    /// Human-readable compilation failure.
+    pub message: String,
+}
+
+/// A schema compiled once for validating any number of documents.
+pub struct PreparedValidator {
+    schema: Schema,
+    plan: ValidationPlan,
+}
+
+impl PreparedValidator {
+    /// Compiles matchers and the immutable JSON Schema resource registry.
+    pub fn new(schema: &Schema) -> Result<Self, PrepareValidationError> {
+        Ok(Self {
+            schema: schema.clone(),
+            plan: ValidationPlan::new(schema)?,
+        })
+    }
+
+    /// Validates one parsed document without recompiling schema state.
+    ///
+    /// Frontmatter validation is included; `fm.` propositions remain deferred
+    /// and therefore evaluate to false.
+    pub fn validate(&self, document: &Document) -> Vec<Diagnostic> {
+        Validator::new(&self.schema, document).run(&self.plan)
+    }
+}
+
+/// Prepares and validates one document.
 ///
-/// Frontmatter presence and linked JSON Schema validation are evaluated here.
-/// `fm.` constraint propositions remain deliberately deferred and therefore
-/// evaluate to false even when parsed frontmatter is present.
-pub fn validate(schema: &Schema, document: &Document) -> Vec<Diagnostic> {
-    Validator::new(schema, document).run()
+/// Use [`PreparedValidator`] directly when validating multiple documents.
+pub fn validate(
+    schema: &Schema,
+    document: &Document,
+) -> Result<Vec<Diagnostic>, PrepareValidationError> {
+    PreparedValidator::new(schema).map(|prepared| prepared.validate(document))
 }
 
 struct ValidationPlan {
@@ -182,16 +213,17 @@ struct ValidationPlan {
 }
 
 impl ValidationPlan {
-    fn new(schema: &Schema) -> Self {
-        Self {
+    fn new(schema: &Schema) -> Result<Self, PrepareValidationError> {
+        Ok(Self {
             title: schema
                 .title
                 .as_ref()
                 .map(|matcher| PreparedMatcher::new(matcher, schema.options.match_case)),
             sections: prepare_rules(&schema.sections, schema.options.match_case),
             frontmatter: frontmatter_schema(&schema.frontmatter)
-                .and_then(compile_frontmatter_schema),
-        }
+                .map(compile_frontmatter_schema)
+                .transpose()?,
+        })
     }
 }
 
@@ -203,22 +235,33 @@ fn frontmatter_schema(policy: &FrontmatterPolicy) -> Option<&FrontmatterSchema> 
     }
 }
 
-fn compile_frontmatter_schema(schema: &FrontmatterSchema) -> Option<jsonschema::Validator> {
-    let (document, base_uri) = match schema {
-        FrontmatterSchema::Inline(object) => (JsonSchemaDocument::Object(object.clone()), None),
-        FrontmatterSchema::External(external) => {
-            (external.schema.clone(), file_uri(&external.path).ok())
-        }
-    };
-    let value = match document {
-        JsonSchemaDocument::Object(object) => serde_json::Value::Object(object.0),
-        JsonSchemaDocument::Boolean(value) => serde_json::Value::Bool(value),
-    };
-    let options = jsonschema::draft202012::options().with_retriever(NoExternalRetrieve);
-    match base_uri {
-        Some(base_uri) => options.with_base_uri(base_uri).build(&value).ok(),
-        None => options.build(&value).ok(),
+fn compile_frontmatter_schema(
+    schema: &FrontmatterSchema,
+) -> Result<jsonschema::Validator, PrepareValidationError> {
+    let mut registry = jsonschema::Registry::new()
+        .add(schema.root_uri.as_str(), &schema.root)
+        .map_err(|error| PrepareValidationError {
+            message: format!("cannot register frontmatter JSON Schema root: {error}"),
+        })?;
+    for (uri, resource) in &schema.resources {
+        registry =
+            registry
+                .add(uri.as_str(), resource)
+                .map_err(|error| PrepareValidationError {
+                    message: format!("cannot register frontmatter JSON Schema resource: {error}"),
+                })?;
     }
+    let registry = registry.prepare().map_err(|error| PrepareValidationError {
+        message: format!("cannot prepare frontmatter JSON Schema registry: {error}"),
+    })?;
+    jsonschema::draft202012::options()
+        .with_registry(&registry)
+        .with_base_uri(schema.root_uri.clone())
+        .with_retriever(NoExternalRetrieve)
+        .build(&schema.root)
+        .map_err(|error| PrepareValidationError {
+            message: format!("cannot compile frontmatter JSON Schema: {error}"),
+        })
 }
 
 struct PreparedRule {
@@ -310,8 +353,7 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn run(mut self) -> Vec<Diagnostic> {
-        let plan = ValidationPlan::new(self.schema);
+    fn run(mut self, plan: &ValidationPlan) -> Vec<Diagnostic> {
         self.validate_frontmatter(plan.frontmatter.as_ref());
         let mut all = Vec::new();
         collect_sections(&self.document.sections, &mut all);
@@ -387,9 +429,8 @@ impl<'a> Validator<'a> {
                 let Some(validator) = validator else {
                     return;
                 };
-                let instance = serde_json::Value::Object(value.clone());
                 let mut errors = validator
-                    .iter_errors(&instance)
+                    .iter_errors(value)
                     .map(|error| (error.instance_path().as_str().to_owned(), error.to_string()))
                     .collect::<Vec<_>>();
                 errors.sort();
@@ -1339,7 +1380,7 @@ mod tests {
         let loaded = load_schema("version: 1\nsections:\n  - match: Item\n    repeat: 2..2\n")
             .expect("test schema is valid");
         let document = parse_markdown("## Item\n## Item\n## Item\n", MarkdownOptions::default());
-        let diagnostics = validate(&loaded.schema, &document);
+        let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
 
         assert_eq!(diagnostics.len(), 1);
         let diagnostic = diagnostics.first().expect("one diagnostic was asserted");
@@ -1360,7 +1401,7 @@ mod tests {
         let loaded = load_schema("version: 1\nsections:\n  - match: Parent\n    strict: true\n")
             .expect("test schema is valid");
         let document = parse_markdown("## Parent\n### Surprise\n", MarkdownOptions::default());
-        let diagnostics = validate(&loaded.schema, &document);
+        let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
 
         let diagnostic = diagnostics
             .iter()
@@ -1386,16 +1427,17 @@ mod tests {
             "required": ["status"],
             "properties": { "status": { "enum": ["draft", "final"] } }
         });
-        let serde_json::Value::Object(object) = object else {
-            panic!("test JSON Schema is an object")
-        };
         schema.frontmatter = FrontmatterPolicy::Required {
-            schema: Some(FrontmatterSchema::Inline(crate::JsonSchemaObject(object))),
+            schema: Some(FrontmatterSchema {
+                root_uri: "https://outlint.invalid/root.json".into(),
+                root: object,
+                resources: std::collections::BTreeMap::new(),
+            }),
         };
 
         let absent = parse_markdown("# Title\n", MarkdownOptions::default());
         assert_eq!(
-            validate(&schema, &absent)[0].id,
+            validate(&schema, &absent).expect("schema prepares")[0].id,
             DiagnosticId::MissingFrontmatter
         );
 
@@ -1403,7 +1445,7 @@ mod tests {
             "---\nstatus: proposed\n---\n# Title\n",
             MarkdownOptions::default(),
         );
-        let diagnostics = validate(&schema, &invalid);
+        let diagnostics = validate(&schema, &invalid).expect("schema prepares");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].id, DiagnosticId::FrontmatterSchema);
         let details = diagnostics[0]
@@ -1424,7 +1466,9 @@ mod tests {
             "---\nstatus: final\n---\n# Title\n",
             MarkdownOptions::default(),
         );
-        assert!(validate(&schema, &valid).is_empty());
+        assert!(validate(&schema, &valid)
+            .expect("schema prepares")
+            .is_empty());
     }
 
     #[test]
@@ -1434,6 +1478,7 @@ mod tests {
             .schema;
         let document = parse_markdown("---\n- item\n---\n", MarkdownOptions::default());
         let ids = validate(&schema, &document)
+            .expect("schema prepares")
             .into_iter()
             .map(|diagnostic| diagnostic.id)
             .collect::<Vec<_>>();
@@ -1442,6 +1487,50 @@ mod tests {
             [
                 DiagnosticId::ForbiddenFrontmatter,
                 DiagnosticId::InvalidFrontmatter
+            ]
+        );
+    }
+
+    #[test]
+    fn optional_forbidden_and_file_suppression_apply_to_json_schema() {
+        let json_schema = FrontmatterSchema {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            root: serde_json::Value::Bool(false),
+            resources: std::collections::BTreeMap::new(),
+        };
+        let mut schema = load_schema("version: 1\nsections: []\n")
+            .expect("test schema is valid")
+            .schema;
+        schema.frontmatter = FrontmatterPolicy::Optional {
+            schema: Some(json_schema.clone()),
+        };
+        let absent = parse_markdown("# Title\n", MarkdownOptions::default());
+        assert!(validate(&schema, &absent)
+            .expect("schema prepares")
+            .is_empty());
+
+        let suppressed = parse_markdown(
+            "---\nstatus: draft\n---\n<!-- outlint-disable-file frontmatter-schema -->\n",
+            MarkdownOptions::default(),
+        );
+        assert!(validate(&schema, &suppressed)
+            .expect("schema prepares")
+            .is_empty());
+
+        schema.frontmatter = FrontmatterPolicy::Forbidden {
+            schema: Some(json_schema),
+        };
+        let present = parse_markdown("---\nstatus: draft\n---\n", MarkdownOptions::default());
+        let ids = validate(&schema, &present)
+            .expect("schema prepares")
+            .into_iter()
+            .map(|diagnostic| diagnostic.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                DiagnosticId::ForbiddenFrontmatter,
+                DiagnosticId::FrontmatterSchema
             ]
         );
     }
