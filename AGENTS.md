@@ -66,6 +66,48 @@ Missing and to be specified before the code needing it is written:
   That is acceptable while the crate is pre-alpha and the model is the
   only content; revisit before publishing, and keep the modules private.
 
+## Pure core, thin IO shell
+
+Write logic as referentially transparent functions: value in, value out,
+same answer every time, no observable effect beyond the return value. Push
+IO, the clock, the environment, the filesystem, process exit, and anything
+else non-deterministic to the outermost edge, where it does nothing but
+fetch inputs, call a pure function, and act on what comes back.
+
+`loader.rs` is the pattern to copy. `load_schema(&str) -> LoadSchemaResult`
+is total and pure — it is the whole loader. `load_schema_file(&Path)` is
+four lines: build a label, read the file, delegate. Nothing between those
+two layers. New subsystems follow the same split:
+
+- Markdown scanning takes source text, not a path.
+- Validation takes a `Schema` and a parsed document, not a directory to
+  walk. It returns diagnostics; it does not print or exit.
+- The CLI is the shell: it reads argv, reads files, calls core, formats
+  output, and picks the exit code. Business logic does not live there.
+
+Consequences to hold to:
+
+- No `fs`, `io`, `std::env`, `println!`/`eprintln!`, `SystemTime`, or
+  randomness in a function that computes a result. If a core function needs
+  the outside world, it takes the data as a parameter instead.
+- Do not hide effects behind a trait or callback so that a "pure" function
+  can perform IO through it. Injecting an effect is not removing it —
+  restructure so the effect happens before or after the computation.
+- Prefer returning a description of what should happen (diagnostics, a
+  planned edit, a report) over performing it. The shell interprets it.
+- No global or thread-local mutable state, no lazily initialized caches
+  observable in a return value. Interior mutability that is invisible to
+  callers is fine only when it cannot change a result.
+- Internal mutation is fine. A function that builds a `Vec` in a loop is
+  still referentially transparent; `Loader` accumulating errors in `&mut
+  self` behind a pure entry point is the intended shape. This rule is about
+  observable effects at a function's boundary, not about avoiding `mut`.
+
+The reason is testability and the conformance corpus: `testdata/` fixtures
+can only be driven by functions that map input text to output data. A rule
+that can only be exercised by writing files and reading stdout is a defect
+in the design, not a fact about the problem.
+
 ## Rust conventions in force
 
 These are established by `schema.rs` and `parser.rs`. Match them.
@@ -157,6 +199,10 @@ Report which checks were actually run.
 
 Correctness against the spec first, then API design, then maintainability.
 Cite the spec section a behavior claim rests on.
+
+Reject IO, environment access, or printing that has leaked into a
+computation. Ask where the pure function is and whether a fixture could
+call it directly; if it could not, the split is in the wrong place.
 
 Challenge unnecessary public items, dependencies, allocations, clones, and
 any `Arc`/`Mutex`/channel — with one standing exception: `Arc<str>` in
