@@ -301,8 +301,8 @@ struct RenderedDiagnostic {
     id: String,
     message: String,
     source_path: String,
-    line: u32,
-    column: u32,
+    line: u64,
+    column: u64,
     header_path: Option<Vec<String>>,
     schema_node: Option<RenderedSchemaNode>,
     schema_location: Option<RenderedLocation>,
@@ -314,15 +314,15 @@ struct RenderedDiagnostic {
 
 #[derive(Debug)]
 struct RenderedLineRange {
-    start_line: u32,
-    end_line: u32,
+    start_line: u64,
+    end_line: u64,
 }
 
 #[derive(Debug)]
 struct RenderedLocation {
     path: String,
-    line: u32,
-    column: u32,
+    line: u64,
+    column: u64,
 }
 
 #[derive(Debug)]
@@ -338,8 +338,8 @@ enum RenderedSchemaNode {
 #[derive(Debug)]
 struct RenderedInvolvedHeader {
     header_path: Vec<String>,
-    line: u32,
-    column: u32,
+    line: u64,
+    column: u64,
 }
 
 #[derive(Debug)]
@@ -684,12 +684,12 @@ fn file_uri_path(uri: &str) -> Option<PathBuf> {
     let mut index = 0;
     while index < encoded.len() {
         if encoded.as_bytes().get(index) == Some(&b'%') {
-            let hex = encoded.get(index.saturating_add(1)..index.saturating_add(3))?;
+            let hex = encoded.get(index + 1..index + 3)?;
             bytes.push(u8::from_str_radix(hex, 16).ok()?);
-            index = index.saturating_add(3);
+            index += 3;
         } else {
             bytes.push(*encoded.as_bytes().get(index)?);
-            index = index.saturating_add(1);
+            index += 1;
         }
     }
     String::from_utf8(bytes).ok().map(PathBuf::from)
@@ -762,8 +762,9 @@ fn display_path(path: &Path) -> String {
 }
 
 fn render_schema_errors(invalid: &InvalidSchema, fallback_path: &str) -> Vec<RenderedDiagnostic> {
-    std::iter::once(&invalid.errors.first)
-        .chain(invalid.errors.rest.iter())
+    invalid
+        .errors
+        .iter()
         .map(|error| render_schema_error(error, &invalid.sources, fallback_path))
         .collect()
 }
@@ -869,17 +870,11 @@ fn render_reference(reference: &DiagnosticReference) -> RenderedReference {
 }
 
 fn non_empty_rule_path(reference: &RuleRef) -> Vec<String> {
-    std::iter::once(&reference.path.first)
-        .chain(reference.path.rest.iter())
-        .map(|id| id.0.clone())
-        .collect()
+    reference.path.iter().map(|id| id.0.clone()).collect()
 }
 
 fn non_empty_frontmatter_path(reference: &FrontmatterRef) -> Vec<String> {
-    std::iter::once(&reference.path.first)
-        .chain(reference.path.rest.iter())
-        .map(|key| key.0.clone())
-        .collect()
+    reference.path.iter().map(|key| key.0.clone()).collect()
 }
 
 fn render_matcher(matcher: &Matcher) -> RenderedMatcher {
@@ -925,16 +920,13 @@ fn source_location(
     RenderedLocation { path, line, column }
 }
 
-fn line_column(source: &str, byte_offset: usize) -> (u32, u32) {
+fn line_column(source: &str, byte_offset: usize) -> (u64, u64) {
     let offset = byte_offset.min(source.len());
     let prefix = source.get(..offset).unwrap_or_default();
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
     let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
-    let column = offset.saturating_sub(line_start) + 1;
-    (
-        u32::try_from(line).unwrap_or(u32::MAX),
-        u32::try_from(column).unwrap_or(u32::MAX),
-    )
+    let column = offset - line_start + 1;
+    (line as u64, column as u64)
 }
 
 fn sort_diagnostics(diagnostics: &mut [RenderedDiagnostic]) {
@@ -1221,7 +1213,7 @@ fn render_json(results: &[ValidationResult]) -> String {
         .iter()
         .filter(|result| result["kind"] == "document")
         .count();
-    let schema_count = results.len().saturating_sub(document_count);
+    let schema_count = results.len() - document_count;
     format!(
         "{}\n",
         json!({
@@ -1363,7 +1355,10 @@ fn scalar_json(scalar: &RenderedScalar) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_utf8, line_column, parse_check_args, ParseOutcome};
+    use super::{
+        decode_utf8, diagnostic_json, line_column, parse_check_args, ParseOutcome,
+        RenderedDiagnostic,
+    };
 
     #[test]
     fn accepts_and_removes_utf8_bom() {
@@ -1376,6 +1371,29 @@ mod tests {
     #[test]
     fn source_positions_are_one_based_byte_columns() {
         assert_eq!(line_column("one\nåx", 6), (2, 3));
+    }
+
+    #[test]
+    fn json_locations_preserve_unsigned_64_bit_values() {
+        let line = u64::from(u32::MAX) + 1;
+        let diagnostic = RenderedDiagnostic {
+            id: "test".into(),
+            message: "test".into(),
+            source_path: "document.md".into(),
+            line,
+            column: line,
+            header_path: None,
+            schema_node: None,
+            schema_location: None,
+            involved_headers: Vec::new(),
+            references: Vec::new(),
+            frontmatter_range: None,
+            json_pointer: None,
+        };
+
+        let json = diagnostic_json(&diagnostic);
+        assert_eq!(json["location"]["line"].as_u64(), Some(line));
+        assert_eq!(json["location"]["column"].as_u64(), Some(line));
     }
 
     #[test]

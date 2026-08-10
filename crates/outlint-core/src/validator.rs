@@ -7,10 +7,10 @@ use regex::RegexBuilder;
 
 use crate::loader::NoExternalRetrieve;
 use crate::{
-    AtLeastTwo, ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
+    ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
     DocumentFrontmatter, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef, FrontmatterSchema,
-    Heading, HeadingLocation, Matcher, NonEmpty, Proposition, RefAnchor, RuleIndex, RuleOutcome,
-    RuleRef, Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
+    Heading, HeadingLocation, Matcher, Proposition, RefAnchor, RuleIndex, RuleOutcome, RuleRef,
+    Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
 };
 
 /// A stable identifier from the diagnostic vocabulary in specification §6.
@@ -98,9 +98,9 @@ pub struct DiagnosticLocation {
     /// The source line to highlight.
     pub range: TextRange,
     /// One-based line number.
-    pub line: u32,
+    pub line: u64,
     /// One-based byte column.
-    pub column: u32,
+    pub column: u64,
 }
 
 /// A concrete header relevant to a constraint violation.
@@ -160,9 +160,9 @@ pub struct FrontmatterDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FrontmatterLineRange {
     /// First line covered by the range.
-    pub start_line: u32,
+    pub start_line: u64,
     /// Last line covered by the range.
-    pub end_line: u32,
+    pub end_line: u64,
 }
 
 /// Failure to prepare a reusable validator from a semantic schema.
@@ -218,8 +218,9 @@ impl ValidationPlan {
             title: schema
                 .title
                 .as_ref()
-                .map(|matcher| PreparedMatcher::new(matcher, schema.options.match_case)),
-            sections: prepare_rules(&schema.sections, schema.options.match_case),
+                .map(|matcher| PreparedMatcher::new(matcher, schema.options.match_case))
+                .transpose()?,
+            sections: prepare_rules(&schema.sections, schema.options.match_case)?,
             frontmatter: frontmatter_schema(&schema.frontmatter)
                 .map(compile_frontmatter_schema)
                 .transpose()?,
@@ -264,30 +265,37 @@ fn compile_frontmatter_schema(
         })
 }
 
+#[derive(Debug)]
 struct PreparedRule {
     matcher: PreparedMatcher,
     sections: Vec<PreparedRule>,
 }
 
-fn prepare_rules(rules: &[SectionRule], match_case: bool) -> Vec<PreparedRule> {
+fn prepare_rules(
+    rules: &[SectionRule],
+    match_case: bool,
+) -> Result<Vec<PreparedRule>, PrepareValidationError> {
     rules
         .iter()
-        .map(|rule| PreparedRule {
-            matcher: PreparedMatcher::new(&rule.matcher, match_case),
-            sections: prepare_rules(&rule.sections, match_case),
+        .map(|rule| {
+            Ok(PreparedRule {
+                matcher: PreparedMatcher::new(&rule.matcher, match_case)?,
+                sections: prepare_rules(&rule.sections, match_case)?,
+            })
         })
         .collect()
 }
 
+#[derive(Debug)]
 enum PreparedMatcher {
     Exact { text: String, match_case: bool },
-    Pattern(Option<regex::Regex>),
+    Pattern(regex::Regex),
     Any,
 }
 
 impl PreparedMatcher {
-    fn new(matcher: &Matcher, match_case: bool) -> Self {
-        match matcher {
+    fn new(matcher: &Matcher, match_case: bool) -> Result<Self, PrepareValidationError> {
+        Ok(match matcher {
             Matcher::Exact(exact) => Self::Exact {
                 text: exact.0.clone(),
                 match_case,
@@ -299,13 +307,13 @@ impl PreparedMatcher {
                     .map(regex::escape)
                     .collect::<Vec<_>>()
                     .join(".*");
-                Self::Pattern(compile_pattern(&body, match_case, true))
+                Self::Pattern(compile_pattern(&body, match_case, true)?)
             }
             Matcher::Regex(pattern) => {
-                Self::Pattern(compile_pattern(&pattern.0, match_case, false))
+                Self::Pattern(compile_pattern(&pattern.0, match_case, false)?)
             }
             Matcher::Any => Self::Any,
-        }
+        })
     }
 
     fn matches(&self, text: &str) -> bool {
@@ -317,9 +325,8 @@ impl PreparedMatcher {
             Self::Exact {
                 text: expected,
                 match_case: false,
-            } => unicase::UniCase::unicode(expected) == unicase::UniCase::unicode(text),
-            Self::Pattern(Some(regex)) => regex.is_match(text),
-            Self::Pattern(None) => false,
+            } => crate::case_fold::simple_eq(expected, text),
+            Self::Pattern(regex) => regex.is_match(text),
             Self::Any => true,
         }
     }
@@ -329,19 +336,42 @@ fn compile_pattern(
     body: &str,
     match_case: bool,
     dot_matches_new_line: bool,
-) -> Option<regex::Regex> {
+) -> Result<regex::Regex, PrepareValidationError> {
     let anchored = format!(r"\A(?:{body})\z");
     RegexBuilder::new(&anchored)
         .case_insensitive(!match_case)
         .dot_matches_new_line(dot_matches_new_line)
         .build()
-        .ok()
+        .map_err(|error| PrepareValidationError {
+            message: format!("cannot compile matcher: {error}"),
+        })
 }
 
 struct Validator<'a> {
     schema: &'a Schema,
     document: &'a Document,
     diagnostics: Vec<Diagnostic>,
+}
+
+struct BindScopeInput<'a, 'd> {
+    sections: &'a [&'d Section],
+    rules: &'a [SectionRule],
+    prepared_rules: &'a [PreparedRule],
+    strict: bool,
+    schema_scope: &'a ScopePath,
+    parent: Option<&'d Heading>,
+    parent_path: &'a HeaderPath,
+}
+
+struct CardinalityCheck<'a, 'd> {
+    cardinality: Cardinality,
+    count: usize,
+    rule: &'a SectionRule,
+    rule_index: usize,
+    occurrences: &'a [BoundSection<'d>],
+    schema_scope: &'a ScopePath,
+    parent: Option<&'d Heading>,
+    parent_path: &'a HeaderPath,
 }
 
 impl<'a> Validator<'a> {
@@ -366,23 +396,28 @@ impl<'a> Validator<'a> {
             .into_iter()
             .filter(|section| section.heading.level == self.schema.options.root_level)
             .collect::<Vec<_>>();
-        let root = self.bind_scope(
-            &root_sections,
-            &self.schema.sections,
-            &plan.sections,
-            false,
-            &ScopePath(Vec::new()),
-            None,
-            &HeaderPath::default(),
-        );
+        let root_schema_scope = ScopePath(Vec::new());
+        let root_path = HeaderPath::default();
+        let root = self.bind_scope(BindScopeInput {
+            sections: &root_sections,
+            rules: &self.schema.sections,
+            prepared_rules: &plan.sections,
+            strict: false,
+            schema_scope: &root_schema_scope,
+            parent: None,
+            parent_path: &root_path,
+        });
         self.validate_constraints(
-            &root,
-            &root,
-            &self.schema.sections,
+            EvalCtx {
+                current: &root,
+                current_rules: &self.schema.sections,
+                root: &root,
+                root_rules: &self.schema.sections,
+            },
             &self.schema.constraints,
-            &ScopePath(Vec::new()),
+            &root_schema_scope,
             None,
-            &HeaderPath::default(),
+            &root_path,
         );
         self.diagnostics
     }
@@ -494,7 +529,7 @@ impl<'a> Validator<'a> {
         let Some(prepared) = prepared else {
             return;
         };
-        let Some(title_level) = previous_level(self.schema.options.root_level) else {
+        let Some(title_level) = self.schema.options.root_level.predecessor() else {
             return;
         };
         let titles = sections
@@ -565,9 +600,7 @@ impl<'a> Validator<'a> {
     ) {
         for section in sections {
             let path = appended_path(parent_path, &section.heading.diagnostic_text);
-            if parent.is_some_and(|parent| {
-                level_number(section.heading.level) > level_number(parent.level).saturating_add(1)
-            }) {
+            if parent.is_some_and(|parent| section.heading.level as u8 > parent.level as u8 + 1) {
                 self.emit(
                     Diagnostic {
                         id: DiagnosticId::SkippedLevel,
@@ -587,18 +620,17 @@ impl<'a> Validator<'a> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn bind_scope<'d>(
-        &mut self,
-        sections: &[&'d Section],
-        rules: &[SectionRule],
-        prepared_rules: &[PreparedRule],
-        strict: bool,
-        schema_scope: &ScopePath,
-        parent: Option<&'d Heading>,
-        parent_path: &HeaderPath,
-    ) -> BoundScope<'d> {
-        let mut counts = vec![0_u32; rules.len()];
+    fn bind_scope<'d>(&mut self, input: BindScopeInput<'_, 'd>) -> BoundScope<'d> {
+        let BindScopeInput {
+            sections,
+            rules,
+            prepared_rules,
+            strict,
+            schema_scope,
+            parent,
+            parent_path,
+        } = input;
+        let mut counts = vec![0_usize; rules.len()];
         let mut occurrences = Vec::new();
         for section in sections {
             let path = appended_path(parent_path, &section.heading.diagnostic_text);
@@ -638,20 +670,20 @@ impl<'a> Validator<'a> {
             }
 
             if let Some(count) = counts.get_mut(rule_index) {
-                *count = count.saturating_add(1);
+                *count += 1;
             }
             let child_refs = section.children.iter().collect::<Vec<_>>();
             let mut child_scope_path = schema_scope.clone();
             child_scope_path.0.push(RuleIndex(rule_index));
-            let child = self.bind_scope(
-                &child_refs,
-                &rule.sections,
-                &prepared_rule.sections,
-                rule.strict,
-                &child_scope_path,
-                Some(&section.heading),
-                &path,
-            );
+            let child = self.bind_scope(BindScopeInput {
+                sections: &child_refs,
+                rules: &rule.sections,
+                prepared_rules: &prepared_rule.sections,
+                strict: rule.strict,
+                schema_scope: &child_scope_path,
+                parent: Some(&section.heading),
+                parent_path: &path,
+            });
             occurrences.push(BoundSection {
                 rule_index,
                 section,
@@ -665,34 +697,33 @@ impl<'a> Validator<'a> {
                 continue;
             };
             let count = counts.get(rule_index).copied().unwrap_or_default();
-            self.validate_cardinality(
+            self.validate_cardinality(CardinalityCheck {
                 cardinality,
                 count,
                 rule,
                 rule_index,
-                &occurrences,
+                occurrences: &occurrences,
                 schema_scope,
                 parent,
                 parent_path,
-            );
+            });
         }
         BoundScope { occurrences }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn validate_cardinality(
-        &mut self,
-        cardinality: Cardinality,
-        count: u32,
-        rule: &SectionRule,
-        rule_index: usize,
-        occurrences: &[BoundSection<'_>],
-        schema_scope: &ScopePath,
-        parent: Option<&Heading>,
-        parent_path: &HeaderPath,
-    ) {
+    fn validate_cardinality(&mut self, check: CardinalityCheck<'_, '_>) {
+        let CardinalityCheck {
+            cardinality,
+            count,
+            rule,
+            rule_index,
+            occurrences,
+            schema_scope,
+            parent,
+            parent_path,
+        } = check;
         let schema_node = Some(SchemaNode::Rule(rule_path(schema_scope, rule_index)));
-        if count < cardinality.min {
+        if count < cardinality.min as usize {
             let id = if count == 0 {
                 DiagnosticId::MissingSection
             } else {
@@ -720,12 +751,10 @@ impl<'a> Validator<'a> {
         let UpperBound::Bounded(max) = cardinality.max else {
             return;
         };
-        if count <= max {
+        if count <= max as usize {
             return;
         }
-        let Some(excess_index) = usize::try_from(max).ok() else {
-            return;
-        };
+        let excess_index = max as usize;
         let Some(excess) = occurrences
             .iter()
             .filter(|occurrence| occurrence.rule_index == rule_index)
@@ -749,30 +778,27 @@ impl<'a> Validator<'a> {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn validate_constraints<'d>(
         &mut self,
-        scope: &'d BoundScope<'d>,
-        root: &'d BoundScope<'d>,
-        rules: &[SectionRule],
+        eval: EvalCtx<'_, 'd>,
         constraints: &[Constraint],
         schema_scope: &ScopePath,
         parent: Option<&Heading>,
         parent_path: &HeaderPath,
     ) {
         for (index, constraint) in constraints.iter().enumerate() {
-            if constraint_satisfied(constraint, scope, rules, root, &self.schema.sections) {
+            if eval.constraint_satisfied(constraint) {
                 continue;
             }
             let id = constraint_id(constraint);
-            let involved =
-                constraint_occurrences(constraint, scope, rules, root, &self.schema.sections)
-                    .into_iter()
-                    .map(|occurrence| InvolvedHeader {
-                        path: occurrence.path.clone(),
-                        location: heading_location(&occurrence.section.heading.location),
-                    })
-                    .collect();
+            let involved = eval
+                .constraint_occurrences(constraint)
+                .into_iter()
+                .map(|occurrence| InvolvedHeader {
+                    path: occurrence.path.clone(),
+                    location: heading_location(&occurrence.section.heading.location),
+                })
+                .collect();
             self.emit(
                 Diagnostic {
                     id,
@@ -784,7 +810,7 @@ impl<'a> Validator<'a> {
                         index: ConstraintIndex(index),
                     })),
                     involved_headers: involved,
-                    references: constraint_references(constraint, rules, &self.schema.sections),
+                    references: eval.constraint_references(constraint),
                     frontmatter: None,
                     message: format!("the `{}` constraint is not satisfied", id.as_str()),
                 },
@@ -793,16 +819,19 @@ impl<'a> Validator<'a> {
             );
         }
 
-        for occurrence in &scope.occurrences {
-            let Some(rule) = rules.get(occurrence.rule_index) else {
+        for occurrence in &eval.current.occurrences {
+            let Some(rule) = eval.current_rules.get(occurrence.rule_index) else {
                 continue;
             };
             let mut child_schema_scope = schema_scope.clone();
             child_schema_scope.0.push(RuleIndex(occurrence.rule_index));
             self.validate_constraints(
-                &occurrence.child,
-                root,
-                &rule.sections,
+                EvalCtx {
+                    current: &occurrence.child,
+                    current_rules: &rule.sections,
+                    root: eval.root,
+                    root_rules: eval.root_rules,
+                },
                 &rule.constraints,
                 &child_schema_scope,
                 Some(&occurrence.section.heading),
@@ -866,21 +895,6 @@ fn collect_sections<'a>(sections: &'a [Section], output: &mut Vec<&'a Section>) 
     }
 }
 
-fn previous_level(level: crate::HeaderLevel) -> Option<crate::HeaderLevel> {
-    match level {
-        crate::HeaderLevel::H1 => None,
-        crate::HeaderLevel::H2 => Some(crate::HeaderLevel::H1),
-        crate::HeaderLevel::H3 => Some(crate::HeaderLevel::H2),
-        crate::HeaderLevel::H4 => Some(crate::HeaderLevel::H3),
-        crate::HeaderLevel::H5 => Some(crate::HeaderLevel::H4),
-        crate::HeaderLevel::H6 => Some(crate::HeaderLevel::H5),
-    }
-}
-
-const fn level_number(level: crate::HeaderLevel) -> u8 {
-    level as u8
-}
-
 fn root_location() -> DiagnosticLocation {
     DiagnosticLocation {
         range: TextRange {
@@ -934,346 +948,249 @@ fn constraint_id(constraint: &Constraint) -> DiagnosticId {
     }
 }
 
-fn constraint_satisfied<'d>(
-    constraint: &Constraint,
-    scope: &'d BoundScope<'d>,
-    rules: &[SectionRule],
-    root: &'d BoundScope<'d>,
-    root_rules: &[SectionRule],
-) -> bool {
-    match constraint {
-        Constraint::OneOf(refs) => {
-            proposition_list(refs)
-                .filter(|proposition| {
-                    proposition_satisfied(proposition, scope, rules, root, root_rules)
-                })
-                .count()
-                == 1
-        }
-        Constraint::AnyOf(refs) => proposition_list(refs)
-            .any(|proposition| proposition_satisfied(proposition, scope, rules, root, root_rules)),
-        Constraint::AtMostOne(refs) => {
-            proposition_list(refs)
-                .filter(|proposition| {
-                    proposition_satisfied(proposition, scope, rules, root, root_rules)
-                })
-                .count()
-                <= 1
-        }
-        Constraint::AllOrNone(refs) => {
-            let values = proposition_list(refs)
-                .map(|proposition| {
-                    proposition_satisfied(proposition, scope, rules, root, root_rules)
-                })
-                .collect::<Vec<_>>();
-            values.iter().all(|value| *value) || values.iter().all(|value| !*value)
-        }
-        Constraint::Requires {
-            condition,
-            consequences,
-        } => {
-            !proposition_satisfied(condition, scope, rules, root, root_rules)
-                || non_empty_items(consequences).all(|proposition| {
-                    proposition_satisfied(proposition, scope, rules, root, root_rules)
-                })
-        }
-        Constraint::Conflicts {
-            condition,
-            exclusions,
-        } => {
-            !proposition_satisfied(condition, scope, rules, root, root_rules)
-                || non_empty_items(exclusions).all(|proposition| {
-                    !proposition_satisfied(proposition, scope, rules, root, root_rules)
-                })
-        }
-        Constraint::Ordered(refs) => {
-            let satisfied = rule_ref_list(refs)
-                .map(|reference| resolve_occurrences(reference, scope, rules, root, root_rules))
-                .filter(|occurrences| !occurrences.is_empty())
-                .collect::<Vec<_>>();
-            satisfied.windows(2).all(|pair| {
-                let Some((left, right)) = pair
-                    .split_first()
-                    .and_then(|(left, rest)| rest.first().map(|right| (left, right)))
-                else {
-                    return true;
-                };
-                let last_left = left
-                    .iter()
-                    .map(|occurrence| occurrence.section.heading.location.range.start.0)
-                    .max();
-                let first_right = right
-                    .iter()
-                    .map(|occurrence| occurrence.section.heading.location.range.start.0)
-                    .min();
-                matches!((last_left, first_right), (Some(left), Some(right)) if left < right)
-            })
-        }
-    }
-}
-
-fn proposition_satisfied<'d>(
-    proposition: &Proposition,
-    scope: &'d BoundScope<'d>,
-    rules: &[SectionRule],
-    root: &'d BoundScope<'d>,
-    root_rules: &[SectionRule],
-) -> bool {
-    match proposition {
-        Proposition::Rule(reference) => {
-            !resolve_occurrences(reference, scope, rules, root, root_rules).is_empty()
-        }
-        Proposition::Frontmatter(reference) => frontmatter_satisfied(reference),
-    }
-}
-
 fn frontmatter_satisfied(_reference: &FrontmatterRef) -> bool {
     false
 }
 
-fn resolve_occurrences<'d>(
-    reference: &RuleRef,
-    current: &'d BoundScope<'d>,
-    current_rules: &[SectionRule],
-    root: &'d BoundScope<'d>,
-    root_rules: &[SectionRule],
-) -> Vec<&'d BoundSection<'d>> {
-    let (start_scope, start_rules) = match reference.anchor {
-        RefAnchor::CurrentScope => (current, current_rules),
-        RefAnchor::SchemaRoot => (root, root_rules),
-    };
-    let segments = std::iter::once(&reference.path.first)
-        .chain(&reference.path.rest)
-        .collect::<Vec<_>>();
-    let mut candidate_scopes = vec![(start_scope, start_rules)];
-    let mut found = Vec::new();
-    for (position, id) in segments.iter().enumerate() {
-        found.clear();
-        let mut next_scopes = Vec::new();
-        for (candidate, candidate_rules) in std::mem::take(&mut candidate_scopes) {
-            let Some((index, rule)) = candidate_rules
-                .iter()
-                .enumerate()
-                .find(|(_, rule)| rule.id.as_ref() == Some(*id))
-            else {
-                continue;
-            };
-            for occurrence in candidate
-                .occurrences
-                .iter()
-                .filter(|occurrence| occurrence.rule_index == index)
-            {
-                found.push(occurrence);
-                next_scopes.push((&occurrence.child, &rule.sections[..]));
-            }
-        }
-        if position + 1 < segments.len() {
-            candidate_scopes = next_scopes;
-        }
-    }
-    found
+#[derive(Clone, Copy)]
+struct EvalCtx<'s, 'd> {
+    current: &'s BoundScope<'d>,
+    current_rules: &'s [SectionRule],
+    root: &'s BoundScope<'d>,
+    root_rules: &'s [SectionRule],
 }
 
-fn constraint_occurrences<'d>(
-    constraint: &Constraint,
-    scope: &'d BoundScope<'d>,
-    rules: &[SectionRule],
-    root: &'d BoundScope<'d>,
-    root_rules: &[SectionRule],
-) -> Vec<&'d BoundSection<'d>> {
-    let mut occurrences = Vec::new();
-    match constraint {
-        Constraint::OneOf(refs)
-        | Constraint::AnyOf(refs)
-        | Constraint::AtMostOne(refs)
-        | Constraint::AllOrNone(refs) => {
-            for proposition in proposition_list(refs) {
-                add_proposition_occurrences(
-                    proposition,
-                    scope,
-                    rules,
-                    root,
-                    root_rules,
-                    &mut occurrences,
-                );
+impl<'s, 'd> EvalCtx<'s, 'd> {
+    fn constraint_satisfied(self, constraint: &Constraint) -> bool {
+        match constraint {
+            Constraint::OneOf(refs) => {
+                refs.iter()
+                    .filter(|proposition| self.proposition_satisfied(proposition))
+                    .count()
+                    == 1
             }
-        }
-        Constraint::Requires {
-            condition,
-            consequences,
-        } => {
-            add_proposition_occurrences(
+            Constraint::AnyOf(refs) => refs
+                .iter()
+                .any(|proposition| self.proposition_satisfied(proposition)),
+            Constraint::AtMostOne(refs) => {
+                refs.iter()
+                    .filter(|proposition| self.proposition_satisfied(proposition))
+                    .count()
+                    <= 1
+            }
+            Constraint::AllOrNone(refs) => {
+                let values = refs
+                    .iter()
+                    .map(|proposition| self.proposition_satisfied(proposition))
+                    .collect::<Vec<_>>();
+                values.iter().all(|value| *value) || values.iter().all(|value| !*value)
+            }
+            Constraint::Requires {
                 condition,
-                scope,
-                rules,
-                root,
-                root_rules,
-                &mut occurrences,
-            );
-            for proposition in non_empty_items(consequences) {
-                add_proposition_occurrences(
-                    proposition,
-                    scope,
-                    rules,
-                    root,
-                    root_rules,
-                    &mut occurrences,
-                );
+                consequences,
+            } => {
+                !self.proposition_satisfied(condition)
+                    || consequences
+                        .iter()
+                        .all(|proposition| self.proposition_satisfied(proposition))
             }
-        }
-        Constraint::Conflicts {
-            condition,
-            exclusions,
-        } => {
-            add_proposition_occurrences(
+            Constraint::Conflicts {
                 condition,
-                scope,
-                rules,
-                root,
-                root_rules,
-                &mut occurrences,
-            );
-            for proposition in non_empty_items(exclusions) {
-                add_proposition_occurrences(
-                    proposition,
-                    scope,
-                    rules,
-                    root,
-                    root_rules,
-                    &mut occurrences,
-                );
+                exclusions,
+            } => {
+                !self.proposition_satisfied(condition)
+                    || exclusions
+                        .iter()
+                        .all(|proposition| !self.proposition_satisfied(proposition))
             }
-        }
-        Constraint::Ordered(refs) => {
-            for reference in rule_ref_list(refs) {
-                occurrences.extend(resolve_occurrences(
-                    reference, scope, rules, root, root_rules,
-                ));
+            Constraint::Ordered(refs) => {
+                let satisfied = refs
+                    .iter()
+                    .map(|reference| self.resolve_occurrences(reference))
+                    .filter(|occurrences| !occurrences.is_empty())
+                    .collect::<Vec<_>>();
+                satisfied
+                    .iter()
+                    .zip(satisfied.iter().skip(1))
+                    .all(|(left, right)| {
+                        let last_left = left
+                            .iter()
+                            .map(|occurrence| occurrence.section.heading.location.range.start.0)
+                            .max();
+                        let first_right = right
+                            .iter()
+                            .map(|occurrence| occurrence.section.heading.location.range.start.0)
+                            .min();
+                        matches!((last_left, first_right), (Some(left), Some(right)) if left < right)
+                    })
             }
         }
     }
-    occurrences.sort_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
-    occurrences.dedup_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
-    occurrences
-}
 
-fn constraint_references(
-    constraint: &Constraint,
-    current_rules: &[SectionRule],
-    root_rules: &[SectionRule],
-) -> Vec<DiagnosticReference> {
-    let mut references = Vec::new();
-    match constraint {
-        Constraint::OneOf(items)
-        | Constraint::AnyOf(items)
-        | Constraint::AtMostOne(items)
-        | Constraint::AllOrNone(items) => {
-            references.extend(proposition_list(items).filter_map(|proposition| {
-                diagnostic_reference(proposition, current_rules, root_rules)
-            }));
+    fn proposition_satisfied(self, proposition: &Proposition) -> bool {
+        match proposition {
+            Proposition::Rule(reference) => !self.resolve_occurrences(reference).is_empty(),
+            Proposition::Frontmatter(reference) => frontmatter_satisfied(reference),
         }
-        Constraint::Requires {
-            condition,
-            consequences,
-        } => {
-            references.extend(
-                std::iter::once(condition)
-                    .chain(non_empty_items(consequences))
-                    .filter_map(|proposition| {
-                        diagnostic_reference(proposition, current_rules, root_rules)
-                    }),
-            );
+    }
+
+    fn resolve_occurrences(self, reference: &RuleRef) -> Vec<&'s BoundSection<'d>> {
+        let (start_scope, start_rules) = match reference.anchor {
+            RefAnchor::CurrentScope => (self.current, self.current_rules),
+            RefAnchor::SchemaRoot => (self.root, self.root_rules),
+        };
+        let mut candidate_scopes = vec![(start_scope, start_rules)];
+        let mut found = Vec::new();
+        for (position, id) in reference.path.iter().enumerate() {
+            found.clear();
+            let mut next_scopes = Vec::new();
+            for (candidate, candidate_rules) in std::mem::take(&mut candidate_scopes) {
+                let Some((index, rule)) = candidate_rules
+                    .iter()
+                    .enumerate()
+                    .find(|(_, rule)| rule.id.as_ref() == Some(id))
+                else {
+                    continue;
+                };
+                for occurrence in candidate
+                    .occurrences
+                    .iter()
+                    .filter(|occurrence| occurrence.rule_index == index)
+                {
+                    found.push(occurrence);
+                    next_scopes.push((&occurrence.child, &rule.sections[..]));
+                }
+            }
+            if position < reference.path.rest.len() {
+                candidate_scopes = next_scopes;
+            }
         }
-        Constraint::Conflicts {
-            condition,
-            exclusions,
-        } => {
-            references.extend(
-                std::iter::once(condition)
-                    .chain(non_empty_items(exclusions))
-                    .filter_map(|proposition| {
-                        diagnostic_reference(proposition, current_rules, root_rules)
-                    }),
-            );
+        found
+    }
+
+    fn constraint_occurrences(self, constraint: &Constraint) -> Vec<&'s BoundSection<'d>> {
+        let mut occurrences = Vec::new();
+        match constraint {
+            Constraint::OneOf(refs)
+            | Constraint::AnyOf(refs)
+            | Constraint::AtMostOne(refs)
+            | Constraint::AllOrNone(refs) => {
+                for proposition in refs.iter() {
+                    self.add_proposition_occurrences(proposition, &mut occurrences);
+                }
+            }
+            Constraint::Requires {
+                condition,
+                consequences,
+            } => {
+                self.add_proposition_occurrences(condition, &mut occurrences);
+                for proposition in consequences.iter() {
+                    self.add_proposition_occurrences(proposition, &mut occurrences);
+                }
+            }
+            Constraint::Conflicts {
+                condition,
+                exclusions,
+            } => {
+                self.add_proposition_occurrences(condition, &mut occurrences);
+                for proposition in exclusions.iter() {
+                    self.add_proposition_occurrences(proposition, &mut occurrences);
+                }
+            }
+            Constraint::Ordered(refs) => {
+                for reference in refs.iter() {
+                    occurrences.extend(self.resolve_occurrences(reference));
+                }
+            }
         }
-        Constraint::Ordered(items) => {
-            references.extend(rule_ref_list(items).filter_map(|reference| {
-                rule_for_ref(reference, current_rules, root_rules).map(|rule| {
-                    DiagnosticReference::Rule {
+        occurrences.sort_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
+        occurrences.dedup_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
+        occurrences
+    }
+
+    fn constraint_references(self, constraint: &Constraint) -> Vec<DiagnosticReference> {
+        let mut references = Vec::new();
+        match constraint {
+            Constraint::OneOf(items)
+            | Constraint::AnyOf(items)
+            | Constraint::AtMostOne(items)
+            | Constraint::AllOrNone(items) => {
+                references.extend(
+                    items
+                        .iter()
+                        .filter_map(|proposition| self.diagnostic_reference(proposition)),
+                );
+            }
+            Constraint::Requires {
+                condition,
+                consequences,
+            } => {
+                references.extend(
+                    std::iter::once(condition)
+                        .chain(consequences.iter())
+                        .filter_map(|proposition| self.diagnostic_reference(proposition)),
+                );
+            }
+            Constraint::Conflicts {
+                condition,
+                exclusions,
+            } => {
+                references.extend(
+                    std::iter::once(condition)
+                        .chain(exclusions.iter())
+                        .filter_map(|proposition| self.diagnostic_reference(proposition)),
+                );
+            }
+            Constraint::Ordered(items) => {
+                references.extend(items.iter().filter_map(|reference| {
+                    self.rule_for_ref(reference)
+                        .map(|rule| DiagnosticReference::Rule {
+                            reference: reference.clone(),
+                            matcher: rule.matcher.clone(),
+                        })
+                }));
+            }
+        }
+        references
+    }
+
+    fn diagnostic_reference(self, proposition: &Proposition) -> Option<DiagnosticReference> {
+        match proposition {
+            Proposition::Rule(reference) => {
+                self.rule_for_ref(reference)
+                    .map(|rule| DiagnosticReference::Rule {
                         reference: reference.clone(),
                         matcher: rule.matcher.clone(),
-                    }
-                })
-            }));
+                    })
+            }
+            Proposition::Frontmatter(reference) => {
+                Some(DiagnosticReference::Frontmatter(reference.clone()))
+            }
         }
     }
-    references
-}
 
-fn diagnostic_reference(
-    proposition: &Proposition,
-    current_rules: &[SectionRule],
-    root_rules: &[SectionRule],
-) -> Option<DiagnosticReference> {
-    match proposition {
-        Proposition::Rule(reference) => {
-            rule_for_ref(reference, current_rules, root_rules).map(|rule| {
-                DiagnosticReference::Rule {
-                    reference: reference.clone(),
-                    matcher: rule.matcher.clone(),
-                }
-            })
+    fn rule_for_ref(self, reference: &RuleRef) -> Option<&'s SectionRule> {
+        let mut rules = match reference.anchor {
+            RefAnchor::CurrentScope => self.current_rules,
+            RefAnchor::SchemaRoot => self.root_rules,
+        };
+        let mut target = None;
+        for id in reference.path.iter() {
+            target = rules.iter().find(|rule| rule.id.as_ref() == Some(id));
+            rules = &target?.sections;
         }
-        Proposition::Frontmatter(reference) => {
-            Some(DiagnosticReference::Frontmatter(reference.clone()))
+        target
+    }
+
+    fn add_proposition_occurrences(
+        self,
+        proposition: &Proposition,
+        output: &mut Vec<&'s BoundSection<'d>>,
+    ) {
+        if let Proposition::Rule(reference) = proposition {
+            output.extend(self.resolve_occurrences(reference));
         }
     }
-}
-
-fn rule_for_ref<'a>(
-    reference: &RuleRef,
-    current_rules: &'a [SectionRule],
-    root_rules: &'a [SectionRule],
-) -> Option<&'a SectionRule> {
-    let mut rules = match reference.anchor {
-        RefAnchor::CurrentScope => current_rules,
-        RefAnchor::SchemaRoot => root_rules,
-    };
-    let mut target = None;
-    for id in std::iter::once(&reference.path.first).chain(&reference.path.rest) {
-        target = rules.iter().find(|rule| rule.id.as_ref() == Some(id));
-        rules = &target?.sections;
-    }
-    target
-}
-
-fn add_proposition_occurrences<'d>(
-    proposition: &Proposition,
-    scope: &'d BoundScope<'d>,
-    rules: &[SectionRule],
-    root: &'d BoundScope<'d>,
-    root_rules: &[SectionRule],
-    output: &mut Vec<&'d BoundSection<'d>>,
-) {
-    if let Proposition::Rule(reference) = proposition {
-        output.extend(resolve_occurrences(
-            reference, scope, rules, root, root_rules,
-        ));
-    }
-}
-
-fn proposition_list<T>(items: &AtLeastTwo<T>) -> impl Iterator<Item = &T> {
-    std::iter::once(&items.first)
-        .chain(std::iter::once(&items.second))
-        .chain(&items.rest)
-}
-
-fn rule_ref_list(items: &AtLeastTwo<RuleRef>) -> impl Iterator<Item = &RuleRef> {
-    proposition_list(items)
-}
-
-fn non_empty_items<T>(items: &NonEmpty<T>) -> impl Iterator<Item = &T> {
-    std::iter::once(&items.first).chain(&items.rest)
 }
 
 #[cfg(test)]
@@ -1284,7 +1201,9 @@ mod tests {
     };
 
     fn matcher_matches(matcher: &Matcher, text: &str, match_case: bool) -> bool {
-        PreparedMatcher::new(matcher, match_case).matches(text)
+        PreparedMatcher::new(matcher, match_case)
+            .expect("test matcher compiles")
+            .matches(text)
     }
 
     #[test]
@@ -1352,11 +1271,23 @@ mod tests {
             assert!(matcher_matches(&matcher, "école", false));
             assert!(!matcher_matches(&matcher, "école", true));
         }
-        assert!(matcher_matches(
-            &Matcher::Exact(ExactText("Straße".into())),
-            "STRASSE",
-            false
-        ));
+        let simple_fold_matchers = [
+            Matcher::Exact(ExactText("S".into())),
+            Matcher::Glob(GlobPattern("S*".into())),
+            Matcher::Regex(RegexPattern("S.*".into())),
+        ];
+        for matcher in simple_fold_matchers {
+            assert!(matcher_matches(&matcher, "ſ", false));
+        }
+
+        let full_only_fold_matchers = [
+            Matcher::Exact(ExactText("Straße".into())),
+            Matcher::Glob(GlobPattern("Straße*".into())),
+            Matcher::Regex(RegexPattern("Straße.*".into())),
+        ];
+        for matcher in full_only_fold_matchers {
+            assert!(!matcher_matches(&matcher, "STRASSE", false));
+        }
     }
 
     #[test]
@@ -1367,12 +1298,15 @@ mod tests {
     }
 
     #[test]
-    fn malformed_manually_constructed_regex_is_total() {
-        assert!(!matcher_matches(
-            &Matcher::Regex(RegexPattern("(".into())),
-            "anything",
-            false
-        ));
+    fn malformed_manually_constructed_regex_fails_preparation() {
+        let mut schema = load_schema("version: 1\nsections: []\n")
+            .expect("test schema is valid")
+            .schema;
+        schema.title = Some(Matcher::Regex(RegexPattern("(".into())));
+        let error = PreparedValidator::new(&schema)
+            .err()
+            .expect("malformed regex must fail preparation");
+        assert!(error.message.contains("cannot compile matcher"));
     }
 
     #[test]

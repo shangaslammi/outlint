@@ -35,7 +35,10 @@ backslash escapes and HTML entity references as CommonMark inline text. If
 spans, and links are reduced to their text content, images to their alt
 text, and raw inline HTML tags are removed (`## **Foo** [bar](x)` →
 `Foo bar`). If `options.match_case` is false (default), matching is
-case-insensitive; the original text is preserved for diagnostics.
+case-insensitive using Unicode default simple case folding. This folding does
+not perform Unicode normalization or multi-code-point expansion, so `ſ`
+matches `S` but `Straße` does not match `STRASSE`. The original text is
+preserved for diagnostics.
 
 1.4. The **root scope** is the set of headers at level `options.root_level`
 (default 2, i.e. documents with a single h1 title and h2 sections). If
@@ -126,7 +129,11 @@ limit permits implementations to store section counts and bounds in unsigned
 | Glob              | contains `*` (and is not `"*"`)  | `*` matches any (possibly empty) substring; all other characters literal |
 | Exact             | anything else                    | string equality on header text           |
 
-Case sensitivity of all forms follows `options.match_case`.
+Case sensitivity of all forms follows `options.match_case`. Case-insensitive
+exact, glob, and regex matching all use Unicode default simple case folding,
+without normalization or multi-code-point expansion. Inline regex `i` flags
+use the same regex case-folding semantics and compose with
+`options.match_case`.
 
 **Regex dialect** (normative for portability): the linear-time class as
 implemented by RE2 / the Rust `regex` crate — literals, classes (`[...]`,
@@ -286,7 +293,8 @@ integer, float, boolean, or null). The proposition is satisfied iff the
 resolved type AND value of both sides are equal — no cross-type coercion:
 `fm.count=1` does not match a string `"1"`, `fm.draft=true` does not match
 the string `"true"`, and `1` ≠ `1.0`. String-string comparison follows
-`options.match_case`. There is no quoting or escaping in the ref literal;
+`options.match_case`, including the Unicode simple-folding semantics defined
+in §1.3. There is no quoting or escaping in the ref literal;
 values needing it are out of scope for `fm.` refs — use
 `frontmatter.schema`.
 

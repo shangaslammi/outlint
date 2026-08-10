@@ -271,11 +271,41 @@ mod tests {
 
     #[test]
     fn schema_error_ids_use_the_public_spellings() {
-        assert_eq!(SchemaErrorKind::Syntax.as_str(), "syntax");
-        assert_eq!(SchemaErrorKind::DuplicateId.as_str(), "duplicate-id");
-        assert_eq!(
-            SchemaErrorKind::InvalidFrontmatterSchema.as_str(),
-            "invalid-frontmatter-schema"
-        );
+        let expected = [
+            (SchemaErrorKind::Syntax, "syntax"),
+            (
+                SchemaErrorKind::InvalidDocumentShape,
+                "invalid-document-shape",
+            ),
+            (SchemaErrorKind::UnsupportedVersion, "unsupported-version"),
+            (SchemaErrorKind::DuplicateId, "duplicate-id"),
+            (SchemaErrorKind::UnresolvedRef, "unresolved-ref"),
+            (SchemaErrorKind::ForbiddenRef, "forbidden-ref"),
+            (SchemaErrorKind::DuplicateRef, "duplicate-ref"),
+            (SchemaErrorKind::ReservedId, "reserved-id"),
+            (SchemaErrorKind::InvalidMatcher, "invalid-matcher"),
+            (SchemaErrorKind::InvalidRepeat, "invalid-repeat"),
+            (
+                SchemaErrorKind::OrderedScopeMismatch,
+                "ordered-scope-mismatch",
+            ),
+            (
+                SchemaErrorKind::ConflictingCardinality,
+                "conflicting-cardinality",
+            ),
+            (
+                SchemaErrorKind::ConflictingFrontmatter,
+                "conflicting-frontmatter",
+            ),
+            (SchemaErrorKind::InvalidRootLevel, "invalid-root-level"),
+            (SchemaErrorKind::InvalidTitleLevel, "invalid-title-level"),
+            (
+                SchemaErrorKind::InvalidFrontmatterSchema,
+                "invalid-frontmatter-schema",
+            ),
+        ];
+        for (kind, spelling) in expected {
+            assert_eq!(kind.as_str(), spelling);
+        }
     }
 }

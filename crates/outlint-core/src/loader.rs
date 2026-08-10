@@ -181,8 +181,9 @@ fn prepare_external_schema_result(
             .map_err(|message| PreparedExternalError { source, message })?;
         parsed.insert(resource.uri.clone(), value);
     }
-    let root = parsed
-        .get(&input.root_uri)
+    let mut resources = parsed;
+    let root = resources
+        .remove(&input.root_uri)
         .ok_or_else(|| PreparedExternalError {
             source: root_source_id(source_ids, &input.root_uri),
             message: format!(
@@ -192,8 +193,12 @@ fn prepare_external_schema_result(
         })?;
 
     {
-        let mut registry = jsonschema::Registry::new();
-        for (uri, resource) in &parsed {
+        let mut registry = jsonschema::Registry::new()
+            .add(input.root_uri.as_str(), &root)
+            .map_err(|error| {
+                external_registry_error(error.to_string(), source_ids, &input.root_uri)
+            })?;
+        for (uri, resource) in &resources {
             registry = registry
                 .add(uri.as_str(), resource)
                 .map_err(|error| external_registry_error(error.to_string(), source_ids, uri))?;
@@ -205,9 +210,11 @@ fn prepare_external_schema_result(
             .with_registry(&registry)
             .with_base_uri(input.root_uri.clone())
             .with_retriever(NoExternalRetrieve)
-            .build(root)
+            .build(&root)
             .map_err(|error| {
                 let message = error.to_string();
+                // jsonschema does not expose a structured resource origin, so
+                // this attribution depends on its error wording containing a URI.
                 let source = source_ids
                     .iter()
                     .find_map(|(uri, source)| message.contains(uri).then_some(*source))
@@ -219,13 +226,6 @@ fn prepare_external_schema_result(
             })?;
     }
 
-    let mut resources = parsed;
-    let root = resources
-        .remove(&input.root_uri)
-        .ok_or_else(|| PreparedExternalError {
-            source: root_source_id(source_ids, &input.root_uri),
-            message: "linked JSON Schema root disappeared during normalization".into(),
-        })?;
     Ok(crate::FrontmatterSchema {
         root_uri: input.root_uri.clone(),
         root,
@@ -259,11 +259,20 @@ fn root_source_id(source_ids: &BTreeMap<String, SourceId>, root_uri: &str) -> So
     source_ids.get(root_uri).copied().unwrap_or(SourceId(0))
 }
 
+fn external_source_id(index: usize) -> Option<SourceId> {
+    u32::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_add(1))
+        .map(SourceId)
+}
+
 fn external_registry_error(
     message: String,
     source_ids: &BTreeMap<String, SourceId>,
     fallback_uri: &str,
 ) -> PreparedExternalError {
+    // jsonschema exposes only display text here; source attribution therefore
+    // intentionally depends on the message retaining the resource URI.
     let source = source_ids
         .iter()
         .find_map(|(uri, source)| message.contains(uri).then_some(*source))
@@ -290,7 +299,14 @@ struct RawSchema {
 struct RawFrontmatter {
     required: Option<bool>,
     allow: Option<bool>,
-    schema: Option<Value>,
+    schema: Option<RawFrontmatterSchema>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawFrontmatterSchema {
+    Path(String),
+    Mapping(Mapping),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -324,6 +340,32 @@ const fn default_true() -> bool {
     true
 }
 
+const DOCUMENT_FIELDS: &[&str] = &[
+    "version",
+    "title",
+    "options",
+    "frontmatter",
+    "sections",
+    "constraints",
+];
+const OPTION_FIELDS: &[&str] = &[
+    "match_case",
+    "strip_inline_markup",
+    "allow_skipped_levels",
+    "root_level",
+];
+const FRONTMATTER_FIELDS: &[&str] = &["required", "allow", "schema"];
+const RULE_FIELDS: &[&str] = &[
+    "id",
+    "match",
+    "allow",
+    "required",
+    "repeat",
+    "strict",
+    "sections",
+    "constraints",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum RangeKey {
     DocumentField(String),
@@ -344,6 +386,8 @@ impl RangeIndex {
         let Ok(root) = marked_yaml::parse_yaml(0, source) else {
             return Self::default();
         };
+        // marked-yaml markers count Unicode scalar values, while Outlint
+        // source ranges are UTF-8 byte offsets. This table bridges the units.
         let char_offsets = source
             .char_indices()
             .map(|(offset, _)| offset)
@@ -353,14 +397,7 @@ impl RangeIndex {
         let Some(mapping) = root.as_mapping() else {
             return index;
         };
-        for field in [
-            "version",
-            "title",
-            "options",
-            "frontmatter",
-            "sections",
-            "constraints",
-        ] {
+        for &field in DOCUMENT_FIELDS {
             if let Some(node) = mapping.get_node(field) {
                 index.ranges.insert(
                     RangeKey::DocumentField(field.into()),
@@ -369,12 +406,7 @@ impl RangeIndex {
             }
         }
         if let Some(options) = mapping.get_mapping("options") {
-            for field in [
-                "match_case",
-                "strip_inline_markup",
-                "allow_skipped_levels",
-                "root_level",
-            ] {
+            for &field in OPTION_FIELDS {
                 if let Some(node) = options.get_node(field) {
                     index.ranges.insert(
                         RangeKey::OptionField(field.into()),
@@ -384,7 +416,7 @@ impl RangeIndex {
             }
         }
         if let Some(frontmatter) = mapping.get_mapping("frontmatter") {
-            for field in ["required", "allow", "schema"] {
+            for &field in FRONTMATTER_FIELDS {
                 if let Some(node) = frontmatter.get_node(field) {
                     index.ranges.insert(
                         RangeKey::FrontmatterField(field.into()),
@@ -421,16 +453,7 @@ impl RangeIndex {
             let Some(mapping) = node.as_mapping() else {
                 continue;
             };
-            for field in [
-                "id",
-                "match",
-                "allow",
-                "required",
-                "repeat",
-                "strict",
-                "sections",
-                "constraints",
-            ] {
+            for &field in RULE_FIELDS {
                 if let Some(value) = mapping.get_node(field) {
                     self.ranges.insert(
                         RangeKey::RuleField(path.clone(), field.into()),
@@ -496,6 +519,10 @@ fn marked_node_range(node: &MarkedNode, char_offsets: &[usize], source: &str) ->
         .copied()
         .unwrap_or(start);
     if node.as_scalar().is_some() && end <= start {
+        // marked-yaml can report a zero-width span for a plain scalar. When
+        // its decoded scalar spelling is present verbatim at the marker, that
+        // byte length is the narrowest sound repair. Otherwise the next
+        // character boundary is a conservative one-scalar fallback.
         end = node
             .as_scalar()
             .map(|scalar| scalar.as_str())
@@ -505,10 +532,10 @@ fn marked_node_range(node: &MarkedNode, char_offsets: &[usize], source: &str) ->
                     .get(start..)
                     .is_some_and(|tail| tail.starts_with(scalar))
             })
-            .map(|scalar| start.saturating_add(scalar.len()))
+            .map(|scalar| start + scalar.len())
             .or_else(|| {
                 span.start()
-                    .and_then(|marker| char_offsets.get(marker.character().saturating_add(1)))
+                    .and_then(|marker| char_offsets.get(marker.character() + 1))
                     .copied()
             })
             .unwrap_or(start);
@@ -526,7 +553,6 @@ struct Loader {
     source: Arc<str>,
     sources: SchemaSources,
     document_range: SourceRange,
-    current_range: SourceRange,
     ranges: RangeIndex,
     errors: Vec<SchemaError>,
     nodes: BTreeMap<SchemaNode, SourceRange>,
@@ -551,8 +577,12 @@ impl Loader {
         let mut sources = primary_sources(Arc::clone(&source), label);
         let external_schema = external_schema.map(|external| {
             let mut source_ids = BTreeMap::new();
+            let mut source_id_exhausted = false;
             for (index, resource) in external.resources.iter().enumerate() {
-                let id = SourceId(u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1));
+                let Some(id) = external_source_id(index) else {
+                    source_id_exhausted = true;
+                    break;
+                };
                 source_ids.insert(resource.uri.clone(), id);
                 sources.documents.insert(
                     id,
@@ -562,13 +592,23 @@ impl Loader {
                     },
                 );
             }
-            prepare_external_schema(&external, &source_ids)
+            if source_id_exhausted {
+                PreparedExternalSchema {
+                    root_source: SourceId(0),
+                    result: Err(PreparedExternalError {
+                        source: SourceId(0),
+                        message: "too many linked JSON Schema resources to assign source ids"
+                            .into(),
+                    }),
+                }
+            } else {
+                prepare_external_schema(&external, &source_ids)
+            }
         });
         Self {
             sources,
             source,
             document_range,
-            current_range: document_range,
             ranges,
             errors: Vec::new(),
             nodes: BTreeMap::new(),
@@ -596,26 +636,30 @@ impl Loader {
             return self.failure();
         }
 
+        // The marked tree is validated first because serde_yaml's data-model
+        // errors do not carry the precise value ranges required by §6.
         let frontmatter_declared = value
             .as_mapping()
             .is_some_and(|mapping| mapping.contains_key(Value::String("frontmatter".into())));
         let raw: RawSchema = match serde_yaml::from_value(value) {
             Ok(raw) => raw,
             Err(error) => {
-                self.error(
+                self.error_at(
                     SchemaErrorKind::InvalidDocumentShape,
+                    self.document_range,
                     format!("invalid schema document shape: {error}"),
                 );
                 return self.failure();
             }
         };
 
-        self.use_range(RangeKey::DocumentField("version".into()));
+        let version_range = self.range(RangeKey::DocumentField("version".into()));
         let version = if raw.version == 1 {
             Some(SchemaVersion::V1)
         } else {
-            self.error(
+            self.error_at(
                 SchemaErrorKind::UnsupportedVersion,
+                version_range,
                 format!("unsupported schema version {}; expected 1", raw.version),
             );
             None
@@ -625,18 +669,18 @@ impl Loader {
 
         let options = self.build_options(&raw.options);
         let title = raw.title.as_deref().and_then(|matcher| {
-            self.use_range(RangeKey::DocumentField("title".into()));
-            self.nodes.insert(SchemaNode::Title, self.current_range);
-            self.build_matcher(matcher)
+            let range = self.range(RangeKey::DocumentField("title".into()));
+            self.nodes.insert(SchemaNode::Title, range);
+            self.build_matcher(matcher, range)
         });
-        if raw.title.is_some_and(|_| {
-            options
+        if raw.title.is_some()
+            && options
                 .as_ref()
                 .is_some_and(|options| options.root_level == HeaderLevel::H1)
-        }) {
-            self.use_range(RangeKey::DocumentField("title".into()));
-            self.error(
+        {
+            self.error_at(
                 SchemaErrorKind::InvalidTitleLevel,
+                self.range(RangeKey::DocumentField("title".into())),
                 "title cannot be declared when root_level is 1",
             );
         }
@@ -678,11 +722,12 @@ impl Loader {
                         self.document_range,
                     ),
                 );
-                self.use_range(RangeKey::Constraint(ConstraintPath {
+                let range = self.range(RangeKey::Constraint(ConstraintPath {
                     scope: scope.clone(),
                     index: ConstraintIndex(index),
                 }));
-                if let Some(constraint) = self.build_constraint(&schema, &scope, constraint) {
+                if let Some(constraint) = self.build_constraint(&schema, &scope, constraint, range)
+                {
                     built.push(constraint);
                 }
             }
@@ -710,35 +755,27 @@ impl Loader {
 
     fn validate_document_shape(&mut self, value: &Value) {
         let Some(mapping) = value.as_mapping() else {
-            self.current_range = self.document_range;
-            self.shape_error("schema document must be a mapping");
+            self.shape_error_at(self.document_range, "schema document must be a mapping");
             return;
         };
-        self.validate_known_fields(
-            mapping,
-            &[
-                "version",
-                "title",
-                "options",
-                "frontmatter",
-                "sections",
-                "constraints",
-            ],
-            self.document_range,
-        );
+        self.validate_known_fields(mapping, DOCUMENT_FIELDS, self.document_range);
         self.validate_required_field(mapping, "version", self.document_range);
         self.validate_required_field(mapping, "sections", self.document_range);
 
         if let Some(value) = yaml_get(mapping, "version") {
-            self.use_range(RangeKey::DocumentField("version".into()));
             if !is_yaml_integer(value) {
-                self.shape_error("version must be an integer and cannot be null");
+                self.shape_error_at(
+                    self.range(RangeKey::DocumentField("version".into())),
+                    "version must be an integer and cannot be null",
+                );
             }
         }
         if let Some(value) = yaml_get(mapping, "title") {
-            self.use_range(RangeKey::DocumentField("title".into()));
             if !matches!(value, Value::String(_)) {
-                self.shape_error("title must be a string and cannot be null");
+                self.shape_error_at(
+                    self.range(RangeKey::DocumentField("title".into())),
+                    "title must be a string and cannot be null",
+                );
             }
         }
         if let Some(value) = yaml_get(mapping, "options") {
@@ -748,40 +785,36 @@ impl Loader {
             self.validate_frontmatter_shape(value);
         }
         if let Some(value) = yaml_get(mapping, "sections") {
-            self.use_range(RangeKey::DocumentField("sections".into()));
-            self.validate_rules_shape(value, &ScopePath(Vec::new()));
+            let range = self.range(RangeKey::DocumentField("sections".into()));
+            self.validate_rules_shape(value, &ScopePath(Vec::new()), range);
         }
         if let Some(value) = yaml_get(mapping, "constraints") {
-            self.use_range(RangeKey::DocumentField("constraints".into()));
-            self.validate_constraints_shape(value, &ScopePath(Vec::new()));
+            let range = self.range(RangeKey::DocumentField("constraints".into()));
+            self.validate_constraints_shape(value, &ScopePath(Vec::new()), range);
         }
     }
 
     fn validate_frontmatter_shape(&mut self, value: &Value) {
-        self.use_range(RangeKey::DocumentField("frontmatter".into()));
+        let range = self.range(RangeKey::DocumentField("frontmatter".into()));
         let Some(mapping) = value.as_mapping() else {
-            self.shape_error("frontmatter must be a mapping and cannot be null");
+            self.shape_error_at(range, "frontmatter must be a mapping and cannot be null");
             return;
         };
-        self.validate_known_fields(
-            mapping,
-            &["required", "allow", "schema"],
-            self.current_range,
-        );
+        self.validate_known_fields(mapping, FRONTMATTER_FIELDS, range);
         for field in ["required", "allow"] {
             if let Some(value) = yaml_get(mapping, field) {
-                self.use_range(RangeKey::FrontmatterField(field.into()));
                 if !matches!(value, Value::Bool(_)) {
-                    self.shape_error(format!(
-                        "frontmatter.{field} must be a bool and cannot be null"
-                    ));
+                    self.shape_error_at(
+                        self.range(RangeKey::FrontmatterField(field.into())),
+                        format!("frontmatter.{field} must be a bool and cannot be null"),
+                    );
                 }
             }
         }
         if let Some(value) = yaml_get(mapping, "schema") {
-            self.use_range(RangeKey::FrontmatterField("schema".into()));
             if !matches!(value, Value::String(_) | Value::Mapping(_)) {
-                self.shape_error(
+                self.shape_error_at(
+                    self.range(RangeKey::FrontmatterField("schema".into())),
                     "frontmatter.schema must be a path string or mapping and cannot be null",
                 );
             }
@@ -796,34 +829,36 @@ impl Loader {
         if !declared {
             return Some(FrontmatterPolicy::Optional { schema: None });
         }
-        self.use_range(RangeKey::DocumentField("frontmatter".into()));
+        let frontmatter_range = self.range(RangeKey::DocumentField("frontmatter".into()));
         self.nodes
-            .insert(SchemaNode::Frontmatter, self.current_range);
+            .insert(SchemaNode::Frontmatter, frontmatter_range);
         let raw = raw?;
         let required = raw.required.unwrap_or(false);
         let allow = raw.allow.unwrap_or(true);
         if required && !allow {
-            self.error(
+            self.error_at(
                 SchemaErrorKind::ConflictingFrontmatter,
+                frontmatter_range,
                 "frontmatter cannot be both required and forbidden",
             );
             return None;
         }
         let schema = match raw.schema {
             None => None,
-            Some(Value::String(_)) => {
-                self.use_range(RangeKey::FrontmatterField("schema".into()));
+            Some(RawFrontmatterSchema::Path(_path)) => {
+                let schema_range = self.range(RangeKey::FrontmatterField("schema".into()));
                 self.nodes
-                    .insert(SchemaNode::FrontmatterSchemaDeclaration, self.current_range);
+                    .insert(SchemaNode::FrontmatterSchemaDeclaration, schema_range);
                 let Some(external) = self.external_schema.take() else {
-                    self.error(
+                    self.error_at(
                         SchemaErrorKind::InvalidFrontmatterSchema,
+                        schema_range,
                         "linked frontmatter schema requires a schema file path context",
                     );
                     return None;
                 };
                 let document_range = self.sources.documents.get(&external.root_source).map_or(
-                    self.current_range,
+                    schema_range,
                     |source| SourceRange {
                         source: external.root_source,
                         range: TextRange {
@@ -836,7 +871,7 @@ impl Loader {
                     Ok(schema) => schema,
                     Err(error) => {
                         let range = self.sources.documents.get(&error.source).map_or(
-                            self.current_range,
+                            schema_range,
                             |source| SourceRange {
                                 source: error.source,
                                 range: TextRange {
@@ -857,21 +892,21 @@ impl Loader {
                     .insert(SchemaNode::FrontmatterSchemaDocument, document_range);
                 Some(schema)
             }
-            Some(Value::Mapping(_)) => {
-                self.use_range(RangeKey::FrontmatterField("schema".into()));
-                self.error(
+            Some(RawFrontmatterSchema::Mapping(_mapping)) => {
+                self.error_at(
                     SchemaErrorKind::InvalidFrontmatterSchema,
+                    self.range(RangeKey::FrontmatterField("schema".into())),
                     "inline frontmatter JSON Schema is not implemented yet; use a linked JSON file",
                 );
                 return None;
             }
-            Some(_) => return None,
         };
-        Some(match (required, allow) {
-            (true, true) => FrontmatterPolicy::Required { schema },
-            (false, false) => FrontmatterPolicy::Forbidden { schema },
-            (false, true) => FrontmatterPolicy::Optional { schema },
-            (true, false) => return None,
+        Some(if required {
+            FrontmatterPolicy::Required { schema }
+        } else if allow {
+            FrontmatterPolicy::Optional { schema }
+        } else {
+            FrontmatterPolicy::Forbidden { schema }
         })
     }
 
@@ -879,7 +914,7 @@ impl Loader {
         let constraints = self.raw_constraints.clone();
         for (scope, values) in constraints {
             for (index, value) in values.iter().enumerate() {
-                self.use_range(RangeKey::Constraint(ConstraintPath {
+                let range = self.range(RangeKey::Constraint(ConstraintPath {
                     scope: scope.clone(),
                     index: ConstraintIndex(index),
                 }));
@@ -892,14 +927,16 @@ impl Loader {
                         parse_rule_ref(reference).is_some()
                     };
                     if !valid {
-                        self.error(
+                        self.error_at(
                             SchemaErrorKind::UnresolvedRef,
+                            range,
                             format!("invalid ref `{reference}`"),
                         );
                     }
                     if !seen.insert(reference) {
-                        self.error(
+                        self.error_at(
                             SchemaErrorKind::DuplicateRef,
+                            range,
                             format!("duplicate ref `{reference}` in one constraint"),
                         );
                     }
@@ -909,49 +946,35 @@ impl Loader {
     }
 
     fn validate_options_shape(&mut self, value: &Value) {
-        self.use_range(RangeKey::DocumentField("options".into()));
+        let range = self.range(RangeKey::DocumentField("options".into()));
         let Some(mapping) = value.as_mapping() else {
-            self.shape_error("options must be a mapping and cannot be null");
+            self.shape_error_at(range, "options must be a mapping and cannot be null");
             return;
         };
-        self.validate_known_fields(
-            mapping,
-            &[
-                "match_case",
-                "strip_inline_markup",
-                "allow_skipped_levels",
-                "root_level",
-            ],
-            self.current_range,
-        );
+        self.validate_known_fields(mapping, OPTION_FIELDS, range);
         for field in ["match_case", "strip_inline_markup", "allow_skipped_levels"] {
             if let Some(value) = yaml_get(mapping, field) {
-                self.use_range(RangeKey::OptionField(field.into()));
                 if !matches!(value, Value::Bool(_)) {
-                    self.shape_error(format!("options.{field} must be a bool and cannot be null"));
+                    self.shape_error_at(
+                        self.range(RangeKey::OptionField(field.into())),
+                        format!("options.{field} must be a bool and cannot be null"),
+                    );
                 }
             }
         }
         if let Some(value) = yaml_get(mapping, "root_level") {
-            self.use_range(RangeKey::OptionField("root_level".into()));
             if !is_yaml_integer(value) {
-                self.shape_error("options.root_level must be an integer and cannot be null");
+                self.shape_error_at(
+                    self.range(RangeKey::OptionField("root_level".into())),
+                    "options.root_level must be an integer and cannot be null",
+                );
             }
         }
     }
 
-    fn validate_rules_shape(&mut self, value: &Value, scope: &ScopePath) {
-        let range = if scope.0.is_empty() {
-            self.ranges.get(
-                &RangeKey::DocumentField("sections".into()),
-                self.document_range,
-            )
-        } else {
-            self.current_range
-        };
-        self.current_range = range;
+    fn validate_rules_shape(&mut self, value: &Value, scope: &ScopePath, range: SourceRange) {
         let Some(rules) = value.as_sequence() else {
-            self.shape_error("sections must be a sequence and cannot be null");
+            self.shape_error_at(range, "sections must be a sequence and cannot be null");
             return;
         };
         for (index, value) in rules.iter().enumerate() {
@@ -959,95 +982,80 @@ impl Loader {
                 scope: scope.clone(),
                 index: RuleIndex(index),
             };
-            self.current_range = self
-                .ranges
-                .get(&RangeKey::Rule(path.clone()), self.document_range);
+            let rule_range = self.range(RangeKey::Rule(path.clone()));
             let Some(mapping) = value.as_mapping() else {
-                self.shape_error("each section rule must be a mapping");
+                self.shape_error_at(rule_range, "each section rule must be a mapping");
                 continue;
             };
-            self.validate_known_fields(
-                mapping,
-                &[
-                    "id",
-                    "match",
-                    "allow",
-                    "required",
-                    "repeat",
-                    "strict",
-                    "sections",
-                    "constraints",
-                ],
-                self.current_range,
-            );
-            self.validate_required_field(mapping, "match", self.current_range);
+            self.validate_known_fields(mapping, RULE_FIELDS, rule_range);
+            self.validate_required_field(mapping, "match", rule_range);
             for field in ["id", "match", "repeat"] {
                 if let Some(value) = yaml_get(mapping, field) {
-                    self.use_range(RangeKey::RuleField(path.clone(), field.into()));
                     if !matches!(value, Value::String(_)) {
-                        self.shape_error(format!(
-                            "rule `{field}` must be a string and cannot be null"
-                        ));
+                        self.shape_error_at(
+                            self.range(RangeKey::RuleField(path.clone(), field.into())),
+                            format!("rule `{field}` must be a string and cannot be null"),
+                        );
                     }
                 }
             }
             for field in ["allow", "required", "strict"] {
                 if let Some(value) = yaml_get(mapping, field) {
-                    self.use_range(RangeKey::RuleField(path.clone(), field.into()));
                     if !matches!(value, Value::Bool(_)) {
-                        self.shape_error(format!(
-                            "rule `{field}` must be a bool and cannot be null"
-                        ));
+                        self.shape_error_at(
+                            self.range(RangeKey::RuleField(path.clone(), field.into())),
+                            format!("rule `{field}` must be a bool and cannot be null"),
+                        );
                     }
                 }
             }
             let mut child_scope = scope.clone();
             child_scope.0.push(RuleIndex(index));
             if let Some(children) = yaml_get(mapping, "sections") {
-                self.use_range(RangeKey::RuleField(path.clone(), "sections".into()));
-                self.validate_rules_shape(children, &child_scope);
+                let range = self.range(RangeKey::RuleField(path.clone(), "sections".into()));
+                self.validate_rules_shape(children, &child_scope, range);
             }
             if let Some(constraints) = yaml_get(mapping, "constraints") {
-                self.use_range(RangeKey::RuleField(path, "constraints".into()));
-                self.validate_constraints_shape(constraints, &child_scope);
+                let range = self.range(RangeKey::RuleField(path, "constraints".into()));
+                self.validate_constraints_shape(constraints, &child_scope, range);
             }
         }
     }
 
-    fn validate_constraints_shape(&mut self, value: &Value, scope: &ScopePath) {
+    fn validate_constraints_shape(&mut self, value: &Value, scope: &ScopePath, range: SourceRange) {
         let Some(constraints) = value.as_sequence() else {
-            self.shape_error("constraints must be a sequence and cannot be null");
+            self.shape_error_at(range, "constraints must be a sequence and cannot be null");
             return;
         };
         for (index, constraint) in constraints.iter().enumerate() {
-            self.use_range(RangeKey::Constraint(ConstraintPath {
+            let range = self.range(RangeKey::Constraint(ConstraintPath {
                 scope: scope.clone(),
                 index: ConstraintIndex(index),
             }));
-            self.validate_constraint_shape(constraint);
+            self.validate_constraint_shape(constraint, range);
         }
     }
 
-    fn validate_constraint_shape(&mut self, value: &Value) {
+    fn validate_constraint_shape(&mut self, value: &Value, range: SourceRange) {
         let Some(mapping) = value.as_mapping() else {
-            self.shape_error("constraint must be a single-key object");
+            self.shape_error_at(range, "constraint must be a single-key object");
             return;
         };
         if mapping.len() != 1 {
-            self.shape_error("constraint must contain exactly one keyword");
+            self.shape_error_at(range, "constraint must contain exactly one keyword");
             return;
         }
         let Some((Value::String(keyword), operand)) = mapping.iter().next() else {
-            self.shape_error("constraint keyword must be a string");
+            self.shape_error_at(range, "constraint keyword must be a string");
             return;
         };
         match keyword.as_str() {
             "one_of" | "any_of" | "at_most_one" | "all_or_none" | "ordered" => {
-                self.validate_ref_sequence(keyword, operand, true);
+                self.validate_ref_sequence(keyword, operand, true, range);
             }
             "requires" | "conflicts" => {
                 let Some(implication) = operand.as_mapping() else {
-                    self.shape_error(format!("{keyword} operand must be an object"));
+                    self.shape_error_at(range, format!("{keyword} operand must be an object"));
                     return;
                 };
                 let consequence = if keyword == "requires" {
@@ -1056,82 +1064,83 @@ impl Loader {
                     "then_not"
                 };
                 let allowed = ["if", consequence];
-                self.validate_known_fields(implication, &allowed, self.current_range);
-                self.validate_required_field(implication, "if", self.current_range);
-                self.validate_required_field(implication, consequence, self.current_range);
+                self.validate_known_fields(implication, &allowed, range);
+                self.validate_required_field(implication, "if", range);
+                self.validate_required_field(implication, consequence, range);
                 if let Some(condition) = yaml_get(implication, "if") {
-                    self.validate_ref_scalar(condition);
+                    self.validate_ref_scalar(condition, range);
                 }
                 if let Some(value) = yaml_get(implication, consequence) {
                     if value.is_sequence() {
-                        self.validate_ref_sequence(consequence, value, false);
+                        self.validate_ref_sequence(consequence, value, false, range);
                     } else {
-                        self.validate_ref_scalar(value);
+                        self.validate_ref_scalar(value, range);
                     }
                 }
             }
-            _ => self.shape_error(format!("unknown constraint keyword `{keyword}`")),
+            _ => self.shape_error_at(range, format!("unknown constraint keyword `{keyword}`")),
         }
     }
 
-    fn validate_ref_sequence(&mut self, name: &str, value: &Value, require_two: bool) {
+    fn validate_ref_sequence(
+        &mut self,
+        name: &str,
+        value: &Value,
+        require_two: bool,
+        range: SourceRange,
+    ) {
         let Some(values) = value.as_sequence() else {
-            self.shape_error(format!("{name} must be a sequence of refs"));
+            self.shape_error_at(range, format!("{name} must be a sequence of refs"));
             return;
         };
         let minimum = if require_two { 2 } else { 1 };
         if values.len() < minimum {
-            self.shape_error(format!("{name} requires at least {minimum} ref(s)"));
+            let noun = if minimum == 1 { "ref" } else { "refs" };
+            self.shape_error_at(range, format!("{name} requires at least {minimum} {noun}"));
         }
         for value in values {
-            self.validate_ref_scalar(value);
+            self.validate_ref_scalar(value, range);
         }
     }
 
-    fn validate_ref_scalar(&mut self, value: &Value) {
+    fn validate_ref_scalar(&mut self, value: &Value, range: SourceRange) {
         if !matches!(value, Value::String(_)) {
-            self.shape_error("constraint refs must be strings and cannot be null");
+            self.shape_error_at(range, "constraint refs must be strings and cannot be null");
         }
     }
 
     fn validate_known_fields(&mut self, mapping: &Mapping, allowed: &[&str], range: SourceRange) {
         for key in mapping.keys() {
             let Some(key) = key.as_str() else {
-                self.current_range = range;
-                self.shape_error("mapping keys must be strings");
+                self.shape_error_at(range, "mapping keys must be strings");
                 continue;
             };
             if !allowed.contains(&key) {
-                self.current_range = range;
-                self.shape_error(format!("unknown field `{key}`"));
+                self.shape_error_at(range, format!("unknown field `{key}`"));
             }
         }
     }
 
     fn validate_required_field(&mut self, mapping: &Mapping, field: &str, range: SourceRange) {
         if yaml_get(mapping, field).is_none() {
-            self.current_range = range;
-            self.shape_error(format!("missing required field `{field}`"));
+            self.shape_error_at(range, format!("missing required field `{field}`"));
         }
     }
 
     fn build_options(&mut self, raw: &RawOptions) -> Option<Options> {
-        self.use_range(RangeKey::OptionField("root_level".into()));
-        let root_level = match raw.root_level.unwrap_or(2) {
-            1 => Some(HeaderLevel::H1),
-            2 => Some(HeaderLevel::H2),
-            3 => Some(HeaderLevel::H3),
-            4 => Some(HeaderLevel::H4),
-            5 => Some(HeaderLevel::H5),
-            6 => Some(HeaderLevel::H6),
-            level => {
-                self.error(
+        let range = self.range(RangeKey::OptionField("root_level".into()));
+        let level = raw.root_level.unwrap_or(2);
+        let root_level = u8::try_from(level)
+            .ok()
+            .and_then(|level| HeaderLevel::try_from(level).ok())
+            .or_else(|| {
+                self.error_at(
                     SchemaErrorKind::InvalidRootLevel,
+                    range,
                     format!("root_level must be between 1 and 6, got {level}"),
                 );
                 None
-            }
-        };
+            });
         root_level.map(|root_level| Options {
             match_case: raw.match_case.unwrap_or(false),
             strip_inline_markup: raw.strip_inline_markup.unwrap_or(true),
@@ -1159,13 +1168,13 @@ impl Loader {
             self.raw_constraints
                 .insert(child_scope.clone(), raw.constraints);
 
-            self.use_range(RangeKey::RuleField(rule_path.clone(), "match".into()));
-            let matcher = self.build_matcher(&raw.matcher);
-            self.use_range(RangeKey::RuleField(
+            let matcher_range = self.range(RangeKey::RuleField(rule_path.clone(), "match".into()));
+            let matcher = self.build_matcher(&raw.matcher, matcher_range);
+            let id_range = self.range(RangeKey::RuleField(
                 rule_path.clone(),
                 if raw.id.is_some() { "id" } else { "match" }.into(),
             ));
-            let id = self.build_rule_id(raw.id.as_deref(), matcher.as_ref(), scope);
+            let id = self.build_rule_id(raw.id.as_deref(), matcher.as_ref(), scope, id_range);
             let cardinality_field = if raw.repeat.is_some() {
                 "repeat"
             } else if raw.required.is_some() {
@@ -1173,11 +1182,16 @@ impl Loader {
             } else {
                 "allow"
             };
-            self.use_range(RangeKey::RuleField(
+            let outcome_range = self.range(RangeKey::RuleField(
                 rule_path.clone(),
                 cardinality_field.into(),
             ));
-            let outcome = self.build_outcome(raw.allow, raw.required, raw.repeat.as_deref());
+            let outcome = self.build_outcome(
+                raw.allow,
+                raw.required,
+                raw.repeat.as_deref(),
+                outcome_range,
+            );
             let children = self.build_scope(raw.sections, &child_scope);
             match (matcher, outcome, children) {
                 (Some(matcher), Some(outcome), Some(sections)) => {
@@ -1196,11 +1210,7 @@ impl Loader {
         }
 
         let mut ids: HashMap<RuleId, usize> = HashMap::new();
-        for (semantic_index, rule) in semantic.iter().enumerate() {
-            let Some(index) = semantic_indices.get(semantic_index).copied() else {
-                complete = false;
-                continue;
-            };
+        for (&index, rule) in semantic_indices.iter().zip(&semantic) {
             let Some(id) = &rule.id else { continue };
             if let Some(first_index) = ids.get(id).copied() {
                 let duplicate_path = RulePath {
@@ -1211,9 +1221,9 @@ impl Loader {
                     scope: scope.clone(),
                     index: RuleIndex(first_index),
                 };
-                self.current_range = self.ranges.rule_id(&duplicate_path, self.document_range);
-                self.error_with_related(
+                self.error_with_related_at(
                     SchemaErrorKind::DuplicateId,
+                    self.ranges.rule_id(&duplicate_path, self.document_range),
                     format!("duplicate rule id `{}` in one scope", id.0),
                     vec![RelatedLocation {
                         range: self.ranges.rule_id(&first_path, self.document_range),
@@ -1234,18 +1244,21 @@ impl Loader {
         explicit: Option<&str>,
         matcher: Option<&Matcher>,
         scope: &ScopePath,
+        range: SourceRange,
     ) -> Option<RuleId> {
         if let Some(id) = explicit {
             if !is_slug(id) {
-                self.error(
+                self.error_at(
                     SchemaErrorKind::InvalidDocumentShape,
+                    range,
                     format!("rule id `{id}` is not a lowercase slug"),
                 );
                 return None;
             }
             if scope.0.is_empty() && id == "fm" {
-                self.error(
+                self.error_at(
                     SchemaErrorKind::ReservedId,
+                    range,
                     "top-level rule id `fm` is reserved for frontmatter refs",
                 );
             }
@@ -1257,15 +1270,16 @@ impl Loader {
         };
         let generated = auto_id(&text.0).map(RuleId);
         if scope.0.is_empty() && generated.as_ref().is_some_and(|id| id.0 == "fm") {
-            self.error(
+            self.error_at(
                 SchemaErrorKind::ReservedId,
+                range,
                 "top-level auto-generated rule id `fm` is reserved for frontmatter refs",
             );
         }
         generated
     }
 
-    fn build_matcher(&mut self, source: &str) -> Option<Matcher> {
+    fn build_matcher(&mut self, source: &str, range: SourceRange) -> Option<Matcher> {
         if source == "*" {
             return Some(Matcher::Any);
         }
@@ -1274,23 +1288,26 @@ impl Loader {
                 .strip_prefix('/')
                 .and_then(|body| body.strip_suffix('/'))
             else {
-                self.error(
+                self.error_at(
                     SchemaErrorKind::InvalidMatcher,
+                    range,
                     "a regex matcher needs separate opening and closing `/` delimiters",
                 );
                 return None;
             };
             let Some(body) = regex_body(body) else {
-                self.error(
+                self.error_at(
                     SchemaErrorKind::InvalidMatcher,
+                    range,
                     format!("regex matcher `{source}` contains an unescaped `/`"),
                 );
                 return None;
             };
             let anchored = format!(r"\A(?:{body})\z");
             if let Err(error) = Regex::new(&anchored) {
-                self.error(
+                self.error_at(
                     SchemaErrorKind::InvalidMatcher,
+                    range,
                     format!("invalid regex matcher `{source}`: {error}"),
                 );
                 return None;
@@ -1308,17 +1325,20 @@ impl Loader {
         allow: bool,
         required: Option<bool>,
         repeat: Option<&str>,
+        range: SourceRange,
     ) -> Option<RuleOutcome> {
         if required.is_some() && repeat.is_some() {
-            self.error(
+            self.error_at(
                 SchemaErrorKind::ConflictingCardinality,
+                range,
                 "required and repeat cannot both be declared",
             );
             return None;
         }
         if !allow && (required.is_some() || repeat.is_some()) {
-            self.error(
+            self.error_at(
                 SchemaErrorKind::ConflictingCardinality,
+                range,
                 "allow: false cannot be combined with required or repeat",
             );
             return None;
@@ -1338,8 +1358,9 @@ impl Loader {
             (None, Some(repeat)) => match parse_repeat(repeat) {
                 Some(cardinality) => cardinality,
                 None => {
-                    self.error(
+                    self.error_at(
                         SchemaErrorKind::InvalidRepeat,
+                        range,
                         format!("invalid repeat `{repeat}`"),
                     );
                     return None;
@@ -1359,24 +1380,25 @@ impl Loader {
         schema: &Schema,
         scope: &ScopePath,
         value: Value,
+        range: SourceRange,
     ) -> Option<Constraint> {
         let Some(mapping) = value.as_mapping() else {
-            self.shape_error("constraint must be a single-key object");
+            self.shape_error_at(range, "constraint must be a single-key object");
             return None;
         };
         if mapping.len() != 1 {
-            self.shape_error("constraint must contain exactly one keyword");
+            self.shape_error_at(range, "constraint must contain exactly one keyword");
             return None;
         }
         let Some((Value::String(keyword), operand)) = mapping.iter().next() else {
-            self.shape_error("constraint keyword must be a string");
+            self.shape_error_at(range, "constraint keyword must be a string");
             return None;
         };
         match keyword.as_str() {
             "one_of" | "any_of" | "at_most_one" | "all_or_none" => {
-                let refs = self.parse_proposition_list(schema, scope, operand, false)?;
+                let refs = self.parse_proposition_list(schema, scope, operand, false, range)?;
                 let refs = at_least_two(refs).or_else(|| {
-                    self.shape_error(format!("{keyword} requires at least two refs"));
+                    self.shape_error_at(range, format!("{keyword} requires at least two refs"));
                     None
                 })?;
                 Some(match keyword.as_str() {
@@ -1387,11 +1409,11 @@ impl Loader {
                     _ => return None,
                 })
             }
-            "requires" => self.build_implication(schema, scope, operand, true),
-            "conflicts" => self.build_implication(schema, scope, operand, false),
-            "ordered" => self.build_ordered(schema, scope, operand),
+            "requires" => self.build_implication(schema, scope, operand, true, range),
+            "conflicts" => self.build_implication(schema, scope, operand, false, range),
+            "ordered" => self.build_ordered(schema, scope, operand, range),
             _ => {
-                self.shape_error(format!("unknown constraint keyword `{keyword}`"));
+                self.shape_error_at(range, format!("unknown constraint keyword `{keyword}`"));
                 None
             }
         }
@@ -1403,33 +1425,41 @@ impl Loader {
         scope: &ScopePath,
         operand: &Value,
         requires: bool,
+        range: SourceRange,
     ) -> Option<Constraint> {
         let Some(mapping) = operand.as_mapping() else {
-            self.shape_error("requires/conflicts operand must be an object");
+            self.shape_error_at(range, "requires/conflicts operand must be an object");
             return None;
         };
         let consequence_key = if requires { "then" } else { "then_not" };
         if mapping.len() != 2 {
-            self.shape_error(format!(
-                "{} requires exactly `if` and `{consequence_key}`",
-                if requires { "requires" } else { "conflicts" }
-            ));
+            self.shape_error_at(
+                range,
+                format!(
+                    "{} requires exactly `if` and `{consequence_key}`",
+                    if requires { "requires" } else { "conflicts" }
+                ),
+            );
             return None;
         }
-        let Some(condition_value) = mapping_get(mapping, "if") else {
-            self.shape_error("requires/conflicts operand is missing `if`");
+        let Some(condition_value) = yaml_get(mapping, "if") else {
+            self.shape_error_at(range, "requires/conflicts operand is missing `if`");
             return None;
         };
-        let Some(consequence_value) = mapping_get(mapping, consequence_key) else {
-            self.shape_error(format!(
-                "requires/conflicts operand is missing `{consequence_key}`"
-            ));
+        let Some(consequence_value) = yaml_get(mapping, consequence_key) else {
+            self.shape_error_at(
+                range,
+                format!("requires/conflicts operand is missing `{consequence_key}`"),
+            );
             return None;
         };
-        let condition = self.parse_proposition(schema, scope, condition_value, false);
+        let condition = self.parse_proposition(schema, scope, condition_value, false, range);
         let consequence_values = scalar_or_sequence(consequence_value);
         if consequence_values.is_empty() {
-            self.shape_error(format!("`{consequence_key}` must contain at least one ref"));
+            self.shape_error_at(
+                range,
+                format!("`{consequence_key}` must contain at least one ref"),
+            );
             return None;
         }
         let mut identities = HashSet::new();
@@ -1440,11 +1470,12 @@ impl Loader {
         let mut complete = condition.is_some();
         for value in consequence_values {
             if let Some((proposition, identity)) =
-                self.parse_proposition(schema, scope, value, false)
+                self.parse_proposition(schema, scope, value, false, range)
             {
                 if !identities.insert(identity) {
-                    self.error(
+                    self.error_at(
                         SchemaErrorKind::DuplicateRef,
+                        range,
                         format!("duplicate ref in `{consequence_key}`"),
                     );
                 }
@@ -1476,9 +1507,10 @@ impl Loader {
         schema: &Schema,
         scope: &ScopePath,
         operand: &Value,
+        range: SourceRange,
     ) -> Option<Constraint> {
         let values = operand.as_sequence().or_else(|| {
-            self.shape_error("ordered requires a list of refs");
+            self.shape_error_at(range, "ordered requires a list of refs");
             None
         })?;
         let mut refs = Vec::new();
@@ -1486,14 +1518,16 @@ impl Loader {
         let mut parent_scope: Option<Vec<usize>> = None;
         let mut complete = true;
         for value in values {
-            let Some((proposition, identity)) = self.parse_proposition(schema, scope, value, true)
+            let Some((proposition, identity)) =
+                self.parse_proposition(schema, scope, value, true, range)
             else {
                 complete = false;
                 continue;
             };
             let Proposition::Rule(rule_ref) = proposition else {
-                self.error(
+                self.error_at(
                     SchemaErrorKind::OrderedScopeMismatch,
+                    range,
                     "frontmatter refs cannot be used in ordered",
                 );
                 continue;
@@ -1509,15 +1543,20 @@ impl Loader {
                 .as_ref()
                 .is_some_and(|existing| existing != &target_parent)
             {
-                self.error(
+                self.error_at(
                     SchemaErrorKind::OrderedScopeMismatch,
+                    range,
                     "all ordered refs must resolve in the same scope",
                 );
             } else {
                 parent_scope = Some(target_parent);
             }
             if !identities.insert(identity) {
-                self.error(SchemaErrorKind::DuplicateRef, "duplicate ref in ordered");
+                self.error_at(
+                    SchemaErrorKind::DuplicateRef,
+                    range,
+                    "duplicate ref in ordered",
+                );
             }
             refs.push(rule_ref);
         }
@@ -1525,7 +1564,7 @@ impl Loader {
             return None;
         }
         let refs = at_least_two(refs).or_else(|| {
-            self.shape_error("ordered requires at least two refs");
+            self.shape_error_at(range, "ordered requires at least two refs");
             None
         })?;
         Some(Constraint::Ordered(refs))
@@ -1537,9 +1576,10 @@ impl Loader {
         scope: &ScopePath,
         operand: &Value,
         ordered: bool,
+        range: SourceRange,
     ) -> Option<Vec<Proposition>> {
         let values = operand.as_sequence().or_else(|| {
-            self.shape_error("constraint operand must be a list of refs");
+            self.shape_error_at(range, "constraint operand must be a list of refs");
             None
         })?;
         let mut identities = HashSet::new();
@@ -1547,11 +1587,12 @@ impl Loader {
         let mut complete = true;
         for value in values {
             if let Some((proposition, identity)) =
-                self.parse_proposition(schema, scope, value, ordered)
+                self.parse_proposition(schema, scope, value, ordered, range)
             {
                 if !identities.insert(identity) {
-                    self.error(
+                    self.error_at(
                         SchemaErrorKind::DuplicateRef,
+                        range,
                         "constraint contains a duplicate ref",
                     );
                 }
@@ -1569,15 +1610,17 @@ impl Loader {
         scope: &ScopePath,
         value: &Value,
         ordered: bool,
+        range: SourceRange,
     ) -> Option<(Proposition, ResolvedIdentity)> {
         let Some(source) = value.as_str() else {
-            self.shape_error("constraint refs must be strings");
+            self.shape_error_at(range, "constraint refs must be strings");
             return None;
         };
         if source.starts_with("fm.") {
             let Some(reference) = parse_frontmatter_ref(source) else {
-                self.error(
+                self.error_at(
                     SchemaErrorKind::UnresolvedRef,
+                    range,
                     format!("invalid frontmatter ref `{source}`"),
                 );
                 return None;
@@ -1590,28 +1633,32 @@ impl Loader {
         }
 
         let Some(reference) = parse_rule_ref(source) else {
-            self.error(
+            self.error_at(
                 SchemaErrorKind::UnresolvedRef,
+                range,
                 format!("invalid or unresolved ref `{source}`"),
             );
             return None;
         };
         let Some(resolved) = resolve_ref(schema, scope, &reference) else {
-            self.error(
+            self.error_at(
                 SchemaErrorKind::UnresolvedRef,
+                range,
                 format!("unresolved ref `{source}`"),
             );
             return None;
         };
         if resolved.denied {
-            self.error(
+            self.error_at(
                 SchemaErrorKind::ForbiddenRef,
+                range,
                 format!("ref `{source}` passes through or targets an allow: false rule"),
             );
         }
         if ordered && resolved.repeated_non_final {
-            self.error(
+            self.error_at(
                 SchemaErrorKind::OrderedScopeMismatch,
+                range,
                 format!("ordered ref `{source}` passes through a repeatable ancestor"),
             );
         }
@@ -1628,31 +1675,35 @@ impl Loader {
         let line_start = self
             .source
             .split_inclusive('\n')
+            // serde_yaml's location is a third-party, unstructured boundary;
+            // clamp a hypothetical zero line/column rather than underflowing.
             .take(location.line().saturating_sub(1))
             .map(str::len)
             .sum::<usize>();
         let start = line_start
-            .saturating_add(location.column().saturating_sub(1))
+            .checked_add(location.column().saturating_sub(1))
+            .unwrap_or(self.source.len())
             .min(self.source.len());
+        let end = if start < self.source.len() {
+            start + 1
+        } else {
+            start
+        };
         SourceRange {
             source: SourceId(0),
             range: TextRange {
                 start: ByteOffset(start),
-                end: ByteOffset(start.saturating_add(1).min(self.source.len())),
+                end: ByteOffset(end),
             },
         }
     }
 
-    fn shape_error(&mut self, message: impl Into<String>) {
-        self.error(SchemaErrorKind::InvalidDocumentShape, message);
+    fn range(&self, key: RangeKey) -> SourceRange {
+        self.ranges.get(&key, self.document_range)
     }
 
-    fn use_range(&mut self, key: RangeKey) {
-        self.current_range = self.ranges.get(&key, self.document_range);
-    }
-
-    fn error(&mut self, kind: SchemaErrorKind, message: impl Into<String>) {
-        self.error_at(kind, self.current_range, message);
+    fn shape_error_at(&mut self, range: SourceRange, message: impl Into<String>) {
+        self.error_at(SchemaErrorKind::InvalidDocumentShape, range, message);
     }
 
     fn error_at(&mut self, kind: SchemaErrorKind, range: SourceRange, message: impl Into<String>) {
@@ -1664,15 +1715,16 @@ impl Loader {
         });
     }
 
-    fn error_with_related(
+    fn error_with_related_at(
         &mut self,
         kind: SchemaErrorKind,
+        range: SourceRange,
         message: impl Into<String>,
         related: Vec<RelatedLocation>,
     ) {
         self.errors.push(SchemaError {
             kind,
-            range: self.current_range,
+            range,
             related,
             message: message.into(),
         });
@@ -1720,9 +1772,8 @@ fn resolve_ref(schema: &Schema, scope: &ScopePath, reference: &RuleRef) -> Optio
     };
     let mut denied = false;
     let mut repeated_non_final = false;
-    let segments = std::iter::once(&reference.path.first).chain(&reference.path.rest);
-    let segment_count = 1 + reference.path.rest.len();
-    for (position, id) in segments.enumerate() {
+    let segment_count = reference.path.rest.len() + 1;
+    for (position, id) in reference.path.iter().enumerate() {
         let (index, rule) = rules
             .iter()
             .enumerate()
@@ -1916,7 +1967,7 @@ fn frontmatter_identity(reference: &FrontmatterRef, match_case: bool) -> Frontma
     let mut identity = reference.clone();
     if !match_case {
         if let Some(FrontmatterScalar::String(value)) = &mut identity.equals {
-            *value = value.to_lowercase();
+            *value = crate::case_fold::simple_fold(value).collect();
         }
     }
     identity
@@ -1980,14 +2031,10 @@ fn canonical_float(source: &str) -> Option<String> {
     }
     if !whole.bytes().all(|byte| byte.is_ascii_digit())
         || !fraction.bytes().all(|byte| byte.is_ascii_digit())
-        || (whole.is_empty() && fraction.is_empty())
     {
         return None;
     }
     let digits = format!("{whole}{fraction}");
-    if digits.is_empty() {
-        return None;
-    }
     let trimmed_leading = digits.trim_start_matches('0');
     if trimmed_leading.is_empty() {
         return Some("0e0".into());
@@ -2009,10 +2056,6 @@ fn strip_sign(source: &str) -> (bool, &str) {
     } else {
         (false, source)
     }
-}
-
-fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
-    mapping.get(Value::String(key.to_owned()))
 }
 
 fn yaml_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
@@ -2055,11 +2098,11 @@ fn constraint_ref_strings(value: &Value) -> Vec<&str> {
             } else {
                 "then_not"
             };
-            let mut result = mapping_get(implication, "if")
+            let mut result = yaml_get(implication, "if")
                 .and_then(Value::as_str)
                 .into_iter()
                 .collect::<Vec<_>>();
-            if let Some(value) = mapping_get(implication, consequence) {
+            if let Some(value) = yaml_get(implication, consequence) {
                 result.extend(
                     scalar_or_sequence(value)
                         .into_iter()
@@ -2099,6 +2142,7 @@ fn at_least_two<T>(mut values: Vec<T>) -> Option<AtLeastTwo<T>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn valid(source: &str) -> Schema {
         match load_schema(source) {
@@ -2110,9 +2154,7 @@ mod tests {
     fn error_kinds(source: &str) -> Vec<SchemaErrorKind> {
         match load_schema(source) {
             Ok(loaded) => panic!("unexpected valid schema: {:#?}", loaded.schema),
-            Err(invalid) => std::iter::once(invalid.errors.first.kind)
-                .chain(invalid.errors.rest.iter().map(|error| error.kind))
-                .collect(),
+            Err(invalid) => invalid.errors.iter().map(|error| error.kind).collect(),
         }
     }
 
@@ -2248,9 +2290,7 @@ sections:
     repeat: null
 "#;
         let invalid = invalid(source);
-        let errors = std::iter::once(&invalid.errors.first)
-            .chain(&invalid.errors.rest)
-            .collect::<Vec<_>>();
+        let errors = invalid.errors.iter().collect::<Vec<_>>();
         assert_eq!(errors.len(), 5);
         assert!(errors
             .iter()
@@ -2278,8 +2318,9 @@ sections:
     match: Second
 "#;
         let invalid = invalid(source);
-        let error = std::iter::once(&invalid.errors.first)
-            .chain(&invalid.errors.rest)
+        let error = invalid
+            .errors
+            .iter()
             .find(|error| error.kind == SchemaErrorKind::DuplicateId)
             .unwrap_or_else(|| panic!("missing duplicate-id error"));
         assert_eq!(source_slice(source, error.range), "duplicate");
@@ -2356,6 +2397,13 @@ sections:
     }
 
     #[test]
+    fn external_source_ids_report_exhaustion_instead_of_saturating() {
+        assert_eq!(external_source_id(0), Some(SourceId(1)));
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(external_source_id(u32::MAX as usize), None);
+    }
+
+    #[test]
     fn resolves_constraints_and_normalizes_frontmatter_scalars() {
         let schema = valid(
             r#"
@@ -2382,6 +2430,29 @@ constraints:
                 equals: Some(FrontmatterScalar::Integer(CanonicalInteger("16".into())))
             })
         );
+    }
+
+    #[test]
+    fn frontmatter_ref_identity_uses_simple_case_folding() {
+        let duplicate = error_kinds(
+            r#"
+version: 1
+sections: []
+constraints:
+  - any_of: [fm.key=ſ, fm.key=S]
+"#,
+        );
+        assert_eq!(duplicate, vec![SchemaErrorKind::DuplicateRef]);
+
+        let schema = valid(
+            r#"
+version: 1
+sections: []
+constraints:
+  - any_of: [fm.key=ß, fm.key=ss]
+"#,
+        );
+        assert_eq!(schema.constraints.len(), 1);
     }
 
     #[test]
@@ -2589,7 +2660,7 @@ sections: []
         );
         let diagnostics =
             crate::validate(&loaded.schema, &document).expect("loader-created validator compiles");
-        assert_eq!(diagnostics.len(), 1, "$ref` siblings must both apply");
+        assert_eq!(diagnostics.len(), 1, "`$ref` siblings must both apply");
 
         let loaded = linked(
             r#"{"$ref":"defs.json#/$defs/base","type":"object"}"#,
@@ -2706,5 +2777,75 @@ constraints:
 "#,
         );
         assert!(kinds.contains(&SchemaErrorKind::InvalidDocumentShape));
+    }
+
+    proptest! {
+        #[test]
+        fn regex_body_round_trips_delimiter_escaping_without_other_escapes(
+            source in any::<String>(),
+        ) {
+            prop_assume!(!source.contains('\\'));
+            let encoded = source
+                .chars()
+                .flat_map(|character| {
+                    if character == '/' {
+                        vec!['\\', '/']
+                    } else {
+                        vec![character]
+                    }
+                })
+                .collect::<String>();
+            let decoded = regex_body(&encoded);
+            prop_assert_eq!(decoded.as_deref(), Some(source.as_str()));
+        }
+
+        #[test]
+        fn parse_repeat_normalizes_valid_finite_bounds(min in any::<u32>(), max in any::<u32>()) {
+            prop_assume!(max >= min && max > 0);
+            let source = format!("{min}..{max}");
+            prop_assert_eq!(
+                parse_repeat(&source),
+                Some(Cardinality {
+                    min,
+                    max: UpperBound::Bounded(max),
+                })
+            );
+        }
+
+        #[test]
+        fn parse_repeat_normalizes_unbounded_bounds(min in any::<u32>()) {
+            let source = format!("{min}..n");
+            prop_assert_eq!(
+                parse_repeat(&source),
+                Some(Cardinality {
+                    min,
+                    max: UpperBound::Unbounded,
+                })
+            );
+        }
+
+        #[test]
+        fn canonical_integer_normalization_is_idempotent(value in any::<i64>()) {
+            let source = if value >= 0 {
+                format!("+000{value}")
+            } else {
+                format!("-000{}", value.unsigned_abs())
+            };
+            let canonical = canonical_integer(&source).expect("generated decimal is valid");
+            prop_assert_eq!(canonical.as_str(), value.to_string());
+            let repeated = canonical_integer(&canonical);
+            prop_assert_eq!(repeated.as_deref(), Some(canonical.as_str()));
+        }
+
+        #[test]
+        fn canonical_float_normalization_is_idempotent(
+            coefficient in any::<i64>(),
+            exponent in any::<i16>(),
+        ) {
+            let source = format!("{coefficient}e{exponent}");
+            let canonical = canonical_float(&source).expect("generated decimal float is valid");
+            let repeated = canonical_float(&canonical);
+            prop_assert_eq!(repeated.as_deref(), Some(canonical.as_str()));
+        }
     }
 }

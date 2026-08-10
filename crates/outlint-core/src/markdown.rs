@@ -71,9 +71,9 @@ pub struct FrontmatterLocation {
     /// Half-open byte range of the complete delimited block.
     pub range: TextRange,
     /// One-based first line, always 1 for v1 YAML frontmatter.
-    pub start_line: u32,
+    pub start_line: u64,
     /// One-based last line covered by the block.
-    pub end_line: u32,
+    pub end_line: u64,
 }
 
 /// A section opened by one Markdown heading.
@@ -118,11 +118,11 @@ pub struct HeadingLocation {
     /// Half-open byte range of the first source line used for anchoring.
     pub line_range: TextRange,
     /// One-based source line containing the heading text or ATX marker.
-    pub line: u32,
+    pub line: u64,
     /// One-based byte column of the heading text or ATX marker.
     ///
     /// Markdown indentation is ASCII, so this is also the character column.
-    pub column: u32,
+    pub column: u64,
 }
 
 /// A diagnostic identifier named by an Outlint suppression directive.
@@ -155,6 +155,8 @@ impl Suppressions {
 pub fn parse_markdown(source: &str, options: MarkdownOptions) -> Document {
     let line_index = LineIndex::new(source);
     let (frontmatter, frontmatter_range) = parse_frontmatter(source, &line_index);
+    // Both transformations preserve byte length. pulldown-cmark ranges into
+    // `parser_source` can therefore safely address the original `source`.
     let masked_source = frontmatter_range.map(|range| mask_source_range(source, range));
     let parser_source = normalize_bare_cr(masked_source.as_deref().unwrap_or(source));
     let mut headings = Vec::new();
@@ -168,14 +170,14 @@ pub fn parse_markdown(source: &str, options: MarkdownOptions) -> Document {
     {
         match event {
             Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item) => {
-                container_depth = container_depth.saturating_add(1);
+                container_depth += 1;
             }
             Event::End(
                 pulldown_cmark::TagEnd::BlockQuote(_)
                 | pulldown_cmark::TagEnd::List(_)
                 | pulldown_cmark::TagEnd::Item,
             ) => {
-                container_depth = container_depth.saturating_sub(1);
+                container_depth -= 1;
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 active_heading = (container_depth == 0
@@ -231,12 +233,12 @@ fn parse_frontmatter(
         return (DocumentFrontmatter::Absent, None);
     }
     let closing_line =
-        (2..=lines.line_count_u32()).find(|line| lines.line_text(source, *line) == Some("---"));
+        (2..=lines.line_count()).find(|line| lines.line_text(source, *line) == Some("---"));
     let Some(closing_line) = closing_line else {
         let location = FrontmatterLocation {
             range: text_range(0, source.len()),
             start_line: 1,
-            end_line: lines.line_count_u32(),
+            end_line: lines.line_count() as u64,
         };
         return (
             DocumentFrontmatter::Invalid {
@@ -248,12 +250,12 @@ fn parse_frontmatter(
     };
     let body_start = lines.line_start(2);
     let body_end = lines.line_start(closing_line);
-    let block_end = line_terminator_end(source, lines.line_end(closing_line, source.len()));
+    let block_end = lines.line_terminator_end(closing_line, source.len());
     let range = 0..block_end;
     let location = FrontmatterLocation {
         range: text_range(range.start, range.end),
         start_line: 1,
-        end_line: closing_line,
+        end_line: closing_line as u64,
     };
     let body = source.get(body_start..body_end).unwrap_or_default();
     let yaml = serde_yaml::from_str::<serde_yaml::Value>(body);
@@ -267,7 +269,8 @@ fn parse_frontmatter(
         // marked-yaml deliberately does not model, notably tags.
         (Ok(yaml), Err(_)) => yaml_frontmatter_mapping(yaml),
         // serde_yaml cannot represent integers outside u64/i64 even though
-        // they are valid YAML. marked-yaml retains those scalar lexemes.
+        // they are valid YAML. marked-yaml retains those scalar lexemes. The
+        // branch necessarily depends on serde_yaml's unstructured wording.
         (Err(error), Ok(marked)) if error.to_string().contains("invalid type: integer") => {
             marked_frontmatter_mapping(&marked)
         }
@@ -396,16 +399,6 @@ fn yaml_to_json(value: serde_yaml::Value) -> Result<serde_json::Value, String> {
     }
 }
 
-fn line_terminator_end(source: &str, line_end: usize) -> usize {
-    let bytes = source.as_bytes();
-    match (bytes.get(line_end), bytes.get(line_end.saturating_add(1))) {
-        (Some(b'\r'), Some(b'\n')) => line_end.saturating_add(2),
-        (Some(b'\r' | b'\n'), _) => line_end.saturating_add(1),
-        _ => line_end,
-    }
-    .min(source.len())
-}
-
 fn mask_source_range(source: &str, range: std::ops::Range<usize>) -> String {
     let bytes = source
         .bytes()
@@ -427,9 +420,10 @@ fn mask_source_range(source: &str, range: std::ops::Range<usize>) -> String {
 }
 
 fn normalize_bare_cr(source: &str) -> Cow<'_, str> {
-    let has_bare_cr = source.as_bytes().iter().enumerate().any(|(index, byte)| {
-        *byte == b'\r' && source.as_bytes().get(index.saturating_add(1)) != Some(&b'\n')
-    });
+    let has_bare_cr =
+        source.as_bytes().iter().enumerate().any(|(index, byte)| {
+            *byte == b'\r' && source.as_bytes().get(index + 1) != Some(&b'\n')
+        });
     if !has_bare_cr {
         return Cow::Borrowed(source);
     }
@@ -438,9 +432,7 @@ fn normalize_bare_cr(source: &str) -> Cow<'_, str> {
         source
             .char_indices()
             .map(|(index, character)| {
-                if character == '\r'
-                    && source.as_bytes().get(index.saturating_add(1)) != Some(&b'\n')
-                {
+                if character == '\r' && source.as_bytes().get(index + 1) != Some(&b'\n') {
                     '\n'
                 } else {
                     character
@@ -474,7 +466,7 @@ impl HeadingBuilder {
         source: &str,
         options: MarkdownOptions,
         lines: &LineIndex,
-        line_suppressions: &BTreeMap<u32, Suppressions>,
+        line_suppressions: &BTreeMap<usize, Suppressions>,
     ) -> Heading {
         let safe_range = clamp_range(self.range, source.len());
         let line = lines.line_number(safe_range.start);
@@ -501,7 +493,7 @@ impl HeadingBuilder {
             location: HeadingLocation {
                 range: text_range(safe_range.start, safe_range.end),
                 line_range: text_range(line_start, line_end),
-                line,
+                line: line as u64,
                 column: byte_column(line_start, safe_range.start),
             },
             suppressions,
@@ -535,7 +527,11 @@ fn is_eligible_heading(
     if !matches!(event_level, HeadingLevel::H1 | HeadingLevel::H2) {
         return false;
     }
-    let last_offset = safe_range.end.saturating_sub(1).max(safe_range.start);
+    let last_offset = safe_range
+        .end
+        .checked_sub(1)
+        .unwrap_or(safe_range.start)
+        .max(safe_range.start);
     let last_line = lines.line_number(last_offset.min(source.len()));
     lines
         .line_text(source, last_line)
@@ -556,23 +552,13 @@ fn physical_atx_level(line: &str) -> Option<HeaderLevel> {
     if !(1..=6).contains(&hashes) {
         return None;
     }
-    let after = indent.saturating_add(hashes);
+    let after = indent + hashes;
     if bytes.get(after).is_some_and(|byte| *byte != b' ') {
         return None;
     }
-    header_level(hashes)
-}
-
-fn header_level(hashes: usize) -> Option<HeaderLevel> {
-    match hashes {
-        1 => Some(HeaderLevel::H1),
-        2 => Some(HeaderLevel::H2),
-        3 => Some(HeaderLevel::H3),
-        4 => Some(HeaderLevel::H4),
-        5 => Some(HeaderLevel::H5),
-        6 => Some(HeaderLevel::H6),
-        _ => None,
-    }
+    u8::try_from(hashes)
+        .ok()
+        .and_then(|level| HeaderLevel::try_from(level).ok())
 }
 
 fn convert_level(level: HeadingLevel) -> HeaderLevel {
@@ -597,12 +583,8 @@ fn text_range(start: usize, end: usize) -> TextRange {
     }
 }
 
-fn byte_column(line_start: usize, offset: usize) -> u32 {
-    offset
-        .saturating_sub(line_start)
-        .saturating_add(1)
-        .try_into()
-        .unwrap_or(u32::MAX)
+fn byte_column(line_start: usize, offset: usize) -> u64 {
+    (offset - line_start + 1) as u64
 }
 
 fn extract_heading_source(block: &str) -> String {
@@ -669,7 +651,7 @@ fn setext_level(line: &str) -> Option<HeaderLevel> {
         .iter()
         .take_while(|byte| **byte == marker)
         .count()
-        .saturating_add(indent);
+        + indent;
     if bytes
         .get(marker_end..)
         .is_some_and(|trailing| !trailing.iter().all(|byte| matches!(byte, b' ' | b'\t')))
@@ -680,30 +662,11 @@ fn setext_level(line: &str) -> Option<HeaderLevel> {
 }
 
 fn physical_lines(source: &str) -> Vec<&str> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let bytes = source.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if matches!(bytes.get(index), Some(b'\r' | b'\n')) {
-            if let Some(line) = source.get(start..index) {
-                lines.push(line);
-            }
-            if bytes.get(index) == Some(&b'\r')
-                && bytes.get(index.saturating_add(1)) == Some(&b'\n')
-            {
-                index = index.saturating_add(1);
-            }
-            start = index.saturating_add(1);
-        }
-        index = index.saturating_add(1);
-    }
-    if start < source.len() {
-        if let Some(line) = source.get(start..) {
-            lines.push(line);
-        }
-    }
-    lines
+    line_ranges(source)
+        .into_iter()
+        .filter(|line| line.start < source.len())
+        .filter_map(|line| source.get(line.start..line.end))
+        .collect()
 }
 
 fn process_inline_text(source: &str) -> String {
@@ -753,7 +716,7 @@ fn expand_escaped_punctuation(
             .and_then(|index| source.as_bytes().get(index))
             .is_some_and(|byte| *byte == b'\\');
     if escaped {
-        range.start.saturating_sub(1)..range.end
+        range.start - 1..range.end
     } else {
         range
     }
@@ -765,22 +728,19 @@ fn collect_suppressions(
     range: std::ops::Range<usize>,
     lines: &LineIndex,
     file: &mut Suppressions,
-    per_line: &mut BTreeMap<u32, Suppressions>,
+    per_line: &mut BTreeMap<usize, Suppressions>,
 ) {
     let safe_range = clamp_range(range, source.len());
-    let (raw_html, base_offset) = source
-        .get(safe_range.clone())
-        .map_or((html, safe_range.start), |raw| (raw, safe_range.start));
+    let raw_html = source.get(safe_range.clone()).unwrap_or(html);
+    let base_offset = safe_range.start;
     let mut cursor = 0;
     while let Some(relative_start) = raw_html.get(cursor..).and_then(|raw| raw.find("<!--")) {
-        let comment_start = cursor.saturating_add(relative_start);
-        let body_start = comment_start.saturating_add("<!--".len());
+        let comment_start = cursor + relative_start;
+        let body_start = comment_start + "<!--".len();
         let Some(relative_end) = raw_html.get(body_start..).and_then(|raw| raw.find("-->")) else {
             break;
         };
-        let comment_end = body_start
-            .saturating_add(relative_end)
-            .saturating_add("-->".len());
+        let comment_end = body_start + relative_end + "-->".len();
         let Some(comment) = raw_html.get(comment_start..comment_end) else {
             break;
         };
@@ -794,7 +754,10 @@ fn collect_suppressions(
             continue;
         }
 
-        let absolute_start = base_offset.saturating_add(comment_start).min(source.len());
+        let absolute_start = base_offset
+            .checked_add(comment_start)
+            .unwrap_or(source.len())
+            .min(source.len());
         let line = lines.line_number(absolute_start);
         let is_entire_line = lines
             .line_text(source, line)
@@ -813,10 +776,8 @@ fn parse_suppression(html: &str) -> Option<(bool, Suppressions)> {
         .trim();
     let (file_wide, ids) = if let Some(ids) = comment.strip_prefix("outlint-disable-file") {
         (true, ids)
-    } else if let Some(ids) = comment.strip_prefix("outlint-disable") {
-        (false, ids)
     } else {
-        return None;
+        (false, comment.strip_prefix("outlint-disable")?)
     };
     if !ids.starts_with(char::is_whitespace) {
         return None;
@@ -853,7 +814,7 @@ fn build_section_tree(headings: Vec<Heading>) -> Vec<Section> {
             heading,
             children: Vec::new(),
         });
-        path.push(siblings.len().saturating_sub(1));
+        path.push(siblings.len() - 1);
     }
 
     roots
@@ -879,80 +840,93 @@ fn children_at_path_mut<'a>(
     children_at_path_mut(&mut section.children, rest)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineRange {
+    start: usize,
+    end: usize,
+    terminator_end: usize,
+}
+
+fn line_ranges(source: &str) -> Vec<LineRange> {
+    let bytes = source.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let terminator_end = match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => index + 2,
+            b'\r' | b'\n' => index + 1,
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        lines.push(LineRange {
+            start,
+            end: index,
+            terminator_end,
+        });
+        start = terminator_end;
+        index = terminator_end;
+    }
+    lines.push(LineRange {
+        start,
+        end: source.len(),
+        terminator_end: source.len(),
+    });
+    lines
+}
+
 struct LineIndex {
-    starts: Vec<usize>,
-    ends: Vec<usize>,
+    lines: Vec<LineRange>,
 }
 
 impl LineIndex {
     fn new(source: &str) -> Self {
-        let mut starts = vec![0];
-        let mut ends = Vec::new();
-        let bytes = source.as_bytes();
-        let mut index = 0;
-        while index < bytes.len() {
-            match bytes.get(index) {
-                Some(b'\r') => {
-                    ends.push(index);
-                    if bytes.get(index.saturating_add(1)) == Some(&b'\n') {
-                        index = index.saturating_add(1);
-                    }
-                    starts.push(index.saturating_add(1));
-                }
-                Some(b'\n') => {
-                    ends.push(index);
-                    starts.push(index.saturating_add(1));
-                }
-                _ => {}
-            }
-            index = index.saturating_add(1);
+        Self {
+            lines: line_ranges(source),
         }
-        if ends.len() < starts.len() {
-            ends.push(source.len());
-        }
-        Self { starts, ends }
     }
 
-    fn line_number(&self, offset: usize) -> u32 {
-        let index = self.starts.partition_point(|start| *start <= offset);
-        index.try_into().unwrap_or(u32::MAX)
+    fn line_number(&self, offset: usize) -> usize {
+        self.lines.partition_point(|line| line.start <= offset)
     }
 
-    fn line_start(&self, line: u32) -> usize {
+    fn line_start(&self, line: usize) -> usize {
         line.checked_sub(1)
-            .and_then(|index| usize::try_from(index).ok())
-            .and_then(|index| self.starts.get(index).copied())
+            .and_then(|index| self.lines.get(index).map(|line| line.start))
             .unwrap_or_default()
     }
 
-    fn line_end(&self, line: u32, source_len: usize) -> usize {
+    fn line_end(&self, line: usize, source_len: usize) -> usize {
         line.checked_sub(1)
-            .and_then(|index| usize::try_from(index).ok())
-            .and_then(|index| self.ends.get(index).copied())
+            .and_then(|index| self.lines.get(index).map(|line| line.end))
             .unwrap_or(source_len)
     }
 
-    fn line_text<'a>(&self, source: &'a str, line: u32) -> Option<&'a str> {
+    fn line_terminator_end(&self, line: usize, source_len: usize) -> usize {
+        line.checked_sub(1)
+            .and_then(|index| self.lines.get(index).map(|line| line.terminator_end))
+            .unwrap_or(source_len)
+    }
+
+    fn line_text<'a>(&self, source: &'a str, line: usize) -> Option<&'a str> {
         let start = self.line_start(line);
         let end = line
             .checked_sub(1)
-            .and_then(|index| usize::try_from(index).ok())
-            .and_then(|index| self.ends.get(index).copied())?;
+            .and_then(|index| self.lines.get(index).map(|line| line.end))?;
         source.get(start..end)
     }
 
     fn line_count(&self) -> usize {
-        self.starts.len()
-    }
-
-    fn line_count_u32(&self) -> u32 {
-        self.line_count().try_into().unwrap_or(u32::MAX)
+        self.lines.len()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn headings(document: &Document) -> Vec<&Heading> {
         fn visit<'a>(sections: &'a [Section], output: &mut Vec<&'a Heading>) {
@@ -1188,7 +1162,7 @@ mod tests {
         let source = "a\r\nb\rc\nd";
         let lines = LineIndex::new(source);
         let actual: Vec<_> = (1..=lines.line_count())
-            .map(|line| lines.line_text(source, line as u32))
+            .map(|line| lines.line_text(source, line))
             .collect();
 
         assert_eq!(actual, [Some("a"), Some("b"), Some("c"), Some("d")]);
@@ -1297,18 +1271,37 @@ mod tests {
         assert_eq!(value["copy"], value["base"]);
     }
 
-    #[test]
-    fn arbitrary_utf8_input_is_total() {
-        let samples = [
-            "",
-            "#",
-            "###\0x",
-            "~~~\n# x",
-            "\u{10ffff}\n---",
-            "# &broken;",
-        ];
-        for sample in samples {
-            let _ = parse_markdown(sample, MarkdownOptions::default());
+    fn assert_valid_range(source: &str, range: TextRange) {
+        assert!(range.start <= range.end);
+        assert!(range.end.0 <= source.len());
+        assert!(source.is_char_boundary(range.start.0));
+        assert!(source.is_char_boundary(range.end.0));
+    }
+
+    fn assert_valid_section_ranges(source: &str, sections: &[Section]) {
+        for section in sections {
+            assert_valid_range(source, section.heading.location.range);
+            assert_valid_range(source, section.heading.location.line_range);
+            assert!(section.heading.location.line >= 1);
+            assert!(section.heading.location.column >= 1);
+            assert_valid_section_ranges(source, &section.children);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_utf8_input_is_total_and_offsets_are_valid(source in any::<String>()) {
+            let document = parse_markdown(&source, MarkdownOptions::default());
+            assert_valid_section_ranges(&source, &document.sections);
+            match document.frontmatter {
+                DocumentFrontmatter::Absent => {}
+                DocumentFrontmatter::Mapping { location, .. }
+                | DocumentFrontmatter::Invalid { location, .. } => {
+                    assert_valid_range(&source, location.range);
+                    prop_assert!(location.start_line >= 1);
+                    prop_assert!(location.end_line >= location.start_line);
+                }
+            }
         }
     }
 }
