@@ -7,6 +7,7 @@ mod case_fold;
 mod load_result;
 mod loader;
 mod markdown;
+mod matcher;
 mod schema;
 mod validator;
 

@@ -12,11 +12,11 @@ use std::{
 
 use marked_yaml::Node as MarkedNode;
 use num_bigint::{BigInt, BigUint};
-use regex::Regex;
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::matcher::compile_anchored_pattern;
 use crate::{
     AtLeastTwo, ByteOffset, CanonicalFloat, CanonicalInteger, Cardinality, Constraint,
     ConstraintIndex, ConstraintPath, ExactText, FrontmatterKey, FrontmatterPolicy, FrontmatterRef,
@@ -683,11 +683,12 @@ impl Loader {
 
         let frontmatter = self.build_frontmatter(raw.frontmatter, frontmatter_declared);
 
+        let match_case = raw.options.match_case.unwrap_or(false);
         let options = self.build_options(&raw.options);
         let title = raw.title.as_deref().and_then(|matcher| {
             let range = self.range(RangeKey::DocumentField("title".into()));
             self.nodes.insert(SchemaNode::Title, range);
-            self.build_matcher(matcher, range)
+            self.build_matcher(matcher, match_case, range)
         });
         if raw.title.is_some()
             && options
@@ -704,7 +705,7 @@ impl Loader {
         let root_scope = ScopePath(Vec::new());
         self.raw_constraints
             .insert(root_scope.clone(), raw.constraints);
-        let sections = self.build_scope(raw.sections, &root_scope);
+        let sections = self.build_scope(raw.sections, &root_scope, match_case);
 
         let (Some(version), Some(options), Some(frontmatter), Some(sections)) =
             (version, options, frontmatter, sections)
@@ -1165,7 +1166,12 @@ impl Loader {
         })
     }
 
-    fn build_scope(&mut self, rules: Vec<RawRule>, scope: &ScopePath) -> Option<Vec<SectionRule>> {
+    fn build_scope(
+        &mut self,
+        rules: Vec<RawRule>,
+        scope: &ScopePath,
+        match_case: bool,
+    ) -> Option<Vec<SectionRule>> {
         let mut semantic = Vec::with_capacity(rules.len());
         let mut semantic_indices = Vec::with_capacity(rules.len());
         let mut complete = true;
@@ -1185,7 +1191,7 @@ impl Loader {
                 .insert(child_scope.clone(), raw.constraints);
 
             let matcher_range = self.range(RangeKey::RuleField(rule_path.clone(), "match".into()));
-            let matcher = self.build_matcher(&raw.matcher, matcher_range);
+            let matcher = self.build_matcher(&raw.matcher, match_case, matcher_range);
             let id_range = self.range(RangeKey::RuleField(
                 rule_path.clone(),
                 if raw.id.is_some() { "id" } else { "match" }.into(),
@@ -1208,7 +1214,7 @@ impl Loader {
                 raw.repeat.as_deref(),
                 outcome_range,
             );
-            let children = self.build_scope(raw.sections, &child_scope);
+            let children = self.build_scope(raw.sections, &child_scope, match_case);
             match (matcher, outcome, children) {
                 (Some(matcher), Some(outcome), Some(sections)) => {
                     semantic_indices.push(index);
@@ -1295,7 +1301,12 @@ impl Loader {
         generated
     }
 
-    fn build_matcher(&mut self, source: &str, range: SourceRange) -> Option<Matcher> {
+    fn build_matcher(
+        &mut self,
+        source: &str,
+        match_case: bool,
+        range: SourceRange,
+    ) -> Option<Matcher> {
         if source == "*" {
             return Some(Matcher::Any);
         }
@@ -1319,8 +1330,7 @@ impl Loader {
                 );
                 return None;
             };
-            let anchored = format!(r"\A(?:{body})\z");
-            if let Err(error) = Regex::new(&anchored) {
+            if let Err(error) = compile_anchored_pattern(&body, match_case, false) {
                 self.error_at(
                     SchemaErrorKind::InvalidMatcher,
                     range,
@@ -2265,6 +2275,22 @@ sections:
 "#,
         );
         assert_eq!(kinds, vec![SchemaErrorKind::InvalidMatcher]);
+    }
+
+    #[test]
+    fn regex_load_validation_uses_the_normalized_match_case_setting() {
+        let body = "[a-z]{100000}";
+        let case_insensitive = format!("version: 1\nsections:\n  - match: \"/{body}/\"\n");
+        let invalid = load_schema(&case_insensitive)
+            .expect_err("case-insensitive compiled regex exceeds the size limit");
+        assert_eq!(invalid.errors.first.kind, SchemaErrorKind::InvalidMatcher);
+
+        let case_sensitive = format!(
+            "version: 1\noptions:\n  match_case: true\nsections:\n  - match: \"/{body}/\"\n"
+        );
+        let loaded = load_schema(&case_sensitive).expect("the same regex fits when case-sensitive");
+        crate::PreparedValidator::new(&loaded.schema)
+            .expect("loader and validator use identical case-sensitive settings");
     }
 
     #[test]
