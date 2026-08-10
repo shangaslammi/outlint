@@ -214,6 +214,115 @@ fn check_validates_yaml_frontmatter_with_a_linked_json_schema() {
         .is_some_and(|path| path.ends_with("frontmatter.schema.json")));
 }
 
+#[test]
+fn linked_schema_root_uri_does_not_alias_a_sibling_root_json() {
+    let directory = TempDir::new("linked-frontmatter-root-name-collision");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write("frontmatter.schema.json", r#"{"$ref":"root.json"}"#);
+    directory.write("root.json", r#"{"required":["needed"]}"#);
+    directory.write("document.md", "---\npresent: true\n---\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        json_output(&output)["results"][0]["diagnostics"][0]["id"],
+        "frontmatter-schema"
+    );
+}
+
+#[test]
+fn linked_schema_parent_refs_from_a_nested_root_remain_distinct() {
+    let directory = TempDir::new("linked-frontmatter-parent-ref-collision");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: sub/main.json\nsections: []\n",
+    );
+    directory.write(
+        "sub/main.json",
+        r#"{"allOf":[{"$ref":"x.json"},{"$ref":"../x.json"}]}"#,
+    );
+    directory.write("sub/x.json", r#"{"required":["from_sub"]}"#);
+    directory.write("x.json", r#"{"required":["from_root"]}"#);
+    directory.write("document.md", "---\nfrom_sub: true\n---\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        json_output(&output)["results"][0]["diagnostics"][0]["id"],
+        "frontmatter-schema"
+    );
+}
+
+#[test]
+fn linked_schema_same_basename_resources_in_different_directories_remain_distinct() {
+    let directory = TempDir::new("linked-frontmatter-basename-collision");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: workspace/deep/main.json\nsections: []\n",
+    );
+    directory.write(
+        "workspace/deep/main.json",
+        r#"{"allOf":[{"$ref":"left/consumer.json"},{"$ref":"right/consumer.json"}]}"#,
+    );
+    directory.write(
+        "workspace/deep/left/consumer.json",
+        r#"{"$ref":"../../target/defs.json"}"#,
+    );
+    directory.write(
+        "workspace/deep/right/consumer.json",
+        r#"{"$ref":"../../../target/defs.json"}"#,
+    );
+    directory.write(
+        "workspace/target/defs.json",
+        r#"{"required":["from_workspace"]}"#,
+    );
+    directory.write("target/defs.json", r#"{"required":["from_fixture_root"]}"#);
+    directory.write("document.md", "---\nfrom_workspace: true\n---\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        json_output(&output)["results"][0]["diagnostics"][0]["id"],
+        "frontmatter-schema"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn linked_schema_refs_use_the_symlink_path_as_their_base() {

@@ -581,7 +581,7 @@ fn read_and_load_schema(
     ))
 }
 
-const LOGICAL_JSON_SCHEMA_ROOT: &str = "https://outlint.invalid/root.json";
+const LOGICAL_JSON_SCHEMA_ORIGIN: &str = "https://outlint.invalid";
 
 fn preload_linked_json_schema(
     schema_path: &Path,
@@ -597,11 +597,8 @@ fn preload_linked_json_schema(
             .join(declared)
     };
     let root_actual_uri = path_file_uri(&root_path)?;
-    let mut queue = VecDeque::from([(
-        root_actual_uri,
-        LOGICAL_JSON_SCHEMA_ROOT.to_owned(),
-        root_path,
-    )]);
+    let root_logical_uri = logical_json_schema_uri(&root_actual_uri)?;
+    let mut queue = VecDeque::from([(root_actual_uri, root_logical_uri.clone(), root_path)]);
     let mut visited = HashSet::new();
     let mut cached = HashMap::<PathBuf, Arc<str>>::new();
     let mut resources = Vec::new();
@@ -642,9 +639,18 @@ fn preload_linked_json_schema(
     }
 
     Ok(LinkedJsonSchemaInput {
-        root_uri: LOGICAL_JSON_SCHEMA_ROOT.into(),
+        root_uri: root_logical_uri,
         resources,
     })
+}
+
+fn logical_json_schema_uri(file_uri: &str) -> Result<String, String> {
+    // Preserve the complete lexical path so URI-relative references mirror
+    // filesystem-relative references without aliasing distinct files.
+    let path = file_uri
+        .strip_prefix("file://")
+        .ok_or_else(|| format!("JSON Schema path URI `{file_uri}` is not a file URI"))?;
+    Ok(format!("{LOGICAL_JSON_SCHEMA_ORIGIN}{path}"))
 }
 
 fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
