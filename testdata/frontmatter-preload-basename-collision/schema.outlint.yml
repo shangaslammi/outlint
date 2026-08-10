@@ -1,0 +1,4 @@
+version: 1
+frontmatter:
+  schema: resources/workspace/deep/main.json
+sections: []

@@ -1,0 +1,4 @@
+{
+  "$id": "https://example.com/schemas/frontmatter.json",
+  "$ref": "defs.json"
+}

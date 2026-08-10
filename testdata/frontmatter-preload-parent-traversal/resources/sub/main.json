@@ -1,0 +1,6 @@
+{
+  "allOf": [
+    { "$ref": "x.json" },
+    { "$ref": "../x.json" }
+  ]
+}
