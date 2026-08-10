@@ -525,6 +525,36 @@ fn schema_check_reports_schema_diagnostics_as_validation_output() {
 }
 
 #[test]
+fn schema_check_and_check_reject_unpreparable_schemas_consistently() {
+    let directory = TempDir::new("schema-unpreparable");
+    let oversized_glob = format!(
+        "version: 1\nsections:\n  - match: \"{}*\"\n",
+        "a".repeat(200_000)
+    );
+    directory.write("oversized.yml", oversized_glob);
+    directory.write("valid.yml", VALID_SCHEMA);
+    directory.write("document.md", "## Required\n");
+
+    let check = run(
+        &directory,
+        &["check", "document.md", "--schema", "oversized.yml"],
+    );
+    assert_eq!(check.status.code(), Some(2));
+    assert_eq!(stdout(&check), "");
+    assert!(stderr(&check).contains("cannot prepare schema 'oversized.yml'"));
+
+    let schema_check = run(&directory, &["schema", "check", "oversized.yml"]);
+    assert_eq!(schema_check.status.code(), Some(2));
+    assert_eq!(stdout(&schema_check), "");
+    assert_eq!(stderr(&schema_check), stderr(&check));
+
+    let valid = run(&directory, &["schema", "check", "valid.yml"]);
+    assert_eq!(valid.status.code(), Some(0));
+    assert_eq!(stdout(&valid), "");
+    assert_eq!(stderr(&valid), "");
+}
+
+#[test]
 fn discovery_uses_the_nearest_schema_for_each_file() {
     let directory = TempDir::new("discovery");
     directory.write(
