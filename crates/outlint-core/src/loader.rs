@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::matcher::compile_anchored_pattern;
+use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
     AtLeastTwo, ByteOffset, CanonicalFloat, CanonicalInteger, Cardinality, Constraint,
     ConstraintIndex, ConstraintPath, ExactText, FrontmatterKey, FrontmatterPolicy, FrontmatterRef,
@@ -1341,6 +1341,14 @@ impl Loader {
             return Some(Matcher::Regex(RegexPattern(body)));
         }
         if source.contains('*') {
+            if let Err(error) = compile_glob_pattern(source, match_case) {
+                self.error_at(
+                    SchemaErrorKind::InvalidMatcher,
+                    range,
+                    format!("invalid glob matcher `{source}`: {error}"),
+                );
+                return None;
+            }
             return Some(Matcher::Glob(GlobPattern(source.to_owned())));
         }
         Some(Matcher::Exact(ExactText(source.to_owned())))
@@ -2291,6 +2299,26 @@ sections:
         let loaded = load_schema(&case_sensitive).expect("the same regex fits when case-sensitive");
         crate::PreparedValidator::new(&loaded.schema)
             .expect("loader and validator use identical case-sensitive settings");
+    }
+
+    #[test]
+    fn oversized_glob_is_invalid_at_its_matcher_range_and_errors_are_collected() {
+        let glob = format!("{}*", "a".repeat(200_000));
+        let source = format!("version: 1\nsections:\n  - match: {glob}\n    repeat: 01..2\n");
+        let invalid = load_schema(&source).expect_err("oversized glob must fail during loading");
+        let errors = invalid.errors.iter().collect::<Vec<_>>();
+
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].kind, SchemaErrorKind::InvalidMatcher);
+        assert_eq!(source_slice(&source, errors[0].range), glob);
+        assert_eq!(errors[1].kind, SchemaErrorKind::InvalidRepeat);
+
+        let case_sensitive =
+            format!("version: 1\noptions:\n  match_case: true\nsections:\n  - match: {glob}\n");
+        let loaded = load_schema(&case_sensitive)
+            .expect("the same glob fits when matching case-sensitively");
+        crate::PreparedValidator::new(&loaded.schema)
+            .expect("loader and validator use identical case-sensitive glob settings");
     }
 
     #[test]

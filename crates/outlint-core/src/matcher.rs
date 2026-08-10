@@ -2,6 +2,15 @@
 
 use regex::{Regex, RegexBuilder};
 
+pub(crate) fn compile_glob_pattern(glob: &str, match_case: bool) -> Result<Regex, regex::Error> {
+    let body = glob
+        .split('*')
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join(".*");
+    compile_anchored_pattern(&body, match_case, true)
+}
+
 pub(crate) fn compile_anchored_pattern(
     body: &str,
     match_case: bool,

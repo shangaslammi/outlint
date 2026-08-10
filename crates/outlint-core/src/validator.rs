@@ -4,7 +4,7 @@
 //! and parse fixture text once, then pass only values to [`validate`].
 
 use crate::loader::NoExternalRetrieve;
-use crate::matcher::compile_anchored_pattern;
+use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
     ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
     DocumentFrontmatter, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef, FrontmatterSchema,
@@ -299,15 +299,9 @@ impl PreparedMatcher {
                 text: exact.0.clone(),
                 match_case,
             },
-            Matcher::Glob(glob) => {
-                let body = glob
-                    .0
-                    .split('*')
-                    .map(regex::escape)
-                    .collect::<Vec<_>>()
-                    .join(".*");
-                Self::Pattern(compile_pattern(&body, match_case, true)?)
-            }
+            Matcher::Glob(glob) => Self::Pattern(
+                compile_glob_pattern(&glob.0, match_case).map_err(prepare_matcher_error)?,
+            ),
             Matcher::Regex(pattern) => {
                 Self::Pattern(compile_pattern(&pattern.0, match_case, false)?)
             }
@@ -336,11 +330,13 @@ fn compile_pattern(
     match_case: bool,
     dot_matches_new_line: bool,
 ) -> Result<regex::Regex, PrepareValidationError> {
-    compile_anchored_pattern(body, match_case, dot_matches_new_line).map_err(|error| {
-        PrepareValidationError {
-            message: format!("cannot compile matcher: {error}"),
-        }
-    })
+    compile_anchored_pattern(body, match_case, dot_matches_new_line).map_err(prepare_matcher_error)
+}
+
+fn prepare_matcher_error(error: regex::Error) -> PrepareValidationError {
+    PrepareValidationError {
+        message: format!("cannot compile matcher: {error}"),
+    }
 }
 
 struct Validator<'a> {
