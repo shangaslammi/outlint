@@ -56,7 +56,7 @@ pub fn load_schema_with_resources(
 #[derive(Debug)]
 struct PreparedExternalSchema {
     root_source: SourceId,
-    result: Result<crate::FrontmatterSchema, PreparedExternalError>,
+    result: Result<crate::FrontmatterSchema, NonEmpty<PreparedExternalError>>,
 }
 
 #[derive(Debug)]
@@ -175,61 +175,83 @@ fn prepare_external_schema(
 fn prepare_external_schema_result(
     input: &LinkedJsonSchemaInput,
     source_ids: &BTreeMap<String, SourceId>,
-) -> Result<crate::FrontmatterSchema, PreparedExternalError> {
+) -> Result<crate::FrontmatterSchema, NonEmpty<PreparedExternalError>> {
     let mut parsed = BTreeMap::new();
-    for resource in &input.resources {
-        let source = source_ids
-            .get(&resource.uri)
-            .copied()
-            .unwrap_or(SourceId(0));
-        if parsed.contains_key(&resource.uri) {
-            return Err(PreparedExternalError {
+    let mut seen = HashSet::new();
+    let mut errors = Vec::new();
+    for (index, resource) in input.resources.iter().enumerate() {
+        let source = external_source_id(index).unwrap_or(SourceId(0));
+        if !seen.insert(resource.uri.clone()) {
+            errors.push(PreparedExternalError {
                 source,
                 message: format!("duplicate JSON Schema resource URI `{}`", resource.uri),
             });
+            continue;
         }
         let text = match &resource.contents {
             JsonSchemaResourceContents::Loaded(text) => text,
             JsonSchemaResourceContents::ReadFailure(message) => {
-                return Err(PreparedExternalError {
+                errors.push(PreparedExternalError {
                     source,
                     message: message.clone(),
                 });
+                continue;
             }
         };
-        let value: serde_json::Value =
-            serde_json::from_str(text).map_err(|error| PreparedExternalError {
-                source,
-                message: format!("invalid linked JSON Schema document: {error}"),
-            })?;
-        validate_json_schema_document(&value)
-            .map_err(|message| PreparedExternalError { source, message })?;
+        let value: serde_json::Value = match serde_json::from_str(text) {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(PreparedExternalError {
+                    source,
+                    message: format!("invalid linked JSON Schema document: {error}"),
+                });
+                continue;
+            }
+        };
+        if let Err(message) = validate_json_schema_document(&value) {
+            errors.push(PreparedExternalError { source, message });
+            continue;
+        }
         parsed.insert(resource.uri.clone(), value);
     }
+    // Resource-local failures are independent and retain input order. The
+    // registry is graph-dependent, so do not compile an incomplete graph or
+    // add cascading resolution failures after any local error.
+    if let Some(errors) = non_empty(errors) {
+        return Err(errors);
+    }
     let mut resources = parsed;
-    let root = resources
-        .remove(&input.root_uri)
-        .ok_or_else(|| PreparedExternalError {
+    let root = resources.remove(&input.root_uri).ok_or_else(|| {
+        single_external_error(PreparedExternalError {
             source: root_source_id(source_ids, &input.root_uri),
             message: format!(
                 "linked JSON Schema root resource `{}` was not preloaded",
                 input.root_uri
             ),
-        })?;
+        })
+    })?;
 
     {
         let mut registry = jsonschema::Registry::new()
             .add(input.root_uri.as_str(), &root)
             .map_err(|error| {
-                external_registry_error(error.to_string(), source_ids, &input.root_uri)
+                single_external_error(external_registry_error(
+                    error.to_string(),
+                    source_ids,
+                    &input.root_uri,
+                ))
             })?;
         for (uri, resource) in &resources {
-            registry = registry
-                .add(uri.as_str(), resource)
-                .map_err(|error| external_registry_error(error.to_string(), source_ids, uri))?;
+            registry = registry.add(uri.as_str(), resource).map_err(|error| {
+                single_external_error(external_registry_error(error.to_string(), source_ids, uri))
+            })?;
         }
         let registry = registry.prepare().map_err(|error| {
-            external_registry_error(error.to_string(), source_ids, &input.root_uri)
+            single_external_error(external_registry_error(
+                error.to_string(),
+                source_ids,
+                &input.root_uri,
+            ))
         })?;
         jsonschema::draft202012::options()
             .with_registry(&registry)
@@ -244,10 +266,10 @@ fn prepare_external_schema_result(
                     .iter()
                     .find_map(|(uri, source)| message.contains(uri).then_some(*source))
                     .unwrap_or_else(|| root_source_id(source_ids, &input.root_uri));
-                PreparedExternalError {
+                single_external_error(PreparedExternalError {
                     source,
                     message: format!("cannot compile linked JSON Schema: {message}"),
-                }
+                })
             })?;
     }
 
@@ -256,6 +278,13 @@ fn prepare_external_schema_result(
         root,
         resources,
     })
+}
+
+fn single_external_error(error: PreparedExternalError) -> NonEmpty<PreparedExternalError> {
+    NonEmpty {
+        first: error,
+        rest: Vec::new(),
+    }
 }
 
 fn validate_json_schema_document(value: &serde_json::Value) -> Result<(), String> {
@@ -608,7 +637,7 @@ impl Loader {
                     source_id_exhausted = true;
                     break;
                 };
-                source_ids.insert(resource.uri.clone(), id);
+                source_ids.entry(resource.uri.clone()).or_insert(id);
                 sources.documents.insert(
                     id,
                     SchemaSource {
@@ -623,11 +652,11 @@ impl Loader {
             if source_id_exhausted {
                 PreparedExternalSchema {
                     root_source: SourceId(0),
-                    result: Err(PreparedExternalError {
+                    result: Err(single_external_error(PreparedExternalError {
                         source: SourceId(0),
                         message: "too many linked JSON Schema resources to assign source ids"
                             .into(),
-                    }),
+                    })),
                 }
             } else {
                 prepare_external_schema(&external, &source_ids)
@@ -898,22 +927,24 @@ impl Loader {
                 );
                 let schema = match external.result {
                     Ok(schema) => schema,
-                    Err(error) => {
-                        let range = self.sources.documents.get(&error.source).map_or(
-                            schema_range,
-                            |source| SourceRange {
-                                source: error.source,
-                                range: TextRange {
-                                    start: ByteOffset(0),
-                                    end: ByteOffset(source.text.len()),
+                    Err(errors) => {
+                        for error in std::iter::once(errors.first).chain(errors.rest) {
+                            let range = self.sources.documents.get(&error.source).map_or(
+                                schema_range,
+                                |source| SourceRange {
+                                    source: error.source,
+                                    range: TextRange {
+                                        start: ByteOffset(0),
+                                        end: ByteOffset(source.text.len()),
+                                    },
                                 },
-                            },
-                        );
-                        self.error_at(
-                            SchemaErrorKind::InvalidFrontmatterSchema,
-                            range,
-                            error.message,
-                        );
+                            );
+                            self.error_at(
+                                SchemaErrorKind::InvalidFrontmatterSchema,
+                                range,
+                                error.message,
+                            );
+                        }
                         return None;
                     }
                 };
@@ -2790,6 +2821,7 @@ sections: []
     #[test]
     fn positions_invalid_linked_json_schema_in_its_own_source() {
         let invalid = linked("{ invalid json }", &[]).expect_err("linked JSON Schema is invalid");
+        assert_eq!(invalid.errors.iter().count(), 1);
         assert_eq!(
             invalid.errors.first.kind,
             SchemaErrorKind::InvalidFrontmatterSchema
@@ -2814,6 +2846,69 @@ sections: []
         assert_eq!(
             invalid.sources.documents[&SourceId(2)].label,
             Some(SourceLabel("defs.json".into()))
+        );
+    }
+
+    #[test]
+    fn collects_independent_linked_resource_errors_in_input_order() {
+        let invalid = linked(
+            r#"{"allOf":[{"$ref":"first.json"},{"$ref":"second.json"}]}"#,
+            &[
+                ("https://outlint.invalid/first.json", "{ invalid json }"),
+                ("https://outlint.invalid/second.json", "[]"),
+            ],
+        )
+        .expect_err("both invalid linked resources must be reported");
+        let errors = invalid.errors.iter().collect::<Vec<_>>();
+
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].kind, SchemaErrorKind::InvalidFrontmatterSchema);
+        assert_eq!(errors[0].range.source, SourceId(2));
+        assert!(errors[0]
+            .message
+            .starts_with("invalid linked JSON Schema document:"));
+        assert_eq!(errors[1].kind, SchemaErrorKind::InvalidFrontmatterSchema);
+        assert_eq!(errors[1].range.source, SourceId(3));
+        assert_eq!(
+            errors[1].message,
+            "linked JSON Schema root must be an object or boolean"
+        );
+    }
+
+    #[test]
+    fn duplicate_linked_resource_error_uses_the_duplicate_occurrence_source() {
+        let uri = "https://outlint.invalid/duplicate.json";
+        let mut first = resource(uri, "{ invalid json }");
+        first.label = Some(SourceLabel("first-duplicate.json".into()));
+        let mut second = resource(uri, "{}");
+        second.label = Some(SourceLabel("second-duplicate.json".into()));
+        let invalid = load_schema_with_resources(
+            linked_schema_source(),
+            Some(SourceLabel("schema.yml".into())),
+            Some(LinkedJsonSchemaInput {
+                root_uri: "https://outlint.invalid/root.json".into(),
+                resources: vec![
+                    resource(
+                        "https://outlint.invalid/root.json",
+                        r#"{"$ref":"duplicate.json"}"#,
+                    ),
+                    first,
+                    second,
+                ],
+            }),
+        )
+        .expect_err("invalid and duplicate resources must both be reported");
+        let errors = invalid.errors.iter().collect::<Vec<_>>();
+
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].range.source, SourceId(2));
+        assert_eq!(errors[1].range.source, SourceId(3));
+        assert!(errors[1]
+            .message
+            .starts_with("duplicate JSON Schema resource URI"));
+        assert_eq!(
+            invalid.sources.documents[&SourceId(3)].label,
+            Some(SourceLabel("second-duplicate.json".into()))
         );
     }
 

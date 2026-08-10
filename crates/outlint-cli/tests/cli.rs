@@ -459,6 +459,40 @@ fn linked_schema_read_failures_name_the_unreadable_resource() {
         .is_some_and(|path| path.ends_with("missing-nested.json")));
 }
 
+#[test]
+fn linked_schema_reports_all_invalid_resources_in_reference_order() {
+    let directory = TempDir::new("linked-frontmatter-error-collection");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: root.json\nsections: []\n",
+    );
+    directory.write(
+        "root.json",
+        r#"{"allOf":[{"$ref":"first.json"},{"$ref":"second.json"}]}"#,
+    );
+    directory.write("first.json", "{ invalid json }");
+    directory.write("second.json", "[]");
+
+    let output = run(
+        &directory,
+        &["schema", "check", "schema.yml", "--format", "json"],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    let json = json_output(&output);
+    let diagnostics = json["results"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert_eq!(diagnostics.len(), 2);
+    for (diagnostic, expected_path) in diagnostics.iter().zip(["first.json", "second.json"]) {
+        assert_eq!(diagnostic["id"], "invalid-frontmatter-schema");
+        assert!(diagnostic["schema_location"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(expected_path)));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn linked_schema_localhost_ref_loads_the_local_absolute_path() {
