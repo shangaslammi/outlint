@@ -3,14 +3,15 @@
 //! Filesystem access, diagnostic formatting, and process behavior belong to
 //! the CLI crate; this crate converts source text into normalized values.
 
+mod case_fold;
+mod load_result;
 mod loader;
 mod markdown;
-mod parser;
 mod schema;
 mod validator;
 
+pub use load_result::*;
 pub use loader::*;
 pub use markdown::*;
-pub use parser::*;
 pub use schema::*;
 pub use validator::*;

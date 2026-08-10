@@ -8,3 +8,21 @@ sections:
     required: true
   - match: "Multi*line"
     required: true
+  - match: "Exact S"
+    required: true
+  - match: "Simple glob S*"
+    required: true
+  - match: "/Simple regex S.*/"
+    required: true
+  - match: "Exact Straße"
+    allow: false
+  - match: "Exact STRASSE"
+    required: true
+  - match: "Full glob Straße*"
+    allow: false
+  - match: "Full glob STRASSE result"
+    required: true
+  - match: "/Full regex Straße.*/"
+    allow: false
+  - match: "Full regex STRASSE result"
+    required: true

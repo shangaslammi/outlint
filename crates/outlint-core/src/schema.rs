@@ -91,6 +91,37 @@ pub enum HeaderLevel {
     H6 = 6,
 }
 
+impl HeaderLevel {
+    /// Returns the next shallower Markdown heading level, if one exists.
+    pub const fn predecessor(self) -> Option<Self> {
+        match self {
+            Self::H1 => None,
+            Self::H2 => Some(Self::H1),
+            Self::H3 => Some(Self::H2),
+            Self::H4 => Some(Self::H3),
+            Self::H5 => Some(Self::H4),
+            Self::H6 => Some(Self::H5),
+        }
+    }
+}
+
+impl TryFrom<u8> for HeaderLevel {
+    type Error = ();
+
+    /// Converts only Markdown's representable h1 through h6 levels.
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::H1),
+            2 => Ok(Self::H2),
+            3 => Ok(Self::H3),
+            4 => Ok(Self::H4),
+            5 => Ok(Self::H5),
+            6 => Ok(Self::H6),
+            _ => Err(()),
+        }
+    }
+}
+
 /// A rule for headers within one scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionRule {
@@ -271,10 +302,26 @@ pub struct NonEmpty<T> {
     pub rest: Vec<T>,
 }
 
+impl<T> NonEmpty<T> {
+    /// Iterates every item in collection order.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        std::iter::once(&self.first).chain(&self.rest)
+    }
+}
+
 /// A collection statically guaranteed to contain at least two items.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AtLeastTwo<T> {
     pub first: T,
     pub second: T,
     pub rest: Vec<T>,
+}
+
+impl<T> AtLeastTwo<T> {
+    /// Iterates every item in collection order.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        std::iter::once(&self.first)
+            .chain(std::iter::once(&self.second))
+            .chain(&self.rest)
+    }
 }

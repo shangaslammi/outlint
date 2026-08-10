@@ -32,7 +32,7 @@ invent, rename, or repurpose one without a spec change.
 ## Current state
 
 Early. `outlint-core` currently contains only the type model:
-`schema.rs` (normalized semantic schema) and `parser.rs` (loader result
+`schema.rs` (normalized semantic schema) and `load_result.rs` (loader result
 types and provenance). There is no loader implementation, no Markdown
 parsing, no validator, and no test suite. `crates/outlint-cli/src/main.rs`
 parses argv and `run_check` is a stub.
@@ -110,7 +110,7 @@ in the design, not a fact about the problem.
 
 ## Rust conventions in force
 
-These are established by `schema.rs` and `parser.rs`. Match them.
+These are established by `schema.rs` and `load_result.rs`. Match them.
 
 Make invalid states unrepresentable. This is the crate's main design idea
 and it is deliberate, not over-engineering: `HeaderLevel` as an enum keeps

@@ -391,6 +391,9 @@ Additional fields MAY be added compatibly.
 
 Fields that do not apply to a diagnostic SHOULD be omitted rather than emitted as ambiguous sentinel values.
 
+Line and byte-column values are one-based unsigned 64-bit integers. This
+includes document and schema locations and `frontmatter_range` endpoints.
+
 Every result has a `kind` field. A successfully loaded document produces a
 `"document"` result whose `path` is the document argument and whose `schema`
 is the explicit or discovered schema path. `schema check` produces a
