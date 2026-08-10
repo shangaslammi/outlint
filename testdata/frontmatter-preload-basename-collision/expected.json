@@ -1,0 +1,6 @@
+{
+  "fail.md": [
+    { "id": "frontmatter-schema", "path": "" }
+  ],
+  "pass.md": []
+}

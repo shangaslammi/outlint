@@ -1,0 +1,4 @@
+version: 1
+frontmatter:
+  schema: bundle/frontmatter.schema.json
+sections: []

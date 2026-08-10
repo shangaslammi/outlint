@@ -1402,6 +1402,9 @@ fn scalar_json(scalar: &RenderedScalar) -> Value {
 }
 
 #[cfg(test)]
+mod conformance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         decode_utf8, diagnostic_json, file_uri_path, line_column, parse_check_args, ParseOutcome,

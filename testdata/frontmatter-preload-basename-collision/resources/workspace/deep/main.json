@@ -1,0 +1,6 @@
+{
+  "allOf": [
+    { "$ref": "left/consumer.json" },
+    { "$ref": "right/consumer.json" }
+  ]
+}
