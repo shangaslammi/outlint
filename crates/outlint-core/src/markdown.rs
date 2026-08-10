@@ -269,7 +269,8 @@ fn parse_frontmatter(
         .prevent_coercion(true);
     let marked = marked_yaml::parse_yaml_with_options(0, body, options);
     let parsed = match (yaml, marked) {
-        (Ok(_), Ok(marked)) => marked_frontmatter_mapping(&marked),
+        (Ok(serde_yaml::Value::Mapping(_)), Ok(marked)) => marked_frontmatter_mapping(&marked),
+        (Ok(_), Ok(_)) => Err("frontmatter must be a YAML mapping".into()),
         // Preserve exact scalar lexemes when valid YAML uses constructs that
         // marked-yaml deliberately does not model, notably tags and aliases.
         (Ok(_), Err(_)) => exact_frontmatter_mapping(body),
@@ -1444,6 +1445,25 @@ mod tests {
         };
         assert_eq!((location.start_line, location.end_line), (1, 3));
         assert!(unclosed.sections.is_empty());
+    }
+
+    #[test]
+    fn empty_and_comment_only_frontmatter_are_not_mappings() {
+        for source in ["---\n---\n", "---\n# comment only\n---\n"] {
+            let document = parse_markdown(source, MarkdownOptions::default());
+            let DocumentFrontmatter::Invalid { location, message } = document.frontmatter else {
+                panic!("empty YAML content must not become a mapping: {document:?}")
+            };
+            assert_eq!(message, "frontmatter must be a YAML mapping");
+            assert_eq!(location.start_line, 1);
+            assert_eq!(location.end_line, source.lines().count() as u64);
+        }
+
+        let explicit_mapping = parse_markdown("---\n{}\n---\n", MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { value, .. } = explicit_mapping.frontmatter else {
+            panic!("an explicit empty mapping remains valid: {explicit_mapping:?}")
+        };
+        assert_eq!(value, serde_json::json!({}));
     }
 
     #[test]
