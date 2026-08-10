@@ -603,6 +603,66 @@ fn marked_node_range(node: &MarkedNode, char_offsets: &[usize], source: &str) ->
     }
 }
 
+fn yaml_location_range(source: &str, line: usize, column: usize) -> TextRange {
+    // serde_yaml reports one-based lines and Unicode-scalar columns. Treat the
+    // location as an unstructured third-party boundary and clamp both axes.
+    let (line_start, line_end) = yaml_line_bounds(source, line);
+    let line_text = source.get(line_start..line_end).unwrap_or_default();
+    let column_offset = line_text
+        .char_indices()
+        .nth(column.saturating_sub(1))
+        .map_or(line_text.len(), |(offset, _)| offset);
+    let start = line_start
+        .checked_add(column_offset)
+        .unwrap_or(source.len())
+        .min(source.len());
+    let width = line_text
+        .get(column_offset..)
+        .and_then(|tail| tail.chars().next())
+        .map_or(0, |character| character.len_utf8());
+    let end = start
+        .checked_add(width)
+        .unwrap_or(source.len())
+        .min(source.len());
+    TextRange {
+        start: ByteOffset(start),
+        end: ByteOffset(end),
+    }
+}
+
+fn yaml_line_bounds(source: &str, line: usize) -> (usize, usize) {
+    let target_line = line.saturating_sub(1);
+    let bytes = source.as_bytes();
+    let mut line_start = 0;
+
+    for _ in 0..target_line {
+        let mut line_end = line_start;
+        while bytes
+            .get(line_end)
+            .is_some_and(|byte| !matches!(*byte, b'\r' | b'\n'))
+        {
+            line_end = line_end.saturating_add(1);
+        }
+
+        let Some(terminator) = bytes.get(line_end).copied() else {
+            return (source.len(), source.len());
+        };
+        let terminator_width = usize::from(
+            terminator == b'\r' && bytes.get(line_end.saturating_add(1)).copied() == Some(b'\n'),
+        ) + 1;
+        line_start = line_end.saturating_add(terminator_width).min(source.len());
+    }
+
+    let mut line_end = line_start;
+    while bytes
+        .get(line_end)
+        .is_some_and(|byte| !matches!(*byte, b'\r' | b'\n'))
+    {
+        line_end = line_end.saturating_add(1);
+    }
+    (line_start, line_end)
+}
+
 struct Loader {
     source: Arc<str>,
     sources: SchemaSources,
@@ -1749,29 +1809,9 @@ impl Loader {
         let Some(location) = error.location() else {
             return self.document_range;
         };
-        let line_start = self
-            .source
-            .split_inclusive('\n')
-            // serde_yaml's location is a third-party, unstructured boundary;
-            // clamp a hypothetical zero line/column rather than underflowing.
-            .take(location.line().saturating_sub(1))
-            .map(str::len)
-            .sum::<usize>();
-        let start = line_start
-            .checked_add(location.column().saturating_sub(1))
-            .unwrap_or(self.source.len())
-            .min(self.source.len());
-        let end = if start < self.source.len() {
-            start + 1
-        } else {
-            start
-        };
         SourceRange {
             source: SourceId(0),
-            range: TextRange {
-                start: ByteOffset(start),
-                end: ByteOffset(end),
-            },
+            range: yaml_location_range(&self.source, location.line(), location.column()),
         }
     }
 
@@ -2246,6 +2286,76 @@ mod tests {
         source
             .get(range.range.start.0..range.range.end.0)
             .unwrap_or("<invalid range>")
+    }
+
+    #[test]
+    fn yaml_syntax_error_ranges_convert_character_columns_to_bytes() {
+        for source in [
+            "version: 1\ntitle: å: bad\nsections: []\n",
+            "version: 1\ntitle: a: bad\nsections: []\n",
+            "version: 1\rtitle: å: bad\rsections: []\r",
+        ] {
+            let invalid = load_schema(source).expect_err("schema has invalid YAML");
+            let error = &invalid.errors.first;
+            let expected_start = source
+                .find(": bad")
+                .unwrap_or_else(|| panic!("test source contains the bad colon"));
+
+            assert_eq!(error.kind, SchemaErrorKind::Syntax);
+            assert_eq!(error.range.range.start, ByteOffset(expected_start));
+            assert_eq!(source_slice(source, error.range), ":");
+            assert!(source.is_char_boundary(error.range.range.start.0));
+            assert!(source.is_char_boundary(error.range.range.end.0));
+        }
+    }
+
+    #[test]
+    fn yaml_location_ranges_clamp_to_character_boundaries_on_the_reported_line() {
+        let source = "å\nx";
+        assert_eq!(
+            yaml_location_range(source, 0, 0),
+            TextRange {
+                start: ByteOffset(0),
+                end: ByteOffset(2),
+            }
+        );
+        assert_eq!(
+            yaml_location_range(source, 1, usize::MAX),
+            TextRange {
+                start: ByteOffset(2),
+                end: ByteOffset(2),
+            }
+        );
+        assert_eq!(
+            yaml_location_range(source, usize::MAX, 1),
+            TextRange {
+                start: ByteOffset(source.len()),
+                end: ByteOffset(source.len()),
+            }
+        );
+
+        let crlf = "😀x\r\nz";
+        assert_eq!(
+            yaml_location_range(crlf, 1, 1),
+            TextRange {
+                start: ByteOffset(0),
+                end: ByteOffset(4),
+            }
+        );
+        assert_eq!(
+            yaml_location_range(crlf, 1, usize::MAX),
+            TextRange {
+                start: ByteOffset(5),
+                end: ByteOffset(5),
+            }
+        );
+        assert_eq!(
+            yaml_location_range(crlf, 2, 1),
+            TextRange {
+                start: ByteOffset(7),
+                end: ByteOffset(8),
+            }
+        );
     }
 
     #[test]

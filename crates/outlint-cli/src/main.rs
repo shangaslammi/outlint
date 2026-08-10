@@ -947,11 +947,34 @@ fn source_location(
 
 fn line_column(source: &str, byte_offset: usize) -> (u64, u64) {
     let offset = byte_offset.min(source.len());
-    let prefix = source.get(..offset).unwrap_or_default();
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
-    let column = offset - line_start + 1;
-    (line as u64, column as u64)
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    let mut line = 1_u64;
+    let mut line_start = 0;
+
+    while index < offset {
+        match bytes.get(index).copied() {
+            Some(b'\r') => {
+                let next = index.saturating_add(1);
+                let terminator_width =
+                    usize::from(next < offset && bytes.get(next).copied() == Some(b'\n')) + 1;
+                index = index.saturating_add(terminator_width).min(offset);
+                line = line.saturating_add(1);
+                line_start = index;
+            }
+            Some(b'\n') => {
+                index = index.saturating_add(1);
+                line = line.saturating_add(1);
+                line_start = index;
+            }
+            Some(_) => index = index.saturating_add(1),
+            None => break,
+        }
+    }
+
+    let column =
+        u64::try_from(offset.saturating_sub(line_start).saturating_add(1)).unwrap_or(u64::MAX);
+    (line, column)
 }
 
 fn sort_diagnostics(diagnostics: &mut [RenderedDiagnostic]) {
@@ -1397,6 +1420,8 @@ mod tests {
     #[test]
     fn source_positions_are_one_based_byte_columns() {
         assert_eq!(line_column("one\nåx", 6), (2, 3));
+        assert_eq!(line_column("one\råx", 6), (2, 3));
+        assert_eq!(line_column("one\r\n😀x", 9), (2, 5));
     }
 
     #[test]
