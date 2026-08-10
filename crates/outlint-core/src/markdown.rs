@@ -53,10 +53,8 @@ pub enum DocumentFrontmatter {
     Absent,
     /// A YAML mapping converted to the JSON value domain used by JSON Schema.
     Mapping {
-        /// The frontmatter mapping in JSON Schema's value domain.
-        ///
-        /// This is always an object for parser-created documents.
-        value: serde_json::Value,
+        /// The frontmatter mapping in JSON Schema's object domain.
+        value: serde_json::Map<String, serde_json::Value>,
         /// Source location of the complete delimited block.
         location: FrontmatterLocation,
     },
@@ -298,7 +296,9 @@ fn serde_yaml_numeric_range_error(error: &serde_yaml::Error) -> bool {
         || (message.contains("invalid value: string") && message.contains("expected a float"))
 }
 
-fn marked_frontmatter_mapping(value: &MarkedNode) -> Result<serde_json::Value, String> {
+fn marked_frontmatter_mapping(
+    value: &MarkedNode,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let Some(mapping) = value.as_mapping() else {
         return Err("frontmatter must be a YAML mapping".into());
     };
@@ -314,7 +314,7 @@ fn marked_frontmatter_mapping(value: &MarkedNode) -> Result<serde_json::Value, S
         }
         object.insert(key.as_str().to_owned(), marked_yaml_to_json(value)?);
     }
-    Ok(serde_json::Value::Object(object))
+    Ok(object)
 }
 
 fn marked_yaml_to_json(value: &MarkedNode) -> Result<serde_json::Value, String> {
@@ -406,12 +406,14 @@ struct ExactYamlScalar {
     tag: Option<YamlTag>,
 }
 
-fn exact_frontmatter_mapping(source: &str) -> Result<serde_json::Value, String> {
+fn exact_frontmatter_mapping(
+    source: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let value = exact_yaml_to_json(parse_exact_yaml(source)?)?;
-    if !value.is_object() {
+    let serde_json::Value::Object(mapping) = value else {
         return Err("frontmatter must be a YAML mapping".into());
-    }
-    Ok(value)
+    };
+    Ok(mapping)
 }
 
 fn parse_exact_yaml(source: &str) -> Result<ExactYamlNode, String> {
@@ -1497,7 +1499,7 @@ mod tests {
         let DocumentFrontmatter::Mapping { value, .. } = explicit_mapping.frontmatter else {
             panic!("an explicit empty mapping remains valid: {explicit_mapping:?}")
         };
-        assert_eq!(value, serde_json::json!({}));
+        assert_eq!(value, serde_json::Map::new());
     }
 
     #[test]
