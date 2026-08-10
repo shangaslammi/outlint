@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use outlint_core::{
     linked_frontmatter_schema_path, load_schema_with_resources, parse_markdown,
-    JsonSchemaResourceInput, LinkedJsonSchemaInput, MarkdownOptions, PreparedValidator,
-    SourceLabel,
+    JsonSchemaResourceContents, JsonSchemaResourceInput, LinkedJsonSchemaInput, MarkdownOptions,
+    PreparedValidator, SourceLabel,
 };
 use serde::Deserialize;
 
@@ -77,9 +77,11 @@ fn run_fixture(directory: &Path) {
                     JsonSchemaResourceInput {
                         uri,
                         label: Some(SourceLabel(path.display().to_string())),
-                        text: Arc::from(fs::read_to_string(&path).unwrap_or_else(|error| {
-                            panic!("cannot read {}: {error}", path.display())
-                        })),
+                        contents: JsonSchemaResourceContents::Loaded(Arc::from(
+                            fs::read_to_string(&path).unwrap_or_else(|error| {
+                                panic!("cannot read {}: {error}", path.display())
+                            }),
+                        )),
                     }
                 })
                 .collect(),

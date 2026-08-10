@@ -10,9 +10,9 @@ use std::{
 use outlint_core::{
     json_schema_external_references, linked_frontmatter_schema_path, load_schema_with_resources,
     parse_markdown, Diagnostic, DiagnosticReference, FrontmatterRef, FrontmatterScalar,
-    InvalidSchema, JsonSchemaResourceInput, LinkedJsonSchemaInput, LoadedSchema, MarkdownOptions,
-    Matcher, PreparedValidator, RefAnchor, RuleRef, SchemaError, SchemaLocations, SchemaNode,
-    SchemaSources, SourceLabel, SourceRange,
+    InvalidSchema, JsonSchemaResourceContents, JsonSchemaResourceInput, LinkedJsonSchemaInput,
+    LoadedSchema, MarkdownOptions, Matcher, PreparedValidator, RefAnchor, RuleRef, SchemaError,
+    SchemaLocations, SchemaNode, SchemaSources, SourceLabel, SourceRange,
 };
 use serde_json::{json, Map, Value};
 
@@ -613,24 +613,30 @@ fn preload_linked_json_schema(
             continue;
         }
         let canonical = fs::canonicalize(&lexical_path).unwrap_or_else(|_| lexical_path.clone());
-        let text = if let Some(text) = cached.get(&canonical) {
-            Arc::clone(text)
+        let contents = if let Some(text) = cached.get(&canonical) {
+            JsonSchemaResourceContents::Loaded(Arc::clone(text))
         } else {
-            let Ok(source) = read_utf8_file(&lexical_path, "linked JSON Schema") else {
-                continue;
-            };
-            let text = Arc::<str>::from(source);
-            cached.insert(canonical, Arc::clone(&text));
-            text
+            match read_utf8_file(&lexical_path, "linked JSON Schema") {
+                Ok(source) => {
+                    let text = Arc::<str>::from(source);
+                    cached.insert(canonical, Arc::clone(&text));
+                    JsonSchemaResourceContents::Loaded(text)
+                }
+                Err(message) => JsonSchemaResourceContents::ReadFailure(message),
+            }
+        };
+        let references = match &contents {
+            JsonSchemaResourceContents::Loaded(text) => {
+                json_schema_external_references(text, &actual_uri, &logical_uri).ok()
+            }
+            JsonSchemaResourceContents::ReadFailure(_) => None,
         };
         resources.push(JsonSchemaResourceInput {
-            uri: logical_uri.clone(),
+            uri: logical_uri,
             label: Some(SourceLabel(lexical_path.display().to_string())),
-            text: Arc::clone(&text),
+            contents,
         });
-
-        let Ok(references) = json_schema_external_references(&text, &actual_uri, &logical_uri)
-        else {
+        let Some(references) = references else {
             continue;
         };
         for reference in references {

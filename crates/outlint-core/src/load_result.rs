@@ -14,25 +14,35 @@ use crate::schema::{NonEmpty, Schema};
 /// The result of parsing, validating, and normalizing a schema document.
 pub type LoadSchemaResult = Result<LoadedSchema, InvalidSchema>;
 
-/// A preloaded JSON Schema resource supplied to the pure schema loader.
+/// One attempted JSON Schema resource supplied to the pure schema loader.
 ///
 /// The outer I/O shell assigns a stable logical `uri` for reference
-/// resolution. The display `label` and source text remain provenance only.
+/// resolution. The display `label` and contents remain provenance only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonSchemaResourceInput {
     /// Logical absolute URI used by JSON Schema reference resolution.
     pub uri: String,
     /// Human-readable filesystem path or caller label.
     pub label: Option<SourceLabel>,
+    /// Either the complete UTF-8 document or the shell's read failure.
+    pub contents: JsonSchemaResourceContents,
+}
+
+/// Contents of one attempted linked JSON Schema resource read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonSchemaResourceContents {
     /// Complete UTF-8 JSON document.
-    pub text: Arc<str>,
+    Loaded(Arc<str>),
+    /// Exact filesystem or UTF-8 error produced by the I/O shell.
+    ReadFailure(String),
 }
 
 /// Complete immutable input graph for one linked frontmatter JSON Schema.
 ///
-/// Every local resource reachable from `root_uri` must be present. Missing or
-/// remote resources are reported as `invalid-frontmatter-schema` rather than
-/// being retrieved by core.
+/// Every attempted local resource reachable from `root_uri` must be present,
+/// including failed reads. Missing, unreadable, or remote resources are
+/// reported as `invalid-frontmatter-schema` rather than being retrieved by
+/// core.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedJsonSchemaInput {
     /// URI of the resource named by `frontmatter.schema`.
@@ -69,19 +79,19 @@ pub struct LoadedSchema {
 /// No partial semantic schema is exposed on failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidSchema {
-    /// The primary document and any external JSON Schema sources read before
-    /// loading failed.
+    /// The primary document and any external JSON Schema source attempts made
+    /// before loading failed.
     pub sources: SchemaSources,
     /// One or more syntax, shape, or schema-validation errors.
     pub errors: NonEmpty<SchemaError>,
 }
 
-/// The source text and optional display name of a schema document.
+/// The available source text and optional display name of a schema document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaSource {
     /// A path, URI, or caller-provided label used when presenting diagnostics.
     pub label: Option<SourceLabel>,
-    /// The complete original source text.
+    /// The complete original text, or empty when reading this source failed.
     pub text: Arc<str>,
 }
 
