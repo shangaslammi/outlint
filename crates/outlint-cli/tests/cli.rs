@@ -323,6 +323,85 @@ fn linked_schema_same_basename_resources_in_different_directories_remain_distinc
     );
 }
 
+#[test]
+fn linked_schema_protocol_relative_ref_does_not_read_from_current_directory() {
+    let directory = TempDir::new("linked-frontmatter-uri-authority");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write(
+        "frontmatter.schema.json",
+        r#"{"$ref":"//attacker.invalid/defs.json"}"#,
+    );
+    directory.write(
+        "attacker.invalid/defs.json",
+        r#"{"required":["cwd_file_was_loaded"]}"#,
+    );
+    directory.write("document.md", "---\npresent: true\n---\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    let json = json_output(&output);
+    assert_eq!(
+        json["results"][0]["diagnostics"][0]["id"],
+        "invalid-frontmatter-schema"
+    );
+    assert!(
+        json["results"][0]["diagnostics"][0]["schema_location"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("frontmatter.schema.json"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_schema_localhost_ref_loads_the_local_absolute_path() {
+    let directory = TempDir::new("linked-frontmatter-localhost-authority");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    let target = directory.path().join("defs.json");
+    directory.write(
+        "frontmatter.schema.json",
+        format!(r#"{{"$ref":"file://localhost{}"}}"#, target.display()),
+    );
+    directory.write("defs.json", r#"{"required":["needed"]}"#);
+    directory.write("document.md", "---\npresent: true\n---\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    assert_eq!(
+        json_output(&output)["results"][0]["diagnostics"][0]["id"],
+        "frontmatter-schema"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn linked_schema_refs_use_the_symlink_path_as_their_base() {
