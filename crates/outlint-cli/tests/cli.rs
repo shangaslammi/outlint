@@ -402,6 +402,79 @@ fn linked_schema_localhost_ref_loads_the_local_absolute_path() {
     );
 }
 
+#[test]
+fn linked_schema_absolute_id_does_not_rebase_physical_sibling_reads() {
+    let directory = TempDir::new("linked-frontmatter-absolute-id");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write(
+        "frontmatter.schema.json",
+        r#"{"$id":"https://example.com/schemas/frontmatter.json","$ref":"defs.json"}"#,
+    );
+    directory.write("defs.json", r#"{"required":["needed"]}"#);
+    directory.write("document.md", "---\npresent: true\n---\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    let json = json_output(&output);
+    assert_eq!(
+        json["results"][0]["diagnostics"][0]["id"],
+        "frontmatter-schema"
+    );
+    assert_eq!(json["results"][0]["diagnostics"][0]["json_pointer"], "");
+}
+
+#[test]
+fn linked_schema_absolute_id_preserves_same_document_fragment_refs() {
+    let directory = TempDir::new("linked-frontmatter-absolute-id-fragment");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write(
+        "frontmatter.schema.json",
+        r##"{
+            "$id":"https://example.com/schemas/frontmatter.json",
+            "$ref":"#/$defs/frontmatter",
+            "$defs":{"frontmatter":{"required":["needed"]}}
+        }"##,
+    );
+    directory.write("document.md", "---\npresent: true\n---\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    assert_eq!(
+        json_output(&output)["results"][0]["diagnostics"][0]["id"],
+        "frontmatter-schema"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn linked_schema_refs_use_the_symlink_path_as_their_base() {

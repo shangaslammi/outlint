@@ -77,53 +77,69 @@ pub fn linked_frontmatter_schema_path(source: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Finds external document URIs referenced from one draft 2020-12 resource.
+/// Finds external documents referenced from one draft 2020-12 resource.
 ///
-/// Returned URIs have fragments removed and preserve traversal order,
-/// including same-document references and duplicates, so a shell can pair
-/// resolution under physical and logical base identities exactly.
+/// Each reference is resolved both from the resource's lexical physical URI,
+/// without applying `$id`, and from its logical URI according to JSON Schema
+/// `$id` semantics. Returned URIs have fragments removed and preserve
+/// traversal order, including same-document references and duplicates.
 pub fn json_schema_external_references(
     source: &str,
-    base_uri: &str,
-) -> Result<Vec<String>, String> {
+    physical_base_uri: &str,
+    logical_base_uri: &str,
+) -> Result<Vec<crate::JsonSchemaExternalReference>, String> {
     let value: serde_json::Value = serde_json::from_str(source)
         .map_err(|error| format!("invalid JSON Schema document: {error}"))?;
-    let base = jsonschema::Uri::parse(base_uri.to_owned())
-        .map_err(|error| format!("invalid JSON Schema base URI `{base_uri}`: {error:?}"))?;
+    let physical_base = jsonschema::Uri::parse(physical_base_uri.to_owned()).map_err(|error| {
+        format!("invalid physical JSON Schema base URI `{physical_base_uri}`: {error:?}")
+    })?;
+    let logical_base = jsonschema::Uri::parse(logical_base_uri.to_owned()).map_err(|error| {
+        format!("invalid logical JSON Schema base URI `{logical_base_uri}`: {error:?}")
+    })?;
     let mut references = Vec::new();
-    collect_external_references(&value, &base, &mut references)?;
+    collect_external_references(&value, &physical_base, &logical_base, &mut references)?;
     Ok(references)
 }
 
 fn collect_external_references(
     value: &serde_json::Value,
-    inherited_base: &jsonschema::Uri<String>,
-    references: &mut Vec<String>,
+    physical_base: &jsonschema::Uri<String>,
+    inherited_logical_base: &jsonschema::Uri<String>,
+    references: &mut Vec<crate::JsonSchemaExternalReference>,
 ) -> Result<(), String> {
-    let mut base = inherited_base.clone();
+    let mut logical_base = inherited_logical_base.clone();
     if let Some(identifier) = value
         .as_object()
         .and_then(|object| object.get("$id"))
         .and_then(serde_json::Value::as_str)
     {
-        base = jsonschema::uri::resolve_against(&base.borrow(), identifier)
+        logical_base = jsonschema::uri::resolve_against(&logical_base.borrow(), identifier)
             .map_err(|error| format!("invalid JSON Schema `$id` `{identifier}`: {error}"))?;
     }
     if let Some(object) = value.as_object() {
         for keyword in ["$ref", "$dynamicRef"] {
             if let Some(reference) = object.get(keyword).and_then(serde_json::Value::as_str) {
-                let target = jsonschema::uri::resolve_against(&base.borrow(), reference).map_err(
-                    |error| format!("invalid JSON Schema `{keyword}` `{reference}`: {error}"),
-                )?;
-                let document = target.as_str().split('#').next().unwrap_or_default();
-                if !document.is_empty() {
-                    references.push(document.to_owned());
+                let physical = jsonschema::uri::resolve_against(&physical_base.borrow(), reference)
+                    .map_err(|error| {
+                        format!("invalid JSON Schema `{keyword}` `{reference}`: {error}")
+                    })?;
+                let logical = jsonschema::uri::resolve_against(&logical_base.borrow(), reference)
+                    .map_err(|error| {
+                    format!("invalid JSON Schema `{keyword}` `{reference}`: {error}")
+                })?;
+                let physical_uri = physical.as_str().split('#').next().unwrap_or_default();
+                let logical_uri = logical.as_str().split('#').next().unwrap_or_default();
+                if !physical_uri.is_empty() && !logical_uri.is_empty() {
+                    references.push(crate::JsonSchemaExternalReference {
+                        physical_uri: physical_uri.to_owned(),
+                        logical_uri: logical_uri.to_owned(),
+                    });
                 }
             }
         }
     }
     for child in jsonschema::Draft::Draft202012.subresources_of(value) {
-        collect_external_references(child, &base, references)?;
+        collect_external_references(child, physical_base, &logical_base, references)?;
     }
     Ok(())
 }
@@ -2549,6 +2565,36 @@ sections: []
 "#,
         );
         assert_eq!(kinds, vec![SchemaErrorKind::InvalidFrontmatterSchema]);
+    }
+
+    #[test]
+    fn external_references_separate_physical_paths_from_id_based_logical_uris() {
+        let references = json_schema_external_references(
+            r#"{
+                "$id": "https://example.com/schemas/root.json",
+                "allOf": [
+                    { "$ref": "defs.json" },
+                    { "$id": "nested/child.json", "$ref": "more.json" }
+                ]
+            }"#,
+            "file:///workspace/frontmatter.schema.json",
+            "https://outlint.invalid/workspace/frontmatter.schema.json",
+        )
+        .expect("references resolve under both bases");
+
+        assert_eq!(
+            references,
+            vec![
+                crate::JsonSchemaExternalReference {
+                    physical_uri: "file:///workspace/defs.json".into(),
+                    logical_uri: "https://example.com/schemas/defs.json".into(),
+                },
+                crate::JsonSchemaExternalReference {
+                    physical_uri: "file:///workspace/more.json".into(),
+                    logical_uri: "https://example.com/schemas/nested/more.json".into(),
+                },
+            ]
+        );
     }
 
     #[test]
