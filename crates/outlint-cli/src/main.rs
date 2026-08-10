@@ -429,16 +429,13 @@ fn execute_check(options: CheckOptions) -> u8 {
 
     for group in &mut schema_groups {
         group.load = match read_and_load_schema(&group.path, &group.display) {
-            Ok(Ok(loaded)) => match PreparedValidator::new(&loaded.schema) {
+            Ok(Ok(loaded)) => match prepare_validator(&loaded, &group.display) {
                 Ok(validator) => SchemaLoad::Valid {
                     loaded,
                     validator: Box::new(validator),
                 },
-                Err(error) => {
-                    output.operational_errors.push(format!(
-                        "cannot prepare schema '{}': {}",
-                        group.display, error.message
-                    ));
+                Err(message) => {
+                    output.operational_errors.push(message);
                     SchemaLoad::OperationalError
                 }
             },
@@ -544,12 +541,15 @@ fn execute_schema_check(options: SchemaOptions) -> u8 {
     for schema in &options.schemas {
         let schema_path = Path::new(schema);
         match read_and_load_schema(schema_path, schema) {
-            Ok(Ok(_)) => output.results.push(ValidationResult {
-                kind: ResultKind::Schema,
-                path: schema.clone(),
-                schema: schema.clone(),
-                diagnostics: Vec::new(),
-            }),
+            Ok(Ok(loaded)) => match prepare_validator(&loaded, schema) {
+                Ok(_) => output.results.push(ValidationResult {
+                    kind: ResultKind::Schema,
+                    path: schema.clone(),
+                    schema: schema.clone(),
+                    diagnostics: Vec::new(),
+                }),
+                Err(message) => output.operational_errors.push(message),
+            },
             Ok(Err(invalid)) => {
                 let mut diagnostics = render_schema_errors(&invalid, schema);
                 sort_diagnostics(&mut diagnostics);
@@ -564,6 +564,11 @@ fn execute_schema_check(options: SchemaOptions) -> u8 {
         }
     }
     finish_invocation(output, options.format, options.color)
+}
+
+fn prepare_validator(loaded: &LoadedSchema, display: &str) -> Result<PreparedValidator, String> {
+    PreparedValidator::new(&loaded.schema)
+        .map_err(|error| format!("cannot prepare schema '{}': {}", display, error.message))
 }
 
 fn read_and_load_schema(
