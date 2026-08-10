@@ -652,6 +652,28 @@ fn schema_check_reports_schema_diagnostics_as_validation_output() {
 }
 
 #[test]
+fn schema_syntax_locations_use_one_based_byte_columns_after_non_ascii() {
+    let directory = TempDir::new("schema-non-ascii-syntax-location");
+    directory.write("invalid.yml", "version: 1\ntitle: å: bad\nsections: []\n");
+    directory.write(
+        "invalid-bare-cr.yml",
+        "version: 1\rtitle: å: bad\rsections: []\r",
+    );
+
+    for path in ["invalid.yml", "invalid-bare-cr.yml"] {
+        let output = run(&directory, &["schema", "check", path, "--format", "json"]);
+
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(stderr(&output), "");
+        let diagnostic = &json_output(&output)["results"][0]["diagnostics"][0];
+        assert_eq!(diagnostic["id"], "syntax");
+        assert_eq!(diagnostic["schema_location"]["path"], path);
+        assert_eq!(diagnostic["schema_location"]["line"], 2);
+        assert_eq!(diagnostic["schema_location"]["column"], 10);
+    }
+}
+
+#[test]
 fn schema_check_and_check_report_oversized_globs_consistently() {
     let directory = TempDir::new("schema-oversized-glob");
     let oversized_glob = format!(
