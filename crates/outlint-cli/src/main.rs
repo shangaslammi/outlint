@@ -685,7 +685,17 @@ fn path_file_uri(path: &Path) -> Result<String, String> {
 }
 
 fn file_uri_path(uri: &str) -> Option<PathBuf> {
-    let encoded = uri.strip_prefix("file://")?;
+    let remainder = uri.strip_prefix("file://")?;
+    let encoded = if remainder.starts_with('/') {
+        remainder
+    } else {
+        let authority_end = remainder.find('/')?;
+        let authority = remainder.get(..authority_end)?;
+        if !authority.eq_ignore_ascii_case("localhost") {
+            return None;
+        }
+        remainder.get(authority_end..)?
+    };
     let mut bytes = Vec::with_capacity(encoded.len());
     let mut index = 0;
     while index < encoded.len() {
@@ -1362,9 +1372,10 @@ fn scalar_json(scalar: &RenderedScalar) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_utf8, diagnostic_json, line_column, parse_check_args, ParseOutcome,
+        decode_utf8, diagnostic_json, file_uri_path, line_column, parse_check_args, ParseOutcome,
         RenderedDiagnostic,
     };
+    use std::path::Path;
 
     #[test]
     fn accepts_and_removes_utf8_bom() {
@@ -1377,6 +1388,22 @@ mod tests {
     #[test]
     fn source_positions_are_one_based_byte_columns() {
         assert_eq!(line_column("one\nåx", 6), (2, 3));
+    }
+
+    #[test]
+    fn file_uri_paths_accept_only_local_authorities() {
+        assert_eq!(
+            file_uri_path("file:///schemas/defs.json").as_deref(),
+            Some(Path::new("/schemas/defs.json"))
+        );
+        assert_eq!(
+            file_uri_path("file://LOCALHOST/schemas/defs.json").as_deref(),
+            Some(Path::new("/schemas/defs.json"))
+        );
+        assert_eq!(file_uri_path("file://attacker.invalid/defs.json"), None);
+        assert_eq!(file_uri_path("file://localhost.evil/defs.json"), None);
+        assert_eq!(file_uri_path("file://localhost@evil/defs.json"), None);
+        assert_eq!(file_uri_path("file://local%68ost/defs.json"), None);
     }
 
     #[test]
