@@ -20,10 +20,10 @@ use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
     AtLeastTwo, ByteOffset, CanonicalFloat, CanonicalInteger, Cardinality, Constraint,
     ConstraintIndex, ConstraintPath, ExactText, FrontmatterKey, FrontmatterPolicy, FrontmatterRef,
-    FrontmatterScalar, GlobPattern, HeaderLevel, InvalidSchema, LinkedJsonSchemaInput,
-    LoadSchemaResult, LoadedSchema, Matcher, NonEmpty, Options, Proposition, RefAnchor,
-    RegexPattern, RelatedLocation, RuleId, RuleIndex, RuleOutcome, RulePath, RuleRef, Schema,
-    SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
+    FrontmatterScalar, GlobPattern, HeaderLevel, InvalidSchema, JsonSchemaResourceContents,
+    LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, Matcher, NonEmpty, Options, Proposition,
+    RefAnchor, RegexPattern, RelatedLocation, RuleId, RuleIndex, RuleOutcome, RulePath, RuleRef,
+    Schema, SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
     SchemaVersion, ScopePath, SectionRule, SourceId, SourceLabel, SourceRange, TextRange,
     UpperBound,
 };
@@ -188,8 +188,17 @@ fn prepare_external_schema_result(
                 message: format!("duplicate JSON Schema resource URI `{}`", resource.uri),
             });
         }
+        let text = match &resource.contents {
+            JsonSchemaResourceContents::Loaded(text) => text,
+            JsonSchemaResourceContents::ReadFailure(message) => {
+                return Err(PreparedExternalError {
+                    source,
+                    message: message.clone(),
+                });
+            }
+        };
         let value: serde_json::Value =
-            serde_json::from_str(&resource.text).map_err(|error| PreparedExternalError {
+            serde_json::from_str(text).map_err(|error| PreparedExternalError {
                 source,
                 message: format!("invalid linked JSON Schema document: {error}"),
             })?;
@@ -604,7 +613,10 @@ impl Loader {
                     id,
                     SchemaSource {
                         label: resource.label.clone(),
-                        text: Arc::clone(&resource.text),
+                        text: match &resource.contents {
+                            JsonSchemaResourceContents::Loaded(text) => Arc::clone(text),
+                            JsonSchemaResourceContents::ReadFailure(_) => Arc::from(""),
+                        },
                     },
                 );
             }
@@ -2806,6 +2818,64 @@ sections: []
     }
 
     #[test]
+    fn positions_linked_schema_read_failures_at_the_unreadable_resource() {
+        let message = "cannot inspect linked JSON Schema 'missing.json': not found";
+        for (resources, expected_source, expected_label) in [
+            (
+                vec![failed_resource(
+                    "https://outlint.invalid/root.json",
+                    "missing-root.json",
+                    message,
+                )],
+                SourceId(1),
+                "missing-root.json",
+            ),
+            (
+                vec![
+                    resource(
+                        "https://outlint.invalid/root.json",
+                        r#"{"$ref":"missing.json"}"#,
+                    ),
+                    failed_resource(
+                        "https://outlint.invalid/missing.json",
+                        "missing.json",
+                        message,
+                    ),
+                ],
+                SourceId(2),
+                "missing.json",
+            ),
+        ] {
+            let invalid = load_schema_with_resources(
+                linked_schema_source(),
+                Some(SourceLabel("schema.yml".into())),
+                Some(LinkedJsonSchemaInput {
+                    root_uri: "https://outlint.invalid/root.json".into(),
+                    resources,
+                }),
+            )
+            .expect_err("linked schema read failure is invalid");
+
+            assert_eq!(
+                invalid.errors.first.kind,
+                SchemaErrorKind::InvalidFrontmatterSchema
+            );
+            assert_eq!(invalid.errors.first.message, message);
+            assert_eq!(invalid.errors.first.range.source, expected_source);
+            assert_eq!(
+                invalid.errors.first.range.range,
+                TextRange {
+                    start: ByteOffset(0),
+                    end: ByteOffset(0),
+                }
+            );
+            let source = &invalid.sources.documents[&expected_source];
+            assert_eq!(source.label, Some(SourceLabel(expected_label.into())));
+            assert_eq!(&*source.text, "");
+        }
+    }
+
+    #[test]
     fn rejects_missing_and_unsupported_linked_json_schemas() {
         let root = resource("https://outlint.invalid/not-root.json", "{}");
         let missing = load_schema_with_resources(
@@ -2858,7 +2928,15 @@ sections: []
             label: Some(SourceLabel(
                 uri.rsplit('/').next().unwrap_or(uri).to_owned(),
             )),
-            text: Arc::from(source),
+            contents: crate::JsonSchemaResourceContents::Loaded(Arc::from(source)),
+        }
+    }
+
+    fn failed_resource(uri: &str, label: &str, message: &str) -> crate::JsonSchemaResourceInput {
+        crate::JsonSchemaResourceInput {
+            uri: uri.into(),
+            label: Some(SourceLabel(label.into())),
+            contents: crate::JsonSchemaResourceContents::ReadFailure(message.into()),
         }
     }
 

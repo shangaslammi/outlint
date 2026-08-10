@@ -366,6 +366,99 @@ fn linked_schema_protocol_relative_ref_does_not_read_from_current_directory() {
     );
 }
 
+#[test]
+fn linked_schema_read_failures_name_the_unreadable_resource() {
+    let directory = TempDir::new("linked-frontmatter-read-failures");
+    directory.write(
+        "root-missing.yml",
+        "version: 1\nfrontmatter:\n  schema: missing-root.json\nsections: []\n",
+    );
+    directory.write(
+        "root-directory.yml",
+        "version: 1\nfrontmatter:\n  schema: unreadable-root\nsections: []\n",
+    );
+    fs::create_dir(directory.path().join("unreadable-root"))
+        .expect("unreadable root fixture directory is creatable");
+    directory.write(
+        "nested-missing.yml",
+        "version: 1\nfrontmatter:\n  schema: nested-missing-root.json\nsections: []\n",
+    );
+    directory.write(
+        "nested-missing-root.json",
+        r#"{"$ref":"missing-nested.json"}"#,
+    );
+    directory.write(
+        "nested-directory.yml",
+        "version: 1\nfrontmatter:\n  schema: nested-directory-root.json\nsections: []\n",
+    );
+    directory.write(
+        "nested-directory-root.json",
+        r#"{"$ref":"unreadable-nested"}"#,
+    );
+    fs::create_dir(directory.path().join("unreadable-nested"))
+        .expect("unreadable nested fixture directory is creatable");
+
+    let output = run(
+        &directory,
+        &[
+            "schema",
+            "check",
+            "root-missing.yml",
+            "root-directory.yml",
+            "nested-missing.yml",
+            "nested-directory.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    let json = json_output(&output);
+    let expected_failures = [
+        ("missing-root.json", "cannot inspect linked JSON Schema"),
+        ("unreadable-root", "is a directory"),
+        ("missing-nested.json", "cannot inspect linked JSON Schema"),
+        ("unreadable-nested", "is a directory"),
+    ];
+    let results = json["results"].as_array().expect("results is an array");
+    assert_eq!(results.len(), expected_failures.len());
+    for (result, (expected_path, expected_error)) in results.iter().zip(expected_failures) {
+        let diagnostic = &result["diagnostics"][0];
+        assert_eq!(diagnostic["id"], "invalid-frontmatter-schema");
+        assert!(diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(expected_path)
+                && message.contains(expected_error)
+                && !message.contains("https://outlint.invalid")));
+        assert!(diagnostic["schema_location"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(expected_path)));
+        assert_eq!(diagnostic["schema_location"]["line"], 1);
+        assert_eq!(diagnostic["schema_location"]["column"], 1);
+    }
+
+    directory.write("document.md", "---\npresent: true\n---\n");
+    let check = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "nested-missing.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(check.status.code(), Some(1), "{}", stderr(&check));
+    assert_eq!(stderr(&check), "");
+    let diagnostic = &json_output(&check)["results"][0]["diagnostics"][0];
+    assert_eq!(diagnostic["id"], "invalid-frontmatter-schema");
+    assert!(diagnostic["schema_location"]["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("missing-nested.json")));
+}
+
 #[cfg(unix)]
 #[test]
 fn linked_schema_localhost_ref_loads_the_local_absolute_path() {
