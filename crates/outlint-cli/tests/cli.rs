@@ -525,8 +525,8 @@ fn schema_check_reports_schema_diagnostics_as_validation_output() {
 }
 
 #[test]
-fn schema_check_and_check_reject_unpreparable_schemas_consistently() {
-    let directory = TempDir::new("schema-unpreparable");
+fn schema_check_and_check_report_oversized_globs_consistently() {
+    let directory = TempDir::new("schema-oversized-glob");
     let oversized_glob = format!(
         "version: 1\nsections:\n  - match: \"{}*\"\n",
         "a".repeat(200_000)
@@ -537,16 +537,42 @@ fn schema_check_and_check_reject_unpreparable_schemas_consistently() {
 
     let check = run(
         &directory,
-        &["check", "document.md", "--schema", "oversized.yml"],
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "oversized.yml",
+            "--format",
+            "json",
+        ],
     );
-    assert_eq!(check.status.code(), Some(2));
-    assert_eq!(stdout(&check), "");
-    assert!(stderr(&check).contains("cannot prepare schema 'oversized.yml'"));
+    assert_eq!(check.status.code(), Some(1));
+    assert_eq!(stderr(&check), "");
+    let check_json = json_output(&check);
+    assert_eq!(
+        check_json["results"][0]["diagnostics"][0]["id"],
+        "invalid-matcher"
+    );
+    assert_eq!(
+        check_json["results"][0]["diagnostics"][0]["schema_location"]["path"],
+        "oversized.yml"
+    );
+    assert_eq!(
+        check_json["results"][0]["diagnostics"][0]["schema_location"]["line"],
+        3
+    );
+    assert_eq!(
+        check_json["results"][0]["diagnostics"][0]["schema_location"]["column"],
+        12
+    );
 
-    let schema_check = run(&directory, &["schema", "check", "oversized.yml"]);
-    assert_eq!(schema_check.status.code(), Some(2));
-    assert_eq!(stdout(&schema_check), "");
-    assert_eq!(stderr(&schema_check), stderr(&check));
+    let schema_check = run(
+        &directory,
+        &["schema", "check", "oversized.yml", "--format", "json"],
+    );
+    assert_eq!(schema_check.status.code(), Some(1));
+    assert_eq!(stderr(&schema_check), "");
+    assert_eq!(json_output(&schema_check), check_json);
 
     let valid = run(&directory, &["schema", "check", "valid.yml"]);
     assert_eq!(valid.status.code(), Some(0));
