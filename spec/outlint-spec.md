@@ -54,7 +54,9 @@ level exceeds its parent's level by more than 1 is a structural error
 1.6. **Frontmatter.** A YAML block delimited by `---` lines starting at the
 very first line of the file is the document's frontmatter. It is not part of
 the section tree. If present it MUST parse as a YAML mapping; a scalar or
-sequence at top level is diagnostic `invalid-frontmatter`. TOML (`+++`)
+sequence at top level is diagnostic `invalid-frontmatter`. Empty YAML content,
+including comment-only content, is not a mapping and is `invalid-frontmatter`;
+an explicit `{}` is a valid empty mapping. TOML (`+++`)
 frontmatter is out of scope for v1. A first-line opening delimiter without a
 closing `---` line is `invalid-frontmatter` spanning the remainder of the
 document. For delegated JSON Schema validation, mapping keys MUST be strings;

@@ -1,0 +1,9 @@
+{
+  "comment-only.md": [
+    { "id": "invalid-frontmatter", "path": "" }
+  ],
+  "empty.md": [
+    { "id": "invalid-frontmatter", "path": "" }
+  ],
+  "mapping.md": []
+}
