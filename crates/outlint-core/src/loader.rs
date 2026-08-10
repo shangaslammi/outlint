@@ -157,6 +157,11 @@ impl jsonschema::Retrieve for NoExternalRetrieve {
     }
 }
 
+/// Starts a registry that can resolve only resources supplied by the caller.
+pub(crate) fn preloaded_json_schema_registry<'a>() -> jsonschema::RegistryBuilder<'a> {
+    jsonschema::Registry::new().retriever(NoExternalRetrieve)
+}
+
 fn prepare_external_schema(
     input: &LinkedJsonSchemaInput,
     source_ids: &BTreeMap<String, SourceId>,
@@ -232,7 +237,7 @@ fn prepare_external_schema_result(
     })?;
 
     {
-        let mut registry = jsonschema::Registry::new()
+        let mut registry = preloaded_json_schema_registry()
             .add(input.root_uri.as_str(), &root)
             .map_err(|error| {
                 single_external_error(external_registry_error(
@@ -2882,6 +2887,7 @@ sections: []
 
     #[test]
     fn rejects_remote_refs_without_network_retrieval() {
+        let remote_uri = "https://example.invalid/frontmatter.schema.json";
         let invalid = linked(
             r#"{
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2895,6 +2901,14 @@ sections: []
             SchemaErrorKind::InvalidFrontmatterSchema
         );
         assert_eq!(invalid.errors.first.range.source, SourceId(1));
+        assert!(
+            invalid.errors.first.message.contains(&format!(
+                "JSON Schema resource `{remote_uri}` was not preloaded"
+            )),
+            "unexpected retrieval diagnostic: {}",
+            invalid.errors.first.message
+        );
+        assert!(!invalid.errors.first.message.contains("Default retriever"));
     }
 
     #[test]

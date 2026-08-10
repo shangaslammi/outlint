@@ -654,6 +654,44 @@ fn linked_schema_absolute_id_preserves_same_document_fragment_refs() {
     );
 }
 
+#[test]
+fn linked_schema_remote_ref_uses_controlled_no_retrieval_diagnostic() {
+    let directory = TempDir::new("linked-frontmatter-remote-ref");
+    let remote_uri = "https://example.invalid/frontmatter.schema.json";
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write(
+        "frontmatter.schema.json",
+        format!(r#"{{"$ref":"{remote_uri}"}}"#),
+    );
+
+    let output = run(
+        &directory,
+        &["schema", "check", "schema.yml", "--format", "json"],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    let json = json_output(&output);
+    let diagnostic = &json["results"][0]["diagnostics"][0];
+    assert_eq!(diagnostic["id"], "invalid-frontmatter-schema");
+    let message = diagnostic["message"]
+        .as_str()
+        .expect("diagnostic message is a string");
+    assert!(
+        message.contains(&format!(
+            "JSON Schema resource `{remote_uri}` was not preloaded"
+        )),
+        "unexpected retrieval diagnostic: {message}"
+    );
+    assert!(
+        !message.contains("Default retriever"),
+        "unexpected retrieval diagnostic: {message}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn linked_schema_refs_use_the_symlink_path_as_their_base() {

@@ -3,7 +3,7 @@
 //! Validation is deliberately separate from parsing and IO: callers can load
 //! and parse fixture text once, then pass only values to [`validate`].
 
-use crate::loader::NoExternalRetrieve;
+use crate::loader::{preloaded_json_schema_registry, NoExternalRetrieve};
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
     ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
@@ -238,7 +238,7 @@ fn frontmatter_schema(policy: &FrontmatterPolicy) -> Option<&FrontmatterSchema> 
 fn compile_frontmatter_schema(
     schema: &FrontmatterSchema,
 ) -> Result<jsonschema::Validator, PrepareValidationError> {
-    let mut registry = jsonschema::Registry::new()
+    let mut registry = preloaded_json_schema_registry()
         .add(schema.root_uri.as_str(), &schema.root)
         .map_err(|error| PrepareValidationError {
             message: format!("cannot register frontmatter JSON Schema root: {error}"),
@@ -1435,6 +1435,38 @@ mod tests {
                 "1E2 is greater than the maximum of 1",
                 "100.0 is greater than the maximum of 1",
             ]
+        );
+    }
+
+    #[test]
+    fn manually_constructed_frontmatter_schema_denies_remote_retrieval() {
+        let remote_uri = "https://example.invalid/frontmatter.schema.json";
+        let mut schema = load_schema("version: 1\nsections: []\n")
+            .expect("test schema is valid")
+            .schema;
+        schema.frontmatter = FrontmatterPolicy::Optional {
+            schema: Some(FrontmatterSchema {
+                root_uri: "https://outlint.invalid/root.json".into(),
+                root: serde_json::json!({"$ref": remote_uri}),
+                resources: std::collections::BTreeMap::new(),
+            }),
+        };
+
+        let error = match PreparedValidator::new(&schema) {
+            Err(error) => error,
+            Ok(_) => panic!("remote refs cannot be retrieved during preparation"),
+        };
+        assert!(
+            error.message.contains(&format!(
+                "JSON Schema resource `{remote_uri}` was not preloaded"
+            )),
+            "unexpected retrieval diagnostic: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("Default retriever"),
+            "unexpected retrieval diagnostic: {}",
+            error.message
         );
     }
 
