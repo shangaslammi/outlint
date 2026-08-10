@@ -456,8 +456,11 @@ impl<'a> Validator<'a> {
                 let Some(validator) = validator else {
                     return;
                 };
+                // jsonschema's serde_json backend accepts `&Value`; keep the
+                // public document model narrower and wrap it only at this boundary.
+                let instance = serde_json::Value::Object(value.clone());
                 let mut errors = validator
-                    .iter_errors(value)
+                    .iter_errors(&instance)
                     .map(|error| (error.instance_path().as_str().to_owned(), error.to_string()))
                     .collect::<Vec<_>>();
                 errors.sort();

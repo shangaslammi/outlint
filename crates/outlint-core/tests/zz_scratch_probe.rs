@@ -4,7 +4,7 @@ fn show(name: &str, src: &str) {
     let doc = parse_markdown(src, MarkdownOptions::default());
     match &doc.frontmatter {
         DocumentFrontmatter::Absent => println!("{name}: ABSENT"),
-        DocumentFrontmatter::Mapping { value, .. } => println!("{name}: MAPPING {value}"),
+        DocumentFrontmatter::Mapping { value, .. } => println!("{name}: MAPPING {value:?}"),
         DocumentFrontmatter::Invalid { message, .. } => println!("{name}: INVALID {message}"),
     }
 }
