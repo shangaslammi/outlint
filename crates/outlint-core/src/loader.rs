@@ -2025,7 +2025,7 @@ fn canonical_integer(source: &str) -> Option<String> {
     Some(format!("{}{value}", if negative { "-" } else { "" }))
 }
 
-fn canonical_float(source: &str) -> Option<String> {
+pub(crate) fn canonical_float(source: &str) -> Option<String> {
     let (negative, unsigned) = strip_sign(source);
     if matches!(unsigned, ".inf" | ".Inf" | ".INF") {
         return Some(if negative { "-inf" } else { "inf" }.into());

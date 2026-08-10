@@ -10,7 +10,12 @@ use std::{
 };
 
 use marked_yaml::{LoaderOptions as MarkedYamlOptions, Node as MarkedNode};
+use num_bigint::BigUint;
 use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag};
+use yaml_rust2::{
+    parser::{Event as YamlEvent, Parser as YamlParser, Tag as YamlTag},
+    scanner::TScalarStyle,
+};
 
 use crate::{ByteOffset, HeaderLevel, TextRange};
 
@@ -265,14 +270,17 @@ fn parse_frontmatter(
     let marked = marked_yaml::parse_yaml_with_options(0, body, options);
     let parsed = match (yaml, marked) {
         (Ok(_), Ok(marked)) => marked_frontmatter_mapping(&marked),
-        // `serde_yaml` remains authoritative for YAML constructs that
-        // marked-yaml deliberately does not model, notably tags.
-        (Ok(yaml), Err(_)) => yaml_frontmatter_mapping(yaml),
-        // serde_yaml cannot represent integers outside u64/i64 even though
-        // they are valid YAML. marked-yaml retains those scalar lexemes. The
-        // branch necessarily depends on serde_yaml's unstructured wording.
-        (Err(error), Ok(marked)) if error.to_string().contains("invalid type: integer") => {
+        // Preserve exact scalar lexemes when valid YAML uses constructs that
+        // marked-yaml deliberately does not model, notably tags and aliases.
+        (Ok(_), Err(_)) => exact_frontmatter_mapping(body),
+        // serde_yaml cannot represent arbitrary-range YAML numbers even
+        // though marked-yaml and the exact fallback retain their lexemes.
+        // The branch necessarily depends on serde_yaml's unstructured wording.
+        (Err(error), Ok(marked)) if serde_yaml_numeric_range_error(&error) => {
             marked_frontmatter_mapping(&marked)
+        }
+        (Err(error), Err(_)) if serde_yaml_numeric_range_error(&error) => {
+            exact_frontmatter_mapping(body)
         }
         (Err(error), _) => Err(format!("invalid YAML frontmatter: {error}")),
     };
@@ -281,6 +289,12 @@ fn parse_frontmatter(
         Err(message) => DocumentFrontmatter::Invalid { location, message },
     };
     (frontmatter, Some(range))
+}
+
+fn serde_yaml_numeric_range_error(error: &serde_yaml::Error) -> bool {
+    let message = error.to_string();
+    message.contains("invalid type: integer")
+        || (message.contains("invalid value: string") && message.contains("expected a float"))
 }
 
 fn marked_frontmatter_mapping(value: &MarkedNode) -> Result<serde_json::Value, String> {
@@ -307,19 +321,7 @@ fn marked_yaml_to_json(value: &MarkedNode) -> Result<serde_json::Value, String> 
         if !scalar.may_coerce() {
             return Ok(serde_json::Value::String(scalar.as_str().to_owned()));
         }
-        return match crate::loader::parse_frontmatter_scalar(scalar.as_str()) {
-            crate::FrontmatterScalar::Null => Ok(serde_json::Value::Null),
-            crate::FrontmatterScalar::Boolean(value) => Ok(serde_json::Value::Bool(value)),
-            crate::FrontmatterScalar::Integer(value) => json_number(&value.0),
-            crate::FrontmatterScalar::Float(value) => {
-                if matches!(value.0.as_str(), "inf" | "-inf" | "nan") {
-                    Err("frontmatter contains a non-finite number".into())
-                } else {
-                    json_number(&value.0)
-                }
-            }
-            crate::FrontmatterScalar::String(value) => Ok(serde_json::Value::String(value)),
-        };
+        return marked_scalar_to_json(scalar.as_str());
     }
     if let Some(sequence) = value.as_sequence() {
         return sequence
@@ -351,51 +353,272 @@ fn json_number(source: &str) -> Result<serde_json::Value, String> {
         .map_err(|error| format!("frontmatter number `{source}` is not representable: {error}"))
 }
 
-fn yaml_frontmatter_mapping(value: serde_yaml::Value) -> Result<serde_json::Value, String> {
-    let serde_yaml::Value::Mapping(mapping) = value else {
-        return Err("frontmatter must be a YAML mapping".into());
-    };
-    let serde_json::Value::Object(mapping) = yaml_to_json(serde_yaml::Value::Mapping(mapping))?
-    else {
-        return Err("frontmatter must be a YAML mapping".into());
-    };
-    Ok(serde_json::Value::Object(mapping))
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ExactYamlNode {
+    Scalar(ExactYamlScalar),
+    Sequence {
+        tag: Option<YamlTag>,
+        values: Vec<Self>,
+    },
+    Mapping {
+        tag: Option<YamlTag>,
+        entries: Vec<(Self, Self)>,
+    },
 }
 
-fn yaml_to_json(value: serde_yaml::Value) -> Result<serde_json::Value, String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExactYamlScalar {
+    value: String,
+    style: TScalarStyle,
+    tag: Option<YamlTag>,
+}
+
+fn exact_frontmatter_mapping(source: &str) -> Result<serde_json::Value, String> {
+    let value = exact_yaml_to_json(parse_exact_yaml(source)?)?;
+    if !value.is_object() {
+        return Err("frontmatter must be a YAML mapping".into());
+    }
+    Ok(value)
+}
+
+fn parse_exact_yaml(source: &str) -> Result<ExactYamlNode, String> {
+    let mut parser = YamlParser::new_from_str(source);
+    let mut anchors = BTreeMap::new();
+    expect_yaml_event(&mut parser, |event| matches!(event, YamlEvent::StreamStart))?;
+    expect_yaml_event(&mut parser, |event| {
+        matches!(event, YamlEvent::DocumentStart)
+    })?;
+    let event = next_yaml_event(&mut parser)?;
+    let value = parse_exact_yaml_node(event, &mut parser, &mut anchors)?;
+    expect_yaml_event(&mut parser, |event| matches!(event, YamlEvent::DocumentEnd))?;
+    expect_yaml_event(&mut parser, |event| matches!(event, YamlEvent::StreamEnd))?;
+    Ok(value)
+}
+
+fn parse_exact_yaml_node(
+    event: YamlEvent,
+    parser: &mut YamlParser<std::str::Chars<'_>>,
+    anchors: &mut BTreeMap<usize, ExactYamlNode>,
+) -> Result<ExactYamlNode, String> {
+    match event {
+        YamlEvent::Scalar(value, style, anchor, tag) => {
+            let node = ExactYamlNode::Scalar(ExactYamlScalar { value, style, tag });
+            remember_yaml_anchor(anchors, anchor, &node);
+            Ok(node)
+        }
+        YamlEvent::SequenceStart(anchor, tag) => {
+            let mut values = Vec::new();
+            loop {
+                let event = next_yaml_event(parser)?;
+                if matches!(event, YamlEvent::SequenceEnd) {
+                    break;
+                }
+                values.push(parse_exact_yaml_node(event, parser, anchors)?);
+            }
+            let node = ExactYamlNode::Sequence { tag, values };
+            remember_yaml_anchor(anchors, anchor, &node);
+            Ok(node)
+        }
+        YamlEvent::MappingStart(anchor, tag) => {
+            let mut entries = Vec::new();
+            loop {
+                let event = next_yaml_event(parser)?;
+                if matches!(event, YamlEvent::MappingEnd) {
+                    break;
+                }
+                let key = parse_exact_yaml_node(event, parser, anchors)?;
+                let event = next_yaml_event(parser)?;
+                let value = parse_exact_yaml_node(event, parser, anchors)?;
+                if entries
+                    .iter()
+                    .any(|(existing, _): &(ExactYamlNode, ExactYamlNode)| existing == &key)
+                {
+                    return Err("frontmatter contains a duplicate mapping key".into());
+                }
+                entries.push((key, value));
+            }
+            let node = ExactYamlNode::Mapping { tag, entries };
+            remember_yaml_anchor(anchors, anchor, &node);
+            Ok(node)
+        }
+        YamlEvent::Alias(anchor) => anchors
+            .get(&anchor)
+            .cloned()
+            .ok_or_else(|| "frontmatter contains an unresolved YAML alias".into()),
+        _ => Err("frontmatter contains an unexpected YAML parser event".into()),
+    }
+}
+
+fn remember_yaml_anchor(
+    anchors: &mut BTreeMap<usize, ExactYamlNode>,
+    anchor: usize,
+    node: &ExactYamlNode,
+) {
+    if anchor != 0 {
+        anchors.insert(anchor, node.clone());
+    }
+}
+
+fn next_yaml_event(parser: &mut YamlParser<std::str::Chars<'_>>) -> Result<YamlEvent, String> {
+    parser
+        .next_token()
+        .map(|(event, _)| event)
+        .map_err(|error| format!("invalid YAML frontmatter: {error}"))
+}
+
+fn expect_yaml_event(
+    parser: &mut YamlParser<std::str::Chars<'_>>,
+    expected: impl FnOnce(&YamlEvent) -> bool,
+) -> Result<(), String> {
+    let event = next_yaml_event(parser)?;
+    if expected(&event) {
+        Ok(())
+    } else {
+        Err("frontmatter contains an unexpected YAML document boundary".into())
+    }
+}
+
+fn exact_yaml_to_json(value: ExactYamlNode) -> Result<serde_json::Value, String> {
     match value {
-        serde_yaml::Value::Null => Ok(serde_json::Value::Null),
-        serde_yaml::Value::Bool(value) => Ok(serde_json::Value::Bool(value)),
-        serde_yaml::Value::Number(number) => {
-            if let Some(value) = number.as_i64() {
-                Ok(serde_json::Value::Number(value.into()))
-            } else if let Some(value) = number.as_u64() {
-                Ok(serde_json::Value::Number(value.into()))
-            } else if let Some(value) = number.as_f64() {
-                serde_json::Number::from_f64(value)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| "frontmatter contains a non-finite number".into())
+        ExactYamlNode::Scalar(scalar) => exact_yaml_scalar_to_json(scalar),
+        ExactYamlNode::Sequence { tag, values } => {
+            validate_yaml_container_tag(tag.as_ref(), "seq")?;
+            values
+                .into_iter()
+                .map(exact_yaml_to_json)
+                .collect::<Result<Vec<_>, _>>()
+                .map(serde_json::Value::Array)
+        }
+        ExactYamlNode::Mapping { tag, entries } => {
+            validate_yaml_container_tag(tag.as_ref(), "map")?;
+            exact_yaml_mapping_to_json(entries)
+        }
+    }
+}
+
+fn exact_yaml_mapping_to_json(
+    mapping: Vec<(ExactYamlNode, ExactYamlNode)>,
+) -> Result<serde_json::Value, String> {
+    let mut object = serde_json::Map::new();
+    for (key, value) in mapping {
+        let ExactYamlNode::Scalar(key) = key else {
+            return Err("frontmatter mapping keys must be strings".into());
+        };
+        let serde_json::Value::String(key) = exact_yaml_scalar_to_json(key)? else {
+            return Err("frontmatter mapping keys must be strings".into());
+        };
+        if object.insert(key, exact_yaml_to_json(value)?).is_some() {
+            return Err("frontmatter contains a duplicate mapping key".into());
+        }
+    }
+    Ok(serde_json::Value::Object(object))
+}
+
+fn validate_yaml_container_tag(tag: Option<&YamlTag>, expected: &str) -> Result<(), String> {
+    if standard_yaml_tag(tag).is_none_or(|tag| tag == expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "frontmatter contains an invalid tag for a YAML {expected}"
+        ))
+    }
+}
+
+fn exact_yaml_scalar_to_json(scalar: ExactYamlScalar) -> Result<serde_json::Value, String> {
+    let standard_tag = standard_yaml_tag(scalar.tag.as_ref());
+    match standard_tag {
+        Some("str") => Ok(serde_json::Value::String(scalar.value)),
+        Some("null") => match scalar.value.as_str() {
+            "null" | "Null" | "NULL" | "~" => Ok(serde_json::Value::Null),
+            _ => Err("frontmatter contains an invalid explicitly tagged null".into()),
+        },
+        Some("bool") => match scalar.value.as_str() {
+            "true" | "True" | "TRUE" => Ok(serde_json::Value::Bool(true)),
+            "false" | "False" | "FALSE" => Ok(serde_json::Value::Bool(false)),
+            _ => Err("frontmatter contains an invalid explicitly tagged boolean".into()),
+        },
+        Some("int") => exact_yaml_integer(&scalar.value),
+        Some("float") => exact_yaml_float(&scalar.value),
+        Some("seq" | "map") => Err("frontmatter contains an invalid tag for a YAML scalar".into()),
+        Some(_) => Ok(serde_json::Value::String(scalar.value)),
+        None if scalar.style != TScalarStyle::Plain => Ok(serde_json::Value::String(scalar.value)),
+        None => marked_scalar_to_json(&scalar.value),
+    }
+}
+
+fn standard_yaml_tag(tag: Option<&YamlTag>) -> Option<&str> {
+    tag.and_then(|tag| (tag.handle == "tag:yaml.org,2002:").then_some(tag.suffix.as_str()))
+}
+
+fn exact_yaml_integer(source: &str) -> Result<serde_json::Value, String> {
+    let canonical = canonical_tagged_yaml_integer(source)
+        .ok_or_else(|| "frontmatter contains an invalid explicitly tagged integer".to_owned())?;
+    json_number(&canonical)
+}
+
+fn canonical_tagged_yaml_integer(source: &str) -> Option<String> {
+    let (negative, unsigned) = if let Some(unsigned) = source.strip_prefix('-') {
+        (true, unsigned)
+    } else {
+        (false, source.strip_prefix('+').unwrap_or(source))
+    };
+    if unsigned.starts_with(['+', '-']) {
+        return None;
+    }
+    let (base, digits) = if let Some(digits) = unsigned.strip_prefix("0x") {
+        (16, digits)
+    } else if let Some(digits) = unsigned.strip_prefix("0o") {
+        (8, digits)
+    } else if let Some(digits) = unsigned.strip_prefix("0b") {
+        (2, digits)
+    } else {
+        if unsigned.len() > 1 && unsigned.starts_with('0') {
+            return None;
+        }
+        (10, unsigned)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let value = BigUint::parse_bytes(digits.as_bytes(), base)?;
+    if value == BigUint::from(0_u8) {
+        Some("0".into())
+    } else {
+        Some(format!("{}{value}", if negative { "-" } else { "" }))
+    }
+}
+
+fn exact_yaml_float(source: &str) -> Result<serde_json::Value, String> {
+    if let Some(canonical) = crate::loader::canonical_float(source) {
+        if matches!(canonical.as_str(), "inf" | "-inf" | "nan") {
+            return Err("frontmatter contains a non-finite number".into());
+        }
+        return json_number(&canonical);
+    }
+    let unsigned = source.strip_prefix(['-', '+']).unwrap_or(source);
+    let crate::FrontmatterScalar::Integer(value) = crate::loader::parse_frontmatter_scalar(source)
+    else {
+        return Err("frontmatter contains an invalid explicitly tagged float".into());
+    };
+    if unsigned.is_empty() || !unsigned.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("frontmatter contains an invalid explicitly tagged float".into());
+    }
+    json_number(&format!("{}e0", value.0))
+}
+
+fn marked_scalar_to_json(source: &str) -> Result<serde_json::Value, String> {
+    match crate::loader::parse_frontmatter_scalar(source) {
+        crate::FrontmatterScalar::Null => Ok(serde_json::Value::Null),
+        crate::FrontmatterScalar::Boolean(value) => Ok(serde_json::Value::Bool(value)),
+        crate::FrontmatterScalar::Integer(value) => json_number(&value.0),
+        crate::FrontmatterScalar::Float(value) => {
+            if matches!(value.0.as_str(), "inf" | "-inf" | "nan") {
+                Err("frontmatter contains a non-finite number".into())
             } else {
-                Err("frontmatter contains an unsupported number".into())
+                json_number(&value.0)
             }
         }
-        serde_yaml::Value::String(value) => Ok(serde_json::Value::String(value)),
-        serde_yaml::Value::Sequence(values) => values
-            .into_iter()
-            .map(yaml_to_json)
-            .collect::<Result<Vec<_>, _>>()
-            .map(serde_json::Value::Array),
-        serde_yaml::Value::Mapping(mapping) => {
-            let mut object = serde_json::Map::new();
-            for (key, value) in mapping {
-                let serde_yaml::Value::String(key) = key else {
-                    return Err("frontmatter mapping keys must be strings".into());
-                };
-                object.insert(key, yaml_to_json(value)?);
-            }
-            Ok(serde_json::Value::Object(object))
-        }
-        serde_yaml::Value::Tagged(tagged) => yaml_to_json(tagged.value),
+        crate::FrontmatterScalar::String(value) => Ok(serde_json::Value::String(value)),
     }
 }
 
@@ -1250,12 +1473,171 @@ mod tests {
     }
 
     #[test]
-    fn serde_yaml_fallback_preserves_explicit_tags() {
-        let document = parse_markdown("---\ntagged: !!str 123\n---\n", MarkdownOptions::default());
+    fn exact_fallback_preserves_explicit_tag_semantics() {
+        let document = parse_markdown(
+            concat!(
+                "---\n",
+                "string: !!str 123\n",
+                "integer: !!int \"42\"\n",
+                "boolean: !!bool TRUE\n",
+                "custom: !thing 123\n",
+                "---\n",
+            ),
+            MarkdownOptions::default(),
+        );
         let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
             panic!("expected tagged frontmatter")
         };
+        assert_eq!(value["string"], "123");
+        assert_eq!(value["integer"], 42);
+        assert_eq!(value["boolean"], true);
+        assert_eq!(value["custom"], 123);
+    }
+
+    #[test]
+    fn explicit_tag_on_a_sibling_does_not_round_a_decimal() {
+        let plain = parse_markdown(
+            "---\nprecise: 0.1234567890123456789012345\n---\n",
+            MarkdownOptions::default(),
+        );
+        let tagged = parse_markdown(
+            "---\nprecise: 0.1234567890123456789012345\ntagged: !!str abc\n---\n",
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping {
+            value: plain_value, ..
+        } = plain.frontmatter
+        else {
+            panic!("expected untagged frontmatter")
+        };
+        let DocumentFrontmatter::Mapping {
+            value: tagged_value,
+            ..
+        } = tagged.frontmatter
+        else {
+            panic!("expected tagged frontmatter")
+        };
+
+        assert_eq!(tagged_value["precise"], plain_value["precise"]);
+        assert_eq!(tagged_value["tagged"], "abc");
+    }
+
+    #[test]
+    fn explicit_tags_preserve_oversized_integers_and_forced_number_types() {
+        let document = parse_markdown(
+            concat!(
+                "---\n",
+                "big: 184467440737095516160\n",
+                "precise: !!float 0.1234567890123456789012345\n",
+                "tagged: !!str 123\n",
+                "---\n",
+            ),
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("expected tagged numeric frontmatter: {document:?}")
+        };
+
+        assert_eq!(value["big"].to_string(), "184467440737095516160");
+        assert_eq!(
+            value["precise"].to_string(),
+            "1234567890123456789012345e-25"
+        );
         assert_eq!(value["tagged"], "123");
+    }
+
+    #[test]
+    fn integer_limit_fallback_rejects_invalid_standard_tags() {
+        for invalid in [
+            "bad: !!int 1.0",
+            "bad: !!int 01",
+            "bad: !!float 0x2A",
+            "bad: !!null nope",
+            "bad: !!str [one, two]",
+            "bad: !!seq {one: two}",
+            "bad: !!map [one, two]",
+        ] {
+            let source = format!("---\nhuge: 184467440737095516160\n{invalid}\n---\n");
+            let document = parse_markdown(&source, MarkdownOptions::default());
+            assert!(
+                matches!(document.frontmatter, DocumentFrontmatter::Invalid { .. }),
+                "invalid tag was accepted: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn integer_limit_fallback_accepts_valid_standard_tags() {
+        let document = parse_markdown(
+            concat!(
+                "---\n",
+                "huge: 184467440737095516160\n",
+                "string: !!str 123\n",
+                "null_value: !!null null\n",
+                "integer: !!int 42\n",
+                "binary: !!int 0b101010\n",
+                "float: !!float 1.25\n",
+                "integer_float: !!float 1\n",
+                "sequence: !!seq [one, two]\n",
+                "mapping: !!map {one: two}\n",
+                "---\n",
+            ),
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("expected valid explicitly tagged frontmatter: {document:?}")
+        };
+
+        assert_eq!(value["huge"].to_string(), "184467440737095516160");
+        assert_eq!(value["string"], "123");
+        assert_eq!(value["null_value"], serde_json::Value::Null);
+        assert_eq!(value["integer"], 42);
+        assert_eq!(value["binary"], 42);
+        assert_eq!(value["float"].to_string(), "125e-2");
+        assert_eq!(value["integer_float"].to_string(), "1e+0");
+        assert_ne!(value["integer_float"], serde_json::json!(1));
+        assert!(jsonschema::draft202012::is_valid(
+            &serde_json::json!({"const": 1}),
+            &value["integer_float"]
+        ));
+        assert_eq!(value["sequence"], serde_json::json!(["one", "two"]));
+        assert_eq!(value["mapping"], serde_json::json!({"one": "two"}));
+    }
+
+    #[test]
+    fn numeric_range_fallback_preserves_huge_and_tiny_exponents() {
+        let document = parse_markdown(
+            concat!(
+                "---\n",
+                "huge: 1e10000\n",
+                "tiny: 1e-10000\n",
+                "tagged_huge: !!float 2e10000\n",
+                "tagged_tiny: !!float 2e-10000\n",
+                "unrelated: !!str value\n",
+                "---\n",
+            ),
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("expected exact ranged decimals: {document:?}")
+        };
+
+        assert_eq!(value["huge"].to_string(), "1e+10000");
+        assert_eq!(value["tiny"].to_string(), "1e-10000");
+        assert_eq!(value["tagged_huge"].to_string(), "2e+10000");
+        assert_eq!(value["tagged_tiny"].to_string(), "2e-10000");
+    }
+
+    #[test]
+    fn numeric_range_fallback_rejects_nonfinite_and_malformed_floats() {
+        for invalid in ["bad: !!float .inf", "bad: !!float 1e", "bad: !!float nope"] {
+            let source = format!("---\nhuge: 184467440737095516160\n{invalid}\n---\n");
+            let document = parse_markdown(&source, MarkdownOptions::default());
+            assert!(
+                matches!(document.frontmatter, DocumentFrontmatter::Invalid { .. }),
+                "invalid float was accepted: {invalid}"
+            );
+        }
     }
 
     #[test]
@@ -1269,6 +1651,33 @@ mod tests {
         };
         assert_eq!(value["base"], 42);
         assert_eq!(value["copy"], value["base"]);
+    }
+
+    #[test]
+    fn aliases_preserve_exact_numeric_values() {
+        let document = parse_markdown(
+            "---\nbase: &base 0.1234567890123456789012345\ncopy: *base\n---\n",
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("expected aliased frontmatter: {document:?}")
+        };
+
+        assert_eq!(value["base"].to_string(), "1234567890123456789012345e-25");
+        assert_eq!(value["copy"], value["base"]);
+    }
+
+    #[test]
+    fn duplicate_keys_remain_invalid_when_a_tag_uses_the_exact_fallback() {
+        let document = parse_markdown(
+            "---\ntagged: !!str value\nduplicate: one\nduplicate: two\n---\n",
+            MarkdownOptions::default(),
+        );
+
+        assert!(matches!(
+            document.frontmatter,
+            DocumentFrontmatter::Invalid { .. }
+        ));
     }
 
     fn assert_valid_range(source: &str, range: TextRange) {
