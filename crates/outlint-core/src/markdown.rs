@@ -354,6 +354,38 @@ fn json_number(source: &str) -> Result<serde_json::Value, String> {
         .map_err(|error| format!("frontmatter number `{source}` is not representable: {error}"))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JsonNumberKind {
+    Integer,
+    Float,
+}
+
+fn json_number_preserving_lexeme(
+    source: &str,
+    canonical: &str,
+    expected_kind: JsonNumberKind,
+) -> Result<serde_json::Value, String> {
+    // JSON's decimal point/exponent markers distinguish floats from integers.
+    // Preserve a valid spelling only when it cannot erase that YAML identity.
+    let source_kind = if source
+        .bytes()
+        .any(|byte| matches!(byte, b'.' | b'e' | b'E'))
+    {
+        JsonNumberKind::Float
+    } else {
+        JsonNumberKind::Integer
+    };
+    if source_kind == expected_kind && serde_json::from_str::<serde_json::Number>(source).is_ok() {
+        // `from_string_unchecked` is available through our direct
+        // `arbitrary_precision` feature. Its input must be one valid JSON
+        // number; the parse immediately above establishes that invariant.
+        return Ok(serde_json::Value::Number(
+            serde_json::Number::from_string_unchecked(source.to_owned()),
+        ));
+    }
+    json_number(canonical)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ExactYamlNode {
     Scalar(ExactYamlScalar),
@@ -554,7 +586,7 @@ fn standard_yaml_tag(tag: Option<&YamlTag>) -> Option<&str> {
 fn exact_yaml_integer(source: &str) -> Result<serde_json::Value, String> {
     let canonical = canonical_tagged_yaml_integer(source)
         .ok_or_else(|| "frontmatter contains an invalid explicitly tagged integer".to_owned())?;
-    json_number(&canonical)
+    json_number_preserving_lexeme(source, &canonical, JsonNumberKind::Integer)
 }
 
 fn canonical_tagged_yaml_integer(source: &str) -> Option<String> {
@@ -594,7 +626,7 @@ fn exact_yaml_float(source: &str) -> Result<serde_json::Value, String> {
         if matches!(canonical.as_str(), "inf" | "-inf" | "nan") {
             return Err("frontmatter contains a non-finite number".into());
         }
-        return json_number(&canonical);
+        return json_number_preserving_lexeme(source, &canonical, JsonNumberKind::Float);
     }
     let unsigned = source.strip_prefix(['-', '+']).unwrap_or(source);
     let crate::FrontmatterScalar::Integer(value) = crate::loader::parse_frontmatter_scalar(source)
@@ -611,12 +643,14 @@ fn marked_scalar_to_json(source: &str) -> Result<serde_json::Value, String> {
     match crate::loader::parse_frontmatter_scalar(source) {
         crate::FrontmatterScalar::Null => Ok(serde_json::Value::Null),
         crate::FrontmatterScalar::Boolean(value) => Ok(serde_json::Value::Bool(value)),
-        crate::FrontmatterScalar::Integer(value) => json_number(&value.0),
+        crate::FrontmatterScalar::Integer(value) => {
+            json_number_preserving_lexeme(source, &value.0, JsonNumberKind::Integer)
+        }
         crate::FrontmatterScalar::Float(value) => {
             if matches!(value.0.as_str(), "inf" | "-inf" | "nan") {
                 Err("frontmatter contains a non-finite number".into())
             } else {
-                json_number(&value.0)
+                json_number_preserving_lexeme(source, &value.0, JsonNumberKind::Float)
             }
         }
         crate::FrontmatterScalar::String(value) => Ok(serde_json::Value::String(value)),
@@ -1487,9 +1521,54 @@ mod tests {
         assert_eq!(value["big"].to_string(), "184467440737095516160");
         assert_eq!(
             value["precise"].to_string(),
-            "12345678901234567890123456789e-29"
+            "0.123456789012345678901234567890"
         );
         assert_eq!(value["quoted"], "184467440737095516160");
+    }
+
+    #[test]
+    fn preserves_json_compatible_frontmatter_number_spellings_and_typed_identity() {
+        let document = parse_markdown(
+            concat!(
+                "---\n",
+                "whole: 100.0\n",
+                "integer: 100\n",
+                "fraction: 1.5\n",
+                "lower_exponent: 1e2\n",
+                "upper_exponent: 1E2\n",
+                "tagged: !!float 2.50\n",
+                "base: &number 3.75\n",
+                "alias: *number\n",
+                "normalized: +4.50\n",
+                "forced_float: !!float 1\n",
+                "huge: 1e10000\n",
+                "tiny: 1e-10000\n",
+                "unrelated: !!str value\n",
+                "---\n",
+            ),
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("expected valid numeric frontmatter: {document:?}")
+        };
+
+        assert_eq!(value["whole"].to_string(), "100.0");
+        assert_ne!(value["whole"], value["integer"]);
+        assert!(jsonschema::draft202012::is_valid(
+            &serde_json::json!({"const": 100}),
+            &value["whole"]
+        ));
+        assert_eq!(value["fraction"].to_string(), "1.5");
+        assert_eq!(value["lower_exponent"].to_string(), "1e2");
+        assert_eq!(value["upper_exponent"].to_string(), "1E2");
+        assert_eq!(value["tagged"].to_string(), "2.50");
+        assert_eq!(value["base"].to_string(), "3.75");
+        assert_eq!(value["alias"].to_string(), "3.75");
+        assert_eq!(value["normalized"].to_string(), "45e-1");
+        assert_eq!(value["forced_float"].to_string(), "1e+0");
+        assert_ne!(value["forced_float"], serde_json::json!(1));
+        assert_eq!(value["huge"].to_string(), "1e10000");
+        assert_eq!(value["tiny"].to_string(), "1e-10000");
     }
 
     #[test]
@@ -1559,10 +1638,7 @@ mod tests {
         };
 
         assert_eq!(value["big"].to_string(), "184467440737095516160");
-        assert_eq!(
-            value["precise"].to_string(),
-            "1234567890123456789012345e-25"
-        );
+        assert_eq!(value["precise"].to_string(), "0.1234567890123456789012345");
         assert_eq!(value["tagged"], "123");
     }
 
@@ -1613,7 +1689,7 @@ mod tests {
         assert_eq!(value["null_value"], serde_json::Value::Null);
         assert_eq!(value["integer"], 42);
         assert_eq!(value["binary"], 42);
-        assert_eq!(value["float"].to_string(), "125e-2");
+        assert_eq!(value["float"].to_string(), "1.25");
         assert_eq!(value["integer_float"].to_string(), "1e+0");
         assert_ne!(value["integer_float"], serde_json::json!(1));
         assert!(jsonschema::draft202012::is_valid(
@@ -1642,9 +1718,9 @@ mod tests {
             panic!("expected exact ranged decimals: {document:?}")
         };
 
-        assert_eq!(value["huge"].to_string(), "1e+10000");
+        assert_eq!(value["huge"].to_string(), "1e10000");
         assert_eq!(value["tiny"].to_string(), "1e-10000");
-        assert_eq!(value["tagged_huge"].to_string(), "2e+10000");
+        assert_eq!(value["tagged_huge"].to_string(), "2e10000");
         assert_eq!(value["tagged_tiny"].to_string(), "2e-10000");
     }
 
@@ -1683,7 +1759,7 @@ mod tests {
             panic!("expected aliased frontmatter: {document:?}")
         };
 
-        assert_eq!(value["base"].to_string(), "1234567890123456789012345e-25");
+        assert_eq!(value["base"].to_string(), "0.1234567890123456789012345");
         assert_eq!(value["copy"], value["base"]);
     }
 

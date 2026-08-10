@@ -215,6 +215,58 @@ fn check_validates_yaml_frontmatter_with_a_linked_json_schema() {
 }
 
 #[test]
+fn frontmatter_schema_messages_preserve_document_number_spellings() {
+    let directory = TempDir::new("frontmatter-number-messages");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write(
+        "frontmatter.schema.json",
+        r#"{"type":"object","properties":{"whole":{"maximum":1},"fraction":{"maximum":1},"lower_exponent":{"maximum":1},"upper_exponent":{"maximum":1}}}"#,
+    );
+    directory.write(
+        "document.md",
+        "---\nwhole: 100.0\nfraction: 1.5\nlower_exponent: 1e2\nupper_exponent: 1E2\n---\n",
+    );
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stderr(&output), "");
+    let json = json_output(&output);
+    let diagnostics = json["results"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics are an array")
+        .iter()
+        .map(|diagnostic| {
+            diagnostic["message"]
+                .as_str()
+                .expect("diagnostic message is a string")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        diagnostics,
+        [
+            "1.5 is greater than the maximum of 1",
+            "1e2 is greater than the maximum of 1",
+            "1E2 is greater than the maximum of 1",
+            "100.0 is greater than the maximum of 1",
+        ]
+    );
+}
+
+#[test]
 fn linked_schema_root_uri_does_not_alias_a_sibling_root_json() {
     let directory = TempDir::new("linked-frontmatter-root-name-collision");
     directory.write(

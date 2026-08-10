@@ -1398,6 +1398,47 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_schema_messages_quote_document_number_spellings() {
+        let mut schema = load_schema("version: 1\nsections: []\n")
+            .expect("test schema is valid")
+            .schema;
+        schema.frontmatter = FrontmatterPolicy::Optional {
+            schema: Some(FrontmatterSchema {
+                root_uri: "https://outlint.invalid/root.json".into(),
+                root: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "whole": { "maximum": 1 },
+                        "fraction": { "maximum": 1 },
+                        "lower_exponent": { "maximum": 1 },
+                        "upper_exponent": { "maximum": 1 }
+                    }
+                }),
+                resources: std::collections::BTreeMap::new(),
+            }),
+        };
+        let document = parse_markdown(
+            "---\nwhole: 100.0\nfraction: 1.5\nlower_exponent: 1e2\nupper_exponent: 1E2\n---\n",
+            MarkdownOptions::default(),
+        );
+        let messages = validate(&schema, &document)
+            .expect("schema prepares")
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            messages,
+            [
+                "1.5 is greater than the maximum of 1",
+                "1e2 is greater than the maximum of 1",
+                "1E2 is greater than the maximum of 1",
+                "100.0 is greater than the maximum of 1",
+            ]
+        );
+    }
+
+    #[test]
     fn reports_invalid_and_forbidden_frontmatter_without_schema_execution() {
         let schema = load_schema("version: 1\nfrontmatter: { allow: false }\nsections: []\n")
             .expect("test schema is valid")
