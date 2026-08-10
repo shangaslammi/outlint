@@ -3,9 +3,8 @@
 //! Validation is deliberately separate from parsing and IO: callers can load
 //! and parse fixture text once, then pass only values to [`validate`].
 
-use regex::RegexBuilder;
-
 use crate::loader::NoExternalRetrieve;
+use crate::matcher::compile_anchored_pattern;
 use crate::{
     ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
     DocumentFrontmatter, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef, FrontmatterSchema,
@@ -337,14 +336,11 @@ fn compile_pattern(
     match_case: bool,
     dot_matches_new_line: bool,
 ) -> Result<regex::Regex, PrepareValidationError> {
-    let anchored = format!(r"\A(?:{body})\z");
-    RegexBuilder::new(&anchored)
-        .case_insensitive(!match_case)
-        .dot_matches_new_line(dot_matches_new_line)
-        .build()
-        .map_err(|error| PrepareValidationError {
+    compile_anchored_pattern(body, match_case, dot_matches_new_line).map_err(|error| {
+        PrepareValidationError {
             message: format!("cannot compile matcher: {error}"),
-        })
+        }
+    })
 }
 
 struct Validator<'a> {
