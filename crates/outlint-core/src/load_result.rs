@@ -41,6 +41,18 @@ pub struct LinkedJsonSchemaInput {
     pub resources: Vec<JsonSchemaResourceInput>,
 }
 
+/// One external JSON Schema document reference resolved for both I/O and validation.
+///
+/// Keeping the two identities in one value prevents a shell from accidentally
+/// using a `$id`-rebased URI as the location of a file to preload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonSchemaExternalReference {
+    /// Target resolved from the resource's lexical file URI without applying `$id`.
+    pub physical_uri: String,
+    /// Target resolved according to JSON Schema base-URI and `$id` semantics.
+    pub logical_uri: String,
+}
+
 /// A valid semantic schema together with its source provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedSchema {

@@ -624,17 +624,15 @@ fn preload_linked_json_schema(
             text: Arc::clone(&text),
         });
 
-        let Ok(actual_references) = json_schema_external_references(&text, &actual_uri) else {
+        let Ok(references) = json_schema_external_references(&text, &actual_uri, &logical_uri)
+        else {
             continue;
         };
-        let Ok(logical_references) = json_schema_external_references(&text, &logical_uri) else {
-            continue;
-        };
-        for (actual, logical) in actual_references.into_iter().zip(logical_references) {
-            let Some(path) = file_uri_path(&actual) else {
+        for reference in references {
+            let Some(path) = file_uri_path(&reference.physical_uri) else {
                 continue;
             };
-            queue.push_back((actual, logical, path));
+            queue.push_back((reference.physical_uri, reference.logical_uri, path));
         }
     }
 
