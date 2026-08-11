@@ -18,9 +18,11 @@ Each expected diagnostic has the portable shape:
 { "id": "missing-section", "path": "Overview > Goals" }
 ```
 
-`id` is the public diagnostic id from specification §6. `path` is the
-case-preserving visible header path joined with ` > `; document-root
-diagnostics use the empty string. Each entry has exactly these two members. The
+`id` is the public diagnostic id from specification §6. `path` follows the
+diagnostic path rule defined normatively in specification §6 ("Diagnostic
+path"); note that for absence diagnostics (`missing-section`,
+`too-few-sections`) this is a synthesized matcher label, not text copied
+from the document. Each entry has exactly these two members. The
 expected object must name every and only the Markdown files in its directory.
 
 Diagnostic arrays compare as multisets (bags), not as sequences. A document
