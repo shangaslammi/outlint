@@ -4,8 +4,13 @@ description = "Markdown outline schema validator (core library)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/outlint-core"
+keywords = ["markdown", "outline", "schema", "validation", "lint"]
+categories = ["text-processing", "parser-implementations", "development-tools"]
 
 [dependencies]
 casefold = "0.1"

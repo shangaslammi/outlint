@@ -6,5 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.86"
+authors = ["Sami Hangaslammi <sami@infer.fi>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/shangaslammi/outlint"
+homepage = "https://github.com/shangaslammi/outlint"
