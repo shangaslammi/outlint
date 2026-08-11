@@ -3,6 +3,11 @@ sections:
   # The root scope is flat: it pools every `h2` regardless of which `h1`
   # encloses it, so the occurrence reported as excess is the one at index
   # `max` in document order, wherever in the tree that lands.
+  #
+  # Several `h1` headers also break the single top-level spine, so both
+  # documents additionally carry one `too-many-sections` on the second `h1`.
+  # That is unavoidable: pooling across ancestors is only observable on a
+  # document that has more than one ancestor chain above the root scope.
   - id: notes
     match: "Note *"
     repeat: "0..1"

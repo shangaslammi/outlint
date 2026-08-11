@@ -1,0 +1,8 @@
+version: 1
+# No `title:` is declared, so nothing in this schema mentions `h1` at all.
+# The single top-level spine is structural rather than opt-in: a schema has
+# one top-level `sections` list, and the flat root scope it describes only has
+# one meaning when at most one header sits at each level above `root_level`.
+sections:
+  - match: "Overview"
+    repeat: "0..n"

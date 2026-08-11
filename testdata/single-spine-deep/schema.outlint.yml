@@ -1,0 +1,10 @@
+version: 1
+options:
+  root_level: 3
+# Two levels sit above the root scope here, and the spine bound applies to
+# each of them independently: one `h1` above one `h2` is legal, so a deep
+# root level is not a bound of one header per document. No `title:` is
+# declared, so neither level is named by the schema.
+sections:
+  - match: "Details"
+    repeat: "0..n"

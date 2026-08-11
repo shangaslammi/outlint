@@ -24,6 +24,16 @@
       "target": { "kind": "header", "path": ["Book", "Details"] }
     }
   ],
+  "two-books.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Manual"] }
+    },
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Manual", "Guide"] }
+    }
+  ],
   "wrong-title.md": [
     {
       "id": "not-allowed",

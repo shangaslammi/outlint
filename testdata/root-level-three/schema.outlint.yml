@@ -1,7 +1,8 @@
 version: 1
 options:
   root_level: 3
-# The title sits one level above the root scope, so it is an `h2` here.
+# The title sits one level above the root scope, so it is an `h2` here. The
+# `h1` above it is unnamed by the schema and still bounded to one header.
 title: "Guide"
 sections:
   - match: "Details"
