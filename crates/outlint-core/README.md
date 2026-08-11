@@ -10,8 +10,10 @@ terminal, or the process exit status — that shell is the
 schema text, the Markdown text, and any linked JSON Schema resources they
 read themselves.
 
-Status: pre-alpha. The normative specification is
-[`spec/outlint-spec.md`](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md).
+This is a 0.x release: expect breaking changes to the API, the schema
+language, and the diagnostic set before 1.0. The normative specification is
+[`spec/outlint-spec.md`](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md);
+where the two disagree, the specification wins.
 
 ## What it checks
 

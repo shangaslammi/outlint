@@ -3,8 +3,11 @@
 Lint the header structure (outline) of Markdown documents against a
 declarative schema.
 
-Status: pre-alpha. The normative specification is
-[`spec/outlint-spec.md`](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md).
+This is a 0.x release: expect breaking changes to the CLI surface, the
+schema language, and the JSON output before 1.0. The normative
+specification is
+[`spec/outlint-spec.md`](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md);
+where the two disagree, the specification wins.
 
 ## Install
 
