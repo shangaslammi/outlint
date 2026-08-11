@@ -1,0 +1,6 @@
+{
+  "fail.md": [
+    { "id": "unexpected-section", "path": "Handbook > Overview > Surprise" }
+  ],
+  "pass.md": []
+}

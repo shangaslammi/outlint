@@ -684,7 +684,9 @@ struct FlatTarget {
 /// header path.
 ///
 /// This exists only to keep the output unchanged while the core distinguishes
-/// the three kinds of target; it is deleted when the output shape follows.
+/// the kinds of target; it is deleted when the output shape follows.
+///
+/// TODO(M3): delete this and render [`DiagnosticTarget`] directly.
 fn flatten_target(target: &DiagnosticTarget) -> FlatTarget {
     let (header_path, block) = match target {
         DiagnosticTarget::Header(path) => (path.0.clone(), None),
@@ -693,6 +695,7 @@ fn flatten_target(target: &DiagnosticTarget) -> FlatTarget {
             path.push(matcher.clone());
             (path, None)
         }
+        DiagnosticTarget::Document => (Vec::new(), None),
         DiagnosticTarget::Frontmatter { block } => (Vec::new(), block.as_ref()),
     };
     FlatTarget {

@@ -1,0 +1,8 @@
+version: 1
+title: "Handbook"
+sections:
+  - match: "Overview"
+    required: true
+    strict: true
+    sections:
+      - match: "Goals"

@@ -80,6 +80,12 @@ impl DiagnosticId {
 }
 
 /// A path of case-preserving visible heading texts.
+///
+/// A header path is always the complete document-tree ancestor chain, from the
+/// document's topmost enclosing heading down to the header itself. It does not
+/// begin at `options.root_level`: ancestors above the root scope, including the
+/// title when the document has one, are part of the path. Two same-named
+/// sections under different ancestors therefore have different paths.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct HeaderPath(pub Vec<String>);
@@ -127,24 +133,34 @@ pub enum DiagnosticReference {
 
 /// What a diagnostic is about.
 ///
-/// The three cases carry text of different provenance, and conflating them in
+/// The four cases carry text of different provenance, and conflating them in
 /// one [`HeaderPath`] silently mixes document text with schema text. Only
 /// [`Self::Header`] names text that occurs in the document; the matcher label
 /// in [`Self::MissingHeader`] comes from the schema and may occur nowhere in
-/// the document; [`Self::Frontmatter`] has no header path at all.
+/// the document; [`Self::Document`] and [`Self::Frontmatter`] name no header
+/// at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticTarget {
     /// A header that exists in the document, named by its document path.
     Header(HeaderPath),
     /// A section the schema requires but the document does not contain.
     MissingHeader {
-        /// Document path of the header whose scope should have contained it;
-        /// empty when the missing section belongs to the document root.
+        /// Document path of the header whose scope should have contained it.
+        ///
+        /// Empty when no header encloses the missing section: either it belongs
+        /// to the root scope, or it is the title, which sits *above* the root
+        /// scope rather than in it.
         parent: HeaderPath,
         /// Label of the unsatisfied schema matcher: exact text, a glob, a
         /// slash-delimited regex, or `*`. This is schema text, not a heading.
         matcher: String,
     },
+    /// The document as a whole, when no single header can name the violation.
+    ///
+    /// This is the root scope, which is flat: it collects every header at
+    /// `options.root_level` regardless of which higher-level header contains
+    /// it, so a constraint attached to it has no one ancestor to point at.
+    Document,
     /// A frontmatter block, or a value inside one. Has no header path.
     Frontmatter {
         /// The offending block, absent only when the document has none.
@@ -371,7 +387,7 @@ struct Validator<'a> {
 }
 
 struct BindScopeInput<'a, 'd> {
-    sections: &'a [&'d Section],
+    sections: &'a [PathedSection<'d>],
     rules: &'a [SectionRule],
     prepared_rules: &'a [PreparedRule],
     strict: bool,
@@ -403,15 +419,18 @@ impl<'a> Validator<'a> {
     fn run(mut self, plan: &ValidationPlan) -> Vec<Diagnostic> {
         self.validate_frontmatter(plan.frontmatter.as_ref());
         let mut all = Vec::new();
-        collect_sections(&self.document.sections, &mut all);
+        collect_sections(&self.document.sections, &HeaderPath::default(), &mut all);
         self.validate_title(&all, plan.title.as_ref());
         if !self.schema.options.allow_skipped_levels {
             self.validate_skipped_levels(&self.document.sections, None, &HeaderPath::default());
         }
 
+        // The root scope is flat: it takes every header at `root_level` from
+        // anywhere in the tree. Each one keeps its own ancestor chain, so two
+        // same-named root sections under different ancestors stay distinct.
         let root_sections = all
             .into_iter()
-            .filter(|section| section.heading.level == self.schema.options.root_level)
+            .filter(|pathed| pathed.section.heading.level == self.schema.options.root_level)
             .collect::<Vec<_>>();
         let root_schema_scope = ScopePath(Vec::new());
         let root_path = HeaderPath::default();
@@ -541,7 +560,11 @@ impl<'a> Validator<'a> {
         );
     }
 
-    fn validate_title(&mut self, sections: &[&Section], prepared: Option<&PreparedMatcher>) {
+    fn validate_title(
+        &mut self,
+        sections: &[PathedSection<'_>],
+        prepared: Option<&PreparedMatcher>,
+    ) {
         let Some(matcher) = &self.schema.title else {
             return;
         };
@@ -553,8 +576,7 @@ impl<'a> Validator<'a> {
         };
         let titles = sections
             .iter()
-            .copied()
-            .filter(|section| section.heading.level == title_level)
+            .filter(|pathed| pathed.section.heading.level == title_level)
             .collect::<Vec<_>>();
         if titles.is_empty() {
             self.emit(
@@ -577,38 +599,36 @@ impl<'a> Validator<'a> {
             return;
         }
         for title in &titles {
-            if !prepared.matches(&title.heading.text) {
-                let path = HeaderPath(vec![title.heading.diagnostic_text.clone()]);
+            if !prepared.matches(&title.section.heading.text) {
                 self.emit(
                     Diagnostic {
                         id: DiagnosticId::NotAllowed,
                         // The offending title is present; only its text is wrong.
-                        target: DiagnosticTarget::Header(path),
-                        location: heading_location(&title.heading.location),
+                        target: DiagnosticTarget::Header(title.path.clone()),
+                        location: heading_location(&title.section.heading.location),
                         schema_node: Some(SchemaNode::Title),
                         involved_headers: Vec::new(),
                         references: Vec::new(),
                         message: "the title does not match the schema title matcher".into(),
                     },
-                    Some(&title.heading),
+                    Some(&title.section.heading),
                     true,
                 );
             }
         }
         if let Some(excess) = titles.get(1) {
-            let path = HeaderPath(vec![excess.heading.diagnostic_text.clone()]);
             self.emit(
                 Diagnostic {
                     id: DiagnosticId::TooManySections,
                     // Anchored on the surplus title, which is a real header.
-                    target: DiagnosticTarget::Header(path),
-                    location: heading_location(&excess.heading.location),
+                    target: DiagnosticTarget::Header(excess.path.clone()),
+                    location: heading_location(&excess.section.heading.location),
                     schema_node: Some(SchemaNode::Title),
                     involved_headers: Vec::new(),
                     references: Vec::new(),
                     message: "the document has more than one title".into(),
                 },
-                Some(&excess.heading),
+                Some(&excess.section.heading),
                 true,
             );
         }
@@ -653,8 +673,11 @@ impl<'a> Validator<'a> {
         } = input;
         let mut counts = vec![0_usize; rules.len()];
         let mut occurrences = Vec::new();
-        for section in sections {
-            let path = appended_path(parent_path, &section.heading.diagnostic_text);
+        for pathed in sections {
+            let section = pathed.section;
+            // Already the section's complete ancestor chain: a scope is not
+            // necessarily rooted at `parent_path` (the root scope is flat).
+            let path = pathed.path.clone();
             let matched = rules
                 .iter()
                 .zip(prepared_rules)
@@ -693,7 +716,7 @@ impl<'a> Validator<'a> {
             if let Some(count) = counts.get_mut(rule_index) {
                 *count += 1;
             }
-            let child_refs = section.children.iter().collect::<Vec<_>>();
+            let child_refs = child_sections(section, &path);
             let mut child_scope_path = schema_scope.clone();
             child_scope_path.0.push(RuleIndex(rule_index));
             let child = self.bind_scope(BindScopeInput {
@@ -753,8 +776,9 @@ impl<'a> Validator<'a> {
             self.emit(
                 Diagnostic {
                     id,
-                    // Nothing in the document satisfies the rule, so the last
-                    // segment can only be the rule's matcher label.
+                    // No concrete header represents the unmet cardinality —
+                    // matching headers may exist, just too few of them — so the
+                    // last segment can only be the rule's matcher label.
                     target: DiagnosticTarget::MissingHeader {
                         parent: parent_path.clone(),
                         matcher: matcher_label(&rule.matcher),
@@ -826,9 +850,13 @@ impl<'a> Validator<'a> {
             self.emit(
                 Diagnostic {
                     id,
-                    // The scope the constraint is attached to: the header that
-                    // encloses it, or the empty path at the document root.
-                    target: DiagnosticTarget::Header(parent_path.clone()),
+                    // The scope the constraint is attached to. At the document
+                    // root that scope is flat and spans headers under different
+                    // ancestors, so no single header can name it.
+                    target: match parent {
+                        Some(_) => DiagnosticTarget::Header(parent_path.clone()),
+                        None => DiagnosticTarget::Document,
+                    },
                     location: parent
                         .map_or_else(root_location, |heading| heading_location(&heading.location)),
                     schema_node: Some(SchemaNode::Constraint(ConstraintPath {
@@ -913,11 +941,40 @@ struct BoundSection<'d> {
     child: BoundScope<'d>,
 }
 
-fn collect_sections<'a>(sections: &'a [Section], output: &mut Vec<&'a Section>) {
+/// A document section paired with its complete document-tree path.
+#[derive(Debug)]
+struct PathedSection<'d> {
+    section: &'d Section,
+    path: HeaderPath,
+}
+
+/// Flattens the section forest in document order, giving every section the full
+/// ancestor chain that names it.
+fn collect_sections<'a>(
+    sections: &'a [Section],
+    parent_path: &HeaderPath,
+    output: &mut Vec<PathedSection<'a>>,
+) {
     for section in sections {
-        output.push(section);
-        collect_sections(&section.children, output);
+        let path = appended_path(parent_path, &section.heading.diagnostic_text);
+        // Pre-order, so the flattened order stays document order.
+        output.push(PathedSection {
+            section,
+            path: path.clone(),
+        });
+        collect_sections(&section.children, &path, output);
     }
+}
+
+fn child_sections<'d>(section: &'d Section, path: &HeaderPath) -> Vec<PathedSection<'d>> {
+    section
+        .children
+        .iter()
+        .map(|child| PathedSection {
+            section: child,
+            path: appended_path(path, &child.heading.diagnostic_text),
+        })
+        .collect()
 }
 
 fn root_location() -> DiagnosticLocation {
@@ -1355,6 +1412,66 @@ mod tests {
                 scope: ScopePath(Vec::new()),
                 index: RuleIndex(0),
             }))
+        );
+    }
+
+    #[test]
+    fn header_paths_carry_every_ancestor_above_the_root_level() {
+        let loaded = load_schema(
+            "version: 1\nsections:\n  - match: Overview\n    repeat: 1..n\n    sections:\n      - match: Goals\n        required: true\n",
+        )
+        .expect("test schema is valid");
+        let document = parse_markdown(
+            "# Part One\n## Overview\n# Part Two\n## Overview\n",
+            MarkdownOptions::default(),
+        );
+        let targets = validate(&loaded.schema, &document)
+            .expect("schema prepares")
+            .into_iter()
+            .map(|diagnostic| diagnostic.target)
+            .collect::<Vec<_>>();
+
+        // Same rule, same matcher, two different enclosing headers: the paths
+        // distinguish them only because ancestors above `root_level` are kept.
+        assert_eq!(
+            targets,
+            [
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath(vec!["Part One".into(), "Overview".into()]),
+                    matcher: "Goals".into(),
+                },
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath(vec!["Part Two".into(), "Overview".into()]),
+                    matcher: "Goals".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn root_scope_violations_name_the_document_rather_than_a_header() {
+        let loaded = load_schema(
+            "version: 1\nsections:\n  - id: a\n    match: A\n    required: true\n  - id: b\n    match: B\n    required: true\nconstraints:\n  - all_or_none: [a, b]\n",
+        )
+        .expect("test schema is valid");
+        let document = parse_markdown("# Part One\n## B\n", MarkdownOptions::default());
+        let targets = validate(&loaded.schema, &document)
+            .expect("schema prepares")
+            .into_iter()
+            .map(|diagnostic| diagnostic.target)
+            .collect::<Vec<_>>();
+
+        // The root scope is flat, so a constraint on it has no one header to
+        // name; a missing root section still has its schema-side matcher label.
+        assert_eq!(
+            targets,
+            [
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "A".into(),
+                },
+                DiagnosticTarget::Document,
+            ]
         );
     }
 
