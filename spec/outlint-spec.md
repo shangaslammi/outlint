@@ -462,7 +462,8 @@ be omitted rather than emitted as null.
 | `too-many-sections` | `header` of the first header in excess of the bound | that header's line |
 | `missing-section`, `too-few-sections` | `missing_header`: `parent` is the enclosing scope's path, `matcher` the unsatisfied rule's label | the parent section's header line; line 1 at the root scope |
 | `missing-title` | `missing_header` with empty `parent` and the `title` matcher's label | line 1 |
-| `missing-frontmatter`, `forbidden-frontmatter`, `invalid-frontmatter`, `frontmatter-schema` | `frontmatter` | the block's first line, or line 1 when absent |
+| `missing-frontmatter`, `forbidden-frontmatter`, `invalid-frontmatter` | `frontmatter` | the block's first line, or line 1 when absent |
+| `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and whenever the entry's position is unavailable |
 | constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, which is attached to the schema root and so has no parent header | the parent section's header line; line 1 at the root scope |
 
 Constraint diagnostics additionally list the concrete headers involved, if
