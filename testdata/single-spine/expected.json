@@ -1,0 +1,16 @@
+{
+  "pass.md": [],
+  "no-spine.md": [],
+  "two-parts.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Part Two"] }
+    }
+  ],
+  "three-parts.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Two"] }
+    }
+  ]
+}

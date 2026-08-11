@@ -1,4 +1,10 @@
 version: 1
+# Every document here has two `h1` headers, so every one of them violates the
+# single top-level spine: at most one header per level above `root_level`.
+# The path ambiguity this fixture was built to probe is therefore unreachable
+# in a conforming document. What it still pins is that the surplus `h1` is
+# reported once, on the second one, and that child scopes keep binding per
+# parent underneath it.
 sections:
   - match: "Overview"
     repeat: "1..n"

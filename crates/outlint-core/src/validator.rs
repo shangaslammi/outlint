@@ -8,8 +8,8 @@ use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
     ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
     DocumentFrontmatter, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef, FrontmatterSchema,
-    Heading, HeadingLocation, Matcher, Proposition, RefAnchor, RuleIndex, RuleOutcome, RuleRef,
-    Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
+    HeaderLevel, Heading, HeadingLocation, Matcher, Proposition, RefAnchor, RuleIndex, RuleOutcome,
+    RuleRef, Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
 };
 
 /// A stable identifier from the diagnostic vocabulary in specification §6.
@@ -25,7 +25,8 @@ pub enum DiagnosticId {
     MissingSection,
     /// Some headings matched a rule, but fewer than its minimum.
     TooFewSections,
-    /// More headings matched a rule than its finite maximum.
+    /// More headings matched a rule than its finite maximum, or a level above
+    /// `options.root_level` holds more than one header.
     TooManySections,
     /// The schema declares a title but the document has none.
     MissingTitle,
@@ -421,6 +422,7 @@ impl<'a> Validator<'a> {
         let mut all = Vec::new();
         collect_sections(&self.document.sections, &HeaderPath::default(), &mut all);
         self.validate_title(&all, plan.title.as_ref());
+        self.validate_single_spine(&all);
         if !self.schema.options.allow_skipped_levels {
             self.validate_skipped_levels(&self.document.sections, None, &HeaderPath::default());
         }
@@ -428,6 +430,8 @@ impl<'a> Validator<'a> {
         // The root scope is flat: it takes every header at `root_level` from
         // anywhere in the tree. Each one keeps its own ancestor chain, so two
         // same-named root sections under different ancestors stay distinct.
+        // `validate_single_spine` keeps that pooling unambiguous on conforming
+        // documents by admitting only one ancestor chain above the root scope.
         let root_sections = all
             .into_iter()
             .filter(|pathed| pathed.section.heading.level == self.schema.options.root_level)
@@ -616,17 +620,66 @@ impl<'a> Validator<'a> {
                 );
             }
         }
-        if let Some(excess) = titles.get(1) {
+        // A surplus title is a surplus header above the root scope, so
+        // `validate_single_spine` reports it for every schema, titled or not.
+    }
+
+    /// Enforces the single top-level spine: at most one header at each level
+    /// above `options.root_level`.
+    ///
+    /// A schema has one top-level `sections` list, and the root scope it
+    /// describes pools every header at `root_level` regardless of which
+    /// higher-level header encloses it. That pooling only has one meaning when
+    /// the headers above the root scope form a single chain, so the format's
+    /// premise of one top-level spine is enforced rather than assumed. It is a
+    /// bound per level, not per document: `root_level: 3` still admits one `h1`
+    /// above one `h2`.
+    ///
+    /// Each offending level yields one diagnostic anchored on the second such
+    /// header in document order; further surplus headers at that level say
+    /// nothing new.
+    fn validate_single_spine(&mut self, sections: &[PathedSection<'_>]) {
+        let title_level = self
+            .schema
+            .title
+            .as_ref()
+            .and_then(|_| self.schema.options.root_level.predecessor());
+        for level in 1..self.schema.options.root_level as u8 {
+            let Ok(level) = HeaderLevel::try_from(level) else {
+                continue;
+            };
+            let mut at_level = sections
+                .iter()
+                .filter(|pathed| pathed.section.heading.level == level);
+            let (Some(_), Some(excess)) = (at_level.next(), at_level.next()) else {
+                continue;
+            };
+            // Only the title level has a schema node to blame, and only when the
+            // schema declares a title; the spine bound itself is structural.
+            let (schema_node, message) = if title_level == Some(level) {
+                (
+                    Some(SchemaNode::Title),
+                    "the document has more than one title".to_owned(),
+                )
+            } else {
+                (
+                    None,
+                    format!(
+                        "the document has more than one h{} header above the root section level",
+                        level as u8
+                    ),
+                )
+            };
             self.emit(
                 Diagnostic {
                     id: DiagnosticId::TooManySections,
-                    // Anchored on the surplus title, which is a real header.
+                    // Anchored on the surplus header, which is a real header.
                     target: DiagnosticTarget::Header(excess.path.clone()),
                     location: heading_location(&excess.section.heading.location),
-                    schema_node: Some(SchemaNode::Title),
+                    schema_node,
                     involved_headers: Vec::new(),
                     references: Vec::new(),
-                    message: "the document has more than one title".into(),
+                    message,
                 },
                 Some(&excess.section.heading),
                 true,
@@ -1433,9 +1486,12 @@ mod tests {
 
         // Same rule, same matcher, two different enclosing headers: the paths
         // distinguish them only because ancestors above `root_level` are kept.
+        // Two `h1` headers also break the single top-level spine, so the shape
+        // that makes the paths differ is itself reported.
         assert_eq!(
             targets,
             [
+                DiagnosticTarget::Header(HeaderPath(vec!["Part Two".into()])),
                 DiagnosticTarget::MissingHeader {
                     parent: HeaderPath(vec!["Part One".into(), "Overview".into()]),
                     matcher: "Goals".into(),
@@ -1446,6 +1502,126 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn spine_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
+        let loaded = load_schema(schema).expect("test schema is valid");
+        let document = parse_markdown(markdown, MarkdownOptions::default());
+        validate(&loaded.schema, &document)
+            .expect("schema prepares")
+            .into_iter()
+            .filter(|diagnostic| diagnostic.id == DiagnosticId::TooManySections)
+            .collect()
+    }
+
+    #[test]
+    fn surplus_headers_above_the_root_level_are_reported_once_per_level() {
+        let schema = "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n";
+
+        // One `h1` above any number of root sections is the intended shape.
+        assert!(spine_diagnostics(schema, "# One\n## Overview\n## Overview\n").is_empty());
+        // No header at all above the root level is equally fine.
+        assert!(spine_diagnostics(schema, "## Overview\n").is_empty());
+
+        let two = spine_diagnostics(schema, "# One\n## Overview\n# Two\n## Overview\n");
+        assert_eq!(two.len(), 1);
+        let diagnostic = two.first().expect("one diagnostic was asserted");
+        // Anchored on the second `h1`, the point at which the spine forks.
+        assert_eq!(
+            diagnostic.target,
+            DiagnosticTarget::Header(HeaderPath(vec!["Two".into()]))
+        );
+        assert_eq!(diagnostic.location.line, 3);
+        // Nothing in the schema names `h1`, so there is no node to blame.
+        assert_eq!(diagnostic.schema_node, None);
+
+        // Surplus beyond the second header says nothing new.
+        let three = spine_diagnostics(schema, "# One\n# Two\n# Three\n## Overview\n");
+        assert_eq!(three.len(), 1);
+        assert_eq!(
+            three[0].target,
+            DiagnosticTarget::Header(HeaderPath(vec!["Two".into()]))
+        );
+    }
+
+    #[test]
+    fn the_spine_bound_is_per_level_not_per_document() {
+        let schema =
+            "version: 1\noptions:\n  root_level: 3\nsections:\n  - match: Details\n    repeat: 0..n\n";
+
+        // One `h1` above one `h2` above the root scope is a legal deep spine.
+        assert!(
+            spine_diagnostics(schema, "# Book\n## Guide\n### Details\n### Details\n").is_empty()
+        );
+
+        // Each level above the root scope is bounded on its own.
+        let forked = spine_diagnostics(schema, "# Book\n## Guide One\n## Guide Two\n### Details\n");
+        assert_eq!(
+            forked
+                .iter()
+                .map(|diagnostic| diagnostic.target.clone())
+                .collect::<Vec<_>>(),
+            [DiagnosticTarget::Header(HeaderPath(vec![
+                "Book".into(),
+                "Guide Two".into()
+            ]))]
+        );
+
+        let both = spine_diagnostics(
+            schema,
+            "# Book A\n## Guide\n### Details\n# Book B\n## Guide\n### Details\n",
+        );
+        assert_eq!(
+            both.iter()
+                .map(|diagnostic| diagnostic.target.clone())
+                .collect::<Vec<_>>(),
+            [
+                DiagnosticTarget::Header(HeaderPath(vec!["Book B".into()])),
+                DiagnosticTarget::Header(HeaderPath(vec!["Book B".into(), "Guide".into()])),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_declared_title_still_owns_the_surplus_title_diagnostic() {
+        let titled = spine_diagnostics(
+            "version: 1\ntitle: Project\nsections:\n  - match: Item\n    repeat: 0..n\n",
+            "# Project\n# Project\n## Item\n",
+        );
+        assert_eq!(titled.len(), 1);
+        let diagnostic = titled.first().expect("one diagnostic was asserted");
+        assert_eq!(diagnostic.schema_node, Some(SchemaNode::Title));
+        assert_eq!(diagnostic.message, "the document has more than one title");
+
+        // A title one level up leaves the `h1` above it schema-less.
+        let deep = spine_diagnostics(
+            "version: 1\noptions:\n  root_level: 3\ntitle: Guide\nsections:\n  - match: Details\n    repeat: 0..n\n",
+            "# Book\n## Guide\n### Details\n# Manual\n## Guide\n",
+        );
+        assert_eq!(
+            deep.iter()
+                .map(|diagnostic| (diagnostic.target.clone(), diagnostic.schema_node.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    DiagnosticTarget::Header(HeaderPath(vec!["Manual".into()])),
+                    None
+                ),
+                (
+                    DiagnosticTarget::Header(HeaderPath(vec!["Manual".into(), "Guide".into()])),
+                    Some(SchemaNode::Title)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_surplus_header_carries_its_own_inline_suppression() {
+        assert!(spine_diagnostics(
+            "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n",
+            "# One\n## Overview\n<!-- outlint-disable too-many-sections -->\n# Two\n",
+        )
+        .is_empty());
     }
 
     #[test]

@@ -7,4 +7,8 @@ sections:
 constraints:
   # Attached to the flat root scope, so occurrences under different `h1`
   # ancestors are compared against each other.
+  #
+  # Two `h1` headers also break the single top-level spine, so every document
+  # here additionally carries one `too-many-sections` on the second `h1`.
+  # `in-order.md` satisfies the ordering and is left with only that.
   - ordered: [intro, body]

@@ -7,13 +7,26 @@
     {
       "id": "missing-section",
       "target": { "kind": "missing_header", "parent": ["Part Two", "Overview"], "matcher": "Goals" }
+    },
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Part Two"] }
     }
   ],
   "attribution.md": [
     {
       "id": "missing-section",
       "target": { "kind": "missing_header", "parent": ["Part One", "Overview"], "matcher": "Goals" }
+    },
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Part Two"] }
     }
   ],
-  "pass.md": []
+  "two-spines.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Part Two"] }
+    }
+  ]
 }
