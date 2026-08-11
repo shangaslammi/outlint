@@ -1024,14 +1024,19 @@ struct PathedSection<'d> {
 ///
 /// Every header must be reachable from the document's spine. A document has at
 /// most one `h1`; if one exists it is the spine and the root scope is its `h2`
-/// children, otherwise the root scope is the document's own `h2`s. A header
-/// that is in neither takes part in no rule matching, no cardinality count and
-/// no constraint: the schema describes the totality of the document, so a
-/// header outside that structure is not silently pooled into it.
+/// children, otherwise the root scope is the document's own `h2`s.
+///
+/// Reachable is the `h1` and everything below it — the whole subtree, not just
+/// the root scope, so an `h3` sitting directly under the `h1` is reachable even
+/// though it is in no scope. When there is no `h1`, reachable is the `h2`s and
+/// everything below them. Anything else is detached and takes part in no rule
+/// matching, no cardinality count and no constraint: the schema describes the
+/// totality of the document, so a header hanging outside it is not silently
+/// pooled in.
 #[derive(Debug)]
 struct Spine<'d> {
-    /// Every header of the spine and of the root scope's subtrees, flattened in
-    /// document order with its complete ancestor chain.
+    /// Every reachable header, flattened in document order with its complete
+    /// ancestor chain.
     reachable: Vec<PathedSection<'d>>,
     /// The root of each detached subtree, in document order. Descendants are
     /// deliberately absent: they are detached only by consequence.
