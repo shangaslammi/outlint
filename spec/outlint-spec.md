@@ -37,8 +37,11 @@ text, and raw inline HTML tags are removed (`## **Foo** [bar](x)` →
 `Foo bar`). If `options.match_case` is false (default), matching is
 case-insensitive using Unicode default simple case folding. This folding does
 not perform Unicode normalization or multi-code-point expansion, so `ſ`
-matches `S` but `Straße` does not match `STRASSE`. The original text is
-preserved for diagnostics.
+matches `S` but `Straße` does not match `STRASSE`. Case folding applies to
+matching only: diagnostics report the case-preserving text. Inline markup
+stripping, by contrast, always applies to diagnostic text —
+`options.strip_inline_markup` gates only the text used for matching, so
+`## **Foo** [bar](x)` reports as `Foo bar` under either setting.
 
 1.4. The **root scope** is the set of headers at level `options.root_level`
 (default 2, i.e. documents with a single h1 title and h2 sections). If
@@ -372,16 +375,23 @@ Implementations MUST report, per violation: a stable diagnostic id, the
 header path (e.g. `Overview > Goals`), a source location, and the schema
 rule/constraint involved.
 
-**Diagnostic path.** A diagnostic's path is built relative to its *root
-scope* — the schema's top-level section list, whose headers sit at level
-`root_level`. The root scope's own path is the empty string, whether or not
-a title header exists above it. For a diagnostic anchored to a present
-header, the path is that header's visible text — case-preserving, with
-inline markup always stripped for diagnostic purposes regardless of
+> **Revision in progress.** The path derivation below is incomplete and is
+> being replaced. Header paths do not currently include ancestors above
+> `root_level`, which makes two diagnostics under different such ancestors
+> indistinguishable; the joined-string encoding is also lossy for headers
+> containing ` > `. A forthcoming revision replaces the path with a tagged
+> *target* — header, missing header, or frontmatter — carrying the complete
+> ancestor chain as an array. Do not rely on the derivation below for a new
+> implementation; the conformance corpus in `testdata/` is authoritative in
+> the meantime.
+
+**Diagnostic path.** For a diagnostic anchored to a present header, the
+path is that header's visible text — case-preserving, with inline markup
+always stripped for diagnostic purposes regardless of
 `options.strip_inline_markup` (§1.3 gates matching, not diagnostic text) —
-joined with ` > ` down from the root scope. A diagnostic anchored at the
-root scope itself (including frontmatter diagnostics) uses the empty
-string.
+joined with ` > `. Frontmatter diagnostics carry no header path and use the
+empty string; they locate the failing value with a JSON Pointer instead
+(§6, *Location anchoring*).
 
 Absence diagnostics (`missing-section`, `too-few-sections`,
 `missing-title`) have no header to draw text from: their path MUST be the
@@ -395,19 +405,6 @@ Exact — the string verbatim; Glob — the glob pattern source verbatim (e.g.
 wrapped in slashes (`/pattern/`); Wildcard — `*`. A matcher label is schema
 text, not document text: it is not necessarily a string that appears
 anywhere in the document being validated.
-
-**Path asymmetry.** `skipped-level` is the one diagnostic id whose path is
-NOT relative to the root scope: it is computed by walking the document's
-full header tree from its literal top, so when a title header (level
-`root_level - 1`) exists, `skipped-level` paths MUST include it as their
-leading segment. Every other diagnostic that carries a path —
-`not-allowed`, `unexpected-section`, `too-many-sections`,
-`missing-section`, `too-few-sections`, `missing-title`, and the constraint
-ids — is relative to the root scope per above and MUST NOT include the
-title header. (Non-normative: this split is an implementation
-inconsistency under review for a future major version, not a deliberate
-design choice; v1 implementations MUST still match it exactly, since the
-conformance corpus asserts both behaviors.)
 
 **Location anchoring:**
 - Diagnostics about a present header (`not-allowed`, `unexpected-section`,
