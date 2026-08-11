@@ -1,15 +1,27 @@
 {
   "pass.md": [],
   "one-of.md": [
-    { "id": "one_of", "path": "" }
+    {
+      "id": "one_of",
+      "target": { "kind": "document" }
+    }
   ],
   "requires.md": [
-    { "id": "requires", "path": "" }
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
   ],
   "conflicts.md": [
-    { "id": "conflicts", "path": "" }
+    {
+      "id": "conflicts",
+      "target": { "kind": "document" }
+    }
   ],
   "ordered.md": [
-    { "id": "ordered", "path": "" }
+    {
+      "id": "ordered",
+      "target": { "kind": "document" }
+    }
   ]
 }

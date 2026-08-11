@@ -1,14 +1,29 @@
 {
   "pass.md": [],
   "fail.md": [
-    { "id": "not-allowed", "path": "Wrong" },
-    { "id": "skipped-level", "path": "Wrong > Item > Deep" },
-    { "id": "too-few-sections", "path": "Item" }
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Wrong"] }
+    },
+    {
+      "id": "skipped-level",
+      "target": { "kind": "header", "path": ["Wrong", "Item", "Deep"] }
+    },
+    {
+      "id": "too-few-sections",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Item" }
+    }
   ],
   "missing.md": [
-    { "id": "missing-title", "path": "Project" }
+    {
+      "id": "missing-title",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Project" }
+    }
   ],
   "multiple.md": [
-    { "id": "too-many-sections", "path": "Project" }
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Project"] }
+    }
   ]
 }

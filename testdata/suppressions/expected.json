@@ -1,6 +1,9 @@
 {
   "file-and-inline.md": [],
   "absence-inline.md": [
-    { "id": "missing-section", "path": "Need" }
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Need" }
+    }
   ]
 }

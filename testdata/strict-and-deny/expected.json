@@ -1,7 +1,13 @@
 {
   "pass.md": [],
   "fail.md": [
-    { "id": "unexpected-section", "path": "Overview > Surprise" },
-    { "id": "not-allowed", "path": "Forbidden" }
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["Overview", "Surprise"] }
+    },
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Forbidden"] }
+    }
   ]
 }

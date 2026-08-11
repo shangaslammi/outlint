@@ -303,13 +303,37 @@ struct RenderedDiagnostic {
     source_path: String,
     line: u64,
     column: u64,
-    header_path: Option<Vec<String>>,
+    /// What the diagnostic is about. Absent for schema-load errors, which are
+    /// about the schema file rather than anything inside a document.
+    target: Option<RenderedTarget>,
     schema_node: Option<RenderedSchemaNode>,
     schema_location: Option<RenderedLocation>,
     involved_headers: Vec<RenderedInvolvedHeader>,
     references: Vec<RenderedReference>,
-    frontmatter_range: Option<RenderedLineRange>,
-    json_pointer: Option<String>,
+}
+
+/// The rendering of [`DiagnosticTarget`], one variant per kind.
+///
+/// The variants are kept apart rather than flattened into one path because the
+/// text they carry has different provenance: only [`Self::Header`] names text
+/// that occurs in the document, [`Self::MissingHeader`]'s matcher is schema
+/// text, and the remaining two name no header at all.
+#[derive(Debug)]
+enum RenderedTarget {
+    Header {
+        path: Vec<String>,
+    },
+    MissingHeader {
+        parent: Vec<String>,
+        matcher: String,
+    },
+    Document,
+    Frontmatter {
+        /// Absent when the document has no frontmatter block at all.
+        line_range: Option<RenderedLineRange>,
+        /// `Some("")` is the root JSON Pointer; `None` is no pointer at all.
+        pointer: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -627,13 +651,11 @@ fn render_schema_error(
         source_path: location.path.clone(),
         line: location.line,
         column: location.column,
-        header_path: None,
+        target: None,
         schema_node: None,
         schema_location: Some(location),
         involved_headers: Vec::new(),
         references: Vec::new(),
-        frontmatter_range: None,
-        json_pointer: None,
     }
 }
 
@@ -646,14 +668,13 @@ fn render_document_diagnostic(
         schema_node_location(node, &loaded.locations)
             .map(|range| source_location(&loaded.sources, range, "<schema>"))
     });
-    let target = flatten_target(&diagnostic.target);
     RenderedDiagnostic {
         id: diagnostic.id.as_str().to_owned(),
         message: diagnostic.message.clone(),
         source_path: document_path.to_owned(),
         line: diagnostic.location.line,
         column: diagnostic.location.column,
-        header_path: Some(target.header_path),
+        target: Some(render_target(&diagnostic.target)),
         schema_node: diagnostic.schema_node.as_ref().map(render_schema_node),
         schema_location,
         involved_headers: diagnostic
@@ -666,45 +687,26 @@ fn render_document_diagnostic(
             })
             .collect(),
         references: diagnostic.references.iter().map(render_reference).collect(),
-        frontmatter_range: target.frontmatter_range,
-        json_pointer: target.json_pointer,
     }
 }
 
-/// The flat header-path/frontmatter fields the current output shape exposes.
-struct FlatTarget {
-    header_path: Vec<String>,
-    frontmatter_range: Option<RenderedLineRange>,
-    json_pointer: Option<String>,
-}
-
-/// Collapses a [`DiagnosticTarget`] back into the flat fields the output shape
-/// still uses, so that a missing section's schema-side matcher label is
-/// indistinguishable from real heading text and frontmatter reports an empty
-/// header path.
-///
-/// This exists only to keep the output unchanged while the core distinguishes
-/// the kinds of target; it is deleted when the output shape follows.
-///
-/// TODO(M3): delete this and render [`DiagnosticTarget`] directly.
-fn flatten_target(target: &DiagnosticTarget) -> FlatTarget {
-    let (header_path, block) = match target {
-        DiagnosticTarget::Header(path) => (path.0.clone(), None),
-        DiagnosticTarget::MissingHeader { parent, matcher } => {
-            let mut path = parent.0.clone();
-            path.push(matcher.clone());
-            (path, None)
-        }
-        DiagnosticTarget::Document => (Vec::new(), None),
-        DiagnosticTarget::Frontmatter { block } => (Vec::new(), block.as_ref()),
-    };
-    FlatTarget {
-        header_path,
-        frontmatter_range: block.map(|block| RenderedLineRange {
-            start_line: block.line_range.start_line,
-            end_line: block.line_range.end_line,
-        }),
-        json_pointer: block.and_then(|block| block.json_pointer.clone()),
+fn render_target(target: &DiagnosticTarget) -> RenderedTarget {
+    match target {
+        DiagnosticTarget::Header(path) => RenderedTarget::Header {
+            path: path.0.clone(),
+        },
+        DiagnosticTarget::MissingHeader { parent, matcher } => RenderedTarget::MissingHeader {
+            parent: parent.0.clone(),
+            matcher: matcher.clone(),
+        },
+        DiagnosticTarget::Document => RenderedTarget::Document,
+        DiagnosticTarget::Frontmatter { block } => RenderedTarget::Frontmatter {
+            line_range: block.as_ref().map(|block| RenderedLineRange {
+                start_line: block.line_range.start_line,
+                end_line: block.line_range.end_line,
+            }),
+            pointer: block.as_ref().and_then(|block| block.json_pointer.clone()),
+        },
     }
 }
 
@@ -924,10 +926,9 @@ fn render_human(results: &[ValidationResult], use_color: bool) -> String {
 }
 
 fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
-    if let Some(path) = &diagnostic.header_path {
-        output.push_str("; header_path=\"");
-        output.push_str(&human_header_path(path));
-        output.push('"');
+    if let Some(target) = &diagnostic.target {
+        output.push_str("; target=");
+        output.push_str(&human_target(target));
     }
     if let Some(node) = &diagnostic.schema_node {
         output.push_str("; schema_node=");
@@ -960,16 +961,37 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
         }
         output.push(']');
     }
-    if let Some(range) = &diagnostic.frontmatter_range {
-        output.push_str(&format!(
-            "; frontmatter_range={}:{}",
-            range.start_line, range.end_line
-        ));
-    }
-    if let Some(pointer) = &diagnostic.json_pointer {
-        output.push_str("; json_pointer=\"");
-        output.push_str(&escape_human(pointer));
-        output.push('"');
+}
+
+/// Renders a target in the same tagged `name` / `name(arguments)` shape the
+/// human output already uses for `schema_node`, so the kind is always visible
+/// and greppable and no kind has to borrow another's spelling.
+fn human_target(target: &RenderedTarget) -> String {
+    match target {
+        RenderedTarget::Header { path } => format!("header(\"{}\")", human_header_path(path)),
+        RenderedTarget::MissingHeader { parent, matcher } => format!(
+            "missing_header(parent=\"{}\",matcher=\"{}\")",
+            human_header_path(parent),
+            escape_human(matcher)
+        ),
+        RenderedTarget::Document => "document".to_owned(),
+        RenderedTarget::Frontmatter {
+            line_range,
+            pointer,
+        } => {
+            let mut arguments = Vec::new();
+            if let Some(range) = line_range {
+                arguments.push(format!("lines={}:{}", range.start_line, range.end_line));
+            }
+            if let Some(pointer) = pointer {
+                arguments.push(format!("pointer=\"{}\"", escape_human(pointer)));
+            }
+            if arguments.is_empty() {
+                "frontmatter".to_owned()
+            } else {
+                format!("frontmatter({})", arguments.join(","))
+            }
+        }
     }
 }
 
@@ -1115,7 +1137,7 @@ fn render_json(results: &[ValidationResult]) -> String {
     format!(
         "{}\n",
         json!({
-            "version": 1,
+            "version": 2,
             "results": results,
             "summary": {
                 "files": results.len(),
@@ -1135,8 +1157,8 @@ fn diagnostic_json(diagnostic: &RenderedDiagnostic) -> Value {
         "location".into(),
         json!({ "line": diagnostic.line, "column": diagnostic.column }),
     );
-    if let Some(header_path) = &diagnostic.header_path {
-        object.insert("header_path".into(), json!(header_path));
+    if let Some(target) = &diagnostic.target {
+        object.insert("target".into(), target_json(target));
     }
     if let Some(node) = &diagnostic.schema_node {
         object.insert("schema_node".into(), schema_node_json(node));
@@ -1174,19 +1196,37 @@ fn diagnostic_json(diagnostic: &RenderedDiagnostic) -> Value {
             Value::Array(diagnostic.references.iter().map(reference_json).collect()),
         );
     }
-    if let Some(range) = &diagnostic.frontmatter_range {
-        object.insert(
-            "frontmatter_range".into(),
-            json!({
-                "start_line": range.start_line,
-                "end_line": range.end_line
-            }),
-        );
-    }
-    if let Some(pointer) = &diagnostic.json_pointer {
-        object.insert("json_pointer".into(), json!(pointer));
-    }
     Value::Object(object)
+}
+
+fn target_json(target: &RenderedTarget) -> Value {
+    match target {
+        RenderedTarget::Header { path } => json!({ "kind": "header", "path": path }),
+        RenderedTarget::MissingHeader { parent, matcher } => {
+            json!({ "kind": "missing_header", "parent": parent, "matcher": matcher })
+        }
+        RenderedTarget::Document => json!({ "kind": "document" }),
+        RenderedTarget::Frontmatter {
+            line_range,
+            pointer,
+        } => {
+            let mut object = Map::new();
+            object.insert("kind".into(), json!("frontmatter"));
+            if let Some(range) = line_range {
+                object.insert(
+                    "line_range".into(),
+                    json!({
+                        "start_line": range.start_line,
+                        "end_line": range.end_line
+                    }),
+                );
+            }
+            if let Some(pointer) = pointer {
+                object.insert("pointer".into(), json!(pointer));
+            }
+            Value::Object(object)
+        }
+    }
 }
 
 fn schema_node_json(node: &RenderedSchemaNode) -> Value {
@@ -1297,13 +1337,11 @@ mod tests {
             source_path: "document.md".into(),
             line,
             column: line,
-            header_path: None,
+            target: None,
             schema_node: None,
             schema_location: None,
             involved_headers: Vec::new(),
             references: Vec::new(),
-            frontmatter_range: None,
-            json_pointer: None,
         };
 
         let json = diagnostic_json(&diagnostic);

@@ -1,10 +1,19 @@
 {
   "ambiguous.md": [
-    { "id": "missing-section", "path": "Part One > Overview > Goals" },
-    { "id": "missing-section", "path": "Part Two > Overview > Goals" }
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": ["Part One", "Overview"], "matcher": "Goals" }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": ["Part Two", "Overview"], "matcher": "Goals" }
+    }
   ],
   "attribution.md": [
-    { "id": "missing-section", "path": "Part One > Overview > Goals" }
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": ["Part One", "Overview"], "matcher": "Goals" }
+    }
   ],
   "pass.md": []
 }

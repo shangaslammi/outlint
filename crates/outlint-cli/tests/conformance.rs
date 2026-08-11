@@ -8,11 +8,14 @@ use std::{
 
 use serde_json::Value;
 
-/// One portable expected diagnostic: exactly `{ "id", "path" }` and nothing else.
+/// One portable expected diagnostic: exactly `{ "id", "target" }` and nothing
+/// else. `target` is held in the key-sorted rendering [`canonical`] produces, so
+/// that two spellings of the same target compare equal and entries stay
+/// orderable for the multiset comparison.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Entry {
     id: String,
-    path: String,
+    target: String,
 }
 
 #[test]
@@ -96,7 +99,7 @@ fn run_fixture(directory: &Path) {
     }
 }
 
-/// Reads one expected diagnostic, enforcing the portable `{id, path}` shape.
+/// Reads one expected diagnostic, enforcing the portable `{id, target}` shape.
 fn expected_entry(entry: &Value, expected_path: &Path) -> Entry {
     let object = entry.as_object().unwrap_or_else(|| {
         panic!(
@@ -104,29 +107,68 @@ fn expected_entry(entry: &Value, expected_path: &Path) -> Entry {
             expected_path.display()
         )
     });
-    let field = |name: &str| {
-        object
-            .get(name)
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| {
-                panic!(
-                    "{}: expected diagnostic {entry} needs a string `{name}`",
-                    expected_path.display()
-                )
-            })
-            .to_owned()
-    };
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: expected diagnostic {entry} needs a string `id`",
+                expected_path.display()
+            )
+        })
+        .to_owned();
+    let target = object.get("target").filter(|target| target.is_object());
+    let target = target.unwrap_or_else(|| {
+        panic!(
+            "{}: expected diagnostic {entry} needs an object `target`",
+            expected_path.display()
+        )
+    });
+    assert!(
+        target.get("kind").and_then(Value::as_str).is_some(),
+        "{}: expected diagnostic {entry} needs a string `target.kind`",
+        expected_path.display()
+    );
     let entries = Entry {
-        id: field("id"),
-        path: field("path"),
+        id,
+        target: canonical(target),
     };
     assert_eq!(
         object.len(),
         2,
-        "{}: expected diagnostic {entry} must carry exactly `id` and `path`",
+        "{}: expected diagnostic {entry} must carry exactly `id` and `target`",
         expected_path.display()
     );
     entries
+}
+
+/// Renders a JSON value with every object's members in key order, so that a
+/// fixture and the CLI agree whenever they describe the same target, whatever
+/// order they happen to write its members in.
+fn canonical(value: &Value) -> String {
+    match value {
+        Value::Object(members) => {
+            let mut keys = members.keys().collect::<Vec<_>>();
+            keys.sort();
+            let body = keys
+                .into_iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        Value::String(key.clone()),
+                        canonical(&members[key])
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{body}}}")
+        }
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(canonical).collect::<Vec<_>>().join(",")
+        ),
+        scalar => scalar.to_string(),
+    }
 }
 
 fn markdown_names(directory: &Path) -> BTreeSet<String> {
@@ -159,7 +201,7 @@ fn markdown_names(directory: &Path) -> BTreeSet<String> {
 }
 
 /// Validates every fixture document with the built binary and returns the
-/// portable `{id, path}` entries it reported, keyed by document path.
+/// portable `{id, target}` entries it reported, keyed by document path.
 fn run_cli(directory: &Path, markdown_names: &BTreeSet<String>) -> BTreeMap<String, Vec<Entry>> {
     let mut arguments = vec!["check".to_owned()];
     arguments.extend(markdown_names.iter().cloned());
@@ -233,22 +275,14 @@ fn entry_from_json(diagnostic: &Value, document: &str) -> Entry {
         .as_str()
         .unwrap_or_else(|| panic!("a diagnostic for {document} has no id: {diagnostic}"))
         .to_owned();
-    let segments = diagnostic["header_path"]
-        .as_array()
-        .unwrap_or_else(|| panic!("diagnostic {id} for {document} has no header_path"))
-        .iter()
-        .map(|segment| {
-            segment
-                .as_str()
-                .unwrap_or_else(|| {
-                    panic!("diagnostic {id} for {document} has a non-string header_path segment")
-                })
-                .to_owned()
-        })
-        .collect::<Vec<_>>();
+    let target = &diagnostic["target"];
+    assert!(
+        target.is_object() && target.get("kind").and_then(Value::as_str).is_some(),
+        "diagnostic {id} for {document} has no tagged target: {diagnostic}"
+    );
     Entry {
         id,
-        path: segments.join(" > "),
+        target: canonical(target),
     }
 }
 
@@ -277,8 +311,8 @@ fn compare_multisets(document: &Path, expected: &[Entry], produced: &[Entry]) {
         for (entry, count) in entries {
             let _ = write!(
                 message,
-                "\n  {count} x {{ \"id\": {:?}, \"path\": {:?} }}",
-                entry.id, entry.path
+                "\n  {count} x {{ \"id\": {:?}, \"target\": {} }}",
+                entry.id, entry.target
             );
         }
         message.push('\n');
