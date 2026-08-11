@@ -43,12 +43,22 @@ stripping, by contrast, always applies to diagnostic text —
 `options.strip_inline_markup` gates only the text used for matching, so
 `## **Foo** [bar](x)` reports as `Foo bar` under either setting.
 
-1.4. The **root scope** is the set of headers at level `options.root_level`
-(default 2, i.e. documents with a single h1 title and h2 sections). If
-`title` is specified in the schema, exactly one header at level
-`root_level - 1` MUST exist and match it. `title` together with
-`root_level: 1` is a schema error `invalid-title-level` (there is no level
-0).
+1.4. The **root scope** is the set of the document's h2 headers; it is what
+the schema's top-level `sections` list describes. `title`, if specified, is
+the rule for the document's h1: a document with no h1 is diagnostic
+`missing-title`, and an h1 whose text does not match the `title` matcher is
+`not-allowed`.
+
+**Single top-level spine.** A document MUST have zero h1, or exactly one h1
+with every h2 beneath it. This is structural, enforced for every schema
+independently of any rule and of whether `title` is declared. A surplus h1
+is one `too-many-sections` per document, on the second h1 in document order:
+that is where the spine forks, and further h1s name the same fork. An h2
+that is not a descendant of the document's h1 — necessarily one that
+precedes it — is `detached-section`, reported once per offending header. A
+document with no h1 at all conforms, and its root scope is then all of its
+h2 headers; when there is one h1, the root scope is exactly that h1's
+children.
 
 1.5. If `options.allow_skipped_levels` is false (default), a header whose
 level exceeds its parent's level by more than 1 is a structural error
@@ -76,14 +86,13 @@ A schema is a YAML (or JSON) document:
 
 ```yaml
 version: 1                # required, integer, currently 1
-title: <matcher>          # optional; rule for the level (root_level - 1) header
+title: <matcher>          # optional; rule for the h1 header
 options:                  # optional, see §7
   match_case: false
   strip_inline_markup: true
   allow_skipped_levels: false
-  root_level: 2
 frontmatter: <frontmatter-object>  # optional, see §2.3
-sections: [<rule>, ...]   # rules for headers at root_level
+sections: [<rule>, ...]   # rules for h2 headers
 constraints: [<constraint>, ...]   # optional, see §5
 ```
 
@@ -215,8 +224,9 @@ headers pass. A scope is **closed** if its parent rule has `strict: true`.
 the explicit rule is redundant but legal.
 
 3.5. **Cardinality check.** After all children of a scope are matched, for
-each rule: if match count < min → `missing-section` (or
-`too-few-sections`); if count > max → `too-many-sections`. A rule's count
+each rule: if match count < min → `missing-section` when the count is zero,
+`too-few-sections` when it is nonzero (some headers matched, just not
+enough); if count > max → `too-many-sections`. A rule's count
 covers only the headers for which it is the matched rule (§3.2); for a
 trailing `match: "*"` that means the children not matched by any earlier
 rule. "At least one child of any name" is therefore `match: "*"` with
@@ -371,73 +381,84 @@ schema error `duplicate-ref`.
 
 ## 6. Diagnostics
 
-Implementations MUST report, per violation: a stable diagnostic id, the
-header path (e.g. `Overview > Goals`), a source location, and the schema
-rule/constraint involved.
+Implementations MUST report, per violation: a stable diagnostic id, a source
+location, and the schema rule or constraint involved when one exists. A
+violation found in a document MUST additionally carry a **target** (§6.1)
+saying what the diagnostic is about. Schema errors (§6.3) are about the
+schema file itself; they have no target and MUST omit it entirely.
 
-> **Revision in progress.** The path derivation below is stale: the
-> implementation has moved ahead of it and this section has not yet caught
-> up. Two defects it describes are already fixed. Header paths omitted
-> ancestors above `root_level`, making two diagnostics under different such
-> ancestors indistinguishable; paths are now the complete document-tree
-> ancestor chain. The joined-string encoding was lossy for headers
-> containing ` > `; paths are now arrays. The path is now a tagged *target*
-> with four kinds — `header`, `missing_header`, `document`, and
-> `frontmatter`. Do not implement from the derivation below; the conformance
-> corpus in `testdata/` is authoritative until this section is rewritten.
+### 6.1 Targets
 
-**Diagnostic path.** For a diagnostic anchored to a present header, the
-path is that header's visible text — case-preserving, with inline markup
-always stripped for diagnostic purposes regardless of
-`options.strip_inline_markup` (§1.3 gates matching, not diagnostic text) —
-joined with ` > `. Frontmatter diagnostics carry no header path and use the
-empty string; they locate the failing value with a JSON Pointer instead
-(§6, *Location anchoring*).
+A target is a tagged value whose `kind` selects one of four shapes. The kinds
+are kept apart because the text they carry has different provenance, and one
+flat path cannot say which is which.
 
-Absence diagnostics (`missing-section`, `too-few-sections`,
-`missing-title`) have no header to draw text from: their path MUST be the
-enclosing scope's path — the root scope's empty string when there is no
-enclosing section, which is always the case for `missing-title` — with one
-segment appended, that segment being the **matcher label** of the
-unsatisfied rule's matcher (the schema's `title` matcher, for
-`missing-title`). The matcher label depends on the matcher form (§2.2):
-Exact — the string verbatim; Glob — the glob pattern source verbatim (e.g.
-`Step *`); Regex — the pattern body, with `\/` unescaped to `/` per §2.2,
-wrapped in slashes (`/pattern/`); Wildcard — `*`. A matcher label is schema
-text, not document text: it is not necessarily a string that appears
-anywhere in the document being validated.
+| `kind` | Members | Names |
+|---|---|---|
+| `header` | `path` | A header that exists in the document |
+| `missing_header` | `parent`, `matcher` | A section the schema requires and the document does not contain |
+| `document` | — | A violation no single header can name |
+| `frontmatter` | `line_range`?, `pointer`? | A frontmatter block, or a value inside one |
 
-**Location anchoring:**
-- Diagnostics about a present header (`not-allowed`, `unexpected-section`,
-  `skipped-level`) anchor to that header's line. `too-many-sections`
-  anchors to the first header in excess of `max`.
-- Absence diagnostics (`missing-section`, `too-few-sections`) anchor to the
-  parent section's header line; for the root scope, to line 1.
-- Title diagnostics: `missing-title` (no header at `root_level - 1`)
-  anchors to line 1; a title header failing the matcher is `not-allowed` on
-  that header's line; more than one header at `root_level - 1` is
-  `too-many-sections` anchored to the second such header.
-- Frontmatter diagnostics (`missing-frontmatter`, `forbidden-frontmatter`,
-  `invalid-frontmatter`, `frontmatter-schema`) anchor to the frontmatter
-  block's line range, or line 1 when absent; `frontmatter-schema`
-  additionally carries the JSON Pointer of the failing value.
-- Constraint diagnostics anchor to the parent section's header line (line 1
-  for root constraints) and list the concrete headers involved, if any.
+A **header path** is the complete document-tree ancestor chain of a header,
+outermost first and ending with the header itself; it includes the enclosing
+h1. Two same-named sections under different ancestors therefore have
+different paths. Each segment is a header's visible text — case-preserving,
+with inline markup always stripped for diagnostic purposes regardless of
+`options.strip_inline_markup` (§1.3 gates matching, not diagnostic text). A
+path is a sequence of segments and MUST NOT be serialized as a single joined
+string: a header literally named `A > B` would otherwise be
+indistinguishable from the two-level path `A`, `B`.
 
-Reserved diagnostic ids: `skipped-level`, `not-allowed`,
-`unexpected-section`, `missing-section`, `too-few-sections`,
-`too-many-sections`, `missing-title`, `missing-frontmatter`,
+`missing_header.parent` is the header path of the scope that should have
+contained the section, and is empty when no header encloses it: the root
+scope, or the title, which sits *above* the root scope. Its `matcher` is the
+**matcher label** of the unsatisfied schema matcher, which is schema text and
+need not occur anywhere in the document. The label depends on the matcher
+form (§2.2): Exact — the string verbatim; Glob — the glob pattern source
+verbatim (e.g. `Step *`); Regex — the pattern body, with `\/` unescaped to
+`/` per §2.2, wrapped in slashes (`/pattern/`); Wildcard — `*`.
+
+For `frontmatter`, `line_range` is the one-based inclusive `{start_line,
+end_line}` span of the whole block, absent exactly when the document has no
+frontmatter block at all (`missing-frontmatter`). `pointer` is the JSON
+Pointer of the value a linked JSON Schema rejected. Its absence and the
+empty string differ: `""` is the root pointer, naming the frontmatter
+mapping itself, while no `pointer` member at all means the diagnostic is
+about the block rather than any value in it. An absent optional member MUST
+be omitted rather than emitted as null.
+
+### 6.2 Target and location per diagnostic
+
+| Diagnostic | Target | Source anchor |
+|---|---|---|
+| `skipped-level`, `not-allowed`, `unexpected-section`, `detached-section` | `header` of the offending header | that header's line |
+| `too-many-sections` | `header` of the first header in excess of the bound | that header's line |
+| `missing-section`, `too-few-sections` | `missing_header`: `parent` is the enclosing scope's path, `matcher` the unsatisfied rule's label | the parent section's header line; line 1 at the root scope |
+| `missing-title` | `missing_header` with empty `parent` and the `title` matcher's label | line 1 |
+| `missing-frontmatter`, `forbidden-frontmatter`, `invalid-frontmatter`, `frontmatter-schema` | `frontmatter` | the block's first line, or line 1 when absent |
+| constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, whose scope spans headers under no single ancestor | the parent section's header line; line 1 at the root scope |
+
+Constraint diagnostics additionally list the concrete headers involved, if
+any, each by its own header path (§5.3). Which diagnostics the `title`
+matcher and the single top-level spine produce is defined in §1.4.
+
+### 6.3 Reserved ids
+
+Diagnostic ids: `skipped-level`, `not-allowed`, `unexpected-section`,
+`missing-section`, `too-few-sections`, `too-many-sections`,
+`detached-section`, `missing-title`, `missing-frontmatter`,
 `forbidden-frontmatter`, `invalid-frontmatter`, `frontmatter-schema`, plus
-the constraint keywords. Schema errors: `duplicate-id`, `unresolved-ref`,
-`forbidden-ref`, `duplicate-ref`, `reserved-id`, `invalid-matcher`,
-`invalid-repeat`, `invalid-title-level`, `invalid-frontmatter-schema`,
-`ordered-scope-mismatch`, `conflicting-cardinality`,
-`conflicting-frontmatter`.
+the constraint keywords `one_of`, `any_of`, `at_most_one`, `all_or_none`,
+`requires`, `conflicts`, `ordered`.
 
-Schema document parsing and top-level validation additionally use
-`syntax`, `invalid-document-shape`, `unsupported-version`, and
-`invalid-root-level`. These are schema diagnostics with the same stability
-contract as the schema-error ids above.
+Schema errors: `syntax`, `invalid-document-shape`, `unsupported-version`,
+`duplicate-id`, `unresolved-ref`, `forbidden-ref`, `duplicate-ref`,
+`reserved-id`, `invalid-matcher`, `invalid-repeat`,
+`ordered-scope-mismatch`, `conflicting-cardinality`,
+`conflicting-frontmatter`, `invalid-frontmatter-schema`. These are load-time
+failures reported against the schema document and share the stability
+contract of the diagnostic ids above.
 
 **Suppression.** An HTML comment
 `<!-- outlint-disable <diag-id>[, <diag-id>...] -->` on the line
@@ -456,7 +477,6 @@ errors are load-time failures and are never suppressible.
 | `match_case` | bool | `false` | case-sensitive matching for all matcher forms |
 | `strip_inline_markup` | bool | `true` | reduce inline markup to text before matching (§1.3) |
 | `allow_skipped_levels` | bool | `false` | permit e.g. h4 directly under h2 |
-| `root_level` | int (1–6) | `2` | header level of the schema's top-level `sections` |
 
 ---
 
@@ -464,7 +484,7 @@ errors are load-time failures and are never suppressible.
 
 ```
 load_schema:
-  parse YAML; check version; reject title with root_level 1
+  parse YAML; check version
   load frontmatter.schema if given; compile JSON Schema (dialect per $schema)
   walk rules: validate matchers (incl. regex dialect), repeat grammar,
               assign auto-ids, check per-scope id uniqueness,
@@ -479,8 +499,10 @@ validate(doc):
                             (ignore code fences; normalize setext)
   check frontmatter presence vs required/allow; if present and schema
     compiled, run JSON Schema validation -> frontmatter-schema diagnostics
-  check title (if declared) and skipped levels
-  visit(scope = root headers, rules = schema.sections, constraints):
+  check title (if declared), the single top-level spine (§1.4:
+    at most one h1 -> too-many-sections; every h2 beneath it ->
+    detached-section), and skipped levels
+  visit(scope = the document's h2 headers, rules = schema.sections, constraints):
     for each header in document order:
       rule := first rule in list whose matcher matches header.text
       if rule is None: report unexpected-section if scope closed; skip subtree
