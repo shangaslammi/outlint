@@ -1,0 +1,123 @@
+name: Bug report
+description: outlint crashes, hangs, or reports something the specification does not call for
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report.
+
+        **Security issues do not belong here.** If the bug is a crash, a hang,
+        or unexpected file access reachable from untrusted input, follow
+        [SECURITY.md](https://github.com/shangaslammi/outlint/blob/main/SECURITY.md)
+        instead.
+
+        The most useful bug report is one that can be turned directly into a
+        `testdata/` conformance fixture, so please paste the schema and the
+        Markdown rather than describing them.
+
+  - type: input
+    id: version
+    attributes:
+      label: outlint version
+      description: Output of `outlint --version`, or the commit SHA if you built from source.
+      placeholder: "outlint 0.1.0 (or commit 88c163b)"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and Rust toolchain
+      description: Operating system and version, plus `rustc --version` if you built from source.
+      placeholder: "Ubuntu 24.04, rustc 1.86.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: schema
+    attributes:
+      label: Schema
+      description: The complete `.outlint.yml` / `*.outlint.yml` that reproduces the problem. Reduce it as far as you can while still reproducing.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: document
+    attributes:
+      label: Markdown input
+      description: The complete Markdown document. Include frontmatter if it is involved.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: schema_resources
+    attributes:
+      label: Linked JSON Schema resources
+      description: If `frontmatter.schema` points at a file, paste it and anything in its `$ref` graph, noting the relative path of each.
+      render: json
+    validations:
+      required: false
+
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact command line you ran.
+      placeholder: "outlint check docs/adr-0001.md --schema .outlint.yml"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected output
+      description: What you expected outlint to print, and the exit code you expected (0 clean, 1 diagnostics, 2 operational failure).
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual output
+      description: What outlint actually printed, verbatim, plus the exit code (`echo $?`). `--format json` output is especially helpful.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: spec
+    attributes:
+      label: Does this contradict the specification?
+      description: >-
+        Check the behavior against spec/outlint-spec.md and spec/cli.md. The
+        specification is normative — where it and the implementation disagree,
+        the implementation is the bug. If the specification is silent or
+        ambiguous, say so; that is a specification bug worth fixing too.
+      options:
+        - "Yes — the specification says something different (section cited below)"
+        - "The specification is silent or ambiguous here"
+        - "The specification agrees with the current behavior, but I think it is wrong"
+        - "I have not checked"
+    validations:
+      required: true
+
+  - type: textarea
+    id: spec_detail
+    attributes:
+      label: Specification section
+      description: If you cited the specification above, which section, and what does it say?
+      placeholder: "spec/outlint-spec.md §3 says the first matching rule in a scope wins, but ..."
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Workarounds you found, when it started, or how it is affecting you.
+    validations:
+      required: false

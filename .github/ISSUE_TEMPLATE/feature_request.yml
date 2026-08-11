@@ -1,0 +1,100 @@
+name: Feature request
+description: Propose a change to the schema language, the CLI, or the library API
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        outlint is specification-first: the schema language and the CLI
+        contract live in
+        [`spec/outlint-spec.md`](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md)
+        and
+        [`spec/cli.md`](https://github.com/shangaslammi/outlint/blob/main/spec/cli.md),
+        and a behavior change is a specification change first and code second.
+        So the useful shape of a feature request is a proposed edit to the
+        specification, not just a wish.
+
+        Some things are out of scope on purpose: rewriting or fixing documents
+        (outlint only reports), prose and formatting linting, directory
+        traversal in v1, network access, async or parallelism, and an LSP.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Schema language (matchers, cardinality, scopes)
+        - Constraints
+        - Frontmatter / JSON Schema integration
+        - Diagnostics (new id, message, or location)
+        - CLI (flags, output formats, exit codes, discovery)
+        - Library API (outlint-core)
+        - Conformance corpus / tooling
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What structural rule are you trying to enforce, and why can you not express it today? Concrete documents beat abstract descriptions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed schema or CLI surface
+      description: Show what you would write. For a schema change, paste the YAML as you imagine it. For a CLI change, show the command line.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected behavior
+      description: >-
+        What should happen for documents that satisfy it and for documents that
+        do not? If it introduces a diagnostic, propose an id and say when it is
+        emitted and where it anchors. Diagnostic ids are a public contract
+        (specification §6).
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >-
+        Can this be expressed with today's matchers, cardinality, `strict`,
+        `allow: false`, or constraints? If it nearly works, say where it falls
+        short.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Is this a breaking change?
+      description: >-
+        Would existing schemas, documents, diagnostic ids, JSON output, or exit
+        codes change meaning? outlint is 0.x, so breaking changes are possible,
+        but they need to be deliberate.
+      options:
+        - "No — purely additive"
+        - "Yes — existing schemas or documents would validate differently"
+        - "Yes — diagnostic ids, JSON shape, or exit codes would change"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to open a pull request (specification change, implementation, and a `testdata/` fixture).
+          required: false

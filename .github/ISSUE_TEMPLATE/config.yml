@@ -1,0 +1,18 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/shangaslammi/outlint/security/policy
+    about: >-
+      Do not open a public issue. Report privately by email to sami@infer.fi or
+      through a GitHub private security advisory.
+  - name: The specification
+    url: https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md
+    about: >-
+      The schema language and observable behavior are defined here, and in
+      spec/cli.md for the command line. Read the relevant section before
+      filing — the specification is normative.
+  - name: Contributing guide
+    url: https://github.com/shangaslammi/outlint/blob/main/CONTRIBUTING.md
+    about: >-
+      How to build, test, and verify, plus the spec-first rule and the
+      conformance corpus contract.
