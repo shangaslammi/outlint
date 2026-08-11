@@ -15,13 +15,13 @@ use serde_json::Value as JsonValue;
 pub struct Schema {
     /// The schema language version used by this document.
     pub version: SchemaVersion,
-    /// Matcher for the single header immediately above the root scope.
+    /// Matcher for the document's `h1`, the header above the root scope.
     pub title: Option<Matcher>,
     /// Document parsing and matching options, with defaults already applied.
     pub options: Options,
     /// The normalized frontmatter presence and value-validation policy.
     pub frontmatter: FrontmatterPolicy,
-    /// Rules for headers in the root scope, in first-match order.
+    /// Rules for the root scope's `h2` headers, in first-match order.
     pub sections: Vec<SectionRule>,
     /// Presence and ordering constraints attached to the root scope.
     pub constraints: Vec<Constraint>,
@@ -72,8 +72,6 @@ pub struct Options {
     pub strip_inline_markup: bool,
     /// Whether a header may be more than one level below its parent.
     pub allow_skipped_levels: bool,
-    /// The header level at which the schema's root section rules apply.
-    pub root_level: HeaderLevel,
 }
 
 /// A Markdown ATX header level.
@@ -89,20 +87,6 @@ pub enum HeaderLevel {
     H4 = 4,
     H5 = 5,
     H6 = 6,
-}
-
-impl HeaderLevel {
-    /// Returns the next shallower Markdown heading level, if one exists.
-    pub const fn predecessor(self) -> Option<Self> {
-        match self {
-            Self::H1 => None,
-            Self::H2 => Some(Self::H1),
-            Self::H3 => Some(Self::H2),
-            Self::H4 => Some(Self::H3),
-            Self::H5 => Some(Self::H4),
-            Self::H6 => Some(Self::H5),
-        }
-    }
 }
 
 impl TryFrom<u8> for HeaderLevel {

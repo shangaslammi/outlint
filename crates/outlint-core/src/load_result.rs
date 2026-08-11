@@ -255,10 +255,6 @@ pub enum SchemaErrorKind {
     ConflictingCardinality,
     /// The frontmatter policy both requires and forbids frontmatter.
     ConflictingFrontmatter,
-    /// `root_level` is outside Markdown's supported header levels.
-    InvalidRootLevel,
-    /// A title matcher was declared while the root scope is at h1.
-    InvalidTitleLevel,
     /// A frontmatter JSON Schema is malformed or uses an unsupported dialect.
     InvalidFrontmatterSchema,
 }
@@ -280,8 +276,6 @@ impl SchemaErrorKind {
             Self::OrderedScopeMismatch => "ordered-scope-mismatch",
             Self::ConflictingCardinality => "conflicting-cardinality",
             Self::ConflictingFrontmatter => "conflicting-frontmatter",
-            Self::InvalidRootLevel => "invalid-root-level",
-            Self::InvalidTitleLevel => "invalid-title-level",
             Self::InvalidFrontmatterSchema => "invalid-frontmatter-schema",
         }
     }
@@ -319,8 +313,6 @@ mod tests {
                 SchemaErrorKind::ConflictingFrontmatter,
                 "conflicting-frontmatter",
             ),
-            (SchemaErrorKind::InvalidRootLevel, "invalid-root-level"),
-            (SchemaErrorKind::InvalidTitleLevel, "invalid-title-level"),
             (
                 SchemaErrorKind::InvalidFrontmatterSchema,
                 "invalid-frontmatter-schema",

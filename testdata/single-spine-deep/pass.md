@@ -1,7 +1,0 @@
-# Book
-
-## Guide
-
-### Details
-
-### Details

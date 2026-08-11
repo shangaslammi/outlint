@@ -25,9 +25,11 @@ pub enum DiagnosticId {
     MissingSection,
     /// Some headings matched a rule, but fewer than its minimum.
     TooFewSections,
-    /// More headings matched a rule than its finite maximum, or a level above
-    /// `options.root_level` holds more than one header.
+    /// More headings matched a rule than its finite maximum, or the document
+    /// holds more than one `h1`.
     TooManySections,
+    /// An `h2` is not a descendant of the document's `h1`.
+    DetachedSection,
     /// The schema declares a title but the document has none.
     MissingTitle,
     /// Reserved for a required frontmatter block that is absent.
@@ -64,6 +66,7 @@ impl DiagnosticId {
             Self::MissingSection => "missing-section",
             Self::TooFewSections => "too-few-sections",
             Self::TooManySections => "too-many-sections",
+            Self::DetachedSection => "detached-section",
             Self::MissingTitle => "missing-title",
             Self::MissingFrontmatter => "missing-frontmatter",
             Self::ForbiddenFrontmatter => "forbidden-frontmatter",
@@ -84,9 +87,9 @@ impl DiagnosticId {
 ///
 /// A header path is always the complete document-tree ancestor chain, from the
 /// document's topmost enclosing heading down to the header itself. It does not
-/// begin at `options.root_level`: ancestors above the root scope, including the
-/// title when the document has one, are part of the path. Two same-named
-/// sections under different ancestors therefore have different paths.
+/// begin at the root scope: the enclosing `h1`, which is the title when the
+/// document has one, is part of the path. Two same-named sections under
+/// different ancestors therefore have different paths.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct HeaderPath(pub Vec<String>);
@@ -158,9 +161,9 @@ pub enum DiagnosticTarget {
     },
     /// The document as a whole, when no single header can name the violation.
     ///
-    /// This is the root scope, which is flat: it collects every header at
-    /// `options.root_level` regardless of which higher-level header contains
-    /// it, so a constraint attached to it has no one ancestor to point at.
+    /// This is the root scope, which is flat: it collects every `h2` in the
+    /// document regardless of which `h1` contains it, so a constraint attached
+    /// to it has no one ancestor to point at.
     Document,
     /// A frontmatter block, or a value inside one. Has no header path.
     Frontmatter {
@@ -427,14 +430,15 @@ impl<'a> Validator<'a> {
             self.validate_skipped_levels(&self.document.sections, None, &HeaderPath::default());
         }
 
-        // The root scope is flat: it takes every header at `root_level` from
-        // anywhere in the tree. Each one keeps its own ancestor chain, so two
-        // same-named root sections under different ancestors stay distinct.
+        // The root scope is flat: it takes every `h2` from anywhere in the
+        // tree. Each one keeps its own ancestor chain, so two same-named root
+        // sections under different ancestors stay distinct.
         // `validate_single_spine` keeps that pooling unambiguous on conforming
-        // documents by admitting only one ancestor chain above the root scope.
+        // documents: at most one `h1`, and every `h2` beneath it, leaves one
+        // possible ancestor chain. It still runs on documents that break that.
         let root_sections = all
             .into_iter()
-            .filter(|pathed| pathed.section.heading.level == self.schema.options.root_level)
+            .filter(|pathed| pathed.section.heading.level == HeaderLevel::H2)
             .collect::<Vec<_>>();
         let root_schema_scope = ScopePath(Vec::new());
         let root_path = HeaderPath::default();
@@ -575,12 +579,10 @@ impl<'a> Validator<'a> {
         let Some(prepared) = prepared else {
             return;
         };
-        let Some(title_level) = self.schema.options.root_level.predecessor() else {
-            return;
-        };
+        // The title is the document's `h1`, always: `sections` describes `h2`.
         let titles = sections
             .iter()
-            .filter(|pathed| pathed.section.heading.level == title_level)
+            .filter(|pathed| pathed.section.heading.level == HeaderLevel::H1)
             .collect::<Vec<_>>();
         if titles.is_empty() {
             self.emit(
@@ -620,55 +622,45 @@ impl<'a> Validator<'a> {
                 );
             }
         }
-        // A surplus title is a surplus header above the root scope, so
-        // `validate_single_spine` reports it for every schema, titled or not.
+        // A surplus title is a surplus `h1`, so `validate_single_spine`
+        // reports it for every schema, titled or not.
     }
 
-    /// Enforces the single top-level spine: at most one header at each level
-    /// above `options.root_level`.
+    /// Enforces the single top-level spine: at most one `h1`, and every `h2`
+    /// a descendant of it.
     ///
     /// A schema has one top-level `sections` list, and the root scope it
-    /// describes pools every header at `root_level` regardless of which
-    /// higher-level header encloses it. That pooling only has one meaning when
-    /// the headers above the root scope form a single chain, so the format's
-    /// premise of one top-level spine is enforced rather than assumed. It is a
-    /// bound per level, not per document: `root_level: 3` still admits one `h1`
-    /// above one `h2`.
+    /// describes pools every `h2` regardless of which `h1` encloses it. That
+    /// pooling only has one meaning when every `h2` shares one ancestor chain,
+    /// so the format's premise of one top-level spine is enforced rather than
+    /// assumed. The two halves together are what guarantee it, and neither
+    /// implies the other:
     ///
-    /// Each offending level yields one diagnostic anchored on the second such
-    /// header in document order; further surplus headers at that level say
-    /// nothing new.
+    /// - `# A` / `# B` / `## X` has one chain, because the single `h2` sits
+    ///   under `B`, yet forks the spine.
+    /// - `## X` / `# A` / `## Y` has one `h1`, yet `X` precedes it with an
+    ///   empty chain while `Y` sits under it: two disjoint chains.
+    ///
+    /// A document with no `h1` at all conforms; its root scope is the whole
+    /// document, and every chain is empty and therefore equal.
     fn validate_single_spine(&mut self, sections: &[PathedSection<'_>]) {
-        let title_level = self
-            .schema
-            .title
-            .as_ref()
-            .and_then(|_| self.schema.options.root_level.predecessor());
-        for level in 1..self.schema.options.root_level as u8 {
-            let Ok(level) = HeaderLevel::try_from(level) else {
-                continue;
-            };
-            let mut at_level = sections
-                .iter()
-                .filter(|pathed| pathed.section.heading.level == level);
-            let (Some(_), Some(excess)) = (at_level.next(), at_level.next()) else {
-                continue;
-            };
-            // Only the title level has a schema node to blame, and only when the
-            // schema declares a title; the spine bound itself is structural.
-            let (schema_node, message) = if title_level == Some(level) {
+        let mut h1s = sections
+            .iter()
+            .filter(|pathed| pathed.section.heading.level == HeaderLevel::H1);
+        let has_h1 = h1s.next().is_some();
+        // One diagnostic per document, anchored on the second `h1` in document
+        // order: that is where the spine forks, and further surplus `h1`s name
+        // the same fork and say nothing new.
+        if let Some(excess) = h1s.next() {
+            // The `h1` is the title when the schema declares one, and only then
+            // is there a schema node to blame; the spine bound is structural.
+            let (schema_node, message) = if self.schema.title.is_some() {
                 (
                     Some(SchemaNode::Title),
-                    "the document has more than one title".to_owned(),
+                    "the document has more than one title",
                 )
             } else {
-                (
-                    None,
-                    format!(
-                        "the document has more than one h{} header above the root section level",
-                        level as u8
-                    ),
-                )
+                (None, "the document has more than one h1 header")
             };
             self.emit(
                 Diagnostic {
@@ -679,9 +671,45 @@ impl<'a> Validator<'a> {
                     schema_node,
                     involved_headers: Vec::new(),
                     references: Vec::new(),
-                    message,
+                    message: message.to_owned(),
                 },
                 Some(&excess.section.heading),
+                true,
+            );
+        }
+
+        if !has_h1 {
+            return;
+        }
+        // An `h2` that follows an `h1` is nested under it by construction, so
+        // the detached ones are exactly those with no ancestor at all — the
+        // `h2`s that precede the document's first `h1`.
+        //
+        // Reported one per offending header rather than once per document:
+        // each detached `h2` is an independent misplacement with its own
+        // location, its own fix, and its own inline suppression anchor, unlike
+        // a forked spine where one fork point explains every surplus `h1`.
+        let detached = sections
+            .iter()
+            .filter(|pathed| pathed.section.heading.level == HeaderLevel::H2)
+            // A one-segment path is the header itself with no ancestor above it.
+            .filter(|pathed| pathed.path.0.len() == 1);
+        for section in detached {
+            self.emit(
+                Diagnostic {
+                    id: DiagnosticId::DetachedSection,
+                    // The detached section is a real header, and its path —
+                    // one segment, no ancestor — is what shows it detached.
+                    target: DiagnosticTarget::Header(section.path.clone()),
+                    location: heading_location(&section.section.heading.location),
+                    // Structural, like a skipped level: nothing in the schema
+                    // asked for this header to sit where it does.
+                    schema_node: None,
+                    involved_headers: Vec::new(),
+                    references: Vec::new(),
+                    message: "the section is not inside the document's h1 header".into(),
+                },
+                Some(&section.section.heading),
                 true,
             );
         }
@@ -1469,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn header_paths_carry_every_ancestor_above_the_root_level() {
+    fn header_paths_carry_the_enclosing_h1() {
         let loaded = load_schema(
             "version: 1\nsections:\n  - match: Overview\n    repeat: 1..n\n    sections:\n      - match: Goals\n        required: true\n",
         )
@@ -1485,9 +1513,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Same rule, same matcher, two different enclosing headers: the paths
-        // distinguish them only because ancestors above `root_level` are kept.
-        // Two `h1` headers also break the single top-level spine, so the shape
-        // that makes the paths differ is itself reported.
+        // distinguish them only because the enclosing `h1` is kept. Two `h1`
+        // headers also break the single top-level spine, so the shape that
+        // makes the paths differ is itself reported.
         assert_eq!(
             targets,
             [
@@ -1514,13 +1542,23 @@ mod tests {
             .collect()
     }
 
+    fn detached_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
+        let loaded = load_schema(schema).expect("test schema is valid");
+        let document = parse_markdown(markdown, MarkdownOptions::default());
+        validate(&loaded.schema, &document)
+            .expect("schema prepares")
+            .into_iter()
+            .filter(|diagnostic| diagnostic.id == DiagnosticId::DetachedSection)
+            .collect()
+    }
+
     #[test]
-    fn surplus_headers_above_the_root_level_are_reported_once_per_level() {
+    fn surplus_h1_headers_are_reported_once_on_the_second_one() {
         let schema = "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n";
 
         // One `h1` above any number of root sections is the intended shape.
         assert!(spine_diagnostics(schema, "# One\n## Overview\n## Overview\n").is_empty());
-        // No header at all above the root level is equally fine.
+        // No `h1` at all is equally fine: the root scope is the whole document.
         assert!(spine_diagnostics(schema, "## Overview\n").is_empty());
 
         let two = spine_diagnostics(schema, "# One\n## Overview\n# Two\n## Overview\n");
@@ -1545,41 +1583,62 @@ mod tests {
     }
 
     #[test]
-    fn the_spine_bound_is_per_level_not_per_document() {
-        let schema =
-            "version: 1\noptions:\n  root_level: 3\nsections:\n  - match: Details\n    repeat: 0..n\n";
+    fn h2_headers_outside_the_documents_h1_are_detached() {
+        let schema = "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n";
 
-        // One `h1` above one `h2` above the root scope is a legal deep spine.
-        assert!(
-            spine_diagnostics(schema, "# Book\n## Guide\n### Details\n### Details\n").is_empty()
-        );
-
-        // Each level above the root scope is bounded on its own.
-        let forked = spine_diagnostics(schema, "# Book\n## Guide One\n## Guide Two\n### Details\n");
+        // Bounding the `h1` count is not enough on its own: this document has
+        // exactly one `h1`, yet the leading `h2` precedes it with an empty
+        // ancestor chain while the trailing one sits under it.
+        let detached = detached_diagnostics(schema, "## Overview\n# Part One\n## Overview\n");
+        assert!(spine_diagnostics(schema, "## Overview\n# Part One\n## Overview\n").is_empty());
+        assert_eq!(detached.len(), 1);
+        let diagnostic = detached.first().expect("one diagnostic was asserted");
         assert_eq!(
-            forked
-                .iter()
-                .map(|diagnostic| diagnostic.target.clone())
-                .collect::<Vec<_>>(),
-            [DiagnosticTarget::Header(HeaderPath(vec![
-                "Book".into(),
-                "Guide Two".into()
-            ]))]
+            diagnostic.target,
+            DiagnosticTarget::Header(HeaderPath(vec!["Overview".into()]))
+        );
+        assert_eq!(diagnostic.location.line, 1);
+        // The `h1` is structural, so nothing in the schema is to blame — not
+        // even when the schema names it with `title:`.
+        assert_eq!(diagnostic.schema_node, None);
+        assert_eq!(
+            detached_diagnostics(
+                "version: 1\ntitle: Part One\nsections:\n  - match: Overview\n    repeat: 0..n\n",
+                "## Overview\n# Part One\n",
+            )[0]
+            .schema_node,
+            None
         );
 
-        let both = spine_diagnostics(
-            schema,
-            "# Book A\n## Guide\n### Details\n# Book B\n## Guide\n### Details\n",
-        );
+        // Every `h2` under the one `h1` conforms, and so does a document that
+        // has no `h1` at all: its root scope is the whole document.
+        assert!(detached_diagnostics(schema, "# Part One\n## Overview\n## Overview\n").is_empty());
+        assert!(detached_diagnostics(schema, "## Overview\n## Overview\n").is_empty());
+
+        // Each detached header is its own misplacement, so each is reported.
+        let two = detached_diagnostics(schema, "## A\n## B\n# Part One\n## Overview\n");
         assert_eq!(
-            both.iter()
+            two.iter()
                 .map(|diagnostic| diagnostic.target.clone())
                 .collect::<Vec<_>>(),
             [
-                DiagnosticTarget::Header(HeaderPath(vec!["Book B".into()])),
-                DiagnosticTarget::Header(HeaderPath(vec!["Book B".into(), "Guide".into()])),
+                DiagnosticTarget::Header(HeaderPath(vec!["A".into()])),
+                DiagnosticTarget::Header(HeaderPath(vec!["B".into()])),
             ]
         );
+
+        // A detached header carries its own inline suppression, and the file
+        // suppression covers them all.
+        assert!(detached_diagnostics(
+            schema,
+            "<!-- outlint-disable detached-section -->\n## Overview\n# Part One\n",
+        )
+        .is_empty());
+        assert!(detached_diagnostics(
+            schema,
+            "<!-- outlint-disable-file detached-section -->\n## A\n## B\n# Part One\n",
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1593,25 +1652,16 @@ mod tests {
         assert_eq!(diagnostic.schema_node, Some(SchemaNode::Title));
         assert_eq!(diagnostic.message, "the document has more than one title");
 
-        // A title one level up leaves the `h1` above it schema-less.
-        let deep = spine_diagnostics(
-            "version: 1\noptions:\n  root_level: 3\ntitle: Guide\nsections:\n  - match: Details\n    repeat: 0..n\n",
-            "# Book\n## Guide\n### Details\n# Manual\n## Guide\n",
+        // Without `title:` the identical document gets the structural wording,
+        // because nothing in the schema names the `h1`.
+        let untitled = spine_diagnostics(
+            "version: 1\nsections:\n  - match: Item\n    repeat: 0..n\n",
+            "# Project\n# Project\n## Item\n",
         );
+        assert_eq!(untitled.len(), 1);
         assert_eq!(
-            deep.iter()
-                .map(|diagnostic| (diagnostic.target.clone(), diagnostic.schema_node.clone()))
-                .collect::<Vec<_>>(),
-            [
-                (
-                    DiagnosticTarget::Header(HeaderPath(vec!["Manual".into()])),
-                    None
-                ),
-                (
-                    DiagnosticTarget::Header(HeaderPath(vec!["Manual".into(), "Guide".into()])),
-                    Some(SchemaNode::Title)
-                ),
-            ]
+            untitled[0].message,
+            "the document has more than one h1 header"
         );
     }
 
