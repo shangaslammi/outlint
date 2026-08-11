@@ -6,7 +6,16 @@ use std::{
 
 use outlint_core::{parse_markdown, MarkdownOptions, PreparedValidator};
 
-use super::read_and_load_schema;
+// The CLI's schema reader is a private implementation detail of the binary, so
+// it is compiled into this test directly from the same source file the binary
+// uses. Driving the corpus through the binary instead would observe the CLI's
+// sorted presentation order rather than the validator emission order the
+// fixture contract in `testdata/README.md` specifies.
+#[allow(dead_code)]
+#[path = "../src/schema_loading.rs"]
+mod schema_loading;
+
+use schema_loading::read_and_load_schema;
 
 #[test]
 fn shared_testdata_corpus_conforms_through_cli_preloading() {
