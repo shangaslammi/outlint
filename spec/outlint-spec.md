@@ -63,11 +63,12 @@ They are enforced for every schema, independently of any rule and of whether
   root scope.
 - A header that is neither the h1 nor anywhere below it is
   `detached-section`; when there is no h1, so is a header that is neither an
-  h2 nor anywhere below one. The set is the h1's whole subtree, not the root
-  scope's: an h3 directly under the h1 is reachable, and it is §1.5, not this
-  rule, that has anything to say about it. With at most one h1 the set is:
-  any header preceding the h1, at any level; or, when there is no h1, any
-  header below h2 with no h2 ancestor. It is reported once per detached
+  h2 nor anywhere below one. The *reachable* set is therefore the h1's whole
+  subtree, which is wider than the root scope: an h3 directly under the h1 is
+  reachable even though it is in no scope, and it is §1.5, not this rule,
+  that has anything to say about it. The *detached* set, given at most one
+  h1, is exactly: any header preceding the h1, at any level; or, when there
+  is no h1, any header below h2 with no h2 ancestor. It is reported once per detached
   **subtree root** — a header under a detached one is misplaced only as a
   consequence of its ancestor, and moving that ancestor onto the spine takes
   the subtree with it, whereas detached siblings are separate misplacements
