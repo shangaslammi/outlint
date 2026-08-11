@@ -1,0 +1,10 @@
+version: 1
+sections:
+  - id: intro
+    match: "Intro"
+  - id: body
+    match: "Body"
+constraints:
+  # Attached to the flat root scope, so occurrences under different `h1`
+  # ancestors are compared against each other.
+  - ordered: [intro, body]

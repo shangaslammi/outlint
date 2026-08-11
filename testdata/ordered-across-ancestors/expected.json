@@ -1,0 +1,5 @@
+{
+  "inverted.md": [{ "id": "ordered", "target": { "kind": "document" } }],
+  "straddle.md": [{ "id": "ordered", "target": { "kind": "document" } }],
+  "pass.md": []
+}

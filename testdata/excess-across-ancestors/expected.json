@@ -1,0 +1,13 @@
+{
+  "spread.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Beta", "Note two"] }
+    },
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Gamma", "Step three"] }
+    }
+  ],
+  "within.md": []
+}

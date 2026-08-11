@@ -1,0 +1,11 @@
+version: 1
+options:
+  root_level: 3
+# The title sits one level above the root scope, so it is an `h2` here.
+title: "Guide"
+sections:
+  - match: "Details"
+    required: true
+    strict: true
+    sections:
+      - match: "Notes"

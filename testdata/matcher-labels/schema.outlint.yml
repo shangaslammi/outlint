@@ -1,0 +1,18 @@
+version: 1
+sections:
+  - id: steps
+    match: "Step *"
+    required: true
+  - id: paths
+    match: "/a\\/b/"
+    required: true
+  - id: container
+    match: "Container"
+    required: true
+    sections:
+      - match: "/item [0-9]+/"
+        required: true
+  # First-match-wins: a wildcard rule swallows every header, so it goes last.
+  - id: anything
+    match: "*"
+    required: true

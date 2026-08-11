@@ -1,0 +1,16 @@
+{
+  "doc.md": [
+    {
+      "id": "missing-section",
+      "target": {
+        "kind": "missing_header",
+        "parent": [],
+        "matcher": "**Foo** [bar](x)"
+      }
+    },
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Ban me"] }
+    }
+  ]
+}

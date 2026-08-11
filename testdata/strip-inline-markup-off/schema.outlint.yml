@@ -1,0 +1,17 @@
+version: 1
+options:
+  strip_inline_markup: false
+sections:
+  # Matches only while inline markup is stripped before matching.
+  - id: stripped
+    match: "Foo bar"
+    required: true
+  # Matches only while it is not.
+  - id: raw
+    match: "**Foo** [bar](x)"
+    required: true
+  # Matches under either setting, so its reported path shows that diagnostic
+  # text is stripped whatever the option says.
+  - id: banned
+    match: "*Ban*"
+    allow: false

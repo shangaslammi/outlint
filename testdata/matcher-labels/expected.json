@@ -1,0 +1,31 @@
+{
+  "none.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Step *" }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "/a/b/" }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Container" }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "*" }
+    }
+  ],
+  "nested.md": [
+    {
+      "id": "missing-section",
+      "target": {
+        "kind": "missing_header",
+        "parent": ["Container"],
+        "matcher": "/item [0-9]+/"
+      }
+    }
+  ],
+  "pass.md": []
+}
