@@ -43,22 +43,33 @@ stripping, by contrast, always applies to diagnostic text —
 `options.strip_inline_markup` gates only the text used for matching, so
 `## **Foo** [bar](x)` reports as `Foo bar` under either setting.
 
-1.4. The **root scope** is the set of the document's h2 headers; it is what
-the schema's top-level `sections` list describes. `title`, if specified, is
-the rule for the document's h1: a document with no h1 is diagnostic
-`missing-title`, and an h1 whose text does not match the `title` matcher is
-`not-allowed`.
+1.4. The **root scope** is the set of *all* the document's h2 headers,
+pooled regardless of which h1 — if any — encloses each one; it is what the
+schema's top-level `sections` list describes. The scope is flat, so an h2
+that precedes every h1, or that sits under a second h1, is a member on the
+same footing as any other and counts toward its matched rule's cardinality.
+`title`, if specified, is the rule for the document's h1: a document with no
+h1 is diagnostic `missing-title`, and an h1 whose text does not match the
+`title` matcher is `not-allowed`.
 
 **Single top-level spine.** A document MUST have zero h1, or exactly one h1
-with every h2 beneath it. This is structural, enforced for every schema
-independently of any rule and of whether `title` is declared. A surplus h1
-is one `too-many-sections` per document, on the second h1 in document order:
-that is where the spine forks, and further h1s name the same fork. An h2
-that is not a descendant of the document's h1 — necessarily one that
-precedes it — is `detached-section`, reported once per offending header. A
-document with no h1 at all conforms, and its root scope is then all of its
-h2 headers; when there is one h1, the root scope is exactly that h1's
-children.
+with every h2 beneath it. Pooling every h2 into one scope has a single
+meaning only when all of them share one ancestor chain, so this rule is
+structural: it is enforced for every schema, independently of any rule and
+of whether `title` is declared. Two diagnostics bound it, each covering a
+case the other does not:
+
+- A surplus h1 is one `too-many-sections` per document, on the second h1 in
+  document order — that is where the spine forks, and further h1s name the
+  same fork.
+- An h2 with no enclosing h1 at all, which is necessarily one that precedes
+  the document's first h1, is `detached-section`, reported once per
+  offending header. An h2 under a *surplus* h1 is **not** detached: it has
+  an ancestor, and the fork is already reported above.
+
+A document with no h1 at all conforms. Neither diagnostic withdraws a header
+from validation: the violation is reported, and the flat root scope above is
+then matched and counted exactly as it stands.
 
 1.5. If `options.allow_skipped_levels` is false (default), a header whose
 level exceeds its parent's level by more than 1 is a structural error
@@ -397,7 +408,7 @@ flat path cannot say which is which.
 |---|---|---|
 | `header` | `path` | A header that exists in the document |
 | `missing_header` | `parent`, `matcher` | A section the schema requires and the document does not contain |
-| `document` | — | A violation no single header can name |
+| `document` | — | The document as a whole, for a violation belonging to no header's scope |
 | `frontmatter` | `line_range`?, `pointer`? | A frontmatter block, or a value inside one |
 
 A **header path** is the complete document-tree ancestor chain of a header,
@@ -406,9 +417,11 @@ h1. Two same-named sections under different ancestors therefore have
 different paths. Each segment is a header's visible text — case-preserving,
 with inline markup always stripped for diagnostic purposes regardless of
 `options.strip_inline_markup` (§1.3 gates matching, not diagnostic text). A
-path is a sequence of segments and MUST NOT be serialized as a single joined
-string: a header literally named `A > B` would otherwise be
-indistinguishable from the two-level path `A`, `B`.
+path is a sequence of segments: a machine-readable representation MUST
+encode it as one and MUST NOT flatten it into a single joined string, since
+a header literally named `A > B` would otherwise be indistinguishable from
+the two-level path `A`, `B`. Human-readable output MAY join the segments for
+legibility, accepting that ambiguity.
 
 `missing_header.parent` is the header path of the scope that should have
 contained the section, and is empty when no header encloses it: the root
@@ -437,7 +450,7 @@ be omitted rather than emitted as null.
 | `missing-section`, `too-few-sections` | `missing_header`: `parent` is the enclosing scope's path, `matcher` the unsatisfied rule's label | the parent section's header line; line 1 at the root scope |
 | `missing-title` | `missing_header` with empty `parent` and the `title` matcher's label | line 1 |
 | `missing-frontmatter`, `forbidden-frontmatter`, `invalid-frontmatter`, `frontmatter-schema` | `frontmatter` | the block's first line, or line 1 when absent |
-| constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, whose scope spans headers under no single ancestor | the parent section's header line; line 1 at the root scope |
+| constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, which is attached to the schema root and so has no parent header | the parent section's header line; line 1 at the root scope |
 
 Constraint diagnostics additionally list the concrete headers involved, if
 any, each by its own header path (§5.3). Which diagnostics the `title`
