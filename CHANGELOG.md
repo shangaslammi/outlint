@@ -31,13 +31,14 @@ feature set of the `0.1.0` workspace.
   any rule scope.
 - **Options.** `match_case`, `strip_inline_markup`, and
   `allow_skipped_levels`, normalized with defaults applied by the loader.
-- **Document shape.** The title is the document's `h1` and `sections`
-  describes its `h2` headings. A document has at most one `h1`; if one exists
+- **Document shape.** `title` is the rule for every `h1` and `sections`
+  describes the `h2` headings. A document has at most one `h1`; if one exists
   the root scope is its `h2` children, otherwise it is the document's `h2`s. A
-  surplus `h1` is `too-many-sections`. A header outside that structure — at
-  any level — is `detached-section`, reported once per detached subtree root,
-  and takes part in no rule matching, no cardinality count, and no constraint.
-  A document with no `h1` conforms.
+  surplus `h1` is `too-many-sections`. A header outside the `h1` and
+  everything below it — or, with no `h1`, outside the document's `h2`s and
+  everything below them — is `detached-section` at any level, reported once
+  per detached subtree root, and takes part in no rule matching, no
+  cardinality count, and no constraint. A document with no `h1` conforms.
 - **Frontmatter.** Presence checking (`required`, `allow`) plus value
   validation delegated to a JSON Schema given inline or as a path relative to
   the schema file, including linked `$ref` resource graphs.
