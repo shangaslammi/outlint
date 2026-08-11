@@ -1,8 +1,9 @@
 //! Filesystem-backed schema reading and linked JSON Schema preloading.
 //!
-//! This module is compiled into the binary and, via `#[path]`, into the
-//! `tests/conformance.rs` integration test so the shared conformance corpus is
-//! loaded through exactly the same code the CLI uses.
+//! The core library is filesystem-agnostic: it consumes schema text and
+//! already-loaded JSON Schema resources. This module is the CLI's filesystem
+//! boundary, walking the `$ref` graph of a linked frontmatter schema and
+//! handing the collected resources to `outlint-core`.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
