@@ -125,13 +125,49 @@ pub enum DiagnosticReference {
     Frontmatter(FrontmatterRef),
 }
 
+/// What a diagnostic is about.
+///
+/// The three cases carry text of different provenance, and conflating them in
+/// one [`HeaderPath`] silently mixes document text with schema text. Only
+/// [`Self::Header`] names text that occurs in the document; the matcher label
+/// in [`Self::MissingHeader`] comes from the schema and may occur nowhere in
+/// the document; [`Self::Frontmatter`] has no header path at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnosticTarget {
+    /// A header that exists in the document, named by its document path.
+    Header(HeaderPath),
+    /// A section the schema requires but the document does not contain.
+    MissingHeader {
+        /// Document path of the header whose scope should have contained it;
+        /// empty when the missing section belongs to the document root.
+        parent: HeaderPath,
+        /// Label of the unsatisfied schema matcher: exact text, a glob, a
+        /// slash-delimited regex, or `*`. This is schema text, not a heading.
+        matcher: String,
+    },
+    /// A frontmatter block, or a value inside one. Has no header path.
+    Frontmatter {
+        /// The offending block, absent only when the document has none.
+        block: Option<FrontmatterBlock>,
+    },
+}
+
+/// The frontmatter block a diagnostic is about, and the value within it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterBlock {
+    /// One-based inclusive line range of the complete frontmatter block.
+    pub line_range: FrontmatterLineRange,
+    /// JSON Pointer of a value rejected by JSON Schema, when applicable.
+    pub json_pointer: Option<String>,
+}
+
 /// One validation violation, with both document and schema-side anchors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     /// Stable diagnostic category.
     pub id: DiagnosticId,
-    /// Path to the concrete or expected header involved.
-    pub path: HeaderPath,
+    /// What the diagnostic is about: a header, a missing one, or frontmatter.
+    pub target: DiagnosticTarget,
     /// Primary Markdown source anchor.
     pub location: DiagnosticLocation,
     /// Structural schema node responsible for the diagnostic, when one exists.
@@ -140,19 +176,8 @@ pub struct Diagnostic {
     pub involved_headers: Vec<InvolvedHeader>,
     /// Normalized references participating in a constraint violation.
     pub references: Vec<DiagnosticReference>,
-    /// Frontmatter-specific range and JSON Pointer details.
-    pub frontmatter: Option<FrontmatterDiagnostic>,
     /// Human-readable context; callers should key behavior on [`Self::id`].
     pub message: String,
-}
-
-/// Extra data carried by a diagnostic about a frontmatter block.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrontmatterDiagnostic {
-    /// One-based inclusive line range of the complete frontmatter block.
-    pub line_range: FrontmatterLineRange,
-    /// JSON Pointer of a value rejected by JSON Schema, when applicable.
-    pub json_pointer: Option<String>,
 }
 
 /// One-based inclusive line range.
@@ -489,7 +514,7 @@ impl<'a> Validator<'a> {
                 line: location.start_line,
                 column: 1,
             });
-        let details = location.map(|location| FrontmatterDiagnostic {
+        let block = location.map(|location| FrontmatterBlock {
             line_range: FrontmatterLineRange {
                 start_line: location.start_line,
                 end_line: location.end_line,
@@ -504,12 +529,11 @@ impl<'a> Validator<'a> {
         self.emit(
             Diagnostic {
                 id,
-                path: HeaderPath::default(),
+                target: DiagnosticTarget::Frontmatter { block },
                 location: diagnostic_location,
                 schema_node,
                 involved_headers: Vec::new(),
                 references: Vec::new(),
-                frontmatter: details,
                 message,
             },
             None,
@@ -536,12 +560,15 @@ impl<'a> Validator<'a> {
             self.emit(
                 Diagnostic {
                     id: DiagnosticId::MissingTitle,
-                    path: HeaderPath(vec![matcher_label(matcher)]),
+                    // The title sits above the root scope, so it has no parent.
+                    target: DiagnosticTarget::MissingHeader {
+                        parent: HeaderPath::default(),
+                        matcher: matcher_label(matcher),
+                    },
                     location: root_location(),
                     schema_node: Some(SchemaNode::Title),
                     involved_headers: Vec::new(),
                     references: Vec::new(),
-                    frontmatter: None,
                     message: "the document has no required title".into(),
                 },
                 None,
@@ -555,12 +582,12 @@ impl<'a> Validator<'a> {
                 self.emit(
                     Diagnostic {
                         id: DiagnosticId::NotAllowed,
-                        path,
+                        // The offending title is present; only its text is wrong.
+                        target: DiagnosticTarget::Header(path),
                         location: heading_location(&title.heading.location),
                         schema_node: Some(SchemaNode::Title),
                         involved_headers: Vec::new(),
                         references: Vec::new(),
-                        frontmatter: None,
                         message: "the title does not match the schema title matcher".into(),
                     },
                     Some(&title.heading),
@@ -573,12 +600,12 @@ impl<'a> Validator<'a> {
             self.emit(
                 Diagnostic {
                     id: DiagnosticId::TooManySections,
-                    path,
+                    // Anchored on the surplus title, which is a real header.
+                    target: DiagnosticTarget::Header(path),
                     location: heading_location(&excess.heading.location),
                     schema_node: Some(SchemaNode::Title),
                     involved_headers: Vec::new(),
                     references: Vec::new(),
-                    frontmatter: None,
                     message: "the document has more than one title".into(),
                 },
                 Some(&excess.heading),
@@ -599,12 +626,11 @@ impl<'a> Validator<'a> {
                 self.emit(
                     Diagnostic {
                         id: DiagnosticId::SkippedLevel,
-                        path: path.clone(),
+                        target: DiagnosticTarget::Header(path.clone()),
                         location: heading_location(&section.heading.location),
                         schema_node: None,
                         involved_headers: Vec::new(),
                         references: Vec::new(),
-                        frontmatter: None,
                         message: "the heading skips a level below its parent".into(),
                     },
                     Some(&section.heading),
@@ -727,13 +753,17 @@ impl<'a> Validator<'a> {
             self.emit(
                 Diagnostic {
                     id,
-                    path: appended_path(parent_path, &matcher_label(&rule.matcher)),
+                    // Nothing in the document satisfies the rule, so the last
+                    // segment can only be the rule's matcher label.
+                    target: DiagnosticTarget::MissingHeader {
+                        parent: parent_path.clone(),
+                        matcher: matcher_label(&rule.matcher),
+                    },
                     location: parent
                         .map_or_else(root_location, |heading| heading_location(&heading.location)),
                     schema_node: schema_node.clone(),
                     involved_headers: Vec::new(),
                     references: Vec::new(),
-                    frontmatter: None,
                     message: format!(
                         "matched {count} sections, but at least {} are required",
                         cardinality.min
@@ -760,12 +790,11 @@ impl<'a> Validator<'a> {
         self.emit(
             Diagnostic {
                 id: DiagnosticId::TooManySections,
-                path: excess.path.clone(),
+                target: DiagnosticTarget::Header(excess.path.clone()),
                 location: heading_location(&excess.section.heading.location),
                 schema_node,
                 involved_headers: Vec::new(),
                 references: Vec::new(),
-                frontmatter: None,
                 message: format!("more than {max} sections match this rule"),
             },
             Some(&excess.section.heading),
@@ -797,7 +826,9 @@ impl<'a> Validator<'a> {
             self.emit(
                 Diagnostic {
                     id,
-                    path: parent_path.clone(),
+                    // The scope the constraint is attached to: the header that
+                    // encloses it, or the empty path at the document root.
+                    target: DiagnosticTarget::Header(parent_path.clone()),
                     location: parent
                         .map_or_else(root_location, |heading| heading_location(&heading.location)),
                     schema_node: Some(SchemaNode::Constraint(ConstraintPath {
@@ -806,7 +837,6 @@ impl<'a> Validator<'a> {
                     })),
                     involved_headers: involved,
                     references: eval.constraint_references(constraint),
-                    frontmatter: None,
                     message: format!("the `{}` constraint is not satisfied", id.as_str()),
                 },
                 parent,
@@ -835,6 +865,7 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Emits a diagnostic about a header that is present in the document.
     fn emit_present(
         &mut self,
         id: DiagnosticId,
@@ -846,12 +877,11 @@ impl<'a> Validator<'a> {
         self.emit(
             Diagnostic {
                 id,
-                path,
+                target: DiagnosticTarget::Header(path),
                 location: heading_location(&heading.location),
                 schema_node,
                 involved_headers: Vec::new(),
                 references: Vec::new(),
-                frontmatter: None,
                 message: message.into(),
             },
             Some(heading),
@@ -1315,7 +1345,10 @@ mod tests {
         let diagnostic = diagnostics.first().expect("one diagnostic was asserted");
         assert_eq!(diagnostic.id, DiagnosticId::TooManySections);
         assert_eq!(diagnostic.location.line, 3);
-        assert_eq!(diagnostic.path.display(), "Item");
+        assert_eq!(
+            diagnostic.target,
+            DiagnosticTarget::Header(HeaderPath(vec!["Item".into()]))
+        );
         assert_eq!(
             diagnostic.schema_node,
             Some(SchemaNode::Rule(crate::RulePath {
@@ -1377,13 +1410,12 @@ mod tests {
         let diagnostics = validate(&schema, &invalid).expect("schema prepares");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].id, DiagnosticId::FrontmatterSchema);
-        let details = diagnostics[0]
-            .frontmatter
-            .as_ref()
-            .expect("frontmatter diagnostic details are present");
-        assert_eq!(details.json_pointer.as_deref(), Some("/status"));
+        let DiagnosticTarget::Frontmatter { block: Some(block) } = &diagnostics[0].target else {
+            panic!("a frontmatter schema diagnostic targets a present block");
+        };
+        assert_eq!(block.json_pointer.as_deref(), Some("/status"));
         assert_eq!(
-            (details.line_range.start_line, details.line_range.end_line),
+            (block.line_range.start_line, block.line_range.end_line),
             (1, 3)
         );
         assert_eq!(

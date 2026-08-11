@@ -38,7 +38,9 @@ anchors.
 ## Usage
 
 ```rust
-use outlint_core::{load_schema, parse_markdown, MarkdownOptions, PreparedValidator};
+use outlint_core::{
+    load_schema, parse_markdown, DiagnosticTarget, MarkdownOptions, PreparedValidator,
+};
 
 fn main() {
     // 1. Load a schema from YAML (or JSON) source text.
@@ -64,15 +66,20 @@ sections:
         },
     );
 
-    // 4. Inspect the diagnostics.
+    // 4. Inspect the diagnostics. The target distinguishes a heading that is
+    //    really there from a schema matcher that nothing matched.
     for diagnostic in validator.validate(&document) {
+        let target = match &diagnostic.target {
+            DiagnosticTarget::Header(path) => path.display(),
+            DiagnosticTarget::MissingHeader { matcher, .. } => format!("expected {matcher}"),
+            DiagnosticTarget::Frontmatter { .. } => "frontmatter".to_owned(),
+        };
         println!(
-            "{}:{} [{}] {} ({})",
+            "{}:{} [{}] {} ({target})",
             diagnostic.location.line,
             diagnostic.location.column,
             diagnostic.id.as_str(),
             diagnostic.message,
-            diagnostic.path.display(),
         );
     }
 }
@@ -81,7 +88,7 @@ sections:
 Output:
 
 ```text
-1:1 [missing-section] matched 0 sections, but at least 1 are required (Overview)
+1:1 [missing-section] matched 0 sections, but at least 1 are required (expected Overview)
 ```
 
 `load_schema` returns `Result<LoadedSchema, InvalidSchema>`; `InvalidSchema`

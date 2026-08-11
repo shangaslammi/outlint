@@ -6,9 +6,9 @@ use std::{
 };
 
 use outlint_core::{
-    parse_markdown, Diagnostic, DiagnosticReference, FrontmatterRef, FrontmatterScalar,
-    InvalidSchema, LoadedSchema, MarkdownOptions, Matcher, PreparedValidator, RefAnchor, RuleRef,
-    SchemaError, SchemaLocations, SchemaNode, SchemaSources, SourceRange,
+    parse_markdown, Diagnostic, DiagnosticReference, DiagnosticTarget, FrontmatterRef,
+    FrontmatterScalar, InvalidSchema, LoadedSchema, MarkdownOptions, Matcher, PreparedValidator,
+    RefAnchor, RuleRef, SchemaError, SchemaLocations, SchemaNode, SchemaSources, SourceRange,
 };
 use serde_json::{json, Map, Value};
 
@@ -646,13 +646,14 @@ fn render_document_diagnostic(
         schema_node_location(node, &loaded.locations)
             .map(|range| source_location(&loaded.sources, range, "<schema>"))
     });
+    let target = flatten_target(&diagnostic.target);
     RenderedDiagnostic {
         id: diagnostic.id.as_str().to_owned(),
         message: diagnostic.message.clone(),
         source_path: document_path.to_owned(),
         line: diagnostic.location.line,
         column: diagnostic.location.column,
-        header_path: Some(diagnostic.path.0.clone()),
+        header_path: Some(target.header_path),
         schema_node: diagnostic.schema_node.as_ref().map(render_schema_node),
         schema_location,
         involved_headers: diagnostic
@@ -665,17 +666,42 @@ fn render_document_diagnostic(
             })
             .collect(),
         references: diagnostic.references.iter().map(render_reference).collect(),
-        frontmatter_range: diagnostic
-            .frontmatter
-            .as_ref()
-            .map(|frontmatter| RenderedLineRange {
-                start_line: frontmatter.line_range.start_line,
-                end_line: frontmatter.line_range.end_line,
-            }),
-        json_pointer: diagnostic
-            .frontmatter
-            .as_ref()
-            .and_then(|frontmatter| frontmatter.json_pointer.clone()),
+        frontmatter_range: target.frontmatter_range,
+        json_pointer: target.json_pointer,
+    }
+}
+
+/// The flat header-path/frontmatter fields the current output shape exposes.
+struct FlatTarget {
+    header_path: Vec<String>,
+    frontmatter_range: Option<RenderedLineRange>,
+    json_pointer: Option<String>,
+}
+
+/// Collapses a [`DiagnosticTarget`] back into the flat fields the output shape
+/// still uses, so that a missing section's schema-side matcher label is
+/// indistinguishable from real heading text and frontmatter reports an empty
+/// header path.
+///
+/// This exists only to keep the output unchanged while the core distinguishes
+/// the three kinds of target; it is deleted when the output shape follows.
+fn flatten_target(target: &DiagnosticTarget) -> FlatTarget {
+    let (header_path, block) = match target {
+        DiagnosticTarget::Header(path) => (path.0.clone(), None),
+        DiagnosticTarget::MissingHeader { parent, matcher } => {
+            let mut path = parent.0.clone();
+            path.push(matcher.clone());
+            (path, None)
+        }
+        DiagnosticTarget::Frontmatter { block } => (Vec::new(), block.as_ref()),
+    };
+    FlatTarget {
+        header_path,
+        frontmatter_range: block.map(|block| RenderedLineRange {
+            start_line: block.line_range.start_line,
+            end_line: block.line_range.end_line,
+        }),
+        json_pointer: block.and_then(|block| block.json_pointer.clone()),
     }
 }
 
