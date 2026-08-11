@@ -456,6 +456,14 @@ be omitted rather than emitted as null.
 
 ### 6.2 Target and location per diagnostic
 
+A source anchor is one position in the document: a one-based line, and a
+one-based **byte** column within that line, so a column is 1 at the line's
+first byte and advances by the encoded length of every character before it,
+not by one per character. The column is the first byte of what the row below
+names — the header's own first byte (its ATX marker, or its text for a
+Setext heading), or the first byte of the frontmatter entry named by
+`pointer` — and 1 wherever the row names a whole line or falls back to one.
+
 | Diagnostic | Target | Source anchor |
 |---|---|---|
 | `skipped-level`, `not-allowed`, `unexpected-section`, `detached-section` | `header` of the offending header | that header's line |

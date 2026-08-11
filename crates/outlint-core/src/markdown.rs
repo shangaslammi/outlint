@@ -342,9 +342,11 @@ fn parse_frontmatter(
     (frontmatter, Some(range))
 }
 
-/// Entry positions as marked-yaml reports them: one-based lines counted from
-/// the frontmatter body, and one-based *character* columns.
-type MarkedAnchors = BTreeMap<String, MarkedPosition>;
+/// Entry positions as marked-yaml reports them, in the order the conversion
+/// walks them: one-based lines counted from the frontmatter body, and one-based
+/// *character* columns. Duplicate mapping keys are rejected upstream, so no
+/// pointer occurs twice.
+type MarkedAnchors = Vec<(String, MarkedPosition)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MarkedPosition {
@@ -361,43 +363,88 @@ struct MarkedPosition {
 /// doubles as a consistency check: a position that does not fall inside the
 /// block, or names a column the line does not have, is dropped rather than
 /// reported, leaving the block location as the anchor.
+///
+/// Re-measuring each entry from the start of its line would be quadratic in a
+/// block that puts many entries on one line, which a flow sequence does. The
+/// positions are therefore ordered and converted by one left-to-right walk per
+/// line. The conversion already emits them in document order, so the sort is
+/// only a guard against depending on that.
 fn document_frontmatter_anchors(
     source: &str,
     lines: &LineIndex,
     location: &FrontmatterLocation,
-    marked: MarkedAnchors,
+    mut marked: MarkedAnchors,
 ) -> FrontmatterAnchors {
-    let anchors = marked
-        .into_iter()
-        .filter_map(|(pointer, position)| {
-            let line = position.line.checked_add(1)?;
-            // Entries lie strictly between the opening and closing delimiters.
-            if line < 2 || line as u64 >= location.end_line {
-                return None;
-            }
-            let text = lines.line_text(source, line)?;
-            let column = byte_column_in_line(text, position.column)?;
-            Some((
-                pointer,
-                FrontmatterAnchor {
-                    line: line as u64,
-                    column,
-                },
-            ))
-        })
-        .collect();
+    marked.sort_unstable_by_key(|(_, position)| (position.line, position.column));
+    let mut anchors = BTreeMap::new();
+    let mut cursor = LineCursor::default();
+    for (pointer, position) in marked {
+        let Some(line) = position.line.checked_add(1) else {
+            continue;
+        };
+        // Entries lie strictly between the opening and closing delimiters.
+        if line < 2 || line as u64 >= location.end_line {
+            continue;
+        }
+        if cursor.line != line {
+            let Some(text) = lines.line_text(source, line) else {
+                continue;
+            };
+            cursor = LineCursor::new(line, text);
+        }
+        let Some(column) = cursor.byte_column(position.column) else {
+            continue;
+        };
+        anchors.insert(
+            pointer,
+            FrontmatterAnchor {
+                line: line as u64,
+                column,
+            },
+        );
+    }
     FrontmatterAnchors(anchors)
 }
 
-/// Converts a one-based character column into a one-based byte column.
-fn byte_column_in_line(line: &str, character_column: usize) -> Option<u64> {
-    let characters = character_column.checked_sub(1)?;
-    let mut offset = 0;
-    for _ in 0..characters {
-        let character = line[offset..].chars().next()?;
-        offset += character.len_utf8();
+/// A left-to-right walk of one line that converts one-based character columns
+/// into one-based byte columns, keeping what it has already measured.
+///
+/// Columns must be requested in non-decreasing order; the walk never rewinds
+/// and reports a column it has passed as unavailable.
+#[derive(Default)]
+struct LineCursor<'a> {
+    /// The document line being walked, or 0 before any line is.
+    line: usize,
+    /// The line's text from [`Self::column`] onward.
+    rest: &'a str,
+    /// One-based character column reached so far.
+    column: usize,
+    /// Byte offset of that column within the line.
+    byte: usize,
+}
+
+impl<'a> LineCursor<'a> {
+    fn new(line: usize, text: &'a str) -> Self {
+        Self {
+            line,
+            rest: text,
+            column: 1,
+            byte: 0,
+        }
     }
-    Some(offset as u64 + 1)
+
+    fn byte_column(&mut self, character_column: usize) -> Option<u64> {
+        if character_column < self.column {
+            return None;
+        }
+        while self.column < character_column {
+            let character = self.rest.chars().next()?;
+            self.rest = self.rest.get(character.len_utf8()..)?;
+            self.byte += character.len_utf8();
+            self.column += 1;
+        }
+        Some(self.byte as u64 + 1)
+    }
 }
 
 fn serde_yaml_numeric_range_error(error: &serde_yaml::Error) -> bool {
@@ -499,13 +546,13 @@ fn record_marked_anchor(anchors: &mut MarkedAnchors, pointer: &str, marker: Opti
     let Some(marker) = marker else {
         return;
     };
-    anchors.insert(
+    anchors.push((
         pointer.to_owned(),
         MarkedPosition {
             line: marker.line(),
             column: marker.column(),
         },
-    );
+    ));
 }
 
 /// Appends `/` and an RFC 6901-escaped mapping key to a JSON Pointer.
@@ -1646,21 +1693,22 @@ mod tests {
         // Comments and blank lines make a line count that skips them visible,
         // and the multi-byte key proves the column is measured in bytes.
         let source = concat!(
-            "---\n",               // 1
-            "# a comment\n",       // 2
-            "\n",                  // 3
-            "\n",                  // 4
-            "count: nope\n",       // 5
-            "nested:\n",           // 6
-            "  inner: 1\n",        // 7
-            "tags:\n",             // 8
-            "  - ok\n",            // 9
-            "  - 123\n",           // 10
-            "flow: [\"ää\", 5]\n", // 11
-            "items:\n",            // 12
-            "  - key: 1\n",        // 13
-            "weird/key~name: 1\n", // 14
-            "---\n",               // 15
+            "---\n",                  // 1
+            "# a comment\n",          // 2
+            "\n",                     // 3
+            "\n",                     // 4
+            "count: nope\n",          // 5
+            "nested:\n",              // 6
+            "  inner: 1\n",           // 7
+            "tags:\n",                // 8
+            "  - ok\n",               // 9
+            "  - 123\n",              // 10
+            "flow: [\"ää\", 5]\n",    // 11
+            "items:\n",               // 12
+            "  - key: 1\n",           // 13
+            "flowseq: [{p: 1}, 5]\n", // 14
+            "weird/key~name: 1\n",    // 15
+            "---\n",                  // 16
             "# Title\n",
         );
         let document = parse_markdown(source, MarkdownOptions::default());
@@ -1690,11 +1738,72 @@ mod tests {
         // the `:` marked-yaml reports as the mapping's own span start.
         assert_eq!(anchor("/items/0"), Some((13, 5)));
         assert_eq!(anchor("/items/0/key"), Some((13, 5)));
+        // A flow mapping is the opposite case: its own `{` precedes its first
+        // key, so the same rule keeps the `{`.
+        assert_eq!(anchor("/flowseq/0"), Some((14, 11)));
+        assert_eq!(anchor("/flowseq/0/p"), Some((14, 12)));
+        assert_eq!(anchor("/flowseq/1"), Some((14, 19)));
         // Pointer tokens are escaped as RFC 6901 spells them.
-        assert_eq!(anchor("/weird~1key~0name"), Some((14, 1)));
+        assert_eq!(anchor("/weird~1key~0name"), Some((15, 1)));
         // The root pointer names the mapping, whose extent is the whole block.
         assert_eq!(anchor(""), None);
         assert_eq!(anchor("/absent"), None);
+    }
+
+    #[test]
+    fn frontmatter_anchors_convert_many_entries_on_one_line() {
+        // A flow sequence puts every element on one line. Converting each from
+        // the start of that line is quadratic, so the columns are measured by
+        // one shared walk; every element must still get its own. The multi-byte
+        // key keeps byte and character columns apart for all of them.
+        const ENTRIES: usize = 500;
+        let mut line = String::from("ää: [");
+        let mut columns = Vec::with_capacity(ENTRIES);
+        for index in 0..ENTRIES {
+            if index > 0 {
+                line.push_str(", ");
+            }
+            // The line begins the document's second line, so a byte offset
+            // within it is one less than the byte column.
+            columns.push(line.len() as u64 + 1);
+            line.push_str(&index.to_string());
+        }
+        line.push(']');
+        let source = format!("---\n{line}\n---\n# Title\n");
+        let document = parse_markdown(&source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        for (index, column) in columns.into_iter().enumerate() {
+            assert_eq!(
+                anchors.get(&format!("/ää/{index}")),
+                Some(FrontmatterAnchor { line: 2, column }),
+                "element {index} is misplaced"
+            );
+        }
+    }
+
+    #[test]
+    fn line_cursor_measures_forward_without_rescanning() {
+        // The single-walk property, pinned without timing: the cursor keeps
+        // what it has measured and refuses a column it has already passed,
+        // which a re-measuring implementation would happily answer.
+        let mut cursor = LineCursor::new(2, "ää: [1, 2]");
+        assert_eq!(cursor.byte_column(1), Some(1));
+        assert_eq!(cursor.byte_column(6), Some(8));
+        assert_eq!(cursor.byte_column(9), Some(11));
+        assert_eq!(cursor.byte_column(6), None);
+        // A column the line does not have is unavailable rather than clamped.
+        assert_eq!(cursor.byte_column(64), None);
+
+        // One past the last character is still a column: it is where an empty
+        // value at end of line begins.
+        let mut cursor = LineCursor::new(2, "ab");
+        assert_eq!(cursor.byte_column(3), Some(3));
+        assert_eq!(LineCursor::new(2, "ab").byte_column(4), None);
+        // Marked columns are one-based; a zero names nothing.
+        assert_eq!(LineCursor::new(2, "ab").byte_column(0), None);
     }
 
     #[test]
@@ -2068,24 +2177,66 @@ mod tests {
         }
     }
 
+    /// A frontmatter block of arbitrary entries, some of which parse.
+    ///
+    /// `any::<String>()` cannot reach a parsed mapping: its default strategy
+    /// excludes control characters, so the generated text never contains the
+    /// newline a closing `---` needs. Anchors need a generator shaped like a
+    /// block to exercise them at all.
+    fn arbitrary_frontmatter_document() -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            (
+                "[a-z\u{00e0}-\u{00ff}]{1,3}",
+                "([a-z0-9\u{00e4}\u{00f6} ]{0,8}|[a-z0-9\u{00e4}\u{00f6}, ]{0,8}|(\r|[ ]|.){0,10})",
+                0usize..3,
+                proptest::bool::ANY,
+            ),
+            1..6,
+        )
+        .prop_map(|entries| {
+            let mut body = String::new();
+            for (key, value, indent, flow) in entries {
+                body.push_str(&" ".repeat(indent));
+                body.push_str(&key);
+                body.push_str(": ");
+                if flow {
+                    body.push('[');
+                    body.push_str(&value);
+                    body.push(']');
+                } else {
+                    body.push_str(&value);
+                }
+                body.push('\n');
+            }
+            format!("---\n{body}---\n\n# Title\n")
+        })
+    }
+
     proptest! {
         #[test]
         fn arbitrary_utf8_input_is_total_and_offsets_are_valid(source in any::<String>()) {
             let document = parse_markdown(&source, MarkdownOptions::default());
             assert_valid_section_ranges(&source, &document.sections);
-            match &document.frontmatter {
+            // Anchors are not asserted here: this strategy never emits a
+            // newline, so no input of it reaches a parsed mapping.
+            match document.frontmatter {
                 DocumentFrontmatter::Absent => {}
-                DocumentFrontmatter::Mapping { location, anchors, .. } => {
-                    assert_valid_range(&source, location.range);
-                    prop_assert!(location.start_line >= 1);
-                    prop_assert!(location.end_line >= location.start_line);
-                    assert_valid_anchors(&source, location, anchors);
-                }
-                DocumentFrontmatter::Invalid { location, .. } => {
+                DocumentFrontmatter::Mapping { location, .. }
+                | DocumentFrontmatter::Invalid { location, .. } => {
                     assert_valid_range(&source, location.range);
                     prop_assert!(location.start_line >= 1);
                     prop_assert!(location.end_line >= location.start_line);
                 }
+            }
+        }
+
+        #[test]
+        fn frontmatter_anchors_stay_within_their_own_line(
+            source in arbitrary_frontmatter_document(),
+        ) {
+            let document = parse_markdown(&source, MarkdownOptions::default());
+            if let DocumentFrontmatter::Mapping { location, anchors, .. } = &document.frontmatter {
+                assert_valid_anchors(&source, location, anchors);
             }
         }
     }
