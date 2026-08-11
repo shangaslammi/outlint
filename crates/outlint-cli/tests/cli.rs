@@ -158,7 +158,7 @@ fn json_check_has_stable_fields_and_order() {
     assert_eq!(stderr(&output), "");
     assert!(!output.stdout.contains(&0x1b));
     let json = json_output(&output);
-    assert_eq!(json["version"], 1);
+    assert_eq!(json["version"], 2);
     assert_eq!(json["results"][0]["path"], "first.md");
     assert_eq!(json["results"][1]["path"], "second.md");
     assert_eq!(json["results"][0]["schema"], "schema.yml");
@@ -167,8 +167,12 @@ fn json_check_has_stable_fields_and_order() {
         "missing-section"
     );
     assert_eq!(
-        json["results"][0]["diagnostics"][0]["header_path"],
-        serde_json::json!(["Required"])
+        json["results"][0]["diagnostics"][0]["target"],
+        serde_json::json!({
+            "kind": "missing_header",
+            "parent": [],
+            "matcher": "Required"
+        })
     );
     assert_eq!(
         json["results"][0]["diagnostics"][0]["location"],
@@ -234,10 +238,13 @@ fn check_validates_yaml_frontmatter_with_a_linked_json_schema() {
     assert_eq!(invalid.status.code(), Some(1));
     let diagnostic = &json_output(&invalid)["results"][0]["diagnostics"][0];
     assert_eq!(diagnostic["id"], "frontmatter-schema");
-    assert_eq!(diagnostic["json_pointer"], "/status");
     assert_eq!(
-        diagnostic["frontmatter_range"],
-        serde_json::json!({"start_line": 1, "end_line": 3})
+        diagnostic["target"],
+        serde_json::json!({
+            "kind": "frontmatter",
+            "line_range": {"start_line": 1, "end_line": 3},
+            "pointer": "/status"
+        })
     );
     assert_eq!(
         diagnostic["schema_node"],
@@ -648,7 +655,16 @@ fn linked_schema_absolute_id_does_not_rebase_physical_sibling_reads() {
         json["results"][0]["diagnostics"][0]["id"],
         "frontmatter-schema"
     );
-    assert_eq!(json["results"][0]["diagnostics"][0]["json_pointer"], "");
+    // The root pointer is the empty string, and must survive as a present
+    // member rather than collapsing into an absent one.
+    assert_eq!(
+        json["results"][0]["diagnostics"][0]["target"],
+        serde_json::json!({
+            "kind": "frontmatter",
+            "line_range": {"start_line": 1, "end_line": 3},
+            "pointer": ""
+        })
+    );
 }
 
 #[test]
@@ -1072,7 +1088,10 @@ fn constraint_details_are_preserved_in_json_and_human_output() {
     );
     assert_eq!(output.status.code(), Some(1));
     let diagnostic = &json_output(&output)["results"][0]["diagnostics"][0];
-    assert_eq!(diagnostic["header_path"], serde_json::json!([]));
+    assert_eq!(
+        diagnostic["target"],
+        serde_json::json!({"kind": "document"})
+    );
     assert_eq!(
         diagnostic["schema_node"],
         serde_json::json!({"kind": "constraint", "scope": [], "index": 0})
@@ -1104,7 +1123,7 @@ fn constraint_details_are_preserved_in_json_and_human_output() {
         ],
     );
     let human = stdout(&human);
-    assert!(human.contains("header_path=\"\""));
+    assert!(human.contains("target=document"));
     assert!(human.contains("schema_node=constraint(scope=[],index=0)"));
     assert!(human.contains("schema_location=\"schema.yml\":"));
     assert!(human.contains("involved_headers=[\"A\"@1:1, \"B\"@2:1]"));

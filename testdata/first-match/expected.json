@@ -1,6 +1,9 @@
 {
   "pass.md": [],
   "fail.md": [
-    { "id": "too-many-sections", "path": "API" }
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["API"] }
+    }
   ]
 }

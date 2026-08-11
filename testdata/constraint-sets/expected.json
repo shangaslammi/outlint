@@ -1,12 +1,21 @@
 {
   "any-of.md": [
-    { "id": "any_of", "path": "" }
+    {
+      "id": "any_of",
+      "target": { "kind": "document" }
+    }
   ],
   "at-most-one.md": [
-    { "id": "at_most_one", "path": "" }
+    {
+      "id": "at_most_one",
+      "target": { "kind": "document" }
+    }
   ],
   "all-or-none.md": [
-    { "id": "all_or_none", "path": "" }
+    {
+      "id": "all_or_none",
+      "target": { "kind": "document" }
+    }
   ],
   "pass.md": []
 }

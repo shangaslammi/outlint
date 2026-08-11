@@ -1,6 +1,9 @@
 {
   "pass.md": [],
   "fail.md": [
-    { "id": "requires", "path": "Group" }
+    {
+      "id": "requires",
+      "target": { "kind": "header", "path": ["Group"] }
+    }
   ]
 }

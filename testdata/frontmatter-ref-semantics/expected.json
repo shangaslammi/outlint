@@ -1,7 +1,13 @@
 {
   "fail.md": [
-    { "id": "frontmatter-schema", "path": "" },
-    { "id": "frontmatter-schema", "path": "" }
+    {
+      "id": "frontmatter-schema",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 4 }, "pointer": "" }
+    },
+    {
+      "id": "frontmatter-schema",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 4 }, "pointer": "/blocked" }
+    }
   ],
   "pass.md": []
 }

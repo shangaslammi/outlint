@@ -1,9 +1,15 @@
 {
   "comment-only.md": [
-    { "id": "invalid-frontmatter", "path": "" }
+    {
+      "id": "invalid-frontmatter",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 3 } }
+    }
   ],
   "empty.md": [
-    { "id": "invalid-frontmatter", "path": "" }
+    {
+      "id": "invalid-frontmatter",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 2 } }
+    }
   ],
   "mapping.md": []
 }

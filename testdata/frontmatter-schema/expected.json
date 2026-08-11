@@ -1,13 +1,25 @@
 {
   "fail.md": [
-    { "id": "frontmatter-schema", "path": "" },
-    { "id": "frontmatter-schema", "path": "" }
+    {
+      "id": "frontmatter-schema",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 3 }, "pointer": "" }
+    },
+    {
+      "id": "frontmatter-schema",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 3 }, "pointer": "/status" }
+    }
   ],
   "invalid.md": [
-    { "id": "invalid-frontmatter", "path": "" }
+    {
+      "id": "invalid-frontmatter",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 4 } }
+    }
   ],
   "missing.md": [
-    { "id": "missing-frontmatter", "path": "" }
+    {
+      "id": "missing-frontmatter",
+      "target": { "kind": "frontmatter" }
+    }
   ],
   "pass.md": []
 }

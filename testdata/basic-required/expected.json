@@ -1,6 +1,9 @@
 {
   "pass.md": [],
   "fail.md": [
-    { "id": "missing-section", "path": "Overview" }
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Overview" }
+    }
   ]
 }

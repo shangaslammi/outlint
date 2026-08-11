@@ -68,8 +68,8 @@ outlint check design.md
 ```
 
 ```text
-design.md:1:1 [ordered] the `ordered` constraint is not satisfied; header_path=""; schema_node=constraint(scope=[],index=0); schema_location=".outlint.yml":17:12; involved_headers=["Design"@3:1, "Overview"@7:1]; references=[overview=>exact:"Overview", design=>exact:"Design"]
-design.md:5:1 [unexpected-section] the section is not permitted in this closed scope; header_path="Design > Implementation Notes"; schema_node=rule(scope=[],index=1); schema_location=".outlint.yml":7:7
+design.md:1:1 [ordered] the `ordered` constraint is not satisfied; target=document; schema_node=constraint(scope=[],index=0); schema_location=".outlint.yml":17:12; involved_headers=["Widget Redesign > Design"@3:1, "Widget Redesign > Overview"@7:1]; references=[overview=>exact:"Overview", design=>exact:"Design"]
+design.md:5:1 [unexpected-section] the section is not permitted in this closed scope; target=header("Widget Redesign > Design > Implementation Notes"); schema_node=rule(scope=[],index=1); schema_location=".outlint.yml":7:7
 2 diagnostics in 1 file
 ```
 
@@ -220,8 +220,17 @@ outlint check rollout.md --format json
 ```
 
 ```json
-{"results":[{"diagnostics":[{"header_path":["Design"],"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":7,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":1}
+{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":7,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":2}
 ```
+
+Every diagnostic carries a `target` saying what it is about, tagged by
+`kind`: `header` (a header the document has, as a `path` array),
+`missing_header` (a section the schema requires, as the `parent` path it
+belongs under plus the schema's `matcher` label), `document`, or
+`frontmatter` (with the block's `line_range` and, when a linked JSON Schema
+rejected one value, its `pointer`). The kinds are distinct because their
+text has different provenance — a `missing_header` matcher is schema text
+that may appear nowhere in the document.
 
 **Schemas alone.** `outlint schema check .outlint.yml` runs every
 schema-load-time check without needing a document — useful in CI when the
