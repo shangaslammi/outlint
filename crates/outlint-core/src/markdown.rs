@@ -9,7 +9,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use marked_yaml::{LoaderOptions as MarkedYamlOptions, Node as MarkedNode};
+use marked_yaml::{
+    types::MarkedMappingNode, LoaderOptions as MarkedYamlOptions, Marker as MarkedMarker,
+    Node as MarkedNode,
+};
 use num_bigint::BigUint;
 use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag};
 use yaml_rust2::{
@@ -57,6 +60,11 @@ pub enum DocumentFrontmatter {
         value: serde_json::Map<String, serde_json::Value>,
         /// Source location of the complete delimited block.
         location: FrontmatterLocation,
+        /// Positions of the entries inside the block, keyed by JSON Pointer.
+        ///
+        /// Empty when the block was parsed by a path that carries no markers;
+        /// callers must then fall back to [`Self::Mapping::location`].
+        anchors: FrontmatterAnchors,
     },
     /// A delimited block exists but is not a valid JSON-compatible YAML mapping.
     Invalid {
@@ -77,6 +85,42 @@ pub struct FrontmatterLocation {
     pub start_line: u64,
     /// One-based last line covered by the block.
     pub end_line: u64,
+}
+
+/// Source position of one entry inside a YAML frontmatter block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrontmatterAnchor {
+    /// One-based document line, counted from the document's first line rather
+    /// than from the start of the frontmatter body.
+    pub line: u64,
+    /// One-based byte column within that line.
+    pub column: u64,
+}
+
+/// Positions of the entries of a frontmatter mapping, keyed by JSON Pointer.
+///
+/// Pointers are spelled per RFC 6901, matching the pointers a JSON Schema
+/// validator reports for a rejected value, so a diagnostic carrying such a
+/// pointer can be anchored to the source it names.
+///
+/// A mapping member is recorded at its **key**, because `key: value` is the
+/// construct the pointer names as it is spelled in the document; a sequence
+/// element, having no key, is recorded at the element itself. The mapping as a
+/// whole — the root pointer `""` — is deliberately absent: its extent is the
+/// whole block, which already has a location of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FrontmatterAnchors(BTreeMap<String, FrontmatterAnchor>);
+
+impl FrontmatterAnchors {
+    /// Position of the entry named by an RFC 6901 `pointer`, when known.
+    pub fn get(&self, pointer: &str) -> Option<FrontmatterAnchor> {
+        self.0.get(pointer).copied()
+    }
+
+    /// Whether no entry position is known, as on marker-free parse paths.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// A section opened by one Markdown heading.
@@ -266,12 +310,16 @@ fn parse_frontmatter(
         .error_on_duplicate_keys(true)
         .prevent_coercion(true);
     let marked = marked_yaml::parse_yaml_with_options(0, body, options);
+    // The exact fallback parses through an event stream that keeps no markers,
+    // so entries parsed by it have no position beyond the block's own.
     let parsed = match (yaml, marked) {
         (Ok(serde_yaml::Value::Mapping(_)), Ok(marked)) => marked_frontmatter_mapping(&marked),
         (Ok(_), Ok(_)) => Err("frontmatter must be a YAML mapping".into()),
         // Preserve exact scalar lexemes when valid YAML uses constructs that
         // marked-yaml deliberately does not model, notably tags and aliases.
-        (Ok(_), Err(_)) => exact_frontmatter_mapping(body),
+        (Ok(_), Err(_)) => {
+            exact_frontmatter_mapping(body).map(|value| (value, MarkedAnchors::new()))
+        }
         // serde_yaml cannot represent arbitrary-range YAML numbers even
         // though marked-yaml and the exact fallback retain their lexemes.
         // The branch necessarily depends on serde_yaml's unstructured wording.
@@ -279,15 +327,77 @@ fn parse_frontmatter(
             marked_frontmatter_mapping(&marked)
         }
         (Err(error), Err(_)) if serde_yaml_numeric_range_error(&error) => {
-            exact_frontmatter_mapping(body)
+            exact_frontmatter_mapping(body).map(|value| (value, MarkedAnchors::new()))
         }
         (Err(error), _) => Err(format!("invalid YAML frontmatter: {error}")),
     };
     let frontmatter = match parsed {
-        Ok(value) => DocumentFrontmatter::Mapping { value, location },
+        Ok((value, anchors)) => DocumentFrontmatter::Mapping {
+            value,
+            location,
+            anchors: document_frontmatter_anchors(source, lines, &location, anchors),
+        },
         Err(message) => DocumentFrontmatter::Invalid { location, message },
     };
     (frontmatter, Some(range))
+}
+
+/// Entry positions as marked-yaml reports them: one-based lines counted from
+/// the frontmatter body, and one-based *character* columns.
+type MarkedAnchors = BTreeMap<String, MarkedPosition>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MarkedPosition {
+    line: usize,
+    column: usize,
+}
+
+/// Lifts body-relative marked-yaml positions into document coordinates.
+///
+/// The body handed to marked-yaml starts on the document's second line, so a
+/// document line is the marked line plus one. Marked columns count characters
+/// while [`DiagnosticLocation`](crate::DiagnosticLocation) counts bytes, so the
+/// column is re-measured against the document line itself. That re-measurement
+/// doubles as a consistency check: a position that does not fall inside the
+/// block, or names a column the line does not have, is dropped rather than
+/// reported, leaving the block location as the anchor.
+fn document_frontmatter_anchors(
+    source: &str,
+    lines: &LineIndex,
+    location: &FrontmatterLocation,
+    marked: MarkedAnchors,
+) -> FrontmatterAnchors {
+    let anchors = marked
+        .into_iter()
+        .filter_map(|(pointer, position)| {
+            let line = position.line.checked_add(1)?;
+            // Entries lie strictly between the opening and closing delimiters.
+            if line < 2 || line as u64 >= location.end_line {
+                return None;
+            }
+            let text = lines.line_text(source, line)?;
+            let column = byte_column_in_line(text, position.column)?;
+            Some((
+                pointer,
+                FrontmatterAnchor {
+                    line: line as u64,
+                    column,
+                },
+            ))
+        })
+        .collect();
+    FrontmatterAnchors(anchors)
+}
+
+/// Converts a one-based character column into a one-based byte column.
+fn byte_column_in_line(line: &str, character_column: usize) -> Option<u64> {
+    let characters = character_column.checked_sub(1)?;
+    let mut offset = 0;
+    for _ in 0..characters {
+        let character = line[offset..].chars().next()?;
+        offset += character.len_utf8();
+    }
+    Some(offset as u64 + 1)
 }
 
 fn serde_yaml_numeric_range_error(error: &serde_yaml::Error) -> bool {
@@ -298,10 +408,21 @@ fn serde_yaml_numeric_range_error(error: &serde_yaml::Error) -> bool {
 
 fn marked_frontmatter_mapping(
     value: &MarkedNode,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+) -> Result<(serde_json::Map<String, serde_json::Value>, MarkedAnchors), String> {
     let Some(mapping) = value.as_mapping() else {
         return Err("frontmatter must be a YAML mapping".into());
     };
+    let mut anchors = MarkedAnchors::new();
+    let mut pointer = String::new();
+    let object = marked_mapping_to_json(mapping, &mut pointer, &mut anchors)?;
+    Ok((object, anchors))
+}
+
+fn marked_mapping_to_json(
+    mapping: &MarkedMappingNode,
+    pointer: &mut String,
+    anchors: &mut MarkedAnchors,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let mut object = serde_json::Map::new();
     for (key, value) in mapping.iter() {
         if key.may_coerce()
@@ -312,12 +433,22 @@ fn marked_frontmatter_mapping(
         {
             return Err("frontmatter mapping keys must be strings".into());
         }
-        object.insert(key.as_str().to_owned(), marked_yaml_to_json(value)?);
+        let restore = pointer.len();
+        push_pointer_token(pointer, key.as_str());
+        // A member is spelled `key: value`, so the key names the whole entry.
+        record_marked_anchor(anchors, pointer, key.span().start());
+        let converted = marked_yaml_to_json(value, pointer, anchors)?;
+        pointer.truncate(restore);
+        object.insert(key.as_str().to_owned(), converted);
     }
     Ok(object)
 }
 
-fn marked_yaml_to_json(value: &MarkedNode) -> Result<serde_json::Value, String> {
+fn marked_yaml_to_json(
+    value: &MarkedNode,
+    pointer: &mut String,
+    anchors: &mut MarkedAnchors,
+) -> Result<serde_json::Value, String> {
     if let Some(scalar) = value.as_scalar() {
         if !scalar.may_coerce() {
             return Ok(serde_json::Value::String(scalar.as_str().to_owned()));
@@ -325,28 +456,68 @@ fn marked_yaml_to_json(value: &MarkedNode) -> Result<serde_json::Value, String> 
         return marked_scalar_to_json(scalar.as_str());
     }
     if let Some(sequence) = value.as_sequence() {
-        return sequence
-            .iter()
-            .map(marked_yaml_to_json)
-            .collect::<Result<Vec<_>, _>>()
-            .map(serde_json::Value::Array);
+        let mut values = Vec::with_capacity(sequence.len());
+        for (index, item) in sequence.iter().enumerate() {
+            let restore = pointer.len();
+            // Sequence index tokens need no RFC 6901 escaping.
+            pointer.push('/');
+            pointer.push_str(&index.to_string());
+            // An element has no key, so it is named by where it begins.
+            record_marked_anchor(anchors, pointer, marked_node_start(item));
+            values.push(marked_yaml_to_json(item, pointer, anchors)?);
+            pointer.truncate(restore);
+        }
+        return Ok(serde_json::Value::Array(values));
     }
     let Some(mapping) = value.as_mapping() else {
         return Err("unsupported YAML frontmatter node".into());
     };
-    let mut object = serde_json::Map::new();
-    for (key, value) in mapping.iter() {
-        if key.may_coerce()
-            && !matches!(
-                crate::loader::parse_frontmatter_scalar(key.as_str()),
-                crate::FrontmatterScalar::String(_)
-            )
-        {
-            return Err("frontmatter mapping keys must be strings".into());
+    marked_mapping_to_json(mapping, pointer, anchors).map(serde_json::Value::Object)
+}
+
+/// Where a node begins in the source.
+///
+/// marked-yaml reports a block mapping's span from the `:` of its first key
+/// rather than from the mapping itself, so the earlier of the node's own start
+/// and its first key's start is the one that names the node.
+fn marked_node_start(value: &MarkedNode) -> Option<&MarkedMarker> {
+    let own = value.span().start();
+    let first_key = value
+        .as_mapping()
+        .and_then(|mapping| mapping.iter().next())
+        .and_then(|(key, _)| key.span().start());
+    match (own, first_key) {
+        (Some(own), Some(key)) if (key.line(), key.column()) < (own.line(), own.column()) => {
+            Some(key)
         }
-        object.insert(key.as_str().to_owned(), marked_yaml_to_json(value)?);
+        (Some(own), _) => Some(own),
+        (None, key) => key,
     }
-    Ok(serde_json::Value::Object(object))
+}
+
+fn record_marked_anchor(anchors: &mut MarkedAnchors, pointer: &str, marker: Option<&MarkedMarker>) {
+    let Some(marker) = marker else {
+        return;
+    };
+    anchors.insert(
+        pointer.to_owned(),
+        MarkedPosition {
+            line: marker.line(),
+            column: marker.column(),
+        },
+    );
+}
+
+/// Appends `/` and an RFC 6901-escaped mapping key to a JSON Pointer.
+fn push_pointer_token(pointer: &mut String, token: &str) {
+    pointer.push('/');
+    for character in token.chars() {
+        match character {
+            '~' => pointer.push_str("~0"),
+            '/' => pointer.push_str("~1"),
+            _ => pointer.push(character),
+        }
+    }
 }
 
 fn json_number(source: &str) -> Result<serde_json::Value, String> {
@@ -1457,7 +1628,10 @@ mod tests {
         );
         let document = parse_markdown(source, MarkdownOptions::default());
 
-        let DocumentFrontmatter::Mapping { value, location } = &document.frontmatter else {
+        let DocumentFrontmatter::Mapping {
+            value, location, ..
+        } = &document.frontmatter
+        else {
             panic!("expected parsed frontmatter")
         };
         assert_eq!(value.get("draft"), Some(&serde_json::Value::Bool(false)));
@@ -1465,6 +1639,79 @@ mod tests {
         assert_eq!(location.end_line, 5);
         assert_eq!(headings(&document).len(), 1);
         assert_eq!(headings(&document)[0].diagnostic_text, "Document title");
+    }
+
+    #[test]
+    fn frontmatter_anchors_locate_entries_by_json_pointer() {
+        // Comments and blank lines make a line count that skips them visible,
+        // and the multi-byte key proves the column is measured in bytes.
+        let source = concat!(
+            "---\n",               // 1
+            "# a comment\n",       // 2
+            "\n",                  // 3
+            "\n",                  // 4
+            "count: nope\n",       // 5
+            "nested:\n",           // 6
+            "  inner: 1\n",        // 7
+            "tags:\n",             // 8
+            "  - ok\n",            // 9
+            "  - 123\n",           // 10
+            "flow: [\"ää\", 5]\n", // 11
+            "items:\n",            // 12
+            "  - key: 1\n",        // 13
+            "weird/key~name: 1\n", // 14
+            "---\n",               // 15
+            "# Title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        let anchor = |pointer: &str| {
+            anchors
+                .get(pointer)
+                .map(|anchor| (anchor.line, anchor.column))
+        };
+
+        // A member is anchored at its key, in document lines: the body starts
+        // on the document's second line, so every marked line shifts by one.
+        assert_eq!(anchor("/count"), Some((5, 1)));
+        assert_eq!(anchor("/nested"), Some((6, 1)));
+        assert_eq!(anchor("/nested/inner"), Some((7, 3)));
+        assert_eq!(anchor("/tags"), Some((8, 1)));
+        // A sequence element has no key, so it is anchored at itself.
+        assert_eq!(anchor("/tags/0"), Some((9, 5)));
+        assert_eq!(anchor("/tags/1"), Some((10, 5)));
+        // `flow: ["ää", 5]` puts the second element on byte column 16 but
+        // character column 14.
+        assert_eq!(anchor("/flow/1"), Some((11, 16)));
+        // A block mapping inside a sequence starts at its first key, not at
+        // the `:` marked-yaml reports as the mapping's own span start.
+        assert_eq!(anchor("/items/0"), Some((13, 5)));
+        assert_eq!(anchor("/items/0/key"), Some((13, 5)));
+        // Pointer tokens are escaped as RFC 6901 spells them.
+        assert_eq!(anchor("/weird~1key~0name"), Some((14, 1)));
+        // The root pointer names the mapping, whose extent is the whole block.
+        assert_eq!(anchor(""), None);
+        assert_eq!(anchor("/absent"), None);
+    }
+
+    #[test]
+    fn marker_free_frontmatter_parsing_records_no_anchors() {
+        // A YAML tag and an alias both force the exact fallback, which parses
+        // through an event stream that keeps no positions.
+        for source in [
+            "---\ncount: !!str 5\n---\n# Title\n",
+            "---\nanchored: &a 1\nalias: *a\n---\n# Title\n",
+        ] {
+            let document = parse_markdown(source, MarkdownOptions::default());
+            let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
+                panic!("expected parsed frontmatter: {document:?}")
+            };
+            assert!(!value.is_empty());
+            assert!(anchors.is_empty(), "{source:?} recorded {anchors:?}");
+        }
     }
 
     #[test]
@@ -1795,15 +2042,46 @@ mod tests {
         }
     }
 
+    fn assert_valid_anchors(
+        source: &str,
+        location: &FrontmatterLocation,
+        anchors: &FrontmatterAnchors,
+    ) {
+        let lines = LineIndex::new(source);
+        for (pointer, anchor) in &anchors.0 {
+            assert!(
+                (2..location.end_line).contains(&anchor.line),
+                "{pointer} left the block: {anchor:?}"
+            );
+            let text = lines
+                .line_text(source, anchor.line as usize)
+                .unwrap_or_else(|| panic!("{pointer} names a line the document lacks"));
+            let column = anchor.column as usize - 1;
+            assert!(
+                column <= text.len(),
+                "{pointer} overruns its line: {anchor:?}"
+            );
+            assert!(
+                text.is_char_boundary(column),
+                "{pointer} splits a character: {anchor:?}"
+            );
+        }
+    }
+
     proptest! {
         #[test]
         fn arbitrary_utf8_input_is_total_and_offsets_are_valid(source in any::<String>()) {
             let document = parse_markdown(&source, MarkdownOptions::default());
             assert_valid_section_ranges(&source, &document.sections);
-            match document.frontmatter {
+            match &document.frontmatter {
                 DocumentFrontmatter::Absent => {}
-                DocumentFrontmatter::Mapping { location, .. }
-                | DocumentFrontmatter::Invalid { location, .. } => {
+                DocumentFrontmatter::Mapping { location, anchors, .. } => {
+                    assert_valid_range(&source, location.range);
+                    prop_assert!(location.start_line >= 1);
+                    prop_assert!(location.end_line >= location.start_line);
+                    assert_valid_anchors(&source, location, anchors);
+                }
+                DocumentFrontmatter::Invalid { location, .. } => {
                     assert_valid_range(&source, location.range);
                     prop_assert!(location.start_line >= 1);
                     prop_assert!(location.end_line >= location.start_line);

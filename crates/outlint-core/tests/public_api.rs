@@ -1,4 +1,6 @@
-use outlint_core::{ByteOffset, DocumentFrontmatter, FrontmatterLocation, TextRange};
+use outlint_core::{
+    ByteOffset, DocumentFrontmatter, FrontmatterAnchors, FrontmatterLocation, TextRange,
+};
 
 #[test]
 fn frontmatter_mapping_value_has_the_public_json_object_type() {
@@ -12,6 +14,7 @@ fn frontmatter_mapping_value_has_the_public_json_object_type() {
             start_line: 1,
             end_line: 1,
         },
+        anchors: FrontmatterAnchors::default(),
     };
     let DocumentFrontmatter::Mapping { value, .. } = frontmatter else {
         panic!("constructed the mapping variant")

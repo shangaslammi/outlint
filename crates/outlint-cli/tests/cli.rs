@@ -296,13 +296,205 @@ fn frontmatter_schema_messages_preserve_document_number_spellings() {
                 .expect("diagnostic message is a string")
         })
         .collect::<Vec<_>>();
+    // Each rejected value anchors to its own line, so the diagnostics order by
+    // the line their key sits on rather than tying on the block's first line.
     assert_eq!(
         diagnostics,
         [
+            "100.0 is greater than the maximum of 1",
             "1.5 is greater than the maximum of 1",
             "1e2 is greater than the maximum of 1",
             "1E2 is greater than the maximum of 1",
-            "100.0 is greater than the maximum of 1",
+        ]
+    );
+}
+
+#[test]
+fn frontmatter_schema_diagnostics_anchor_to_the_failing_entry() {
+    let directory = TempDir::new("frontmatter-anchors");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write(
+        "frontmatter.schema.json",
+        r#"{"type":"object","required":["absent"],"properties":{
+            "tags":{"type":"array","items":{"type":"string"}},
+            "count":{"type":"integer"},
+            "nested":{"type":"object","properties":{"inner":{"type":"string"}}}
+        }}"#,
+    );
+    // The comment and the blank lines separate the document line of each
+    // failing entry from any count of its non-empty predecessors.
+    directory.write(
+        "document.md",
+        concat!(
+            "---\n",         // 1
+            "# a comment\n", // 2
+            "\n",            // 3
+            "tags:\n",       // 4
+            "  - ok\n",      // 5
+            "  - 123\n",     // 6
+            "\n",            // 7
+            "count: nope\n", // 8
+            "nested:\n",     // 9
+            "  inner: 1\n",  // 10
+            "---\n",         // 11
+            "\n",
+            "# Document\n",
+        ),
+    );
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let json = json_output(&output);
+    let anchored = json["results"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics are an array")
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic["id"].as_str().expect("an id"),
+                diagnostic["location"]["line"].as_u64().expect("a line"),
+                diagnostic["location"]["column"].as_u64().expect("a column"),
+                diagnostic["target"]["pointer"].as_str().expect("a pointer"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        anchored,
+        [
+            // The root pointer names the mapping, whose extent is the block.
+            ("frontmatter-schema", 1, 1, ""),
+            ("frontmatter-schema", 6, 5, "/tags/1"),
+            ("frontmatter-schema", 8, 1, "/count"),
+            ("frontmatter-schema", 10, 3, "/nested/inner"),
+        ]
+    );
+    // The target keeps naming the whole block; only the anchor narrows.
+    assert_eq!(
+        json["results"][0]["diagnostics"][2]["target"],
+        serde_json::json!({
+            "kind": "frontmatter",
+            "line_range": {"start_line": 1, "end_line": 11},
+            "pointer": "/count"
+        })
+    );
+}
+
+#[test]
+fn frontmatter_schema_anchors_fall_back_to_the_block_without_markers() {
+    let directory = TempDir::new("frontmatter-anchors-fallback");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write(
+        "frontmatter.schema.json",
+        r#"{"type":"object","properties":{"count":{"type":"integer"}}}"#,
+    );
+    // An explicit tag forces the parse path that carries no positions.
+    directory.write(
+        "document.md",
+        "---\nignored: !!str 5\ncount: nope\n---\n\n# Document\n",
+    );
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let diagnostic = &json_output(&output)["results"][0]["diagnostics"][0];
+    assert_eq!(diagnostic["id"], "frontmatter-schema");
+    assert_eq!(diagnostic["target"]["pointer"], "/count");
+    assert_eq!(
+        diagnostic["location"],
+        serde_json::json!({"line": 1, "column": 1})
+    );
+}
+
+#[test]
+fn block_level_frontmatter_diagnostics_stay_anchored_to_the_block() {
+    let directory = TempDir::new("frontmatter-block-anchors");
+    directory.write(
+        "required.yml",
+        "version: 1\nfrontmatter:\n  required: true\nsections: []\n",
+    );
+    directory.write(
+        "forbidden.yml",
+        "version: 1\nfrontmatter:\n  allow: false\nsections: []\n",
+    );
+    directory.write("absent.md", "# Document\n");
+    directory.write("unparsable.md", "---\nnot: [a\n---\n\n# Document\n");
+
+    let missing = run(
+        &directory,
+        &[
+            "check",
+            "absent.md",
+            "--schema",
+            "required.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(1), "{}", stderr(&missing));
+    let missing = &json_output(&missing)["results"][0]["diagnostics"][0];
+    assert_eq!(missing["id"], "missing-frontmatter");
+    assert_eq!(
+        missing["location"],
+        serde_json::json!({"line": 1, "column": 1})
+    );
+
+    let present = run(
+        &directory,
+        &[
+            "check",
+            "unparsable.md",
+            "--schema",
+            "forbidden.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(present.status.code(), Some(1), "{}", stderr(&present));
+    let present = json_output(&present);
+    let anchored = present["results"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics are an array")
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic["id"].as_str().expect("an id"),
+                diagnostic["location"]["line"].as_u64().expect("a line"),
+                diagnostic["location"]["column"].as_u64().expect("a column"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        anchored,
+        [
+            ("forbidden-frontmatter", 1, 1),
+            ("invalid-frontmatter", 1, 1)
         ]
     );
 }

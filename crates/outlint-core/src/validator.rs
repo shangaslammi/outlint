@@ -7,9 +7,10 @@ use crate::loader::{preloaded_json_schema_registry, NoExternalRetrieve};
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
     ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
-    DocumentFrontmatter, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef, FrontmatterSchema,
-    HeaderLevel, Heading, HeadingLocation, Matcher, Proposition, RefAnchor, RuleIndex, RuleOutcome,
-    RuleRef, Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
+    DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef,
+    FrontmatterSchema, HeaderLevel, Heading, HeadingLocation, Matcher, Proposition, RefAnchor,
+    RuleIndex, RuleOutcome, RuleRef, Schema, SchemaNode, ScopePath, Section, SectionRule,
+    TextRange, UpperBound,
 };
 
 /// A stable identifier from the diagnostic vocabulary in specification §6.
@@ -500,7 +501,11 @@ impl<'a> Validator<'a> {
                     None,
                 );
             }
-            DocumentFrontmatter::Mapping { value, location } => {
+            DocumentFrontmatter::Mapping {
+                value,
+                location,
+                anchors,
+            } => {
                 if forbidden {
                     self.emit_frontmatter(
                         DiagnosticId::ForbiddenFrontmatter,
@@ -521,9 +526,13 @@ impl<'a> Validator<'a> {
                     .collect::<Vec<_>>();
                 errors.sort();
                 for (pointer, message) in errors {
-                    self.emit_frontmatter(
+                    // The root pointer names the mapping, whose extent is the
+                    // block; only a pointer into it can name a narrower anchor.
+                    let anchor = anchors.get(&pointer);
+                    self.emit_frontmatter_at(
                         DiagnosticId::FrontmatterSchema,
                         Some(*location),
+                        anchor,
                         message,
                         Some(pointer),
                     );
@@ -532,6 +541,7 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Emits a diagnostic about a frontmatter block as a whole.
     fn emit_frontmatter(
         &mut self,
         id: DiagnosticId,
@@ -539,11 +549,26 @@ impl<'a> Validator<'a> {
         message: String,
         json_pointer: Option<String>,
     ) {
+        self.emit_frontmatter_at(id, location, None, message, json_pointer);
+    }
+
+    /// Emits a frontmatter diagnostic anchored at `anchor`, when one is known.
+    ///
+    /// The range stays the block's: the diagnostic concerns the block, and only
+    /// the point a reader is sent to narrows to the offending entry.
+    fn emit_frontmatter_at(
+        &mut self,
+        id: DiagnosticId,
+        location: Option<FrontmatterLocation>,
+        anchor: Option<FrontmatterAnchor>,
+        message: String,
+        json_pointer: Option<String>,
+    ) {
         let diagnostic_location =
             location.map_or_else(root_location, |location| DiagnosticLocation {
                 range: location.range,
-                line: location.start_line,
-                column: 1,
+                line: anchor.map_or(location.start_line, |anchor| anchor.line),
+                column: anchor.map_or(1, |anchor| anchor.column),
             });
         let block = location.map(|location| FrontmatterBlock {
             line_range: FrontmatterLineRange {
