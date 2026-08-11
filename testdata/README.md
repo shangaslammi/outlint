@@ -21,9 +21,10 @@ Each expected diagnostic has the portable shape:
 `id` is the public diagnostic id from specification §6. `path` follows the
 diagnostic path rule defined normatively in specification §6 ("Diagnostic
 path"); note that for absence diagnostics (`missing-section`,
-`too-few-sections`) this is a synthesized matcher label, not text copied
-from the document. Each entry has exactly these two members. The
-expected object must name every and only the Markdown files in its directory.
+`too-few-sections`, `missing-title`) this is a synthesized matcher label,
+not text copied from the document. Each entry has exactly these two
+members. The expected object must name every and only the Markdown files
+in its directory.
 
 Diagnostic arrays compare as multisets (bags), not as sequences. A document
 conforms when the entries an implementation produces for it and the entries
