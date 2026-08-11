@@ -1,0 +1,14 @@
+version: 1
+# Every header must be reachable from the document's spine. `Overview` closes
+# its child scope and requires `Goals`, so a detached `Overview` would, if it
+# were pooled into the root scope, drag in a whole cascade: a surplus match,
+# an unexpected child, and a missing one. It is detached, so none of that is
+# reported — one diagnostic per detached subtree root, and nothing about its
+# descendants.
+sections:
+  - match: "Overview"
+    required: true
+    strict: true
+    sections:
+      - match: "Goals"
+        required: true
