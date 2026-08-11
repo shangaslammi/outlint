@@ -4,8 +4,13 @@ description = "Lint the header structure of Markdown documents against a schema"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/outlint"
+keywords = ["markdown", "lint", "linter", "outline", "schema"]
+categories = ["command-line-utilities", "text-processing", "development-tools"]
 
 [[bin]]
 name = "outlint"
