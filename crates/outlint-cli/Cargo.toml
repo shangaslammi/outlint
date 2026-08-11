@@ -9,6 +9,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/outlint"
+readme = "README.md"
 keywords = ["markdown", "lint", "linter", "outline", "schema"]
 categories = ["command-line-utilities", "text-processing", "development-tools"]
 
