@@ -29,8 +29,12 @@ feature set of the `0.1.0` workspace.
 - **Constraints.** `one_of`, `any_of`, `at_most_one`, `all_or_none`,
   `requires`, `conflicts`, and `ordered`, usable at the schema root or inside
   any rule scope.
-- **Options.** `match_case`, `strip_inline_markup`, `allow_skipped_levels`,
-  and `root_level`, normalized with defaults applied by the loader.
+- **Options.** `match_case`, `strip_inline_markup`, and
+  `allow_skipped_levels`, normalized with defaults applied by the loader.
+- **Document shape.** The title is the document's `h1` and `sections`
+  describes its `h2` headings. A document has at most one `h1`, and every `h2`
+  is a descendant of it; a surplus `h1` is `too-many-sections` and an `h2`
+  outside it is `detached-section`. A document with no `h1` conforms.
 - **Frontmatter.** Presence checking (`required`, `allow`) plus value
   validation delegated to a JSON Schema given inline or as a path relative to
   the schema file, including linked `$ref` resource graphs.

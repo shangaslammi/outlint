@@ -2,7 +2,9 @@ version: 1
 # No `title:` is declared, so nothing in this schema mentions `h1` at all.
 # The single top-level spine is structural rather than opt-in: a schema has
 # one top-level `sections` list, and the flat root scope it describes only has
-# one meaning when at most one header sits at each level above `root_level`.
+# one meaning when every `h2` shares one ancestor chain. Half of that is
+# bounding the document to one `h1`, which is what these documents exercise;
+# `detached-sections/` covers the other half.
 sections:
   - match: "Overview"
     repeat: "0..n"

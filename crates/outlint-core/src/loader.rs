@@ -20,7 +20,7 @@ use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
     AtLeastTwo, ByteOffset, CanonicalFloat, CanonicalInteger, Cardinality, Constraint,
     ConstraintIndex, ConstraintPath, ExactText, FrontmatterKey, FrontmatterPolicy, FrontmatterRef,
-    FrontmatterScalar, GlobPattern, HeaderLevel, InvalidSchema, JsonSchemaResourceContents,
+    FrontmatterScalar, GlobPattern, InvalidSchema, JsonSchemaResourceContents,
     LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, Matcher, NonEmpty, Options, Proposition,
     RefAnchor, RegexPattern, RelatedLocation, RuleId, RuleIndex, RuleOutcome, RulePath, RuleRef,
     Schema, SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
@@ -374,7 +374,6 @@ struct RawOptions {
     match_case: Option<bool>,
     strip_inline_markup: Option<bool>,
     allow_skipped_levels: Option<bool>,
-    root_level: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,12 +406,7 @@ const DOCUMENT_FIELDS: &[&str] = &[
     "sections",
     "constraints",
 ];
-const OPTION_FIELDS: &[&str] = &[
-    "match_case",
-    "strip_inline_markup",
-    "allow_skipped_levels",
-    "root_level",
-];
+const OPTION_FIELDS: &[&str] = &["match_case", "strip_inline_markup", "allow_skipped_levels"];
 const FRONTMATTER_FIELDS: &[&str] = &["required", "allow", "schema"];
 const RULE_FIELDS: &[&str] = &[
     "id",
@@ -790,31 +784,19 @@ impl Loader {
         let frontmatter = self.build_frontmatter(raw.frontmatter, frontmatter_declared);
 
         let match_case = raw.options.match_case.unwrap_or(false);
-        let options = self.build_options(&raw.options);
+        let options = Self::build_options(&raw.options);
         let title = raw.title.as_deref().and_then(|matcher| {
             let range = self.range(RangeKey::DocumentField("title".into()));
             self.nodes.insert(SchemaNode::Title, range);
             self.build_matcher(matcher, match_case, range)
         });
-        if raw.title.is_some()
-            && options
-                .as_ref()
-                .is_some_and(|options| options.root_level == HeaderLevel::H1)
-        {
-            self.error_at(
-                SchemaErrorKind::InvalidTitleLevel,
-                self.range(RangeKey::DocumentField("title".into())),
-                "title cannot be declared when root_level is 1",
-            );
-        }
 
         let root_scope = ScopePath(Vec::new());
         self.raw_constraints
             .insert(root_scope.clone(), raw.constraints);
         let sections = self.build_scope(raw.sections, &root_scope, match_case);
 
-        let (Some(version), Some(options), Some(frontmatter), Some(sections)) =
-            (version, options, frontmatter, sections)
+        let (Some(version), Some(frontmatter), Some(sections)) = (version, frontmatter, sections)
         else {
             self.validate_constraint_lexical_refs();
             return self.failure();
@@ -1087,14 +1069,6 @@ impl Loader {
                 }
             }
         }
-        if let Some(value) = yaml_get(mapping, "root_level") {
-            if !is_yaml_integer(value) {
-                self.shape_error_at(
-                    self.range(RangeKey::OptionField("root_level".into())),
-                    "options.root_level must be an integer and cannot be null",
-                );
-            }
-        }
     }
 
     fn validate_rules_shape(&mut self, value: &Value, scope: &ScopePath, range: SourceRange) {
@@ -1252,26 +1226,12 @@ impl Loader {
         }
     }
 
-    fn build_options(&mut self, raw: &RawOptions) -> Option<Options> {
-        let range = self.range(RangeKey::OptionField("root_level".into()));
-        let level = raw.root_level.unwrap_or(2);
-        let root_level = u8::try_from(level)
-            .ok()
-            .and_then(|level| HeaderLevel::try_from(level).ok())
-            .or_else(|| {
-                self.error_at(
-                    SchemaErrorKind::InvalidRootLevel,
-                    range,
-                    format!("root_level must be between 1 and 6, got {level}"),
-                );
-                None
-            });
-        root_level.map(|root_level| Options {
+    fn build_options(raw: &RawOptions) -> Options {
+        Options {
             match_case: raw.match_case.unwrap_or(false),
             strip_inline_markup: raw.strip_inline_markup.unwrap_or(true),
             allow_skipped_levels: raw.allow_skipped_levels.unwrap_or(false),
-            root_level,
-        })
+        }
     }
 
     fn build_scope(
@@ -2378,9 +2338,9 @@ sections:
     allow: false
 "#,
         );
-        assert_eq!(schema.options.root_level, HeaderLevel::H2);
         assert!(!schema.options.match_case);
         assert!(schema.options.strip_inline_markup);
+        assert!(!schema.options.allow_skipped_levels);
         assert_eq!(schema.sections[0].id, Some(RuleId("api-reference".into())));
         assert_eq!(
             schema.sections[0].outcome,
@@ -2503,6 +2463,27 @@ sections:
 "#,
         );
         assert_eq!(kinds, vec![SchemaErrorKind::ReservedId]);
+    }
+
+    /// `root_level` was removed from the format: the title is always the `h1`
+    /// and `sections` always describes `h2`. A schema still declaring it is
+    /// rejected as an unknown option rather than silently ignored.
+    #[test]
+    fn rejects_the_removed_root_level_option() {
+        let source = "version: 1\noptions:\n  root_level: 3\nsections: []\n";
+        let invalid = invalid(source);
+        let messages = invalid
+            .errors
+            .iter()
+            .map(|error| (error.kind, error.message.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec![(
+                SchemaErrorKind::InvalidDocumentShape,
+                "unknown field `root_level`".to_owned()
+            )]
+        );
     }
 
     #[test]

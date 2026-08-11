@@ -110,7 +110,7 @@ version: 1
 
 options:
   match_case: false            # matchers are case-insensitive by default
-  root_level: 2                # `sections` describes h2 headings
+  strip_inline_markup: true    # match on `Foo bar`, not `**Foo** [bar](x)`
 
 frontmatter:
   required: true

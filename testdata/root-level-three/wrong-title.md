@@ -1,5 +1,0 @@
-# Book
-
-## Manual
-
-### Details

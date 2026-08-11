@@ -1,0 +1,23 @@
+{
+  "pass.md": [],
+  "pre-spine.md": [
+    {
+      "id": "detached-section",
+      "target": { "kind": "header", "path": ["Overview"] }
+    },
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Part One", "Overview"] }
+    }
+  ],
+  "pair.md": [
+    {
+      "id": "detached-section",
+      "target": { "kind": "header", "path": ["Overview"] }
+    },
+    {
+      "id": "detached-section",
+      "target": { "kind": "header", "path": ["Summary"] }
+    }
+  ]
+}
