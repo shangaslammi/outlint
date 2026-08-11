@@ -375,15 +375,16 @@ Implementations MUST report, per violation: a stable diagnostic id, the
 header path (e.g. `Overview > Goals`), a source location, and the schema
 rule/constraint involved.
 
-> **Revision in progress.** The path derivation below is incomplete and is
-> being replaced. Header paths do not currently include ancestors above
-> `root_level`, which makes two diagnostics under different such ancestors
-> indistinguishable; the joined-string encoding is also lossy for headers
-> containing ` > `. A forthcoming revision replaces the path with a tagged
-> *target* — header, missing header, or frontmatter — carrying the complete
-> ancestor chain as an array. Do not rely on the derivation below for a new
-> implementation; the conformance corpus in `testdata/` is authoritative in
-> the meantime.
+> **Revision in progress.** The path derivation below is stale: the
+> implementation has moved ahead of it and this section has not yet caught
+> up. Two defects it describes are already fixed. Header paths omitted
+> ancestors above `root_level`, making two diagnostics under different such
+> ancestors indistinguishable; paths are now the complete document-tree
+> ancestor chain. The joined-string encoding was lossy for headers
+> containing ` > `; paths are now arrays. The path is now a tagged *target*
+> with four kinds — `header`, `missing_header`, `document`, and
+> `frontmatter`. Do not implement from the derivation below; the conformance
+> corpus in `testdata/` is authoritative until this section is rewritten.
 
 **Diagnostic path.** For a diagnostic anchored to a present header, the
 path is that header's visible text — case-preserving, with inline markup
