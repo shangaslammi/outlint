@@ -2,7 +2,7 @@
   "name": "outlint",
   "version": "0.1.0",
   "description": "Lint the header structure of Markdown documents against a schema",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "repository": "github:shangaslammi/outlint",
   "bin": { "outlint": "bin.js" },
   "files": ["bin.js"]
