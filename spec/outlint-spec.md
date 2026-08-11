@@ -44,11 +44,13 @@ stripping, by contrast, always applies to diagnostic text —
 `## **Foo** [bar](x)` reports as `Foo bar` under either setting.
 
 1.4. A document has at most one h1. If an h1 exists, the **root scope** is
-its h2 children; otherwise it is the document's h2s. A header outside that
-structure is `detached-section` and takes part in no rule. The root scope is
-what the schema's top-level `sections` list describes. `title`, if specified,
-is the rule for every h1: a document with no h1 is diagnostic `missing-title`,
-and an h1 whose text does not match the `title` matcher is `not-allowed`.
+its h2 children; otherwise it is the document's h2s. A header outside the h1
+and everything below it — or, when there is no h1, outside the document's h2s
+and everything below them — is `detached-section` and takes part in no rule.
+The root scope is what the schema's top-level `sections` list describes.
+`title`, if specified, is the rule for every h1: a document with no h1 is
+diagnostic `missing-title`, and an h1 whose text does not match the `title`
+matcher is `not-allowed`.
 
 **Reachability.** The schema describes the totality of the document: no part
 of it is implicitly outside the schema. Two structural diagnostics say so.
@@ -59,17 +61,20 @@ They are enforced for every schema, independently of any rule and of whether
   document order — that is where the spine forks, and further h1s name the
   same fork. It withdraws nothing: the h2s under a surplus h1 remain in the
   root scope.
-- A header that is neither the h1 nor in the root scope's subtree is
-  `detached-section`. With at most one h1 that means: any header preceding
-  the h1, at any level; or, when there is no h1, any header below h2 with no
-  h2 ancestor. It is reported once per detached **subtree root** — a header
-  under a detached one is misplaced only as a consequence of its ancestor,
-  and moving that ancestor onto the spine takes the subtree with it, whereas
-  detached siblings are separate misplacements with separate fixes. A
-  detached header takes part in no rule: it matches none, counts toward no
-  cardinality, and satisfies no constraint ref. Neither does anything below
-  it, which is why the subtree yields the one diagnostic and no cascade of
-  complaints about its descendants.
+- A header that is neither the h1 nor anywhere below it is
+  `detached-section`; when there is no h1, so is a header that is neither an
+  h2 nor anywhere below one. The set is the h1's whole subtree, not the root
+  scope's: an h3 directly under the h1 is reachable, and it is §1.5, not this
+  rule, that has anything to say about it. With at most one h1 the set is:
+  any header preceding the h1, at any level; or, when there is no h1, any
+  header below h2 with no h2 ancestor. It is reported once per detached
+  **subtree root** — a header under a detached one is misplaced only as a
+  consequence of its ancestor, and moving that ancestor onto the spine takes
+  the subtree with it, whereas detached siblings are separate misplacements
+  with separate fixes. A detached header takes part in no rule: it matches
+  none, counts toward no cardinality, and satisfies no constraint ref.
+  Neither does anything below it, which is why the subtree yields the one
+  diagnostic and no cascade of complaints about its descendants.
 
 A document with no h1 at all conforms. Reachability governs which headers the
 rules see; it is not itself a rule, so §1.5 still applies inside a detached

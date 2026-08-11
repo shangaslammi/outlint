@@ -36,7 +36,7 @@ path cannot say which is which:
 | `kind` | Members | What it names |
 | --- | --- | --- |
 | `header` | `path` | A header that exists in the document, as its complete ancestor chain of visible heading texts, outermost first. |
-| `missing_header` | `parent`, `matcher` | A section the schema requires and the document does not contain. `parent` is the document path of the header whose scope should have contained it, empty when no header encloses it. `matcher` is the **schema's** matcher label — exact text, a glob, a `/regex/`, or `*` — and may occur nowhere in the document. |
+| `missing_header` | `parent`, `matcher` | A section the schema requires and the document does not contain. `parent` is the document path of the header whose scope should have contained it, and is empty for the two scopes no header names: the root scope, which is attached to the schema root rather than to any header and stays empty whether or not an `h1` encloses it, and the title, which sits *above* the root scope. `matcher` is the **schema's** matcher label — exact text, a glob, a `/regex/`, or `*` — and may occur nowhere in the document. |
 | `document` | — | The document as a whole, for a violation no single header can name. |
 | `frontmatter` | `line_range`?, `pointer`? | A frontmatter block, or a value inside it. It has no header path. |
 
