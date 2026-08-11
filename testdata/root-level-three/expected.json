@@ -1,0 +1,34 @@
+{
+  "extra.md": [
+    {
+      "id": "unexpected-section",
+      "target": {
+        "kind": "header",
+        "path": ["Book", "Guide", "Details", "Extra"]
+      }
+    }
+  ],
+  "no-details.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Details" }
+    }
+  ],
+  "no-title.md": [
+    {
+      "id": "missing-title",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Guide" }
+    },
+    {
+      "id": "skipped-level",
+      "target": { "kind": "header", "path": ["Book", "Details"] }
+    }
+  ],
+  "wrong-title.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Book", "Manual"] }
+    }
+  ],
+  "pass.md": []
+}

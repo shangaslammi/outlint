@@ -1,0 +1,11 @@
+version: 1
+sections:
+  # The root scope is flat: it pools every `h2` regardless of which `h1`
+  # encloses it, so the occurrence reported as excess is the one at index
+  # `max` in document order, wherever in the tree that lands.
+  - id: notes
+    match: "Note *"
+    repeat: "0..1"
+  - id: steps
+    match: "Step *"
+    repeat: "0..2"

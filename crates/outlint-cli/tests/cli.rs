@@ -789,6 +789,18 @@ fn schema_check_reports_schema_diagnostics_as_validation_output() {
         json["results"][0]["diagnostics"][0]["schema_location"]["path"],
         "invalid.yml"
     );
+    // A schema-load failure is about the schema, not about anything in a
+    // document, so it carries no target at all: the member is omitted rather
+    // than reported as `document` or as JSON null.
+    assert!(
+        json["results"][0]["diagnostics"][0]
+            .as_object()
+            .expect("a schema diagnostic is a JSON object")
+            .get("target")
+            .is_none(),
+        "a schema-load diagnostic must omit `target`: {}",
+        json["results"][0]["diagnostics"][0]
+    );
 }
 
 #[test]

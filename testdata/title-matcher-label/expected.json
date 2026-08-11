@@ -1,0 +1,19 @@
+{
+  "missing.md": [
+    {
+      "id": "missing-title",
+      "target": {
+        "kind": "missing_header",
+        "parent": [],
+        "matcher": "/Handbook v[0-9]+/"
+      }
+    }
+  ],
+  "wrong.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Manual"] }
+    }
+  ],
+  "pass.md": []
+}

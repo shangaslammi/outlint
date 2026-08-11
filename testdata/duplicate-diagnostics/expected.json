@@ -1,0 +1,26 @@
+{
+  "repeated.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Notes"] }
+    },
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Notes"] }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "/Goal/" }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "/Goal/" }
+    }
+  ],
+  "single.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "/Goal/" }
+    }
+  ]
+}
