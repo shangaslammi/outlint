@@ -372,6 +372,20 @@ Implementations MUST report, per violation: a stable diagnostic id, the
 header path (e.g. `Overview > Goals`), a source location, and the schema
 rule/constraint involved.
 
+**Diagnostic path.** For a diagnostic anchored to a present header, the
+path is that header's visible text — case-preserving, after inline-markup
+stripping and entity/escape processing per §1.3 — joined from the document
+root with ` > `. A diagnostic anchored at the document root uses the empty
+string. Absence diagnostics (`missing-section`, `too-few-sections`) have no
+header to draw text from: their path MUST be the parent section's path with
+one segment appended, that segment being the **matcher label** of the
+unsatisfied rule's `match` matcher. The matcher label depends on the
+matcher form (§2.2): Exact — the string verbatim; Glob — the glob pattern
+source verbatim (e.g. `Step *`); Regex — the pattern source wrapped in
+slashes (`/pattern/`); Wildcard — `*`. A matcher label is schema text, not
+document text: it is not necessarily a string that appears anywhere in the
+document being validated.
+
 **Location anchoring:**
 - Diagnostics about a present header (`not-allowed`, `unexpected-section`,
   `skipped-level`) anchor to that header's line. `too-many-sections`
