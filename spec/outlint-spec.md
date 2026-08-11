@@ -43,33 +43,38 @@ stripping, by contrast, always applies to diagnostic text —
 `options.strip_inline_markup` gates only the text used for matching, so
 `## **Foo** [bar](x)` reports as `Foo bar` under either setting.
 
-1.4. The **root scope** is the set of *all* the document's h2 headers,
-pooled regardless of which h1 — if any — encloses each one; it is what the
-schema's top-level `sections` list describes. The scope is flat, so an h2
-that precedes every h1, or that sits under a second h1, is a member on the
-same footing as any other and counts toward its matched rule's cardinality.
-`title`, if specified, is the rule for the document's h1: a document with no
-h1 is diagnostic `missing-title`, and an h1 whose text does not match the
-`title` matcher is `not-allowed`.
+1.4. A document has at most one h1. If an h1 exists, the **root scope** is
+its h2 children; otherwise it is the document's h2s. A header outside that
+structure is `detached-section` and takes part in no rule. The root scope is
+what the schema's top-level `sections` list describes. `title`, if specified,
+is the rule for every h1: a document with no h1 is diagnostic `missing-title`,
+and an h1 whose text does not match the `title` matcher is `not-allowed`.
 
-**Single top-level spine.** A document MUST have zero h1, or exactly one h1
-with every h2 beneath it. Pooling every h2 into one scope has a single
-meaning only when all of them share one ancestor chain, so this rule is
-structural: it is enforced for every schema, independently of any rule and
-of whether `title` is declared. Two diagnostics bound it, each covering a
-case the other does not:
+**Reachability.** The schema describes the totality of the document: no part
+of it is implicitly outside the schema. Two structural diagnostics say so.
+They are enforced for every schema, independently of any rule and of whether
+`title` is declared, and each covers a case the other does not:
 
 - A surplus h1 is one `too-many-sections` per document, on the second h1 in
   document order — that is where the spine forks, and further h1s name the
-  same fork.
-- An h2 with no enclosing h1 at all, which is necessarily one that precedes
-  the document's first h1, is `detached-section`, reported once per
-  offending header. An h2 under a *surplus* h1 is **not** detached: it has
-  an ancestor, and the fork is already reported above.
+  same fork. It withdraws nothing: the h2s under a surplus h1 remain in the
+  root scope.
+- A header that is neither the h1 nor in the root scope's subtree is
+  `detached-section`. With at most one h1 that means: any header preceding
+  the h1, at any level; or, when there is no h1, any header below h2 with no
+  h2 ancestor. It is reported once per detached **subtree root** — a header
+  under a detached one is misplaced only as a consequence of its ancestor,
+  and moving that ancestor onto the spine takes the subtree with it, whereas
+  detached siblings are separate misplacements with separate fixes. A
+  detached header takes part in no rule: it matches none, counts toward no
+  cardinality, and satisfies no constraint ref. Neither does anything below
+  it, which is why the subtree yields the one diagnostic and no cascade of
+  complaints about its descendants.
 
-A document with no h1 at all conforms. Neither diagnostic withdraws a header
-from validation: the violation is reported, and the flat root scope above is
-then matched and counted exactly as it stands.
+A document with no h1 at all conforms. Reachability governs which headers the
+rules see; it is not itself a rule, so §1.5 still applies inside a detached
+subtree, and a *reachable* header that matches no rule remains the business
+of `strict` (§3.4).
 
 1.5. If `options.allow_skipped_levels` is false (default), a header whose
 level exceeds its parent's level by more than 1 is a structural error
@@ -211,7 +216,9 @@ Schema.
 
 3.1. **Scope.** Validation proceeds per scope. A scope is (parent section,
 its list of child headers, the schema `sections` list attached to the
-parent's matched rule).
+parent's matched rule). The outermost scope is the root scope (§1.4) paired
+with the schema's top-level `sections`; a detached header is in no scope at
+all, so §3.2 through §3.6 never see it.
 
 3.2. **First match wins.** For each child header, in document order, the
 rules in the `sections` list are tried in list order; the first rule whose
@@ -412,10 +419,10 @@ flat path cannot say which is which.
 | `frontmatter` | `line_range`?, `pointer`? | A frontmatter block, or a value inside one |
 
 A **header path** is the complete document-tree ancestor chain of a header,
-outermost first and ending with the header itself; it includes the enclosing
-h1. Two same-named sections under different ancestors therefore have
-different paths. Each segment is a header's visible text — case-preserving,
-with inline markup always stripped for diagnostic purposes regardless of
+outermost first and ending with the header itself. Two same-named sections
+under different ancestors therefore have different paths. Each segment is a
+header's visible text — case-preserving, with inline markup always stripped
+for diagnostic purposes regardless of
 `options.strip_inline_markup` (§1.3 gates matching, not diagnostic text). A
 path is a sequence of segments: a machine-readable representation MUST
 encode it as one and MUST NOT flatten it into a single joined string, since
@@ -454,7 +461,7 @@ be omitted rather than emitted as null.
 
 Constraint diagnostics additionally list the concrete headers involved, if
 any, each by its own header path (§5.3). Which diagnostics the `title`
-matcher and the single top-level spine produce is defined in §1.4.
+matcher and reachability produce is defined in §1.4.
 
 ### 6.3 Reserved ids
 
@@ -512,10 +519,9 @@ validate(doc):
                             (ignore code fences; normalize setext)
   check frontmatter presence vs required/allow; if present and schema
     compiled, run JSON Schema validation -> frontmatter-schema diagnostics
-  check title (if declared), the single top-level spine (§1.4:
-    at most one h1 -> too-many-sections; every h2 beneath it ->
+  check title (if declared), reachability (§1.4 -> too-many-sections,
     detached-section), and skipped levels
-  visit(scope = the document's h2 headers, rules = schema.sections, constraints):
+  visit(scope = the root scope (§1.4), rules = schema.sections, constraints):
     for each header in document order:
       rule := first rule in list whose matcher matches header.text
       if rule is None: report unexpected-section if scope closed; skip subtree

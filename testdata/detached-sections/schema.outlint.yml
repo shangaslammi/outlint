@@ -1,11 +1,10 @@
 version: 1
-# The root scope is flat: `sections` describes every `h2` in the document,
-# pooled regardless of which `h1` encloses it. `required: true` therefore
-# means "exactly one in the document" here. That pooling only has one meaning
-# when every `h2` shares one ancestor chain, and bounding the document to one
-# `h1` is not enough to guarantee it: an `h2` placed *before* the `h1` has no
-# ancestor at all, so the scope would straddle two disjoint chains. Such a
-# header is `detached-section`, reported on the header itself.
+# A document has at most one `h1`. If an `h1` exists, the root scope is its
+# `h2` children; otherwise it is the document's own `h2`s. `required: true`
+# therefore means "exactly one under the `h1`" here. A header outside that
+# structure is `detached-section`, reported on the header itself, and takes
+# part in no rule: it neither satisfies `Overview` nor counts toward its
+# cardinality.
 sections:
   - match: "Overview"
     required: true

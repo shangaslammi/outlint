@@ -1,0 +1,21 @@
+{
+  "pass.md": [],
+  "deep-orphan-before-h1.md": [
+    {
+      "id": "detached-section",
+      "target": { "kind": "header", "path": ["Orphan"] }
+    }
+  ],
+  "deep-orphan-no-h1.md": [
+    {
+      "id": "detached-section",
+      "target": { "kind": "header", "path": ["Orphan"] }
+    }
+  ],
+  "detached-subtree.md": [
+    {
+      "id": "detached-section",
+      "target": { "kind": "header", "path": ["Overview"] }
+    }
+  ]
+}
