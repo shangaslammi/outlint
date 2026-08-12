@@ -522,18 +522,29 @@ fn marked_yaml_to_json(
     marked_mapping_to_json(mapping, pointer, anchors).map(serde_json::Value::Object)
 }
 
-/// Where a sequence element begins in the source, if it is written at all.
+/// Where a sequence element begins in the source, if it has text of its own.
 ///
-/// A `-` with nothing after it is an element whose value is an implicit null:
-/// it occupies no source text, and marked-yaml reports it at the next token it
-/// scanned, which belongs to a later element. Such an element has no position
-/// of its own, so it takes none and falls back to the block. A plain scalar
-/// cannot otherwise be empty, so an empty scalar that may coerce is exactly
-/// this case; a quoted empty string does not coerce and is written where
-/// marked-yaml reports it.
+/// marked-yaml marks a scalar at the first character of its text, so an element
+/// with no text has no mark to give and is reported at the next token the
+/// scanner reached — which belongs to a later element. `-` with nothing after
+/// it is such an element, and so is a block scalar with no content line
+/// (`- >-`, `- |`, or `- |+` over blank lines only): both are marked at the
+/// following entry, so accepting the mark would name text the element does not
+/// own.
+///
+/// Textless is exactly "no character other than a line break": a block scalar
+/// with no content line keeps at most the breaks its chomping indicator
+/// retains, while any content line contributes a character that marked-yaml
+/// marks. An element like that therefore takes no position and falls back to
+/// the block, as §6.2 provides for an entry whose position is unavailable.
+///
+/// Nothing in the text tells a written empty scalar apart from an unwritten
+/// one — `- ""` and `- "\n"` are marked correctly but read the same here — so
+/// they fall back too. A coarse but correct anchor beats a precise wrong one,
+/// and the JSON Pointer still names the entry exactly.
 fn marked_element_start(value: &MarkedNode) -> Option<&MarkedMarker> {
     if let Some(scalar) = value.as_scalar() {
-        if scalar.as_str().is_empty() && scalar.may_coerce() {
+        if scalar.as_str().bytes().all(|byte| byte == b'\n') {
             return None;
         }
     }
@@ -1803,24 +1814,42 @@ mod tests {
     }
 
     #[test]
-    fn unwritten_sequence_elements_take_no_anchor() {
-        // `-` with nothing after it is an element that occupies no source.
-        // marked-yaml reports each one at the next token it scanned, so
-        // accepting that position would name a later element's text.
+    fn textless_sequence_elements_take_no_anchor() {
+        // An element with no text of its own is marked at the next token the
+        // scanner reached, which belongs to a later element, so accepting that
+        // position would name text the element does not own. `-` with nothing
+        // after it is one such element and an empty block scalar is another.
         let source = concat!(
             "---\n",       // 1
             "gaps:\n",     // 2
             "  -\n",       // 3
             "  -\n",       // 4
             "  - 3\n",     // 5
-            "written:\n",  // 6
-            "  - \"\"\n",  // 7
-            "  - ''\n",    // 8
-            "  - 3\n",     // 9
-            "trailing:\n", // 10
-            "  - 1\n",     // 11
-            "  -\n",       // 12
-            "---\n",       // 13
+            "folded:\n",   // 6
+            "  - >-\n",    // 7
+            "  - 2\n",     // 8
+            "literal:\n",  // 9
+            "  - |\n",     // 10
+            "  - 2\n",     // 11
+            "kept:\n",     // 12
+            "  - |+\n",    // 13
+            "\n",          // 14
+            "  - 2\n",     // 15
+            "quoted:\n",   // 16
+            "  - \"\"\n",  // 17
+            "  - ''\n",    // 18
+            "  - 3\n",     // 19
+            "nulls:\n",    // 20
+            "  - null\n",  // 21
+            "  - ~\n",     // 22
+            "written:\n",  // 23
+            "  - >-\n",    // 24
+            "    text\n",  // 25
+            "  - 2\n",     // 26
+            "trailing:\n", // 27
+            "  - 1\n",     // 28
+            "  -\n",       // 29
+            "---\n",       // 30
             "# Title\n",
         );
         let document = parse_markdown(source, MarkdownOptions::default());
@@ -1839,14 +1868,30 @@ mod tests {
         assert_eq!(anchor("/gaps/0"), None);
         assert_eq!(anchor("/gaps/1"), None);
         assert_eq!(anchor("/gaps/2"), Some((5, 5)));
-        // A quoted empty string is written, so it keeps its position. Both
-        // quotings parse to the same empty value that an unwritten element
-        // does not, which is what separates the two cases.
-        assert_eq!(anchor("/written/0"), Some((7, 5)));
-        assert_eq!(anchor("/written/1"), Some((8, 5)));
-        assert_eq!(anchor("/written/2"), Some((9, 5)));
+        // An empty block scalar occupies source but has no content line, so it
+        // borrows the same way. Its mark is the `-` of the next element, which
+        // that element also claims.
+        assert_eq!(anchor("/folded/0"), None);
+        assert_eq!(anchor("/folded/1"), Some((8, 5)));
+        assert_eq!(anchor("/literal/0"), None);
+        assert_eq!(anchor("/literal/1"), Some((11, 5)));
+        // `|+` keeps the blank lines, so its value is not empty even though it
+        // has no content line to be marked at.
+        assert_eq!(anchor("/kept/0"), None);
+        assert_eq!(anchor("/kept/1"), Some((15, 5)));
         assert_eq!(
-            value.get("written"),
+            value.get("kept"),
+            Some(&serde_json::json!(["\n", 2])),
+            "a kept blank line is still part of the value"
+        );
+        // A quoted empty string is marked where it is written, but nothing in
+        // an empty text distinguishes it from an unwritten element, so it falls
+        // back rather than resting on a rule that cannot tell the two apart.
+        assert_eq!(anchor("/quoted/0"), None);
+        assert_eq!(anchor("/quoted/1"), None);
+        assert_eq!(anchor("/quoted/2"), Some((19, 5)));
+        assert_eq!(
+            value.get("quoted"),
             Some(&serde_json::json!(["", "", 3])),
             "quoted empties must stay strings"
         );
@@ -1855,10 +1900,57 @@ mod tests {
             Some(&serde_json::json!([null, null, 3])),
             "unwritten elements must stay null"
         );
-        // A trailing one is the same case; it merely had no later token to
-        // borrow, so it was already unplaced.
-        assert_eq!(anchor("/trailing/0"), Some((11, 5)));
+        // A written null is spelled, so it keeps its own position: what costs
+        // an element its anchor is having no text, not having no value.
+        assert_eq!(anchor("/nulls/0"), Some((21, 5)));
+        assert_eq!(anchor("/nulls/1"), Some((22, 5)));
+        assert_eq!(
+            value.get("nulls"),
+            Some(&serde_json::json!([null, null])),
+            "written nulls must parse as null"
+        );
+        // A block scalar with a content line is marked at that content, which
+        // is text it owns, so it keeps its position.
+        assert_eq!(anchor("/written/0"), Some((25, 5)));
+        assert_eq!(anchor("/written/1"), Some((26, 5)));
+        // A trailing textless element is the same case; it merely had no later
+        // token to borrow, so it was already unplaced.
+        assert_eq!(anchor("/trailing/0"), Some((28, 5)));
         assert_eq!(anchor("/trailing/1"), None);
+
+        // No two entries may claim one position, which is what borrowing did.
+        let mut placed: Vec<_> = anchors
+            .0
+            .iter()
+            .map(|(pointer, anchor)| (anchor.line, anchor.column, pointer.as_str()))
+            .collect();
+        placed.sort_unstable();
+        for pair in placed.windows(2) {
+            assert_ne!(
+                (pair[0].0, pair[0].1),
+                (pair[1].0, pair[1].1),
+                "{} and {} share a position",
+                pair[0].2,
+                pair[1].2
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_block_scalar_does_not_borrow_a_following_key() {
+        // With no element after it, the borrowed mark lands on the next
+        // mapping key instead, so the element and that member would collide.
+        let source = "---\nlist:\n  - >-\nother: 1\n---\n\n# Title\n";
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        assert_eq!(anchors.get("/list/0"), None);
+        assert_eq!(
+            anchors.get("/other"),
+            Some(FrontmatterAnchor { line: 4, column: 1 })
+        );
     }
 
     #[test]
@@ -2252,7 +2344,70 @@ mod tests {
                 "{pointer} splits a character: {anchor:?}"
             );
         }
+        assert_distinct_anchors(source, anchors);
     }
+
+    /// No two entries may name one position.
+    ///
+    /// A borrowed marker shows up here: the entry that has no text of its own
+    /// is reported at a later entry's, and both then claim it. Nesting is the
+    /// one legitimate sharing — a block mapping inside a sequence begins at its
+    /// own first key, so `/items/0` and `/items/0/key` coincide by design — so
+    /// pairs where one pointer is a prefix of the other are exempt.
+    fn assert_distinct_anchors(source: &str, anchors: &FrontmatterAnchors) {
+        let mut placed: Vec<_> = anchors
+            .0
+            .iter()
+            .map(|(pointer, anchor)| (anchor.line, anchor.column, pointer.as_str()))
+            .collect();
+        placed.sort_unstable();
+        for pair in placed.windows(2) {
+            let (line, column, earlier) = pair[0];
+            let (other_line, other_column, later) = pair[1];
+            if (line, column) != (other_line, other_column) {
+                continue;
+            }
+            assert!(
+                is_pointer_prefix(earlier, later),
+                "{earlier} and {later} both claim {line}:{column} in {source:?}"
+            );
+        }
+    }
+
+    /// Whether one JSON Pointer names an ancestor of what another names.
+    ///
+    /// Tokens are compared whole so that `/a` is not read as a prefix of `/ab`.
+    fn is_pointer_prefix(ancestor: &str, descendant: &str) -> bool {
+        descendant
+            .strip_prefix(ancestor)
+            .is_some_and(|rest| ancestor.is_empty() || rest.is_empty() || rest.starts_with('/'))
+    }
+
+    /// The element spellings a generated block sequence draws from.
+    ///
+    /// The first six are textless in one form or another and are the class
+    /// that borrows a later entry's marker; the rest are written and must keep
+    /// a position of their own. A spelling may span lines, so it carries its
+    /// own continuation, indented past the `-` that opens it.
+    const ARBITRARY_ELEMENTS: &[&str] = &[
+        "-",
+        "- \"\"",
+        "- ''",
+        "- >-",
+        "- |",
+        "- |+\n",
+        "- null",
+        "- ~",
+        "- 1",
+        "- ok",
+        "- >-\n    text",
+        "- key: 1",
+        "- [1, 2]",
+        "- {p: 1}",
+    ];
+
+    /// The prefix of [`ARBITRARY_ELEMENTS`] whose elements have no text.
+    const ARBITRARY_TEXTLESS_ELEMENTS: usize = 6;
 
     /// A frontmatter block of arbitrary entries, some of which parse.
     ///
@@ -2260,33 +2415,43 @@ mod tests {
     /// excludes control characters, so the generated text never contains the
     /// newline a closing `---` needs. Anchors need a generator shaped like a
     /// block to exercise them at all.
+    ///
+    /// Keys carry their index so that entries cannot collide, since a duplicate
+    /// key is rejected before any anchor is recorded and would spend the case.
+    /// Indentation is skewed to zero for the same reason: a top-level entry
+    /// indented past the first one is invalid YAML, and every entry of a case
+    /// has to be well placed for the case to reach a mapping at all.
     fn arbitrary_frontmatter_document() -> impl Strategy<Value = String> {
-        proptest::collection::vec(
-            (
-                "[a-z\u{00e0}-\u{00ff}]{1,3}",
-                "([a-z0-9\u{00e4}\u{00f6} ]{0,8}|[a-z0-9\u{00e4}\u{00f6}, ]{0,8}|(\r|[ ]|.){0,10})",
-                0usize..3,
-                proptest::bool::ANY,
-            ),
-            1..6,
-        )
-        .prop_map(|entries| {
-            let mut body = String::new();
-            for (key, value, indent, flow) in entries {
-                body.push_str(&" ".repeat(indent));
-                body.push_str(&key);
-                body.push_str(": ");
-                if flow {
-                    body.push('[');
-                    body.push_str(&value);
-                    body.push(']');
-                } else {
-                    body.push_str(&value);
+        let indent = prop_oneof![9 => Just(0usize), 1 => 1usize..3];
+        let body = prop_oneof![
+            // `key: value`, plain or wrapped in flow brackets.
+            2 => (proptest::bool::ANY, "([a-z0-9\u{00e4}\u{00f6} ]{0,8}|[a-z0-9\u{00e4}\u{00f6}, ]{0,8}|(\r|[ ]|.){0,10})")
+                .prop_map(|(flow, value)| if flow { format!(" [{value}]") } else { format!(" {value}") }),
+            // A block sequence, whose elements are named by position alone.
+            1 => proptest::collection::vec(0..ARBITRARY_ELEMENTS.len(), 1..5)
+                .prop_map(|elements| {
+                    let mut text = String::new();
+                    for element in elements {
+                        text.push_str("\n  ");
+                        text.push_str(ARBITRARY_ELEMENTS[element]);
+                    }
+                    text
+                }),
+        ];
+        proptest::collection::vec(("[a-z\u{00e0}-\u{00ff}]{1,3}", indent, body), 1..6).prop_map(
+            |entries| {
+                let mut text = String::new();
+                for (index, (key, indent, body)) in entries.into_iter().enumerate() {
+                    text.push_str(&" ".repeat(indent));
+                    text.push_str(&key);
+                    text.push_str(&index.to_string());
+                    text.push(':');
+                    text.push_str(&body);
+                    text.push('\n');
                 }
-                body.push('\n');
-            }
-            format!("---\n{body}---\n\n# Title\n")
-        })
+                format!("---\n{text}---\n\n# Title\n")
+            },
+        )
     }
 
     proptest! {
@@ -2316,5 +2481,54 @@ mod tests {
                 assert_valid_anchors(&source, location, anchors);
             }
         }
+    }
+
+    #[test]
+    fn arbitrary_frontmatter_documents_reach_block_sequences() {
+        // A generator that cannot reach the shape under test leaves a dead
+        // property that passes forever. This one has to reach a parsed mapping
+        // holding a block sequence, and one holding a textless element, often
+        // enough that the anchor invariants are actually being exercised.
+        use proptest::{strategy::ValueTree, test_runner::TestRunner};
+
+        const SAMPLES: usize = 512;
+        let strategy = arbitrary_frontmatter_document();
+        let mut runner = TestRunner::deterministic();
+        let (mut parsed, mut sequences, mut textless) = (0, 0, 0);
+        for _ in 0..SAMPLES {
+            let source = strategy
+                .new_tree(&mut runner)
+                .expect("the strategy generates a document")
+                .current();
+            let document = parse_markdown(&source, MarkdownOptions::default());
+            if !matches!(document.frontmatter, DocumentFrontmatter::Mapping { .. }) {
+                continue;
+            }
+            parsed += 1;
+            if !source.contains("\n  -") {
+                continue;
+            }
+            sequences += 1;
+            if ARBITRARY_ELEMENTS[..ARBITRARY_TEXTLESS_ELEMENTS]
+                .iter()
+                .any(|spelling| source.contains(&format!("\n  {}\n", spelling.trim_end())))
+            {
+                textless += 1;
+            }
+        }
+        println!(
+            "of {SAMPLES} generated documents: {parsed} parsed as a mapping, \
+             {sequences} held a block sequence, {textless} held a textless element"
+        );
+
+        assert!(parsed >= SAMPLES / 4, "only {parsed} documents parsed");
+        assert!(
+            sequences >= SAMPLES / 16,
+            "only {sequences} documents held a block sequence"
+        );
+        assert!(
+            textless >= SAMPLES / 32,
+            "only {textless} documents held a textless element"
+        );
     }
 }
