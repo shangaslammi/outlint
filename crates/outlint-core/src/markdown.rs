@@ -1887,37 +1887,53 @@ mod tests {
         // scanner reached, which belongs to a later element, so accepting that
         // position would name text the element does not own. `-` with nothing
         // after it is one such element and an empty block scalar is another.
+        //
+        // A textless mapping key rides along at `keyed`. YAML admits one only
+        // through the explicit `? ` form, and `marked_key_start` withholds its
+        // anchor for the same reason and by the same rule.
         let source = concat!(
-            "---\n",       // 1
-            "gaps:\n",     // 2
-            "  -\n",       // 3
-            "  -\n",       // 4
-            "  - 3\n",     // 5
-            "folded:\n",   // 6
-            "  - >-\n",    // 7
-            "  - 2\n",     // 8
-            "literal:\n",  // 9
-            "  - |\n",     // 10
-            "  - 2\n",     // 11
-            "kept:\n",     // 12
-            "  - |+\n",    // 13
-            "\n",          // 14
-            "  - 2\n",     // 15
-            "quoted:\n",   // 16
-            "  - \"\"\n",  // 17
-            "  - ''\n",    // 18
-            "  - 3\n",     // 19
-            "nulls:\n",    // 20
-            "  - null\n",  // 21
-            "  - ~\n",     // 22
-            "written:\n",  // 23
-            "  - >-\n",    // 24
-            "    text\n",  // 25
-            "  - 2\n",     // 26
-            "trailing:\n", // 27
-            "  - 1\n",     // 28
-            "  -\n",       // 29
-            "---\n",       // 30
+            "---\n",            // 1
+            "gaps:\n",          // 2
+            "  -\n",            // 3
+            "  -\n",            // 4
+            "  - 3\n",          // 5
+            "folded:\n",        // 6
+            "  - >-\n",         // 7
+            "  - 2\n",          // 8
+            "literal:\n",       // 9
+            "  - |\n",          // 10
+            "  - 2\n",          // 11
+            "kept:\n",          // 12
+            "  - |+\n",         // 13
+            "\n",               // 14
+            "  - 2\n",          // 15
+            "blanks:\n",        // 16
+            "  - |+\n",         // 17
+            "\n",               // 18
+            "\n",               // 19
+            "  - 2\n",          // 20
+            "quoted:\n",        // 21
+            "  - \"\"\n",       // 22
+            "  - ''\n",         // 23
+            "  - 3\n",          // 24
+            "spaced:\n",        // 25
+            "  - \" \"\n",      // 26
+            "  - \"\\r\"\n",    // 27
+            "  - \"\\t\"\n",    // 28
+            "nulls:\n",         // 29
+            "  - null\n",       // 30
+            "  - ~\n",          // 31
+            "written:\n",       // 32
+            "  - >-\n",         // 33
+            "    text\n",       // 34
+            "  - 2\n",          // 35
+            "keyed:\n",         // 36
+            "  ? >-\n",         // 37
+            "  next: second\n", // 38
+            "trailing:\n",      // 39
+            "  - 1\n",          // 40
+            "  -\n",            // 41
+            "---\n",            // 42
             "# Title\n",
         );
         let document = parse_markdown(source, MarkdownOptions::default());
@@ -1952,16 +1968,41 @@ mod tests {
             Some(&serde_json::json!(["\n", 2])),
             "a kept blank line is still part of the value"
         );
+        // Two kept blank lines resolve to `"\n\n"`, which is still a text with
+        // no character to have been marked at. A rule written for one break
+        // alone would accept the borrowed marker, and nothing else would
+        // notice: the `-` at column 3 differs from the next element's own
+        // column 5, so the two never collide.
+        assert_eq!(anchor("/blanks/0"), None);
+        assert_eq!(anchor("/blanks/1"), Some((20, 5)));
+        assert_eq!(
+            value.get("blanks"),
+            Some(&serde_json::json!(["\n\n", 2])),
+            "both kept blank lines are part of the value"
+        );
         // A quoted empty string is marked where it is written, but nothing in
         // an empty text distinguishes it from an unwritten element, so it falls
         // back rather than resting on a rule that cannot tell the two apart.
         assert_eq!(anchor("/quoted/0"), None);
         assert_eq!(anchor("/quoted/1"), None);
-        assert_eq!(anchor("/quoted/2"), Some((19, 5)));
+        assert_eq!(anchor("/quoted/2"), Some((24, 5)));
         assert_eq!(
             value.get("quoted"),
             Some(&serde_json::json!(["", "", 3])),
             "quoted empties must stay strings"
+        );
+        // The limit is the line break and nothing wider. Every other
+        // whitespace character — a space as much as a carriage return or a tab
+        // — comes from source the scalar owns, so a scalar holding one keeps
+        // its position and the rule stays as narrow as the ambiguity forcing
+        // it.
+        assert_eq!(anchor("/spaced/0"), Some((26, 5)));
+        assert_eq!(anchor("/spaced/1"), Some((27, 5)));
+        assert_eq!(anchor("/spaced/2"), Some((28, 5)));
+        assert_eq!(
+            value.get("spaced"),
+            Some(&serde_json::json!([" ", "\r", "\t"])),
+            "each element holds the one whitespace character it spells"
         );
         assert_eq!(
             value.get("gaps"),
@@ -1970,8 +2011,8 @@ mod tests {
         );
         // A written null is spelled, so it keeps its own position: what costs
         // an element its anchor is having no text, not having no value.
-        assert_eq!(anchor("/nulls/0"), Some((21, 5)));
-        assert_eq!(anchor("/nulls/1"), Some((22, 5)));
+        assert_eq!(anchor("/nulls/0"), Some((30, 5)));
+        assert_eq!(anchor("/nulls/1"), Some((31, 5)));
         assert_eq!(
             value.get("nulls"),
             Some(&serde_json::json!([null, null])),
@@ -1979,11 +2020,21 @@ mod tests {
         );
         // A block scalar with a content line is marked at that content, which
         // is text it owns, so it keeps its position.
-        assert_eq!(anchor("/written/0"), Some((25, 5)));
-        assert_eq!(anchor("/written/1"), Some((26, 5)));
+        assert_eq!(anchor("/written/0"), Some((34, 5)));
+        assert_eq!(anchor("/written/1"), Some((35, 5)));
+        // The explicit textless key is marked at the `next` that follows it,
+        // so taking that mark would have the two members claim one position
+        // and one of them name the other's text.
+        assert_eq!(anchor("/keyed/"), None);
+        assert_eq!(anchor("/keyed/next"), Some((38, 3)));
+        assert_eq!(
+            value.get("keyed"),
+            Some(&serde_json::json!({"": null, "next": "second"})),
+            "the explicit key parses to an empty-keyed member"
+        );
         // A trailing textless element is the same case; it merely had no later
         // token to borrow, so it was already unplaced.
-        assert_eq!(anchor("/trailing/0"), Some((28, 5)));
+        assert_eq!(anchor("/trailing/0"), Some((40, 5)));
         assert_eq!(anchor("/trailing/1"), None);
 
         // No two entries may claim one position, which is what borrowing did.
@@ -2002,147 +2053,6 @@ mod tests {
                 pair[1].2
             );
         }
-    }
-
-    #[test]
-    fn an_empty_block_scalar_does_not_borrow_a_following_key() {
-        // With no element after it, the borrowed mark lands on the next
-        // mapping key instead, so the element and that member would collide.
-        let source = "---\nlist:\n  - >-\nother: 1\n---\n\n# Title\n";
-        let document = parse_markdown(source, MarkdownOptions::default());
-
-        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
-            panic!("expected parsed frontmatter: {document:?}")
-        };
-        assert_eq!(anchors.get("/list/0"), None);
-        assert_eq!(
-            anchors.get("/other"),
-            Some(FrontmatterAnchor { line: 4, column: 1 })
-        );
-    }
-
-    #[test]
-    fn textless_mapping_keys_take_no_anchor() {
-        // A key is written before its value, so it cannot normally borrow a
-        // mark from inside its own member. YAML's explicit-key syntax breaks
-        // that: `? >-` is a key with no text, and marked-yaml marks it at the
-        // following member's key, which that member also claims.
-        let source = concat!(
-            "---\n",            // 1
-            "folded:\n",        // 2
-            "  ? >-\n",         // 3
-            "  next: second\n", // 4
-            "literal:\n",       // 5
-            "  ? |\n",          // 6
-            "  next: second\n", // 7
-            "kept:\n",          // 8
-            "  ? |+\n",         // 9
-            "\n",               // 10
-            "  next: second\n", // 11
-            "quoted:\n",        // 12
-            "  ? \"\"\n",       // 13
-            "  next: second\n", // 14
-            "valued:\n",        // 15
-            "  ? >-\n",         // 16
-            "  : first\n",      // 17
-            "  next: second\n", // 18
-            "written:\n",       // 19
-            "  ? >-\n",         // 20
-            "    text\n",       // 21
-            "  next: second\n", // 22
-            "spelled:\n",       // 23
-            "  ? plain\n",      // 24
-            "  next: second\n", // 25
-            "wrapped:\n",       // 26
-            "  ? multi\n",      // 27
-            "    line\n",       // 28
-            "  next: second\n", // 29
-            "\"top\": 1\n",     // 30
-            "---\n",            // 31
-            "# Title\n",
-        );
-        let document = parse_markdown(source, MarkdownOptions::default());
-
-        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
-            panic!("expected parsed frontmatter: {document:?}")
-        };
-        let anchor = |pointer: &str| {
-            anchors
-                .get(pointer)
-                .map(|anchor| (anchor.line, anchor.column))
-        };
-
-        // An empty block scalar key is marked at the `next` that follows it, so
-        // the two members would claim one position and one of them would name
-        // the other's text.
-        assert_eq!(anchor("/folded/"), None);
-        assert_eq!(anchor("/folded/next"), Some((4, 3)));
-        assert_eq!(anchor("/literal/"), None);
-        assert_eq!(anchor("/literal/next"), Some((7, 3)));
-        // `|+` keeps the blank line, so the key is "\n" rather than "", and it
-        // still has no content line to be marked at.
-        assert_eq!(anchor("/kept/\n"), None);
-        assert_eq!(anchor("/kept/next"), Some((11, 3)));
-        assert_eq!(
-            value.get("kept"),
-            Some(&serde_json::json!({"\n": null, "next": "second"})),
-            "a kept blank line is still part of the key"
-        );
-        // A quoted empty key is marked where it is written, but its text does
-        // not distinguish it from a textless one, so it falls back too.
-        assert_eq!(anchor("/quoted/"), None);
-        assert_eq!(anchor("/quoted/next"), Some((14, 3)));
-        // The same key given a value borrows that value's line instead. It is
-        // no better placed for having landed inside its own member: the mark is
-        // the `:` that separates a key the member never spells.
-        assert_eq!(anchor("/valued/"), None);
-        assert_eq!(anchor("/valued/next"), Some((18, 3)));
-        assert_eq!(
-            value.get("valued"),
-            Some(&serde_json::json!({"": "first", "next": "second"})),
-            "an empty key must still carry its value"
-        );
-        // A block key with a content line is marked at that content, and a
-        // plain key at its first character, so both keep their positions. A
-        // plain key may span lines and is marked where it begins.
-        assert_eq!(anchor("/written/text"), Some((21, 5)));
-        assert_eq!(anchor("/written/next"), Some((22, 3)));
-        assert_eq!(anchor("/spelled/plain"), Some((24, 5)));
-        assert_eq!(anchor("/spelled/next"), Some((25, 3)));
-        assert_eq!(anchor("/wrapped/multi line"), Some((27, 5)));
-        assert_eq!(anchor("/wrapped/next"), Some((29, 3)));
-        // Ordinary keys are untouched, quoting included.
-        assert_eq!(anchor("/folded"), Some((2, 1)));
-        assert_eq!(anchor("/top"), Some((30, 1)));
-
-        assert_distinct_anchors(source, anchors);
-    }
-
-    #[test]
-    fn a_textless_key_does_not_borrow_the_following_member() {
-        // The whole of a frontmatter block can be this shape, where the member
-        // whose mark is borrowed is a sibling rather than a nested member: `/`
-        // is not an ancestor of `/next`, so the two would name one position
-        // while naming unrelated entries.
-        let source = "---\n? >-\nnext: second\n---\n\n# Title\n";
-        let document = parse_markdown(source, MarkdownOptions::default());
-
-        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
-            panic!("expected parsed frontmatter: {document:?}")
-        };
-        assert_eq!(
-            value,
-            &serde_json::json!({"": null, "next": "second"})
-                .as_object()
-                .unwrap()
-                .clone(),
-            "the explicit key parses to an empty-keyed member"
-        );
-        assert_eq!(anchors.get("/"), None);
-        assert_eq!(
-            anchors.get("/next"),
-            Some(FrontmatterAnchor { line: 3, column: 1 })
-        );
     }
 
     #[test]
@@ -2210,111 +2120,6 @@ mod tests {
         );
 
         assert_distinct_anchors(source, anchors);
-    }
-
-    #[test]
-    fn a_block_scalar_over_several_blank_lines_takes_no_anchor() {
-        // `|+` keeps every trailing break, so two blank content lines resolve to
-        // `"\n\n"`. That is still a text with no character marked-yaml can have
-        // marked the scalar at, so the element borrows the following one's `-`
-        // and must fall back. A rule written for one break alone would accept
-        // that borrowed marker, and no other invariant would notice: the `-` at
-        // column 3 differs from the next element's own column 5, so the two
-        // never collide.
-        let source = concat!(
-            "---\n",    // 1
-            "list:\n",  // 2
-            "  - |+\n", // 3
-            "\n",       // 4
-            "\n",       // 5
-            "  - 2\n",  // 6
-            "---\n",    // 7
-            "# Title\n",
-        );
-        let document = parse_markdown(source, MarkdownOptions::default());
-
-        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
-            panic!("expected parsed frontmatter: {document:?}")
-        };
-        assert_eq!(
-            value.get("list"),
-            Some(&serde_json::json!(["\n\n", 2])),
-            "both kept blank lines are part of the value"
-        );
-        assert_eq!(anchors.get("/list/0"), None);
-        assert_eq!(
-            anchors.get("/list/1"),
-            Some(FrontmatterAnchor { line: 6, column: 5 })
-        );
-    }
-
-    #[test]
-    fn a_quoted_line_break_takes_no_anchor_by_design() {
-        // `- "\n"` is written and marked-yaml marks it correctly, at its
-        // opening quote. It takes no anchor even so, because its text is
-        // nothing but a line break and nothing marked-yaml exposes tells that
-        // apart from a textless element's borrowed mark. A peek at the marked
-        // byte cannot: an unwritten element followed by a quoted string borrows
-        // a mark that lands on exactly such a quote, as `/borrowed` below
-        // shows. Nor can `may_coerce`, which is false for quoted and block
-        // scalars alike. The scalar's style would, but reading it costs another
-        // parse; the precision is given up deliberately until this module has
-        // one YAML parser instead of three, and the pointer names the element
-        // exactly either way.
-        let source = concat!(
-            "---\n",         // 1
-            "written:\n",    // 2
-            "  - \"\\n\"\n", // 3
-            "  - \" \"\n",   // 4
-            "  - \"\\r\"\n", // 5
-            "  - \"\\t\"\n", // 6
-            "  - 2\n",       // 7
-            "borrowed:\n",   // 8
-            "  -\n",         // 9
-            "  - \"x\"\n",   // 10
-            "---\n",         // 11
-            "# Title\n",
-        );
-        let document = parse_markdown(source, MarkdownOptions::default());
-
-        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
-            panic!("expected parsed frontmatter: {document:?}")
-        };
-        let anchor = |pointer: &str| {
-            anchors
-                .get(pointer)
-                .map(|anchor| (anchor.line, anchor.column))
-        };
-
-        assert_eq!(
-            value.get("written"),
-            Some(&serde_json::json!(["\n", " ", "\r", "\t", 2])),
-            "an escaped break is the element's whole value"
-        );
-        assert_eq!(anchor("/written/0"), None);
-        // The limit is `\n` and nothing wider. A break is the only character a
-        // scalar can hold with nothing in the source for marked-yaml to have
-        // marked; every other whitespace character — a carriage return and a
-        // tab as much as a space — comes from source the scalar owns, so a
-        // scalar holding one keeps its position and the rule stays as narrow as
-        // the ambiguity that forces it.
-        assert_eq!(anchor("/written/1"), Some((4, 5)));
-        assert_eq!(anchor("/written/2"), Some((5, 5)));
-        assert_eq!(anchor("/written/3"), Some((6, 5)));
-        assert_eq!(anchor("/written/4"), Some((7, 5)));
-        // The unwritten element's mark is the next element's, and that one
-        // begins at an opening quote: the very byte a peek would read as proof
-        // that the element before it was written.
-        assert_eq!(anchor("/borrowed/0"), None);
-        assert_eq!(anchor("/borrowed/1"), Some((10, 5)));
-        assert_eq!(
-            source
-                .lines()
-                .nth(9)
-                .and_then(|line| line.as_bytes().get(4)),
-            Some(&b'"'),
-            "the borrowed position holds a quote"
-        );
     }
 
     #[test]
