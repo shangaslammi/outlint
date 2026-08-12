@@ -16,7 +16,7 @@ use marked_yaml::{
 use num_bigint::BigUint;
 use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag};
 use saphyr_parser::{
-    Event as ExactEvent, Parser as ExactParser, ScalarStyle, StrInput, Tag as YamlTag,
+    Event as ExactEvent, Parser as ExactParser, ScalarStyle, ScanError, StrInput, Tag as YamlTag,
 };
 use yaml_rust2::parser::{Event as YamlEvent, Parser as YamlParser};
 
@@ -305,6 +305,20 @@ fn parse_frontmatter(
         end_line: closing_line as u64,
     };
     let body = source.get(body_start..body_end).unwrap_or_default();
+    // A byte-order mark heading the block is removed once, here, where the body
+    // is cut out and before any of the three readers below is handed it. YAML
+    // gives one no meaning at the head of a stream, but neither parser drops it
+    // either, so it arrives as the first character of the first key and leaves
+    // a document whose `version` entry is invisibly named something else while
+    // §1.6's mapping keys are the text their author wrote. Removing it in one
+    // of the readers instead would have them disagree about what the block
+    // says, and the answer would depend on which of them a document happened to
+    // reach. Exactly one is removed, so a second stays part of the key and
+    // remains as visible as any other stray character.
+    let (body, mark) = match body.strip_prefix('\u{feff}') {
+        Some(body) => (body, 1),
+        None => (body, 0),
+    };
     let parsed = match scan_frontmatter(body) {
         // §1.6: empty content, comments included, is not a mapping, while an
         // explicit `{}` is. Both reach marked-yaml as the same empty mapping.
@@ -323,7 +337,7 @@ fn parse_frontmatter(
                 // no markers, so entries parsed by it have no position beyond
                 // the block's own.
                 Err(_) => {
-                    exact_frontmatter_mapping(body).map(|value| (value, MarkedAnchors::new()))
+                    exact_frontmatter_mapping(body, mark).map(|value| (value, MarkedAnchors::new()))
                 }
             }
         }
@@ -332,7 +346,7 @@ fn parse_frontmatter(
         Ok((value, anchors)) => DocumentFrontmatter::Mapping {
             value,
             location,
-            anchors: document_frontmatter_anchors(source, lines, &location, anchors),
+            anchors: document_frontmatter_anchors(source, lines, &location, anchors, mark),
         },
         Err(message) => DocumentFrontmatter::Invalid { location, message },
     };
@@ -366,11 +380,18 @@ struct MarkedPosition {
 /// positions are therefore ordered and converted by one left-to-right walk per
 /// line. The conversion already emits them in document order, so the sort is
 /// only a guard against depending on that.
+///
+/// `mark` is how many characters the block's removed byte-order mark took from
+/// the head of the body, which is the only text the parsers were not shown.
+/// Positions on the body's first line are counted back over it, so an entry is
+/// reported where the document actually spells it rather than one character
+/// earlier.
 fn document_frontmatter_anchors(
     source: &str,
     lines: &LineIndex,
     location: &FrontmatterLocation,
     mut marked: MarkedAnchors,
+    mark: usize,
 ) -> FrontmatterAnchors {
     marked.sort_unstable_by_key(|(_, position)| (position.line, position.column));
     let mut anchors = BTreeMap::new();
@@ -389,7 +410,8 @@ fn document_frontmatter_anchors(
             };
             cursor = LineCursor::new(line, text);
         }
-        let Some(column) = cursor.byte_column(position.column) else {
+        let shift = if position.line == 1 { mark } else { 0 };
+        let Some(column) = cursor.byte_column(position.column + shift) else {
             continue;
         };
         anchors.insert(
@@ -836,7 +858,7 @@ fn json_number_preserving_lexeme(
 /// tag rides on the collections too: `saphyr-parser` reports one on a sequence
 /// or mapping start exactly as it does on a scalar, and the conversion below
 /// checks all three.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ExactYamlNode {
     Scalar(ExactYamlScalar),
     Sequence {
@@ -855,17 +877,31 @@ enum ExactYamlNode {
 /// takes ownership of it: the tree outlives the parser that produced it, and
 /// alias expansion clones nodes anyway. What the borrow would have saved is
 /// smaller than what threading its lifetime through the tree would cost.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ExactYamlScalar {
     value: String,
     style: ScalarStyle,
     tag: Option<YamlTag>,
 }
 
+/// Digests a mapping key, so that only the keys that could be equal to it are
+/// compared against it.
+///
+/// Two equal keys hash alike, which is all the duplicate check needs: a digest
+/// narrows the candidates and equality still decides, so a collision costs one
+/// comparison rather than a wrong verdict. The hash is not held anywhere and
+/// nothing depends on its value, so which hasher produces it is free to change.
+fn exact_yaml_key_digest(key: &ExactYamlNode) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(key, &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
 fn exact_frontmatter_mapping(
     source: &str,
+    mark: usize,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let value = exact_yaml_to_json(parse_exact_yaml(source)?)?;
+    let value = exact_yaml_to_json(parse_exact_yaml(source, mark)?)?;
     let serde_json::Value::Object(mapping) = value else {
         return Err("frontmatter must be a YAML mapping".into());
     };
@@ -916,14 +952,34 @@ impl ExactYamlBudget {
     }
 }
 
-/// A parsed node held for the aliases that name it, with its size in nodes.
+/// A node just built, beside how deeply its own collections nest.
+///
+/// The depth is counted from the node itself: a scalar reaches no level, a
+/// sequence of scalars one, and a collection the greatest its entries reach
+/// plus its own. It is carried out of the build rather than measured from the
+/// finished node afterwards, because measuring it would be another walk of the
+/// same recursion the bound exists to keep within the stack.
+#[derive(Debug)]
+struct ExactYamlSubtree {
+    node: ExactYamlNode,
+    depth: usize,
+}
+
+/// A parsed node held for the aliases that name it, with its size and depth.
 ///
 /// The size is what an alias to it costs, and is recorded here because that
 /// cost has to be charged before the copy is made rather than measured from it.
+/// The depth is recorded for the same reason and answers a different question:
+/// what an alias to it costs the *stack*. An alias splices a copy of this node
+/// wherever it appears, so the copy carries its whole depth to a place that may
+/// already be nested, and the parser — which reads a chain of aliases as one
+/// event each and never descends into what they name — cannot see that the tree
+/// being built is deeper than any text in the block.
 #[derive(Debug)]
 struct AnchoredYamlNode {
     node: ExactYamlNode,
     nodes: usize,
+    depth: usize,
 }
 
 /// Builds the exact tree by pulling one event at a time from `saphyr-parser`.
@@ -939,14 +995,18 @@ struct ExactYamlReader<'source> {
     parser: ExactParser<'source, StrInput<'source>>,
     anchors: BTreeMap<usize, AnchoredYamlNode>,
     budget: ExactYamlBudget,
+    /// Characters removed from the head of the block before parsing, which the
+    /// parser's own positions therefore do not count. See [`Self::syntax_error`].
+    mark: usize,
 }
 
 impl<'source> ExactYamlReader<'source> {
-    fn new(source: &'source str) -> Self {
+    fn new(source: &'source str, mark: usize) -> Self {
         Self {
             parser: ExactParser::new_from_str(source),
             anchors: BTreeMap::new(),
             budget: ExactYamlBudget::default(),
+            mark,
         }
     }
 
@@ -961,9 +1021,29 @@ impl<'source> ExactYamlReader<'source> {
             // The span is deliberately dropped: this fallback records no
             // positions, so carrying one would be a field nothing reads.
             Some(Ok((event, _))) => Ok(event),
-            Some(Err(error)) => Err(format!("invalid YAML frontmatter: {error}")),
+            Some(Err(error)) => Err(self.syntax_error(&error)),
             None => Err("frontmatter contains an unexpected YAML document boundary".into()),
         }
+    }
+
+    /// Names a parse failure at the position the block's own text puts it.
+    ///
+    /// The parser is handed the body with its byte-order mark already removed,
+    /// so every character index it reports is short by the mark, and a column on
+    /// the first line is short by it too while later lines are unaffected.
+    /// `ScanError`'s own rendering is reproduced here rather than interpolated
+    /// because those numbers are exactly what has to be counted back: its
+    /// `Display` prints the info, the character index it calls a byte, the
+    /// one-based line, and the column one past the zero-based one it holds.
+    fn syntax_error(&self, error: &ScanError) -> String {
+        let marker = error.marker();
+        let column = marker.col() + 1 + if marker.line() == 1 { self.mark } else { 0 };
+        format!(
+            "invalid YAML frontmatter: {} at byte {} line {} column {column}",
+            error.info(),
+            marker.index() + self.mark,
+            marker.line(),
+        )
     }
 
     /// Reads the next event and requires it to be the expected boundary.
@@ -985,9 +1065,15 @@ impl<'source> ExactYamlReader<'source> {
     /// collection entered here occupies `depth + 1` and the document's own root
     /// mapping is the first level. The recursion mirrors the nesting, which is
     /// why the depth is bounded before the frame is taken rather than after.
-    fn node(&mut self, event: ExactEvent<'source>, depth: usize) -> Result<ExactYamlNode, String> {
+    /// What the node reaches below itself is returned with it, since an alias
+    /// to it has to be charged that depth at a site this call knows nothing of.
+    fn node(
+        &mut self,
+        event: ExactEvent<'source>,
+        depth: usize,
+    ) -> Result<ExactYamlSubtree, String> {
         let spent = self.budget.nodes;
-        let (node, anchor) = match event {
+        let (node, anchor, reached) = match event {
             ExactEvent::Scalar(value, style, anchor, tag) => {
                 self.budget.spend(1)?;
                 (
@@ -997,18 +1083,22 @@ impl<'source> ExactYamlReader<'source> {
                         tag: tag.map(Cow::into_owned),
                     }),
                     anchor,
+                    0,
                 )
             }
             ExactEvent::SequenceStart(anchor, tag) => {
-                let depth = deeper_yaml_nesting(depth)?;
+                let depth = deeper_yaml_nesting(depth, 1)?;
                 self.budget.spend(1)?;
                 let mut values = Vec::new();
+                let mut inner = 0;
                 loop {
                     let event = self.next_event()?;
                     if matches!(event, ExactEvent::SequenceEnd) {
                         break;
                     }
-                    values.push(self.node(event, depth)?);
+                    let value = self.node(event, depth)?;
+                    inner = inner.max(value.depth);
+                    values.push(value.node);
                 }
                 (
                     ExactYamlNode::Sequence {
@@ -1016,12 +1106,15 @@ impl<'source> ExactYamlReader<'source> {
                         values,
                     },
                     anchor,
+                    inner + 1,
                 )
             }
             ExactEvent::MappingStart(anchor, tag) => {
-                let depth = deeper_yaml_nesting(depth)?;
+                let depth = deeper_yaml_nesting(depth, 1)?;
                 self.budget.spend(1)?;
-                let mut entries = Vec::new();
+                let mut entries: Vec<(ExactYamlNode, ExactYamlNode)> = Vec::new();
+                let mut keys: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+                let mut inner = 0;
                 loop {
                     let event = self.next_event()?;
                     if matches!(event, ExactEvent::MappingEnd) {
@@ -1030,18 +1123,28 @@ impl<'source> ExactYamlReader<'source> {
                     let key = self.node(event, depth)?;
                     let event = self.next_event()?;
                     let value = self.node(event, depth)?;
+                    inner = inner.max(key.depth).max(value.depth);
+                    let (key, value) = (key.node, value.node);
                     // Whole-node equality catches the keys the conversion never
                     // reduces to a string — a sequence or mapping used as a key,
                     // and an alias standing for one. Keys that do resolve to a
                     // string are caught there instead, on the resolved text, so
                     // that `a` and `"a"` are recognised as one key however
                     // differently the two nodes compare here.
-                    if entries
-                        .iter()
-                        .any(|(existing, _): &(ExactYamlNode, ExactYamlNode)| existing == &key)
-                    {
+                    //
+                    // Equality still decides, but only against the keys hashing
+                    // alike, so a mapping of many keys costs one hash each
+                    // rather than a comparison against every key before it.
+                    // Comparing each against all of them is quadratic in whole
+                    // nodes, and an aliased collection makes each of those
+                    // comparisons large as well: a hundred kilobytes of such
+                    // keys took over a minute to refuse.
+                    let digest = exact_yaml_key_digest(&key);
+                    let alike = keys.entry(digest).or_default();
+                    if alike.iter().any(|&entry| entries[entry].0 == key) {
                         return Err("frontmatter contains a duplicate mapping key".into());
                     }
+                    alike.push(entries.len());
                     entries.push((key, value));
                 }
                 (
@@ -1050,6 +1153,7 @@ impl<'source> ExactYamlReader<'source> {
                         entries,
                     },
                     anchor,
+                    inner + 1,
                 )
             }
             ExactEvent::Alias(anchor) => {
@@ -1057,18 +1161,32 @@ impl<'source> ExactYamlReader<'source> {
                     .anchors
                     .get(&anchor)
                     .ok_or("frontmatter contains an unresolved YAML alias")?;
-                // The budget is charged the recorded size before the copy is
-                // taken, never after: charging afterwards would measure an
-                // allocation the refusal exists to prevent from happening.
+                // The copy lands inside whatever is already open here, so it
+                // has to clear the depth limit for the levels it brings rather
+                // than for the one event that named them. Charged before the
+                // copy for the same reason the size is: a tree too deep to walk
+                // must not be built in order to discover that it is.
+                let reached = anchored.depth;
+                deeper_yaml_nesting(depth, reached)?;
+                // Charging the recorded size before the copy rather than
+                // measuring the copy afterwards is what keeps the peak at the
+                // limit rather than at the limit plus one more expansion of it.
+                // The overshoot the other order allows is bounded — a single
+                // node the budget had already paid for, copied once more before
+                // the refusal lands — so this ordering is worth about a factor
+                // of two, not the difference between refusing and not.
                 self.budget.spend(anchored.nodes)?;
                 // An alias event carries no anchor of its own, so the copy names
                 // nothing and is not remembered.
-                (anchored.node.clone(), 0)
+                (anchored.node.clone(), 0, reached)
             }
             _ => return Err("frontmatter contains an unexpected YAML parser event".into()),
         };
-        self.remember_anchor(anchor, &node, self.budget.nodes - spent);
-        Ok(node)
+        self.remember_anchor(anchor, &node, self.budget.nodes - spent, reached);
+        Ok(ExactYamlSubtree {
+            node,
+            depth: reached,
+        })
     }
 
     /// Holds a finished node for the aliases that name it.
@@ -1077,28 +1195,33 @@ impl<'source> ExactYamlReader<'source> {
     /// only once it is built, so a collection cannot alias itself: the parser
     /// resolves `&x` as soon as it reads it, while this table does not, and the
     /// alias inside is refused as unresolved.
-    fn remember_anchor(&mut self, anchor: usize, node: &ExactYamlNode, nodes: usize) {
+    fn remember_anchor(&mut self, anchor: usize, node: &ExactYamlNode, nodes: usize, depth: usize) {
         if anchor != 0 {
             self.anchors.insert(
                 anchor,
                 AnchoredYamlNode {
                     node: node.clone(),
                     nodes,
+                    depth,
                 },
             );
         }
     }
 }
 
-/// Opens one more level of nesting, refusing to pass [`MAX_YAML_DEPTH`].
+/// Opens `levels` further levels of nesting, refusing to pass
+/// [`MAX_YAML_DEPTH`].
 ///
-/// [`scan_frontmatter`] rejects an over-deep block before either tree parser is
-/// handed it, so on the frontmatter path this bound is reached only if that
-/// scan stops running. It is enforced here even so, because the recursion it
-/// guards is this builder's own and a bound that lives in a different function
-/// is one a later change can quietly remove.
-fn deeper_yaml_nesting(depth: usize) -> Result<usize, String> {
-    let depth = depth.saturating_add(1);
+/// A collection opens one level, while an alias opens as many as the node it
+/// copies reaches, which is why the count is a parameter rather than always
+/// one. [`scan_frontmatter`] rejects an over-deep block before either tree
+/// parser is handed it, but it counts the levels the *events* open and an alias
+/// is a single event however deep the value it names, so nesting spliced in by
+/// an alias is a depth only this bound sees. It would be enforced here in any
+/// case, because the recursion it guards is this builder's own and a bound that
+/// lives in a different function is one a later change can quietly remove.
+fn deeper_yaml_nesting(depth: usize, levels: usize) -> Result<usize, String> {
+    let depth = depth.saturating_add(levels);
     if depth > MAX_YAML_DEPTH {
         return Err("frontmatter nests YAML beyond its depth limit".into());
     }
@@ -1107,21 +1230,18 @@ fn deeper_yaml_nesting(depth: usize) -> Result<usize, String> {
 
 /// Reads one YAML document out of the block, keeping every scalar's spelling.
 ///
-/// A leading byte-order mark is removed before parsing. YAML gives one no
-/// meaning at the head of a stream, but the parser reports it as the first
-/// character of the first key, which would leave a document whose `version`
-/// entry is invisibly named something else while §1.6's mapping keys are the
-/// text their author wrote. Exactly one is removed, so a second stays part of
-/// the key and remains as visible as any other stray character.
-fn parse_exact_yaml(source: &str) -> Result<ExactYamlNode, String> {
-    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let mut reader = ExactYamlReader::new(source);
+/// `mark` is how many characters [`parse_frontmatter`] took off the head of the
+/// body, which is a byte-order mark or nothing at all. The text arrives without
+/// them, so they are carried here only to put a reported position back where the
+/// document spells it.
+fn parse_exact_yaml(source: &str, mark: usize) -> Result<ExactYamlNode, String> {
+    let mut reader = ExactYamlReader::new(source, mark);
     reader.expect_event(|event| matches!(event, ExactEvent::StreamStart))?;
     // The payload distinguishes an explicit `---` from an implicit start, which
     // a frontmatter block has already consumed at its own delimiter.
     reader.expect_event(|event| matches!(event, ExactEvent::DocumentStart(_)))?;
     let event = reader.next_event()?;
-    let value = reader.node(event, 0)?;
+    let value = reader.node(event, 0)?.node;
     // A second document would be read with the first one's anchors still in the
     // parser's table, since only `Parser::load` clears them between documents.
     // Refusing at the boundary is what keeps that unreachable.
@@ -1804,6 +1924,10 @@ impl LineIndex {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// No byte-order mark was taken off the head of the bodies below, so the
+    /// builder's own positions need no counting back. See [`parse_exact_yaml`].
+    const NO_MARK: usize = 0;
 
     fn headings(document: &Document) -> Vec<&Heading> {
         fn visit<'a>(sections: &'a [Section], output: &mut Vec<&'a Heading>) {
@@ -2620,10 +2744,10 @@ mod tests {
 
     #[test]
     fn frontmatter_alias_expansion_is_bounded() {
-        // The refusal must come before the expansion, not after it: an
-        // unbudgeted builder of this same shape needs a gigabyte at depth six
-        // and does not finish at depth eight, while charging an alias the size
-        // of the node it copies rejects depth fifteen in a few milliseconds. A
+        // What the budget buys is the whole difference here: a builder without
+        // one needs a gigabyte on this same shape at depth six and does not
+        // finish at depth eight, while charging every alias the size of the
+        // node it copies rejects depth fifteen in a few milliseconds. A
         // wall-clock bound is therefore part of what is asserted — a run that
         // merely returns the right verdict eventually is the failure this
         // guards against.
@@ -2733,6 +2857,67 @@ mod tests {
         }
     }
 
+    /// Frontmatter whose every line wraps an alias to the line above it in
+    /// `levels` more collections.
+    ///
+    /// Each line adds its own `levels` to whatever the line it names already
+    /// reached, so `lines` of it build a tree `lines * levels` deep under the
+    /// root mapping while no line of the source nests past `levels` and every
+    /// alias is one parser event. Input grows linearly with the depth built,
+    /// which is what keeps the node budget clear of it: the same lines that
+    /// deepen the tree raise the allowance that bounds its size.
+    fn alias_deepened_frontmatter(lines: usize, levels: usize) -> String {
+        let (open, close) = ("[".repeat(levels), "]".repeat(levels));
+        let mut source = format!("---\na0: &x0 {open}1{close}\n");
+        for line in 1..lines {
+            source.push_str(&format!("a{line}: &x{line} {open}*x{}{close}\n", line - 1));
+        }
+        source.push_str("---\n# Title\n");
+        source
+    }
+
+    #[test]
+    fn alias_expanded_nesting_is_bounded() {
+        // Depth an alias brings with it is depth nothing counting events can
+        // see: the parser reads `*x` as one event whatever the node it names,
+        // and the scan ahead of the builder counts the levels the source text
+        // opens. Only the builder knows how deep the value it is splicing in
+        // reaches, so the limit has to be charged there, against the nesting
+        // already open around the alias site. Left uncharged this overran the
+        // stack and aborted the process at seventy lines of eighteen kilobytes
+        // — a crash, not a rejection, and one no budget on size would ever have
+        // caught, since the input grows as fast as the tree it builds.
+        for (lines, levels) in [(70, 127), (2_000, 127), (MAX_YAML_DEPTH, 1)] {
+            let source = alias_deepened_frontmatter(lines, levels);
+            let started = std::time::Instant::now();
+            let document = parse_markdown(&source, MarkdownOptions::default());
+            let elapsed = started.elapsed();
+            let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
+                panic!("{lines} lines of {levels} alias-expanded levels were accepted")
+            };
+            assert_eq!(message, "frontmatter nests YAML beyond its depth limit");
+            assert!(
+                elapsed < std::time::Duration::from_secs(5),
+                "{lines} lines of {levels} levels took {elapsed:?}, so the tree was built first"
+            );
+        }
+
+        // The bound is on the tree, not on the aliases: one level per line for
+        // one line fewer than the limit fills it exactly, root mapping
+        // included, and the value is still built. The line above rejects the
+        // one further level, so these two pin the boundary from both sides.
+        let source = alias_deepened_frontmatter(MAX_YAML_DEPTH - 1, 1);
+        let document = parse_markdown(&source, MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("alias-expanded nesting that fills the limit is built: {document:?}")
+        };
+        let mut node = &value[&format!("a{}", MAX_YAML_DEPTH - 2)];
+        for _ in 1..MAX_YAML_DEPTH - 1 {
+            node = &node[0];
+        }
+        assert_eq!(node[0], serde_json::json!(1));
+    }
+
     #[test]
     fn nesting_depth_counts_collections_that_are_open_at_once() {
         // Siblings are not nesting: a mapping of many one-level entries closes
@@ -2769,12 +2954,12 @@ mod tests {
         // exactly, and one more overruns it. If the bound lived only in
         // `scan_frontmatter` this test would build the value instead.
         let nested = |levels: usize| format!("deep:\n {}1\n", "- ".repeat(levels));
-        let filled = exact_frontmatter_mapping(&nested(MAX_YAML_DEPTH - 1))
+        let filled = exact_frontmatter_mapping(&nested(MAX_YAML_DEPTH - 1), NO_MARK)
             .expect("nesting that fills the limit is built");
         assert_eq!(innermost_sequence(&filled, MAX_YAML_DEPTH - 1)[0], 1);
         for levels in [MAX_YAML_DEPTH, MAX_YAML_DEPTH + 1] {
             assert_eq!(
-                exact_frontmatter_mapping(&nested(levels)),
+                exact_frontmatter_mapping(&nested(levels), NO_MARK),
                 Err("frontmatter nests YAML beyond its depth limit".to_owned()),
                 "the builder accepted {levels} levels of its own accord"
             );
@@ -2803,7 +2988,7 @@ mod tests {
             "? [x]\n: 1\n? [x]\n: 2\n",
         ] {
             assert_eq!(
-                exact_frontmatter_mapping(duplicate),
+                exact_frontmatter_mapping(duplicate, NO_MARK),
                 Err("frontmatter contains a duplicate mapping key".to_owned()),
                 "a duplicate key was accepted: {duplicate:?}"
             );
@@ -2818,7 +3003,7 @@ mod tests {
             "a:\n  k: 1\nb:\n  k: 2\n",
         ] {
             assert!(
-                exact_frontmatter_mapping(valid).is_ok(),
+                exact_frontmatter_mapping(valid, NO_MARK).is_ok(),
                 "distinct mappings sharing a key name were rejected: {valid:?}"
             );
         }
@@ -2829,15 +3014,15 @@ mod tests {
         // reaches the second key, so an invalid value is reported ahead of the
         // duplicate that follows it.
         assert_eq!(
-            exact_frontmatter_mapping("a: 1\n? [x]\n: 2\n"),
+            exact_frontmatter_mapping("a: 1\n? [x]\n: 2\n", NO_MARK),
             Err("frontmatter mapping keys must be strings".to_owned())
         );
         assert_eq!(
-            exact_frontmatter_mapping("a: !!int 1.0\na: 2\n"),
+            exact_frontmatter_mapping("a: !!int 1.0\na: 2\n", NO_MARK),
             Err("frontmatter contains a duplicate mapping key".to_owned())
         );
         assert_eq!(
-            exact_frontmatter_mapping("a: !!int 1.0\n\"a\": 2\n"),
+            exact_frontmatter_mapping("a: !!int 1.0\n\"a\": 2\n", NO_MARK),
             Err("frontmatter contains an invalid explicitly tagged integer".to_owned())
         );
     }
@@ -2858,7 +3043,7 @@ mod tests {
             ("a: !custom [one]\n", serde_json::json!(["one"])),
             ("a: !custom {one: two}\n", serde_json::json!({"one": "two"})),
         ] {
-            let mapping = exact_frontmatter_mapping(source)
+            let mapping = exact_frontmatter_mapping(source, NO_MARK)
                 .unwrap_or_else(|error| panic!("{source:?}: {error}"));
             assert_eq!(mapping["a"], expected, "{source:?}");
         }
@@ -2872,7 +3057,7 @@ mod tests {
             ("!!str\na: 1\n", "map"),
         ] {
             assert_eq!(
-                exact_frontmatter_mapping(source),
+                exact_frontmatter_mapping(source, NO_MARK),
                 Err(format!(
                     "frontmatter contains an invalid tag for a YAML {expected}"
                 )),
@@ -2892,41 +3077,341 @@ mod tests {
             // no tag this converter recognises and the plain scalar resolves.
             ("a: !thing 123\n", serde_json::json!(123)),
         ] {
-            let mapping = exact_frontmatter_mapping(source)
+            let mapping = exact_frontmatter_mapping(source, NO_MARK)
                 .unwrap_or_else(|error| panic!("{source:?}: {error}"));
             assert_eq!(mapping["a"], expected, "{source:?}");
         }
         assert_eq!(
-            exact_frontmatter_mapping("a: !!str [one, two]\n"),
+            exact_frontmatter_mapping("a: !!str [one, two]\n", NO_MARK),
             Err("frontmatter contains an invalid tag for a YAML seq".to_owned())
         );
     }
 
     #[test]
-    fn the_exact_builder_drops_one_leading_byte_order_mark() {
+    fn the_exact_builder_keeps_a_quoted_scalar_a_string() {
+        // §1.6 resolves a plain scalar by the YAML core schema and leaves a
+        // quoted one the text it was written as, which is the whole reason a
+        // frontmatter author has quotes: `"1"`, `'true'` and `"null"` are a
+        // string each and nothing else. The distinction lives in one guard on
+        // the scalar's style, and a converter that dropped it would still pass
+        // every other test in this module while quietly turning those three
+        // into a number, a boolean and a null.
+        //
+        // A block scalar is not plain either and resolves the same way. The
+        // neighbouring plain `1` is here so the guard cannot be satisfied by
+        // making every untagged scalar a string.
+        let entries = "a: \"1\"\nb: 'true'\nc: \"null\"\nd: |\n  1\ne: 1\n";
+        let fallback = expect_frontmatter_mapping(&format!("---\n{entries}f: !!str y\n---\n"));
+        assert_eq!(fallback["a"], serde_json::json!("1"));
+        assert_eq!(fallback["b"], serde_json::json!("true"));
+        assert_eq!(fallback["c"], serde_json::json!("null"));
+        assert_eq!(fallback["d"], serde_json::json!("1\n"));
+        assert_eq!(fallback["e"], serde_json::json!(1));
+
+        // The tag on the last entry is the only thing routing that block
+        // through this builder rather than the marked parse, so the same
+        // entries without it read the resolution the rest of the module gives
+        // them. The two must agree: a document's values may not depend on
+        // which parser happened to be handed it.
+        let marked = expect_frontmatter_mapping(&format!("---\n{entries}---\n"));
+        for key in ["a", "b", "c", "d", "e"] {
+            assert_eq!(
+                fallback[key], marked[key],
+                "the two parsers disagree on {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_exact_builder_refuses_a_second_document_itself() {
+        // `saphyr-parser` clears its anchor table between documents only inside
+        // `Parser::load`, which this builder does not call, so reading a second
+        // document through raw events would resolve its aliases against the
+        // first document's anchors. Refusing at the boundary is what keeps that
+        // unreachable, and the refusal has to be the builder's own: the scan
+        // that counts a block's documents today reads the body with a different
+        // parser, and is due to be removed once this one counts them.
+        //
+        // Called directly, without that scan, both spellings of a second
+        // document are refused — and the alias in the second is refused with
+        // them rather than resolving to a value defined in the first.
+        for source in [
+            "a: 1\n--- \nb: 2\n",
+            "a: &x 1\n--- \nb: *x\n",
+            "a: 1\n...\nb: 2\n",
+        ] {
+            assert_eq!(
+                exact_frontmatter_mapping(source, NO_MARK),
+                Err("frontmatter contains an unexpected YAML document boundary".to_owned()),
+                "a second document was read: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_alias_budget_allows_a_hundred_nodes_per_event() {
+        // The allowance is a fixed multiple of the events read so far, and the
+        // multiple is what decides which documents are refused: raise it and
+        // the bomb fixtures above still fail, because they overrun any constant
+        // factor by orders of magnitude. Only a block sitting on the boundary
+        // pins it, so this one is built to sit there.
+        //
+        // A thousand-element sequence costs 1001 nodes and 1006 events to
+        // read; each further line naming it costs 1002 nodes — the copy and its
+        // key — against the 200 further allowance its two events buy. The
+        // deficit closes at the 125th such line, so 124 of them are built and
+        // 125 are refused. Doubling either side of the ratio moves that number
+        // by more than one.
+        let sequence = vec!["1"; 1000].join(",");
+        let block = |lines: usize| {
+            let mut source = format!("---\nbase: &b [{sequence}]\n");
+            for line in 0..lines {
+                source.push_str(&format!("copy{line}: *b\n"));
+            }
+            source.push_str("---\n# Title\n");
+            source
+        };
+        let built = expect_frontmatter_mapping(&block(124));
+        assert_eq!(built["copy123"][999], serde_json::json!(1));
+        assert_eq!(
+            expect_invalid_frontmatter(&block(125)),
+            "frontmatter expands YAML aliases beyond its size limit"
+        );
+    }
+
+    #[test]
+    fn duplicate_key_detection_stays_linear_in_the_number_of_keys() {
+        // The keys the ordered check exists for are the ones the conversion
+        // never reduces to a string, and an alias makes such a key as large as
+        // the node it names. Comparing each new key against every key before it
+        // is quadratic in whole nodes and quadratic again in their size, which
+        // a block of a hundred kilobytes turned into more than a minute of
+        // comparisons. Digesting each key first leaves equality deciding but
+        // compares only against the keys that hash alike, and this block is
+        // sized so that the difference is the difference between passing and
+        // hanging rather than something a machine's speed decides.
+        let mut source = format!("---\nbig: &b [{}]\n", vec!["1"; 450].join(","));
+        for key in 0..2_000 {
+            source.push_str(&format!("? [*b,{key}]\n: {key}\n"));
+        }
+        source.push_str("---\n# Title\n");
+        let started = std::time::Instant::now();
+        let message = expect_invalid_frontmatter(&source);
+        let elapsed = started.elapsed();
+        // Every key is distinct, so the block is refused only once the walk has
+        // compared all of them and the conversion has reached a key that is no
+        // string: the verdict is evidence the check ran over the whole block.
+        assert_eq!(message, "frontmatter mapping keys must be strings");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "two thousand collection keys took {elapsed:?} to compare"
+        );
+    }
+
+    #[test]
+    fn frontmatter_syntax_errors_carry_the_parser_position() {
+        // Every malformed block is reported by the exact fallback, not only the
+        // ones holding a tag or an alias: the marked parse fails on anything
+        // that does not parse, and this builder is what runs next and what has
+        // a position to give. These messages are therefore the whole diagnostic
+        // surface for frontmatter that does not parse.
+        //
+        // The text is `saphyr-parser`'s own, recorded rather than translated. A
+        // stray bracket is caught in its scanner and so reported earlier and
+        // differently than the block-mapping parser this module used to read
+        // reported it, which is an accepted change: an inherited rejection this
+        // project never wrote down was never a contract. What these fixtures
+        // hold is the current wording and position against silent drift, since
+        // nothing else in the suite reads either.
+        //
+        // Positions are the parser's: the line is one-based and counted from
+        // the block's first content line, and the number the message calls a
+        // byte is a count of characters, which the accented pair below shows by
+        // reporting the same column at a smaller index than the bytes would.
+        for (body, message) in [
+            ("title: Doc\n]\n", "misplaced bracket at byte 11 line 2 column 1"),
+            ("*x]\n", "misplaced bracket at byte 2 line 1 column 3"),
+            (
+                "a: [1, 2\n",
+                "while parsing a flow sequence, expected ',' or ']' at byte 9 line 2 column 1",
+            ),
+            (
+                "{a: 1\n",
+                "while parsing a flow mapping, did not find expected ',' or '}' \
+                 at byte 6 line 2 column 1",
+            ),
+            (
+                "tags: [, draft]\n",
+                "while parsing a node, did not find expected node content at byte 7 line 1 column 8",
+            ),
+            (
+                "a: *nope\n",
+                "while parsing node, found unknown anchor at byte 3 line 1 column 4",
+            ),
+            (
+                "title: 'unterminated\n",
+                "while scanning a quoted scalar, found unexpected end of stream \
+                 at byte 7 line 1 column 8",
+            ),
+            (
+                "title: \"\\q\"\n",
+                "while parsing a quoted scalar, found unknown escape character \
+                 at byte 7 line 1 column 8",
+            ),
+            (
+                "a:\n  b: 1\n c: 2\n",
+                "while parsing a block mapping, did not find expected key at byte 11 line 3 column 2",
+            ),
+            (
+                "a: 1\n b: 2\n",
+                "mapping values are not allowed in this context at byte 7 line 2 column 3",
+            ),
+            ("a: 1\nb\n", "simple key expect ':' at byte 7 line 3 column 1"),
+            (
+                "é: 'x\n",
+                "while scanning a quoted scalar, found unexpected end of stream \
+                 at byte 3 line 1 column 4",
+            ),
+        ] {
+            assert_eq!(
+                expect_invalid_frontmatter(&format!("---\n{body}---\n# Title\n")),
+                format!("invalid YAML frontmatter: {message}"),
+                "{body:?}"
+            );
+        }
+    }
+
+    /// The mapping a block parses to, whichever of this module's readers
+    /// happened to produce it.
+    fn expect_frontmatter_mapping(source: &str) -> serde_json::Map<String, serde_json::Value> {
+        let document = parse_markdown(source, MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("frontmatter must parse as a mapping: {source:?}")
+        };
+        value
+    }
+
+    /// The message a block that does not parse is refused with.
+    fn expect_invalid_frontmatter(source: &str) -> String {
+        let document = parse_markdown(source, MarkdownOptions::default());
+        let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
+            panic!("frontmatter must be refused: {source:?}")
+        };
+        message
+    }
+
+    #[test]
+    fn frontmatter_drops_one_leading_byte_order_mark() {
         // A byte-order mark means nothing to YAML at the head of a stream, but
-        // the parser hands it back as the first character of the first key. A
-        // document written with one would then have a `version` entry named
-        // something no reader can see, and a schema would report an unknown
-        // field naming a key its author did believe they had written.
-        let stripped =
-            exact_frontmatter_mapping("\u{feff}a: !!str x\n").expect("a leading mark is dropped");
-        assert_eq!(stripped.keys().collect::<Vec<_>>(), ["a"]);
-        assert_eq!(stripped["a"], "x");
+        // neither parser here drops it and both hand it back as the first
+        // character of the first key. A document written with one would then
+        // have a `version` entry named something no reader can see, and a
+        // schema would report an unknown field naming a key its author did
+        // believe they had written.
+        //
+        // It is removed where the body is cut out, so the block's three readers
+        // — the document scan, the marked parse, and the exact fallback — are
+        // all shown the same text. Removed inside one of them instead, the same
+        // document parsed to different keys depending on whether it happened to
+        // contain a tag, which is the only thing deciding which parser reads
+        // it. Every case below is therefore checked in both spellings: plain,
+        // and with a tag that routes the identical block through the fallback.
+        for tag in ["", "!!int "] {
+            let marked = format!("---\n\u{feff}version: {tag}1\nx: 2\n---\n");
+            let plain = format!("---\nversion: {tag}1\nx: 2\n---\n");
+            let document = parse_markdown(&marked, MarkdownOptions::default());
+            let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+                panic!("a leading mark is dropped: {marked:?}")
+            };
+            assert_eq!(value, expect_frontmatter_mapping(&plain), "{marked:?}");
 
-        // Exactly one is dropped, so a second is as visible as any other stray
-        // character rather than being silently swallowed too.
-        let doubled =
-            exact_frontmatter_mapping("\u{feff}\u{feff}a: 1\n").expect("a second mark is content");
-        assert_eq!(doubled.keys().collect::<Vec<_>>(), ["\u{feff}a"]);
+            // Exactly one is dropped, so a second is as visible as any other
+            // stray character rather than being silently swallowed too.
+            let doubled = format!("---\n\u{feff}\u{feff}version: {tag}1\n---\n");
+            let doubled = expect_frontmatter_mapping(&doubled);
+            assert_eq!(doubled.keys().collect::<Vec<_>>(), ["\u{feff}version"]);
 
-        // Inside a value a mark is content, and it changes the entry's type:
-        // `1` with a mark in front of it is no longer a number in any YAML
-        // implementation. Pinned rather than fixed — stripping it there would
-        // be this module inventing a rule the format does not have.
-        let inside =
-            exact_frontmatter_mapping("a: \u{feff}1\n").expect("a mark inside a value is content");
-        assert_eq!(inside["a"], "\u{feff}1");
+            // Inside a value a mark is content, and it changes the entry's
+            // type: `1` with a mark in front of it is no longer a number in any
+            // YAML implementation. Pinned rather than fixed — stripping it
+            // there would be this module inventing a rule the format does not
+            // have.
+            let inside = format!("---\nx: {tag}2\na: \u{feff}1\n---\n");
+            assert_eq!(expect_frontmatter_mapping(&inside)["a"], "\u{feff}1");
+        }
+
+        // An entry on the marked-up line keeps the position the document spells
+        // it at. The parsers count columns in the text they were handed, which
+        // is one character shorter than the line the reader sees, so the mark
+        // has to be counted back in — a mark being three bytes and the entry
+        // otherwise starting the line.
+        let document = parse_markdown(
+            "---\n\u{feff}version: 1\nx: 2\n---\n",
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { anchors, .. } = document.frontmatter else {
+            panic!("a marked block still parses")
+        };
+        assert_eq!(
+            anchors.get("/version"),
+            Some(FrontmatterAnchor { line: 2, column: 4 }),
+        );
+        // A later line is behind no mark at all and must not be moved.
+        assert_eq!(
+            anchors.get("/x"),
+            Some(FrontmatterAnchor { line: 3, column: 1 }),
+        );
+
+        // The scan that counts the block's documents reads the same stripped
+        // body as the parsers do, so it agrees with them about where the block
+        // begins. A block whose only content was the mark is the empty one it
+        // looks like, and it is refused for holding no mapping rather than for
+        // a document boundary its author never wrote. A `...` the mark used to
+        // hide is likewise read the same by scan and parser, so whether it
+        // opens a second document is decided once and not per reader.
+        let empty = parse_markdown("---\n\u{feff}\n---\n", MarkdownOptions::default());
+        let DocumentFrontmatter::Invalid { message, .. } = empty.frontmatter else {
+            panic!("a block holding only a mark holds no mapping: {empty:?}")
+        };
+        assert_eq!(message, "frontmatter must be a YAML mapping");
+        for tag in ["", "!!str "] {
+            let marked = format!("---\n\u{feff}...\nb: {tag}2\n---\n");
+            let plain = format!("---\n...\nb: {tag}2\n---\n");
+            assert_eq!(
+                expect_frontmatter_mapping(&marked),
+                expect_frontmatter_mapping(&plain),
+                "a mark changed how a document boundary was read"
+            );
+        }
+
+        // A syntax error is reported against the block as its author wrote it,
+        // not against the text the parser was handed: the removed mark is one
+        // character of the first line, so an index anywhere in the body and a
+        // column on that first line both count it.
+        let marked = expect_invalid_frontmatter("---\n\u{feff}title: 'unterminated\n---\n");
+        let plain = expect_invalid_frontmatter("---\ntitle: 'unterminated\n---\n");
+        assert_eq!(
+            plain,
+            "invalid YAML frontmatter: while scanning a quoted scalar, \
+             found unexpected end of stream at byte 7 line 1 column 8"
+        );
+        assert_eq!(
+            marked,
+            "invalid YAML frontmatter: while scanning a quoted scalar, \
+             found unexpected end of stream at byte 8 line 1 column 9"
+        );
+        // Past the first line only the index moves, since no later column has
+        // the mark in front of it.
+        assert_eq!(
+            expect_invalid_frontmatter("---\n\u{feff}a: 1\nb: 'x\n---\n"),
+            "invalid YAML frontmatter: while scanning a quoted scalar, \
+             found unexpected end of stream at byte 9 line 2 column 4"
+        );
+        assert_eq!(
+            expect_invalid_frontmatter("---\na: 1\nb: 'x\n---\n"),
+            "invalid YAML frontmatter: while scanning a quoted scalar, \
+             found unexpected end of stream at byte 8 line 2 column 4"
+        );
     }
 
     #[test]
@@ -3095,7 +3580,7 @@ mod tests {
             // The tagged sibling is what routes the block through this builder
             // at all; marked-yaml would take a block without it.
             let source = format!("first: {first}\nsecond: {second}\ntagged: !!str x\n");
-            let mapping = exact_frontmatter_mapping(&source)
+            let mapping = exact_frontmatter_mapping(&source, NO_MARK)
                 .unwrap_or_else(|error| panic!("{source:?}: {error}"));
             assert_eq!(mapping["first"].to_string(), first);
             assert_eq!(mapping["second"].to_string(), second);
