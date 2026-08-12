@@ -146,8 +146,9 @@ diagnostics model are both plural by design.
 
 ## Dependencies
 
-Current: `serde`, `serde_json`, `serde_yaml` in core; `serde_json` in the
-CLI. Note that `serde_yaml` is unmaintained upstream; if the loader needs
+Current: `serde`, `serde_json`, `yaml_serde` in core; `serde_json` in the
+CLI. `yaml_serde` is The YAML Organization's maintained continuation of
+dtolnay's deprecated `serde_yaml` and keeps its API; if the loader needs
 a different YAML crate, raise it rather than working around it.
 
 Two additions are expected and need no debate when the work reaches them:

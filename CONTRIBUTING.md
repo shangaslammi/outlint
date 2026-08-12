@@ -163,8 +163,9 @@ design choice; do not restate the signature.
 
 New dependencies need a concrete justification in the pull request. The CLI
 argument parser is hand-rolled on purpose and that is fine at this size.
-Note that `serde_yaml` is unmaintained upstream; if you need different YAML
-behavior, raise it in an issue rather than working around it.
+YAML goes through `yaml_serde`, The YAML Organization's maintained
+continuation of dtolnay's deprecated `serde_yaml`; if you need different
+YAML behavior, raise it in an issue rather than working around it.
 
 Not planned, and please do not add speculatively: async or threading, an
 error-reporting framework (`thiserror`, `anyhow`, `miette` — errors are plain
