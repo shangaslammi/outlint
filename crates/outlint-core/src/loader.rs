@@ -666,6 +666,10 @@ struct Loader {
     source: Arc<str>,
     sources: SchemaSources,
     document_range: SourceRange,
+    /// Whether the source nests past the depth every recursive walk over it
+    /// has to survive. Answered before the first of those walks runs and
+    /// reported by [`Loader::load`], which owns the error list.
+    too_deep: bool,
     ranges: RangeIndex,
     errors: Vec<SchemaError>,
     nodes: BTreeMap<SchemaNode, SourceRange>,
@@ -686,7 +690,14 @@ impl Loader {
                 end: ByteOffset(source.len()),
             },
         };
-        let ranges = RangeIndex::from_source(&source);
+        // The range index is the first tree built over the source and recurses
+        // over it, so the depth question is settled before it, not in `load`.
+        let too_deep = crate::markdown::yaml_nesting_exceeds_limit(&source);
+        let ranges = if too_deep {
+            RangeIndex::default()
+        } else {
+            RangeIndex::from_source(&source)
+        };
         let mut sources = primary_sources(Arc::clone(&source), label);
         let external_schema = external_schema.map(|external| {
             let mut source_ids = BTreeMap::new();
@@ -725,6 +736,7 @@ impl Loader {
             sources,
             source,
             document_range,
+            too_deep,
             ranges,
             errors: Vec::new(),
             nodes: BTreeMap::new(),
@@ -734,6 +746,18 @@ impl Loader {
     }
 
     fn load(mut self) -> LoadSchemaResult {
+        if self.too_deep {
+            // The whole document is the anchor: the position where the nesting
+            // passed the limit is a position no reader of the schema can act
+            // on, since what is wrong is the shape of the document, not a
+            // character of it.
+            self.error_at(
+                SchemaErrorKind::Syntax,
+                self.document_range,
+                "invalid YAML: nesting exceeds the depth limit",
+            );
+            return self.failure();
+        }
         let value: Value = match yaml_serde::from_str(&self.source) {
             Ok(value) => value,
             Err(error) => {
@@ -2321,6 +2345,45 @@ mod tests {
                 end: ByteOffset(8),
             }
         );
+    }
+
+    /// A schema of `rules` rules, each the sole child of the one above it.
+    ///
+    /// Nesting is what a schema spends YAML depth on, two levels per rule: the
+    /// `sections` sequence and the rule mapping it holds.
+    fn nested_rule_schema(rules: usize) -> String {
+        let mut source = String::from("version: 1\n");
+        for rule in 0..rules {
+            let indent = "  ".repeat(rule * 2);
+            source.push_str(&format!(
+                "{indent}sections:\n{indent}  - match: \"h{rule}\"\n"
+            ));
+        }
+        source
+    }
+
+    #[test]
+    fn schema_nesting_is_bounded() {
+        // Every tree the loader builds over the source recurses, so a schema
+        // nesting past the depth limit is refused before the first of them is
+        // built rather than overrunning the stack inside one. Two levels per
+        // rule plus the document's own mapping puts the deepest schema that
+        // fits at 63 rules, and the first that does not at 64.
+        let schema = valid(&nested_rule_schema(63));
+        assert_eq!(schema.sections.len(), 1);
+
+        for rules in [64, 5_000] {
+            let invalid = invalid(&nested_rule_schema(rules));
+            assert_eq!(invalid.errors.first.kind, SchemaErrorKind::Syntax);
+            assert_eq!(
+                invalid.errors.first.message,
+                "invalid YAML: nesting exceeds the depth limit"
+            );
+            // Nothing was read deeply enough to place the failure, so it is
+            // anchored to the whole document.
+            let source = nested_rule_schema(rules);
+            assert_eq!(source_slice(&source, invalid.errors.first.range), source);
+        }
     }
 
     #[test]
