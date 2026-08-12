@@ -1438,6 +1438,100 @@ fn schema_check_handles_directories_bom_and_invalid_utf8_as_specified() {
     assert!(stderr(&failures).contains("missing.yml"));
 }
 
+/// Writes a linked JSON Schema whose root reference starts a chain of `links`
+/// hops ending at `true`, declaring `links + 1` references in all.
+///
+/// However long the chain, the document nests three levels: this is the shape
+/// no depth bound can see.
+fn write_reference_chain_schema(directory: &TempDir, links: usize) {
+    let mut definitions = serde_json::Map::new();
+    definitions.insert("end".into(), Value::Bool(true));
+    for index in 0..links {
+        let target = if index + 1 == links {
+            "#/$defs/end".to_owned()
+        } else {
+            format!("#/$defs/{}", index + 1)
+        };
+        definitions.insert(index.to_string(), serde_json::json!({ "$ref": target }));
+    }
+    directory.write(
+        "frontmatter.schema.json",
+        serde_json::json!({ "$ref": "#/$defs/0", "$defs": definitions }).to_string(),
+    );
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+}
+
+#[test]
+fn schema_check_refuses_a_reference_chain_instead_of_overrunning_the_stack() {
+    // Compiling a `$ref` re-enters the JSON Schema compiler at its target, so
+    // a chain costs a stack frame per link; a long enough one aborted the
+    // process, which reaches the user as a signal and no diagnostic rather
+    // than as a verdict. Every link of it sits at the same JSON depth, so
+    // neither the YAML nesting limit nor `serde_json`'s parse limit can refuse
+    // it -- the quantity that has to be bounded is the count. Asserting an
+    // exit code at all is half the point: an abort has none.
+    let directory = TempDir::new("linked-frontmatter-ref-chain");
+    write_reference_chain_schema(&directory, 4_000);
+
+    let output = run(
+        &directory,
+        &["schema", "check", "schema.yml", "--format", "json"],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    let json = json_output(&output);
+    let diagnostic = &json["results"][0]["diagnostics"][0];
+    assert_eq!(diagnostic["id"], "invalid-frontmatter-schema");
+    assert_eq!(
+        diagnostic["message"],
+        "linked JSON Schema declares more than 128 `$ref` or `$dynamicRef` keywords"
+    );
+    assert!(
+        diagnostic["schema_location"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("frontmatter.schema.json")),
+        "the diagnostic names the document holding the chain"
+    );
+}
+
+#[test]
+fn checking_a_document_refuses_a_reference_chain_instead_of_overrunning_the_stack() {
+    // The same graph is compiled again when a validator is prepared, so
+    // checking a document reached the same recursion by a different route and
+    // aborted identically -- no Markdown was needed to trigger it. Both
+    // commands are pinned because a bound charged on only one of them would
+    // leave the crash reachable from the other.
+    let directory = TempDir::new("linked-frontmatter-ref-chain-check");
+    write_reference_chain_schema(&directory, 4_000);
+    directory.write("document.md", "---\nstatus: draft\n---\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "document.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    let json = json_output(&output);
+    let diagnostic = &json["results"][0]["diagnostics"][0];
+    assert_eq!(diagnostic["id"], "invalid-frontmatter-schema");
+    assert_eq!(
+        diagnostic["message"],
+        "linked JSON Schema declares more than 128 `$ref` or `$dynamicRef` keywords"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_command_line_paths_are_an_explicit_usage_error() {

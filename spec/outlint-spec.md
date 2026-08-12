@@ -251,6 +251,23 @@ diagnostic `frontmatter-schema` carrying the JSON Pointer of the failing
 location and the validator's message. Absent frontmatter with
 `required: false` skips `schema` validation entirely.
 
+A reference is resolved by reading the schema it names, so a reference whose
+target holds another reference is read through both, and a chain of them is
+read through all of it at once. That cost is a chain's length and nothing else:
+each link may sit at the same nesting as every other, so the depth limits of
+§1.6 and §2 are satisfied however long the chain grows, and it may be spelled
+across as many documents as the graph has. An implementation MAY therefore
+refuse a linked schema graph declaring more references than a fixed limit. The
+limit MUST be at least 64 references counted over the whole graph rather than
+per document, since a chain crosses documents as freely as it stays within one
+and a per-document count would bound nothing. A graph exceeding the limit is
+schema error `invalid-frontmatter-schema`, decided before the graph is
+validated against, so the same graph is refused whether a document is being
+checked or the schema is being checked on its own. Cycles are not what this
+bounds: a reference reached a second time on one path resolves to the schema
+already being read, and cycles within and between files are required above to
+resolve, so an implementation MUST NOT refuse a graph for being cyclic.
+
 Outlint's own frontmatter awareness is limited to presence and equality via
 `fm.` refs in constraints (§4.6). Richer value logic belongs in the JSON
 Schema.

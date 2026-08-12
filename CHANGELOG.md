@@ -46,7 +46,10 @@ feature set of the `0.1.0` workspace.
   byte-order mark leading the block is dropped rather than becoming part of the
   first key. Alias expansion is bounded by a multiple of the block's own size
   and collection nesting by a fixed depth limit, which the value an alias
-  expands to counts against exactly as the written text does.
+  expands to counts against exactly as the written text does. A linked graph is
+  bounded in turn by how many `$ref` and `$dynamicRef` keywords it declares in
+  all, counted across its documents rather than within each, because a chain of
+  references costs a stack frame per link however shallowly its documents nest.
 - **Core library** (`outlint-core`): a pure, IO-free schema loader, Markdown
   outline parser, and validator. Schema loading collects every error rather
   than stopping at the first, and never returns a partial schema.

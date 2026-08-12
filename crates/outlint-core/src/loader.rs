@@ -184,6 +184,7 @@ fn prepare_external_schema_result(
     let mut parsed = BTreeMap::new();
     let mut seen = HashSet::new();
     let mut errors = Vec::new();
+    let mut references = 0usize;
     for (index, resource) in input.resources.iter().enumerate() {
         let source = external_source_id(index).unwrap_or(SourceId(0));
         if !seen.insert(resource.uri.clone()) {
@@ -216,6 +217,19 @@ fn prepare_external_schema_result(
         if let Err(message) = validate_json_schema_document(&value) {
             errors.push(PreparedExternalError { source, message });
             continue;
+        }
+        // The budget spans the graph rather than any one document, so it is
+        // charged as the documents arrive and reported against the one that
+        // spends the last of it. Nothing later can bring the total back under,
+        // and an over-budget graph is never compiled, so stop reading here
+        // instead of listing local faults in resources that will not be used.
+        references = references.saturating_add(json_schema_reference_count(&value));
+        if references > MAX_JSON_SCHEMA_REFERENCES {
+            errors.push(PreparedExternalError {
+                source,
+                message: json_schema_reference_budget_message(),
+            });
+            break;
         }
         parsed.insert(resource.uri.clone(), value);
     }
@@ -290,6 +304,80 @@ fn single_external_error(error: PreparedExternalError) -> NonEmpty<PreparedExter
         first: error,
         rest: Vec::new(),
     }
+}
+
+/// How many reference keywords one linked JSON Schema graph may declare.
+///
+/// Compiling a reference re-enters the compiler at the target, so a chain of
+/// references costs one stack frame per link however flat the documents that
+/// spell it are: every link of `{"$ref":"#/x/1"}, {"$ref":"#/x/2"}, ...` sits
+/// at the same JSON depth, which is why neither the YAML depth limit nor
+/// `serde_json`'s parse limit sees the chain at all. What the limit therefore
+/// has to bound is a count, not a nesting.
+///
+/// It counts occurrences rather than the longest chain because a chain's
+/// length is only knowable by resolving every reference the way the compiler
+/// does — through `$id`, `$anchor`, `$dynamicAnchor`, JSON pointers, and
+/// across resources — and a second implementation of that resolution would
+/// either refuse graphs the compiler handles or, worse, admit ones it cannot.
+/// A count needs no resolution and still bounds the recursion, since a stack
+/// path enters each reference keyword at most once: cycles are cut by the
+/// compiler's own pending-node cache, which is why a self-reference or a
+/// mutual pair compiles today rather than overflowing.
+///
+/// The value is the constant this crate already uses wherever structure has to
+/// be bounded, and which `serde_json` and `yaml_serde` default to. Measured
+/// against the compiler, a link costs about 1.7 KB of stack optimized and
+/// about 6 KB unoptimized, so 128 links stay under a megabyte in the tightest
+/// configuration — an unoptimized build on a two-megabyte thread, where the
+/// abort begins around 345 links. Measured against real schemas it is far
+/// above anything one contains: the whole conformance corpus declares at most
+/// four references across a linked graph and its deepest chain is two.
+pub(crate) const MAX_JSON_SCHEMA_REFERENCES: usize = 128;
+
+/// Reports the shared wording for a graph that spends more than the budget.
+pub(crate) fn json_schema_reference_budget_message() -> String {
+    format!(
+        "linked JSON Schema declares more than {MAX_JSON_SCHEMA_REFERENCES} \
+         `$ref` or `$dynamicRef` keywords"
+    )
+}
+
+/// Counts the `$ref` and `$dynamicRef` keywords one JSON document declares.
+///
+/// The walk carries an explicit stack rather than recursing, so what it costs
+/// the call stack does not depend on the limit it enforces. A counter that
+/// recursed would be safe only while a limit's worth of its own frames still
+/// fit, which ties the choice of limit to the shape of the check and would
+/// turn a later raise of the limit into the very overflow being refused here.
+/// Those two keywords are the ones whose
+/// compilation re-enters the compiler under draft 2020-12, the only dialect
+/// [`validate_json_schema_document`] admits, and they are the same pair
+/// [`collect_external_references`] follows.
+///
+/// Every occurrence of either name is counted, including one used as a
+/// property name or buried in a `const`, which cannot drive the compiler and
+/// so only makes the bound stricter than it needs to be. Distinguishing them
+/// would mean knowing which positions are schemas, which is the resolution
+/// this count exists to avoid.
+pub(crate) fn json_schema_reference_count(value: &serde_json::Value) -> usize {
+    let mut references = 0usize;
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (keyword, child) in object {
+                    if matches!(keyword.as_str(), "$ref" | "$dynamicRef") {
+                        references = references.saturating_add(1);
+                    }
+                    pending.push(child);
+                }
+            }
+            serde_json::Value::Array(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    references
 }
 
 fn validate_json_schema_document(value: &serde_json::Value) -> Result<(), String> {
@@ -666,9 +754,15 @@ struct Loader {
     source: Arc<str>,
     sources: SchemaSources,
     document_range: SourceRange,
-    /// Whether the source nests past the depth every recursive walk over it
-    /// has to survive. Answered before the first of those walks runs and
-    /// reported by [`Loader::load`], which owns the error list.
+    /// Whether the source's own text nests collections past the limit. What
+    /// this counts is parser events, so an alias contributes one level here
+    /// however deep the value it names, and the depth a walk over the built
+    /// tree actually reaches can exceed it. Nothing more is needed on this
+    /// path: marked-yaml refuses a document defining an anchor at all, so the
+    /// range index never expands one, and `yaml_serde` applies its own
+    /// recursion limit — the same 128 — while expanding, inheriting it across
+    /// each alias jump. Answered before the first walk runs and reported by
+    /// [`Loader::load`], which owns the error list.
     too_deep: bool,
     ranges: RangeIndex,
     errors: Vec<SchemaError>,
@@ -3259,6 +3353,106 @@ sections: []
 
     fn linked_schema_source() -> &'static str {
         "version: 1\nfrontmatter:\n  schema: root.json\nsections: []\n"
+    }
+
+    /// Builds a document whose root reference starts a chain of `links` hops,
+    /// the last of which targets `tail`. It declares `links + 1` references
+    /// and nests three levels however long the chain is.
+    fn reference_chain(links: usize, tail: &str) -> String {
+        let mut definitions = serde_json::Map::new();
+        definitions.insert("end".into(), serde_json::Value::Bool(true));
+        for index in 0..links {
+            let target = if index + 1 == links {
+                tail.to_owned()
+            } else {
+                format!("#/$defs/{}", index + 1)
+            };
+            definitions.insert(index.to_string(), serde_json::json!({ "$ref": target }));
+        }
+        serde_json::json!({ "$ref": "#/$defs/0", "$defs": definitions }).to_string()
+    }
+
+    #[test]
+    fn refuses_a_reference_chain_longer_than_the_compiler_can_recurse_over() {
+        // Compiling a reference re-enters the compiler at its target, so a
+        // chain costs a stack frame per link while every link of it sits at
+        // the same JSON depth: the YAML depth limit and `serde_json`'s parse
+        // limit are both satisfied with room to spare by a chain long enough
+        // to abort the process. The count is charged before the graph reaches
+        // the compiler, so the boundary is pinned on both sides -- a graph
+        // spending the whole budget must still load, or the bound would be
+        // free to drift downwards unnoticed.
+        let at_budget = reference_chain(MAX_JSON_SCHEMA_REFERENCES - 1, "#/$defs/end");
+        assert_eq!(
+            json_schema_reference_count(
+                &serde_json::from_str(&at_budget).expect("chain is valid JSON")
+            ),
+            MAX_JSON_SCHEMA_REFERENCES
+        );
+        linked(&at_budget, &[]).expect("a graph spending the whole budget still loads");
+
+        let over_budget = reference_chain(MAX_JSON_SCHEMA_REFERENCES, "#/$defs/end");
+        let invalid = linked(&over_budget, &[]).expect_err("one reference more is refused");
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(
+            invalid.errors.first.message,
+            json_schema_reference_budget_message()
+        );
+        assert_eq!(invalid.errors.first.range.source, SourceId(1));
+        assert!(invalid.errors.rest.is_empty());
+    }
+
+    #[test]
+    fn the_reference_budget_counts_dynamic_references_too() {
+        // `$dynamicRef` compiles through the same function as `$ref` and
+        // re-enters the compiler the same way, so a chain of them aborts at
+        // the same length. Counting only `$ref` would leave the crash
+        // reachable by renaming one keyword.
+        let over_budget = reference_chain(MAX_JSON_SCHEMA_REFERENCES, "#/$defs/end")
+            .replace(r#""$ref""#, r#""$dynamicRef""#);
+        let invalid = linked(&over_budget, &[]).expect_err("a dynamic chain is a chain");
+        assert_eq!(
+            invalid.errors.first.message,
+            json_schema_reference_budget_message()
+        );
+    }
+
+    #[test]
+    fn the_reference_budget_spans_the_graph_and_names_where_it_runs_out() {
+        // The compiler recurses across resource boundaries as readily as
+        // within one, so a per-document budget would be no budget at all: two
+        // documents each under it can name a chain twice as long as either.
+        // The total is therefore charged over the graph, and reported against
+        // the resource whose references spend the last of it rather than the
+        // root, so the diagnostic points at a document the author can shorten.
+        let half = MAX_JSON_SCHEMA_REFERENCES / 2;
+        let root = reference_chain(half - 1, "defs.json#/$defs/0");
+        let definitions = reference_chain(half, "#/$defs/end");
+        assert_eq!(
+            json_schema_reference_count(&serde_json::from_str(&root).expect("root is valid JSON"))
+                + json_schema_reference_count(
+                    &serde_json::from_str(&definitions).expect("defs are valid JSON")
+                ),
+            MAX_JSON_SCHEMA_REFERENCES + 1
+        );
+
+        let invalid = linked(
+            &root,
+            &[("https://outlint.invalid/defs.json", &definitions)],
+        )
+        .expect_err("a chain split across two documents is still one chain");
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(
+            invalid.errors.first.message,
+            json_schema_reference_budget_message()
+        );
+        assert_eq!(invalid.errors.first.range.source, SourceId(2));
     }
 
     #[test]
