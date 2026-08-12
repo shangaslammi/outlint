@@ -305,12 +305,13 @@ fn parse_frontmatter(
         end_line: closing_line as u64,
     };
     let body = source.get(body_start..body_end).unwrap_or_default();
-    let parsed = match frontmatter_documents(body) {
+    let parsed = match scan_frontmatter(body) {
         // §1.6: empty content, comments included, is not a mapping, while an
         // explicit `{}` is. Both reach marked-yaml as the same empty mapping.
-        FrontmatterDocuments::None => Err("frontmatter must be a YAML mapping".into()),
-        FrontmatterDocuments::Several => Err("frontmatter must be a single YAML document".into()),
-        FrontmatterDocuments::One | FrontmatterDocuments::Unreadable => {
+        FrontmatterScan::None => Err("frontmatter must be a YAML mapping".into()),
+        FrontmatterScan::Several => Err("frontmatter must be a single YAML document".into()),
+        FrontmatterScan::TooDeep => Err("frontmatter nests YAML beyond its depth limit".into()),
+        FrontmatterScan::One | FrontmatterScan::Unreadable => {
             let options = MarkedYamlOptions::default()
                 .error_on_duplicate_keys(true)
                 .prevent_coercion(true);
@@ -443,16 +444,17 @@ impl<'a> LineCursor<'a> {
     }
 }
 
-/// What the frontmatter body's YAML event stream says about its documents.
+/// What the frontmatter body's YAML event stream says about it.
 ///
 /// Neither tree this module builds can answer this on its own. marked-yaml
 /// reports an empty body as an empty mapping, so `---\n---` and `---\n{}\n---`
 /// arrive at it identically while §1.6 makes the first `invalid-frontmatter`
 /// and the second a valid empty mapping. It also stops at the first document of
 /// a stream, so a body opening a second one would otherwise be accepted with
-/// everything past the first silently dropped.
+/// everything past the first silently dropped. Neither tree can be asked how
+/// deeply the body nests either, since building one is what overruns the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FrontmatterDocuments {
+enum FrontmatterScan {
     /// No document at all: empty, blank, or comment-only content.
     None,
     /// Exactly one document, which the tree parsers can be trusted with.
@@ -463,21 +465,27 @@ enum FrontmatterDocuments {
     /// marker rather than by a start marker. Either way marked-yaml stops at
     /// the first document and cannot see what follows it.
     Several,
+    /// Collections nested past [`MAX_YAML_DEPTH`], which no tree parser here
+    /// may be handed.
+    TooDeep,
     /// The stream did not parse, and it failed early enough that the tree
     /// parsers meet the same failure. The verdict is left to them, since they
     /// report it against a position and this scan has none to give.
     Unreadable,
 }
 
-/// Counts the documents the frontmatter body opens, without building a tree.
+/// Reads the frontmatter body's event stream, without building a tree.
 ///
 /// A document is exactly a `DocumentStart`, and a body holding none yields
 /// `StreamStart` followed directly by `StreamEnd`. Counting stops at the second
-/// one, which is all the caller distinguishes.
-fn frontmatter_documents(body: &str) -> FrontmatterDocuments {
+/// one, which is all the caller distinguishes. Depth is tracked in the same
+/// pass, because both questions are answered by the same events and the body
+/// should not be read twice to ask them separately.
+fn scan_frontmatter(body: &str) -> FrontmatterScan {
     let mut parser = YamlParser::new_from_str(body);
     let mut documents = 0usize;
     let mut closed = false;
+    let mut depth = 0usize;
     loop {
         let Ok((event, _)) = parser.next_token() else {
             // Where the stream fails decides who can report it. A failure
@@ -485,22 +493,87 @@ fn frontmatter_documents(body: &str) -> FrontmatterDocuments {
             // failure after that document closed is past the point marked-yaml
             // stops at, so deferring would accept the body and drop the rest.
             return if closed {
-                FrontmatterDocuments::Several
+                FrontmatterScan::Several
             } else {
-                FrontmatterDocuments::Unreadable
+                FrontmatterScan::Unreadable
             };
         };
+        if track_yaml_depth(&event, &mut depth) {
+            return FrontmatterScan::TooDeep;
+        }
         match event {
             YamlEvent::DocumentStart => {
                 documents += 1;
                 if documents > 1 {
-                    return FrontmatterDocuments::Several;
+                    return FrontmatterScan::Several;
                 }
             }
             YamlEvent::DocumentEnd => closed = true,
-            YamlEvent::StreamEnd if documents == 0 => return FrontmatterDocuments::None,
-            YamlEvent::StreamEnd => return FrontmatterDocuments::One,
+            YamlEvent::StreamEnd if documents == 0 => return FrontmatterScan::None,
+            YamlEvent::StreamEnd => return FrontmatterScan::One,
             _ => {}
+        }
+    }
+}
+
+/// How deeply YAML collections may nest before Outlint refuses to read them.
+///
+/// Every tree over YAML in this crate is built and walked by recursion — the
+/// marked-yaml loader, the exact fallback, both conversions to JSON, and the
+/// dropping of the JSON value itself — so nesting costs stack rather than the
+/// heap the [node budget](EXACT_YAML_NODES_PER_EVENT) bounds. A compact block
+/// sequence nests without indenting, so `- - - …` on one short line reaches a
+/// depth no stack survives, and the parser's own `recursion limit` counts flow
+/// nesting alone and never sees it. A fixed limit is the right shape here where
+/// a size-scaled one is not: what a level costs is a stack frame, which the
+/// input's size says nothing about.
+///
+/// The value is `yaml_serde`'s own long-standing recursion limit, which this
+/// module had for free while frontmatter was parsed through serde, and
+/// serde_json's default nesting limit for the same purpose. Frontmatter written
+/// to be read nests two or three deep and a schema a handful, so the limit is
+/// an order of magnitude clear of any document meant for a reader, and §1.6
+/// requires at least half of it of any implementation.
+const MAX_YAML_DEPTH: usize = 128;
+
+/// Follows one event's effect on nesting depth, reporting an overrun.
+///
+/// Counting events is what makes the bound safe to apply: the event stream is
+/// produced iteratively, so the scan reaches any depth the input names without
+/// recursing itself.
+fn track_yaml_depth(event: &YamlEvent, depth: &mut usize) -> bool {
+    match event {
+        YamlEvent::SequenceStart(..) | YamlEvent::MappingStart(..) => {
+            *depth += 1;
+            *depth > MAX_YAML_DEPTH
+        }
+        YamlEvent::SequenceEnd | YamlEvent::MappingEnd => {
+            *depth = depth.saturating_sub(1);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Reports whether a whole YAML document nests past [`MAX_YAML_DEPTH`].
+///
+/// The frontmatter path folds this question into [`scan_frontmatter`], which
+/// reads the same stream for other reasons. A schema document has no such scan
+/// to join, so it gets this one, which is still cheaper than the tree parses it
+/// guards: it allocates nothing per level. A stream that does not parse is not
+/// too deep, and is left to the parse that reports it against a position.
+pub(crate) fn yaml_nesting_exceeds_limit(source: &str) -> bool {
+    let mut parser = YamlParser::new_from_str(source);
+    let mut depth = 0usize;
+    loop {
+        let Ok((event, _)) = parser.next_token() else {
+            return false;
+        };
+        if track_yaml_depth(&event, &mut depth) {
+            return true;
+        }
+        if matches!(event, YamlEvent::StreamEnd) {
+            return false;
         }
     }
 }
@@ -2433,6 +2506,99 @@ mod tests {
             panic!("repeated aliases to one node remain valid: {document:?}")
         };
         assert_eq!(value["copy9"], serde_json::json!([1, 2, 3]));
+    }
+
+    /// Frontmatter whose one entry nests `levels` compact block sequences.
+    ///
+    /// A compact sequence opens a level per `- ` without indenting, so the
+    /// whole block stays one short line however deep it goes, and the mapping
+    /// §1.6 requires of it is the first of the levels the limit counts.
+    fn deeply_nested_frontmatter(levels: usize, tagged: bool) -> String {
+        let tag = if tagged { "tag: !!str x\n" } else { "" };
+        format!("---\n{tag}deep:\n {}1\n---\n# Title\n", "- ".repeat(levels))
+    }
+
+    /// Walks to the innermost sequence of [`deeply_nested_frontmatter`].
+    fn innermost_sequence(
+        value: &serde_json::Map<String, serde_json::Value>,
+        levels: usize,
+    ) -> &serde_json::Value {
+        let mut node = &value["deep"];
+        for _ in 1..levels {
+            node = &node[0];
+        }
+        node
+    }
+
+    #[test]
+    fn frontmatter_nesting_is_bounded() {
+        // One level under the limit, both tree parsers still build the value.
+        let levels = MAX_YAML_DEPTH - 1;
+        let document = parse_markdown(
+            &deeply_nested_frontmatter(levels, false),
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { value, anchors, .. } = document.frontmatter else {
+            panic!("nesting within the limit stays valid: {document:?}")
+        };
+        assert_eq!(innermost_sequence(&value, levels)[0], serde_json::json!(1));
+        // A tag routes the same block through the exact fallback instead,
+        // which is the parser that reports no positions at all.
+        let document = parse_markdown(
+            &deeply_nested_frontmatter(levels, true),
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping {
+            value,
+            anchors: fallback_anchors,
+            ..
+        } = document.frontmatter
+        else {
+            panic!("nesting within the limit stays valid through the fallback: {document:?}")
+        };
+        assert_eq!(innermost_sequence(&value, levels)[0], serde_json::json!(1));
+        assert!(!anchors.is_empty() && fallback_anchors.is_empty());
+
+        // One level over it, and at a depth that overran the stack before the
+        // scan was asked, neither parser is handed the block at all.
+        for levels in [MAX_YAML_DEPTH, 30_000] {
+            for tagged in [false, true] {
+                let source = deeply_nested_frontmatter(levels, tagged);
+                let document = parse_markdown(&source, MarkdownOptions::default());
+                let DocumentFrontmatter::Invalid { location, message } = document.frontmatter
+                else {
+                    panic!("nesting past the limit must be rejected: {levels} levels, {tagged}")
+                };
+                assert_eq!(message, "frontmatter nests YAML beyond its depth limit");
+                assert_eq!(location.start_line, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn nesting_depth_counts_collections_that_are_open_at_once() {
+        // Siblings are not nesting: a mapping of many one-level entries closes
+        // each before opening the next, so no bound on depth may reject it.
+        let mut wide = String::from("---\n");
+        for entry in 0..MAX_YAML_DEPTH * 2 {
+            wide.push_str(&format!("key{entry}: [1, 2, 3]\n"));
+        }
+        wide.push_str("---\n");
+        let document = parse_markdown(&wide, MarkdownOptions::default());
+        assert!(matches!(
+            document.frontmatter,
+            DocumentFrontmatter::Mapping { .. }
+        ));
+
+        // The scan the schema path uses answers the same question, counting
+        // the document's own root mapping as the first level.
+        let nested = |levels: usize| format!("deep:\n {}1\n", "- ".repeat(levels));
+        assert!(!yaml_nesting_exceeds_limit(&nested(MAX_YAML_DEPTH - 1)));
+        assert!(yaml_nesting_exceeds_limit(&nested(MAX_YAML_DEPTH)));
+        // Nothing to read is not too deep, and neither is a stream that fails
+        // to parse: the parse that reports it is the one with a position.
+        assert!(!yaml_nesting_exceeds_limit(""));
+        assert!(!yaml_nesting_exceeds_limit("key: value: bad\n"));
     }
 
     #[test]

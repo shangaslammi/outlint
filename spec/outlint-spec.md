@@ -110,6 +110,18 @@ an absolute ceiling. A block exceeding the bound is `invalid-frontmatter`. An
 implementation MUST NOT instead validate a truncated value, which would report
 a verdict on a document it did not read in full.
 
+How deeply a block nests is a separate cost, and one the bound above does not
+reach: a value nested one level deeper is one level deeper for everything that
+reads it, and a compact block sequence opens a level per two characters, so a
+block small enough to satisfy any size-scaled bound can still nest thousands of
+levels. An implementation MAY therefore refuse frontmatter nesting collections
+deeper than a fixed limit. A constant is the right shape here where it was the
+wrong one above, because what one level costs a reader does not depend on how
+much input named it. The limit MUST be at least 64 levels, which no frontmatter
+written for a reader approaches, so that where an implementation set it decides
+nothing about a document anyone meant to write. A block exceeding it is
+`invalid-frontmatter`.
+
 ---
 
 ## 2. Schema format
@@ -127,6 +139,13 @@ frontmatter: <frontmatter-object>  # optional, see §2.3
 sections: [<rule>, ...]   # rules for h2 headers
 constraints: [<constraint>, ...]   # optional, see §5
 ```
+
+A schema document is read as YAML on the same terms as frontmatter, so an
+implementation MAY refuse one nesting deeper than the limit of §1.6. A schema
+exceeding it is schema error `syntax`. The limit binds the document as written,
+not the rule nesting it expresses: a rule and its `sections` list are two
+levels, so the shallowest limit §1.6 permits still admits far deeper rule
+nesting than the six header levels of §1.2 can address.
 
 ### 2.1 Rule object
 
