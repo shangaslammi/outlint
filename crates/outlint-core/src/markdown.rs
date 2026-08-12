@@ -15,10 +15,10 @@ use marked_yaml::{
 };
 use num_bigint::BigUint;
 use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag};
-use yaml_rust2::{
-    parser::{Event as YamlEvent, Parser as YamlParser, Tag as YamlTag},
-    scanner::TScalarStyle,
+use saphyr_parser::{
+    Event as ExactEvent, Parser as ExactParser, ScalarStyle, StrInput, Tag as YamlTag,
 };
+use yaml_rust2::parser::{Event as YamlEvent, Parser as YamlParser};
 
 use crate::{ByteOffset, HeaderLevel, TextRange};
 
@@ -672,8 +672,8 @@ fn marked_yaml_to_json(
 /// `may_coerce` cannot, since it is false for quoted and block scalars alike.
 ///
 /// The scalar's style would separate them, and that is a limit of this parser's
-/// surface rather than of the problem. `yaml-rust2`, already read for
-/// [`TScalarStyle`] in [`parse_exact_yaml`], reports a style beside a marker on
+/// surface rather than of the problem. `yaml-rust2`, already read by
+/// [`scan_frontmatter`], reports a [style](ScalarStyle) beside a marker on
 /// the same event, and a quoted scalar always has its opening quote in the
 /// source, so it is never marked at a later entry's token — while a plain,
 /// literal, or folded all-break scalar always is. Reading it here would mean a
@@ -826,6 +826,16 @@ fn json_number_preserving_lexeme(
     json_number(canonical)
 }
 
+/// One node of the tree the exact fallback builds out of parser events.
+///
+/// A mapping keeps its entries as an ordered `Vec` rather than a map so that
+/// two keys spelled differently but resolving alike stay visible to the
+/// duplicate checks, and so that a key which is not a scalar at all still has
+/// somewhere to live until the conversion rejects it. The scalar's style and
+/// tag ride along because both decide how its text becomes a JSON value, and a
+/// tag rides on the collections too: `saphyr-parser` reports one on a sequence
+/// or mapping start exactly as it does on a scalar, and the conversion below
+/// checks all three.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ExactYamlNode {
     Scalar(ExactYamlScalar),
@@ -839,10 +849,16 @@ enum ExactYamlNode {
     },
 }
 
+/// A scalar's source text beside the two things that decide what it means.
+///
+/// The parser hands the text out as a `Cow` borrowed from the block, and this
+/// takes ownership of it: the tree outlives the parser that produced it, and
+/// alias expansion clones nodes anyway. What the borrow would have saved is
+/// smaller than what threading its lifetime through the tree would cost.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExactYamlScalar {
     value: String,
-    style: TScalarStyle,
+    style: ScalarStyle,
     tag: Option<YamlTag>,
 }
 
@@ -910,129 +926,208 @@ struct AnchoredYamlNode {
     nodes: usize,
 }
 
-fn parse_exact_yaml(source: &str) -> Result<ExactYamlNode, String> {
-    let mut parser = YamlParser::new_from_str(source);
-    let mut anchors = BTreeMap::new();
-    let mut budget = ExactYamlBudget::default();
-    expect_yaml_event(&mut parser, &mut budget, |event| {
-        matches!(event, YamlEvent::StreamStart)
-    })?;
-    expect_yaml_event(&mut parser, &mut budget, |event| {
-        matches!(event, YamlEvent::DocumentStart)
-    })?;
-    let event = next_yaml_event(&mut parser, &mut budget)?;
-    let value = parse_exact_yaml_node(event, &mut parser, &mut anchors, &mut budget)?;
-    expect_yaml_event(&mut parser, &mut budget, |event| {
-        matches!(event, YamlEvent::DocumentEnd)
-    })?;
-    expect_yaml_event(&mut parser, &mut budget, |event| {
-        matches!(event, YamlEvent::StreamEnd)
-    })?;
-    Ok(value)
+/// Builds the exact tree by pulling one event at a time from `saphyr-parser`.
+///
+/// The three things a node needs beyond the event itself all belong to the
+/// whole block rather than to any one node, so they are held together here: the
+/// anchor table an alias resolves through, the budget that bounds what those
+/// aliases may copy, and the parser the events come from. Pulling rather than
+/// being pushed at is what lets a refusal be a plain `?`: a receiver's callback
+/// returns nothing, so a bomb could only be recorded and reported after the
+/// parser had finished, where here it stops the read.
+struct ExactYamlReader<'source> {
+    parser: ExactParser<'source, StrInput<'source>>,
+    anchors: BTreeMap<usize, AnchoredYamlNode>,
+    budget: ExactYamlBudget,
 }
 
-fn parse_exact_yaml_node(
-    event: YamlEvent,
-    parser: &mut YamlParser<std::str::Chars<'_>>,
-    anchors: &mut BTreeMap<usize, AnchoredYamlNode>,
-    budget: &mut ExactYamlBudget,
-) -> Result<ExactYamlNode, String> {
-    let spent = budget.nodes;
-    let (node, anchor) = match event {
-        YamlEvent::Scalar(value, style, anchor, tag) => {
-            budget.spend(1)?;
-            (
-                ExactYamlNode::Scalar(ExactYamlScalar { value, style, tag }),
+impl<'source> ExactYamlReader<'source> {
+    fn new(source: &'source str) -> Self {
+        Self {
+            parser: ExactParser::new_from_str(source),
+            anchors: BTreeMap::new(),
+            budget: ExactYamlBudget::default(),
+        }
+    }
+
+    /// Reads the next event, charging the budget for the input it took.
+    ///
+    /// The parser stops yielding after the stream ends, which the callers below
+    /// reach only by reading past a boundary they have already checked for, so
+    /// an exhausted stream is reported as the boundary error it would be.
+    fn next_event(&mut self) -> Result<ExactEvent<'source>, String> {
+        self.budget.events += 1;
+        match self.parser.next_event() {
+            // The span is deliberately dropped: this fallback records no
+            // positions, so carrying one would be a field nothing reads.
+            Some(Ok((event, _))) => Ok(event),
+            Some(Err(error)) => Err(format!("invalid YAML frontmatter: {error}")),
+            None => Err("frontmatter contains an unexpected YAML document boundary".into()),
+        }
+    }
+
+    /// Reads the next event and requires it to be the expected boundary.
+    fn expect_event(
+        &mut self,
+        expected: impl FnOnce(&ExactEvent<'source>) -> bool,
+    ) -> Result<(), String> {
+        let event = self.next_event()?;
+        if expected(&event) {
+            Ok(())
+        } else {
+            Err("frontmatter contains an unexpected YAML document boundary".into())
+        }
+    }
+
+    /// Builds the node the given event opens, reading whatever it contains.
+    ///
+    /// `depth` counts the collections already open around this node, so a
+    /// collection entered here occupies `depth + 1` and the document's own root
+    /// mapping is the first level. The recursion mirrors the nesting, which is
+    /// why the depth is bounded before the frame is taken rather than after.
+    fn node(&mut self, event: ExactEvent<'source>, depth: usize) -> Result<ExactYamlNode, String> {
+        let spent = self.budget.nodes;
+        let (node, anchor) = match event {
+            ExactEvent::Scalar(value, style, anchor, tag) => {
+                self.budget.spend(1)?;
+                (
+                    ExactYamlNode::Scalar(ExactYamlScalar {
+                        value: value.into_owned(),
+                        style,
+                        tag: tag.map(Cow::into_owned),
+                    }),
+                    anchor,
+                )
+            }
+            ExactEvent::SequenceStart(anchor, tag) => {
+                let depth = deeper_yaml_nesting(depth)?;
+                self.budget.spend(1)?;
+                let mut values = Vec::new();
+                loop {
+                    let event = self.next_event()?;
+                    if matches!(event, ExactEvent::SequenceEnd) {
+                        break;
+                    }
+                    values.push(self.node(event, depth)?);
+                }
+                (
+                    ExactYamlNode::Sequence {
+                        tag: tag.map(Cow::into_owned),
+                        values,
+                    },
+                    anchor,
+                )
+            }
+            ExactEvent::MappingStart(anchor, tag) => {
+                let depth = deeper_yaml_nesting(depth)?;
+                self.budget.spend(1)?;
+                let mut entries = Vec::new();
+                loop {
+                    let event = self.next_event()?;
+                    if matches!(event, ExactEvent::MappingEnd) {
+                        break;
+                    }
+                    let key = self.node(event, depth)?;
+                    let event = self.next_event()?;
+                    let value = self.node(event, depth)?;
+                    // Whole-node equality catches the keys the conversion never
+                    // reduces to a string — a sequence or mapping used as a key,
+                    // and an alias standing for one. Keys that do resolve to a
+                    // string are caught there instead, on the resolved text, so
+                    // that `a` and `"a"` are recognised as one key however
+                    // differently the two nodes compare here.
+                    if entries
+                        .iter()
+                        .any(|(existing, _): &(ExactYamlNode, ExactYamlNode)| existing == &key)
+                    {
+                        return Err("frontmatter contains a duplicate mapping key".into());
+                    }
+                    entries.push((key, value));
+                }
+                (
+                    ExactYamlNode::Mapping {
+                        tag: tag.map(Cow::into_owned),
+                        entries,
+                    },
+                    anchor,
+                )
+            }
+            ExactEvent::Alias(anchor) => {
+                let anchored = self
+                    .anchors
+                    .get(&anchor)
+                    .ok_or("frontmatter contains an unresolved YAML alias")?;
+                // The budget is charged the recorded size before the copy is
+                // taken, never after: charging afterwards would measure an
+                // allocation the refusal exists to prevent from happening.
+                self.budget.spend(anchored.nodes)?;
+                // An alias event carries no anchor of its own, so the copy names
+                // nothing and is not remembered.
+                (anchored.node.clone(), 0)
+            }
+            _ => return Err("frontmatter contains an unexpected YAML parser event".into()),
+        };
+        self.remember_anchor(anchor, &node, self.budget.nodes - spent);
+        Ok(node)
+    }
+
+    /// Holds a finished node for the aliases that name it.
+    ///
+    /// Anchor zero is `saphyr-parser`'s "no anchor", and a node is registered
+    /// only once it is built, so a collection cannot alias itself: the parser
+    /// resolves `&x` as soon as it reads it, while this table does not, and the
+    /// alias inside is refused as unresolved.
+    fn remember_anchor(&mut self, anchor: usize, node: &ExactYamlNode, nodes: usize) {
+        if anchor != 0 {
+            self.anchors.insert(
                 anchor,
-            )
+                AnchoredYamlNode {
+                    node: node.clone(),
+                    nodes,
+                },
+            );
         }
-        YamlEvent::SequenceStart(anchor, tag) => {
-            budget.spend(1)?;
-            let mut values = Vec::new();
-            loop {
-                let event = next_yaml_event(parser, budget)?;
-                if matches!(event, YamlEvent::SequenceEnd) {
-                    break;
-                }
-                values.push(parse_exact_yaml_node(event, parser, anchors, budget)?);
-            }
-            (ExactYamlNode::Sequence { tag, values }, anchor)
-        }
-        YamlEvent::MappingStart(anchor, tag) => {
-            budget.spend(1)?;
-            let mut entries = Vec::new();
-            loop {
-                let event = next_yaml_event(parser, budget)?;
-                if matches!(event, YamlEvent::MappingEnd) {
-                    break;
-                }
-                let key = parse_exact_yaml_node(event, parser, anchors, budget)?;
-                let event = next_yaml_event(parser, budget)?;
-                let value = parse_exact_yaml_node(event, parser, anchors, budget)?;
-                if entries
-                    .iter()
-                    .any(|(existing, _): &(ExactYamlNode, ExactYamlNode)| existing == &key)
-                {
-                    return Err("frontmatter contains a duplicate mapping key".into());
-                }
-                entries.push((key, value));
-            }
-            (ExactYamlNode::Mapping { tag, entries }, anchor)
-        }
-        YamlEvent::Alias(anchor) => {
-            let anchored = anchors
-                .get(&anchor)
-                .ok_or("frontmatter contains an unresolved YAML alias")?;
-            budget.spend(anchored.nodes)?;
-            // An alias event carries no anchor of its own, so the copy names
-            // nothing and is not remembered.
-            (anchored.node.clone(), 0)
-        }
-        _ => return Err("frontmatter contains an unexpected YAML parser event".into()),
-    };
-    remember_yaml_anchor(anchors, anchor, &node, budget.nodes - spent);
-    Ok(node)
-}
-
-fn remember_yaml_anchor(
-    anchors: &mut BTreeMap<usize, AnchoredYamlNode>,
-    anchor: usize,
-    node: &ExactYamlNode,
-    nodes: usize,
-) {
-    if anchor != 0 {
-        anchors.insert(
-            anchor,
-            AnchoredYamlNode {
-                node: node.clone(),
-                nodes,
-            },
-        );
     }
 }
 
-fn next_yaml_event(
-    parser: &mut YamlParser<std::str::Chars<'_>>,
-    budget: &mut ExactYamlBudget,
-) -> Result<YamlEvent, String> {
-    budget.events += 1;
-    parser
-        .next_token()
-        .map(|(event, _)| event)
-        .map_err(|error| format!("invalid YAML frontmatter: {error}"))
+/// Opens one more level of nesting, refusing to pass [`MAX_YAML_DEPTH`].
+///
+/// [`scan_frontmatter`] rejects an over-deep block before either tree parser is
+/// handed it, so on the frontmatter path this bound is reached only if that
+/// scan stops running. It is enforced here even so, because the recursion it
+/// guards is this builder's own and a bound that lives in a different function
+/// is one a later change can quietly remove.
+fn deeper_yaml_nesting(depth: usize) -> Result<usize, String> {
+    let depth = depth.saturating_add(1);
+    if depth > MAX_YAML_DEPTH {
+        return Err("frontmatter nests YAML beyond its depth limit".into());
+    }
+    Ok(depth)
 }
 
-fn expect_yaml_event(
-    parser: &mut YamlParser<std::str::Chars<'_>>,
-    budget: &mut ExactYamlBudget,
-    expected: impl FnOnce(&YamlEvent) -> bool,
-) -> Result<(), String> {
-    let event = next_yaml_event(parser, budget)?;
-    if expected(&event) {
-        Ok(())
-    } else {
-        Err("frontmatter contains an unexpected YAML document boundary".into())
-    }
+/// Reads one YAML document out of the block, keeping every scalar's spelling.
+///
+/// A leading byte-order mark is removed before parsing. YAML gives one no
+/// meaning at the head of a stream, but the parser reports it as the first
+/// character of the first key, which would leave a document whose `version`
+/// entry is invisibly named something else while §1.6's mapping keys are the
+/// text their author wrote. Exactly one is removed, so a second stays part of
+/// the key and remains as visible as any other stray character.
+fn parse_exact_yaml(source: &str) -> Result<ExactYamlNode, String> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let mut reader = ExactYamlReader::new(source);
+    reader.expect_event(|event| matches!(event, ExactEvent::StreamStart))?;
+    // The payload distinguishes an explicit `---` from an implicit start, which
+    // a frontmatter block has already consumed at its own delimiter.
+    reader.expect_event(|event| matches!(event, ExactEvent::DocumentStart(_)))?;
+    let event = reader.next_event()?;
+    let value = reader.node(event, 0)?;
+    // A second document would be read with the first one's anchors still in the
+    // parser's table, since only `Parser::load` clears them between documents.
+    // Refusing at the boundary is what keeps that unreachable.
+    reader.expect_event(|event| matches!(event, ExactEvent::DocumentEnd))?;
+    reader.expect_event(|event| matches!(event, ExactEvent::StreamEnd))?;
+    Ok(value)
 }
 
 fn exact_yaml_to_json(value: ExactYamlNode) -> Result<serde_json::Value, String> {
@@ -1098,13 +1193,13 @@ fn exact_yaml_scalar_to_json(scalar: ExactYamlScalar) -> Result<serde_json::Valu
         Some("float") => exact_yaml_float(&scalar.value),
         Some("seq" | "map") => Err("frontmatter contains an invalid tag for a YAML scalar".into()),
         Some(_) => Ok(serde_json::Value::String(scalar.value)),
-        None if scalar.style != TScalarStyle::Plain => Ok(serde_json::Value::String(scalar.value)),
+        None if scalar.style != ScalarStyle::Plain => Ok(serde_json::Value::String(scalar.value)),
         None => marked_scalar_to_json(&scalar.value),
     }
 }
 
 fn standard_yaml_tag(tag: Option<&YamlTag>) -> Option<&str> {
-    tag.and_then(|tag| (tag.handle == "tag:yaml.org,2002:").then_some(tag.suffix.as_str()))
+    tag.and_then(|tag| tag.is_yaml_core_schema().then_some(tag.suffix.as_str()))
 }
 
 fn exact_yaml_integer(source: &str) -> Result<serde_json::Value, String> {
@@ -2504,32 +2599,58 @@ mod tests {
         assert_eq!(value["b"], serde_json::json!([1]));
     }
 
-    #[test]
-    fn frontmatter_alias_expansion_is_bounded() {
-        // Every level aliases the one below it four times, so nine lines name
-        // 4^9 scalars and each further line would multiply that again. Nothing
-        // recurses and nothing nests deeply, so neither the anchor rule nor the
-        // parser's recursion limit applies: only the node budget stops it.
+    /// Frontmatter whose every level aliases the one below it four times.
+    ///
+    /// The `depth + 1` short lines this writes name `4 ^ (depth + 1)` leaf
+    /// scalars between them, and every further line would multiply that again.
+    /// Nothing recurses and nothing nests deeply, so neither the anchor rule
+    /// nor the parser's own recursion limit applies: only the node budget
+    /// stops it.
+    fn alias_bomb_frontmatter(depth: usize) -> String {
         let mut bomb = String::from("---\na0: &x0 [1,1,1,1]\n");
-        for level in 1..=8 {
+        for level in 1..=depth {
             let alias = format!("*x{}", level - 1);
             bomb.push_str(&format!(
                 "a{level}: &x{level} [{alias},{alias},{alias},{alias}]\n"
             ));
         }
         bomb.push_str("---\n# Title\n");
-        let document = parse_markdown(&bomb, MarkdownOptions::default());
-        // A failure here means the bomb was accepted, so the panic names the
-        // value rather than printing it: it is the very thing the budget
-        // exists to keep out of memory.
-        let DocumentFrontmatter::Invalid { location, message } = document.frontmatter else {
-            panic!("an alias bomb must be rejected")
-        };
-        assert_eq!(
-            message,
-            "frontmatter expands YAML aliases beyond its size limit"
-        );
-        assert_eq!((location.start_line, location.end_line), (1, 11));
+        bomb
+    }
+
+    #[test]
+    fn frontmatter_alias_expansion_is_bounded() {
+        // The refusal must come before the expansion, not after it: an
+        // unbudgeted builder of this same shape needs a gigabyte at depth six
+        // and does not finish at depth eight, while charging an alias the size
+        // of the node it copies rejects depth fifteen in a few milliseconds. A
+        // wall-clock bound is therefore part of what is asserted — a run that
+        // merely returns the right verdict eventually is the failure this
+        // guards against.
+        for depth in [9, 12, 15] {
+            let bomb = alias_bomb_frontmatter(depth);
+            let started = std::time::Instant::now();
+            let document = parse_markdown(&bomb, MarkdownOptions::default());
+            let elapsed = started.elapsed();
+            // A failure here means the bomb was accepted, so the panic names
+            // the value rather than printing it: it is the very thing the
+            // budget exists to keep out of memory.
+            let DocumentFrontmatter::Invalid { location, message } = document.frontmatter else {
+                panic!("an alias bomb at depth {depth} must be rejected")
+            };
+            assert_eq!(
+                message,
+                "frontmatter expands YAML aliases beyond its size limit"
+            );
+            assert_eq!(
+                (location.start_line, location.end_line),
+                (1, depth as u64 + 3)
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "an alias bomb at depth {depth} took {elapsed:?}, so it was expanded before being refused"
+            );
+        }
 
         // The budget scales with the block, so ordinary reuse stays clear of
         // it: aliasing one node ten times costs ten copies of a small node.
@@ -2636,6 +2757,176 @@ mod tests {
         // to parse: the parse that reports it is the one with a position.
         assert!(!yaml_nesting_exceeds_limit(""));
         assert!(!yaml_nesting_exceeds_limit("key: value: bad\n"));
+    }
+
+    #[test]
+    fn the_exact_builder_bounds_its_own_recursion() {
+        // The builder descends by recursion, so the depth bound has to hold in
+        // the builder itself and not only in the scan that currently runs
+        // ahead of it. Called directly, without that scan, the same limit
+        // applies and counts the root mapping as its first level: a block of
+        // `MAX_YAML_DEPTH - 1` compact sequences under one key fills the limit
+        // exactly, and one more overruns it. If the bound lived only in
+        // `scan_frontmatter` this test would build the value instead.
+        let nested = |levels: usize| format!("deep:\n {}1\n", "- ".repeat(levels));
+        let filled = exact_frontmatter_mapping(&nested(MAX_YAML_DEPTH - 1))
+            .expect("nesting that fills the limit is built");
+        assert_eq!(innermost_sequence(&filled, MAX_YAML_DEPTH - 1)[0], 1);
+        for levels in [MAX_YAML_DEPTH, MAX_YAML_DEPTH + 1] {
+            assert_eq!(
+                exact_frontmatter_mapping(&nested(levels)),
+                Err("frontmatter nests YAML beyond its depth limit".to_owned()),
+                "the builder accepted {levels} levels of its own accord"
+            );
+        }
+    }
+
+    #[test]
+    fn the_exact_builder_rejects_a_key_repeated_in_any_spelling() {
+        // Two checks answer this question and neither subsumes the other. The
+        // ordered entries catch a key the conversion never turns into a string
+        // — a collection used as a key, or an alias standing for one — while
+        // the JSON object's own insertion catches every key that does resolve,
+        // on its resolved text, which is the only comparison under which `a`
+        // and `"a"` are the same key. Dropping either one silently accepts a
+        // document and discards one of its two values.
+        for duplicate in [
+            "a: 1\na: 2\n",
+            "a: 1\n\"a\": 2\n",
+            "\"a\": 1\na: 2\n",
+            "'a': 1\n\"a\": 2\n",
+            "a: 1\nb:\n  c: 1\n  c: 2\n",
+            "a: {b: 1, b: 2}\n",
+            "a:\n  - {k: 1, k: 2}\n",
+            "a: !!str x\nb: 1\nb: 2\n",
+            "? &k a\n: 1\n? *k\n: 2\n",
+            "? [x]\n: 1\n? [x]\n: 2\n",
+        ] {
+            assert_eq!(
+                exact_frontmatter_mapping(duplicate),
+                Err("frontmatter contains a duplicate mapping key".to_owned()),
+                "a duplicate key was accepted: {duplicate:?}"
+            );
+        }
+
+        // The same key in two different mappings is not a duplicate, however
+        // near the two sit. A flat check over every key in the block would
+        // reject all three of these, and each is ordinary frontmatter.
+        for valid in [
+            "a:\n  - {k: 1}\n  - {k: 2}\n",
+            "a: {k: 1}\nb: {k: 2}\n",
+            "a:\n  k: 1\nb:\n  k: 2\n",
+        ] {
+            assert!(
+                exact_frontmatter_mapping(valid).is_ok(),
+                "distinct mappings sharing a key name were rejected: {valid:?}"
+            );
+        }
+
+        // A key that is not a scalar at all is refused as a key rather than as
+        // a duplicate, and the two checks keep their order: the conversion of
+        // the first entry's value runs before the resolved-text comparison
+        // reaches the second key, so an invalid value is reported ahead of the
+        // duplicate that follows it.
+        assert_eq!(
+            exact_frontmatter_mapping("a: 1\n? [x]\n: 2\n"),
+            Err("frontmatter mapping keys must be strings".to_owned())
+        );
+        assert_eq!(
+            exact_frontmatter_mapping("a: !!int 1.0\na: 2\n"),
+            Err("frontmatter contains a duplicate mapping key".to_owned())
+        );
+        assert_eq!(
+            exact_frontmatter_mapping("a: !!int 1.0\n\"a\": 2\n"),
+            Err("frontmatter contains an invalid explicitly tagged integer".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_exact_builder_reads_tags_on_collections_as_well_as_scalars() {
+        // A tag arrives on a sequence or mapping start exactly as it does on a
+        // scalar, and a converter that only looked at scalars would accept
+        // `!!str` on a sequence. Both spellings of each collection are covered
+        // because block and flow reach the same events by different paths.
+        for (source, expected) in [
+            ("a: !!seq [one, two]\n", serde_json::json!(["one", "two"])),
+            ("a: !!seq\n  - one\n", serde_json::json!(["one"])),
+            ("a: !!map {one: two}\n", serde_json::json!({"one": "two"})),
+            ("a: !!map\n  one: two\n", serde_json::json!({"one": "two"})),
+            // A tag outside the core schema names a type this converter does
+            // not model, so the collection keeps its own kind.
+            ("a: !custom [one]\n", serde_json::json!(["one"])),
+            ("a: !custom {one: two}\n", serde_json::json!({"one": "two"})),
+        ] {
+            let mapping = exact_frontmatter_mapping(source)
+                .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+            assert_eq!(mapping["a"], expected, "{source:?}");
+        }
+
+        for (source, expected) in [
+            ("a: !!map [one, two]\n", "seq"),
+            ("a: !!str [one]\n", "seq"),
+            ("a: !!seq {one: two}\n", "map"),
+            ("a: !!str {one: two}\n", "map"),
+            // The document's own root collection carries a tag too.
+            ("!!str\na: 1\n", "map"),
+        ] {
+            assert_eq!(
+                exact_frontmatter_mapping(source),
+                Err(format!(
+                    "frontmatter contains an invalid tag for a YAML {expected}"
+                )),
+                "{source:?}"
+            );
+        }
+
+        // A standard tag on a scalar decides its type outright, and one from
+        // outside the core schema leaves the text a string.
+        for (source, expected) in [
+            ("a: !!str 123\n", serde_json::json!("123")),
+            ("a: !!int \"42\"\n", serde_json::json!(42)),
+            ("a: !!bool TRUE\n", serde_json::json!(true)),
+            ("a: !!null ~\n", serde_json::Value::Null),
+            ("a: !!unknown 1\n", serde_json::json!("1")),
+            // `!thing` has the `!` handle, not the core-schema one, so it is
+            // no tag this converter recognises and the plain scalar resolves.
+            ("a: !thing 123\n", serde_json::json!(123)),
+        ] {
+            let mapping = exact_frontmatter_mapping(source)
+                .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+            assert_eq!(mapping["a"], expected, "{source:?}");
+        }
+        assert_eq!(
+            exact_frontmatter_mapping("a: !!str [one, two]\n"),
+            Err("frontmatter contains an invalid tag for a YAML seq".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_exact_builder_drops_one_leading_byte_order_mark() {
+        // A byte-order mark means nothing to YAML at the head of a stream, but
+        // the parser hands it back as the first character of the first key. A
+        // document written with one would then have a `version` entry named
+        // something no reader can see, and a schema would report an unknown
+        // field naming a key its author did believe they had written.
+        let stripped =
+            exact_frontmatter_mapping("\u{feff}a: !!str x\n").expect("a leading mark is dropped");
+        assert_eq!(stripped.keys().collect::<Vec<_>>(), ["a"]);
+        assert_eq!(stripped["a"], "x");
+
+        // Exactly one is dropped, so a second is as visible as any other stray
+        // character rather than being silently swallowed too.
+        let doubled =
+            exact_frontmatter_mapping("\u{feff}\u{feff}a: 1\n").expect("a second mark is content");
+        assert_eq!(doubled.keys().collect::<Vec<_>>(), ["\u{feff}a"]);
+
+        // Inside a value a mark is content, and it changes the entry's type:
+        // `1` with a mark in front of it is no longer a number in any YAML
+        // implementation. Pinned rather than fixed — stripping it there would
+        // be this module inventing a rule the format does not have.
+        let inside =
+            exact_frontmatter_mapping("a: \u{feff}1\n").expect("a mark inside a value is content");
+        assert_eq!(inside["a"], "\u{feff}1");
     }
 
     #[test]
@@ -2778,6 +3069,38 @@ mod tests {
         assert_eq!(value["big"].to_string(), "184467440737095516160");
         assert_eq!(value["precise"].to_string(), "0.1234567890123456789012345");
         assert_eq!(value["tagged"], "123");
+    }
+
+    #[test]
+    fn the_exact_builder_keeps_every_digit_it_was_given() {
+        // §1.6's exactness is what this whole fallback exists for, and under an
+        // event-driven builder it rests on the event's own text being the
+        // lexeme rather than on any parser option. Twenty-five and thirty
+        // digits are both past what a `f64` can distinguish, so each value is
+        // paired with the same spelling differing only in its last digit: a
+        // parse that went through a float would make the two members of a pair
+        // equal, and comparing spellings alone would not notice.
+        for (first, second) in [
+            ("1234567890123456789012345", "1234567890123456789012346"),
+            (
+                "123456789012345678901234567890",
+                "123456789012345678901234567891",
+            ),
+            ("0.1234567890123456789012345", "0.1234567890123456789012346"),
+            (
+                "1.23456789012345678901234567890e5",
+                "1.23456789012345678901234567891e5",
+            ),
+        ] {
+            // The tagged sibling is what routes the block through this builder
+            // at all; marked-yaml would take a block without it.
+            let source = format!("first: {first}\nsecond: {second}\ntagged: !!str x\n");
+            let mapping = exact_frontmatter_mapping(&source)
+                .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+            assert_eq!(mapping["first"].to_string(), first);
+            assert_eq!(mapping["second"].to_string(), second);
+            assert_ne!(mapping["first"], mapping["second"], "{source:?}");
+        }
     }
 
     #[test]
