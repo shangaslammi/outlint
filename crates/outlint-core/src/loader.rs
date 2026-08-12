@@ -2347,6 +2347,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_second_schema_document_is_refused_without_a_position() {
+        // The deserializer refuses more than one document itself, so nothing in
+        // the loader looks for a second `---`. Its refusal carries no location,
+        // which is why the whole document is the best anchor available and the
+        // reader is told nothing about where the second document began. Pinned
+        // so that giving the guard a position of its own reads as the
+        // improvement it is rather than as an unexplained range change.
+        for source in [
+            "version: 1\nsections: []\n---\nversion: 1\nsections: []\n",
+            "version: 1\nsections: []\n...\n---\nsections: []\n",
+        ] {
+            let invalid = invalid(source);
+            assert_eq!(invalid.errors.first.kind, SchemaErrorKind::Syntax);
+            assert_eq!(
+                invalid.errors.first.message,
+                "invalid YAML: deserializing from YAML containing more than one document \
+                 is not supported"
+            );
+            assert_eq!(source_slice(source, invalid.errors.first.range), source);
+        }
+
+        // A `...` that closes the only document opens nothing.
+        assert_eq!(valid("version: 1\nsections: []\n...\n").sections.len(), 0);
+    }
+
+    #[test]
+    fn a_merge_key_is_an_ordinary_schema_field() {
+        // `<<` belongs to YAML's optional merge type, not to the core schema,
+        // and no parser this crate reads applies it. A schema author who writes
+        // one therefore gets an unknown field named `<<` rather than the fields
+        // of the mapping they aliased. Pinned rather than fixed: honoring merges
+        // would make schemas that are rejected today start loading, which needs
+        // a specification first.
+        let source =
+            "version: 1\nbase: &b\n  strip_inline_markup: true\noptions:\n  <<: *b\nsections: []\n";
+        let invalid = invalid(source);
+        let reported = invalid
+            .errors
+            .iter()
+            .map(|error| (error.kind, error.message.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reported,
+            vec![
+                (
+                    SchemaErrorKind::InvalidDocumentShape,
+                    "unknown field `base`"
+                ),
+                (SchemaErrorKind::InvalidDocumentShape, "unknown field `<<`"),
+            ],
+        );
+    }
+
     /// A schema of `rules` rules, each the sole child of the one above it.
     ///
     /// Nesting is what a schema spends YAML depth on, two levels per rule: the

@@ -2442,6 +2442,43 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_key_is_an_ordinary_frontmatter_entry() {
+        // YAML's `<<` merge key is a convention of the failsafe schema's
+        // optional merge type, not of the core schema, and neither parser this
+        // module reads applies it. A frontmatter JSON Schema therefore sees a
+        // literal `<<` member holding the mapping that was supposed to be
+        // merged in. Pinned rather than fixed: honoring merges would change
+        // which documents validate, so it needs a specification first, and this
+        // fixture is what makes such a change visible when it happens.
+        let aliased = parse_markdown(
+            "---\nbase: &b\n  a: 1\nmerged:\n  <<: *b\n  b: 2\n---\n",
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { value, .. } = aliased.frontmatter else {
+            panic!("a merge key parses as an ordinary mapping: {aliased:?}")
+        };
+        assert_eq!(
+            value["merged"],
+            serde_json::json!({ "<<": { "a": 1 }, "b": 2 }),
+        );
+
+        // The same holds without an alias, which takes the other parser: the
+        // key keeps its spelling and the entry keeps an anchor of its own.
+        let inline = parse_markdown("---\n<<: {a: 1}\nb: 2\n---\n", MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { value, anchors, .. } = inline.frontmatter else {
+            panic!("a merge key parses as an ordinary mapping: {inline:?}")
+        };
+        assert_eq!(
+            serde_json::Value::Object(value),
+            serde_json::json!({ "<<": { "a": 1 }, "b": 2 }),
+        );
+        assert_eq!(
+            anchors.get("/<<"),
+            Some(FrontmatterAnchor { line: 2, column: 1 }),
+        );
+    }
+
+    #[test]
     fn recursive_frontmatter_aliases_terminate() {
         // The exact fallback registers an anchor only once its node is fully
         // parsed, so a container cannot alias itself. Without that, dropping
