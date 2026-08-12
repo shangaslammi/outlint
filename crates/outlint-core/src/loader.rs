@@ -13,8 +13,8 @@ use std::{
 use marked_yaml::Node as MarkedNode;
 use num_bigint::{BigInt, BigUint};
 use serde::Deserialize;
-use serde_yaml::{Mapping, Value};
 use unicode_normalization::UnicodeNormalization;
+use yaml_serde::{Mapping, Value};
 
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
@@ -70,7 +70,7 @@ struct PreparedExternalError {
 /// The path is returned exactly as declared. Resolution against a lexical file
 /// location belongs to the I/O shell.
 pub fn linked_frontmatter_schema_path(source: &str) -> Option<String> {
-    let value: Value = serde_yaml::from_str(source).ok()?;
+    let value: Value = yaml_serde::from_str(source).ok()?;
     let frontmatter = yaml_get(value.as_mapping()?, "frontmatter")?.as_mapping()?;
     yaml_get(frontmatter, "schema")
         .and_then(Value::as_str)
@@ -603,7 +603,7 @@ fn marked_node_range(node: &MarkedNode, char_offsets: &[usize], source: &str) ->
 }
 
 fn yaml_location_range(source: &str, line: usize, column: usize) -> TextRange {
-    // serde_yaml reports one-based lines and Unicode-scalar columns. Treat the
+    // yaml_serde reports one-based lines and Unicode-scalar columns. Treat the
     // location as an unstructured third-party boundary and clamp both axes.
     let (line_start, line_end) = yaml_line_bounds(source, line);
     let line_text = source.get(line_start..line_end).unwrap_or_default();
@@ -734,7 +734,7 @@ impl Loader {
     }
 
     fn load(mut self) -> LoadSchemaResult {
-        let value: Value = match serde_yaml::from_str(&self.source) {
+        let value: Value = match yaml_serde::from_str(&self.source) {
             Ok(value) => value,
             Err(error) => {
                 let range = self.range_for_yaml_error(&error);
@@ -752,12 +752,12 @@ impl Loader {
             return self.failure();
         }
 
-        // The marked tree is validated first because serde_yaml's data-model
+        // The marked tree is validated first because yaml_serde's data-model
         // errors do not carry the precise value ranges required by §6.
         let frontmatter_declared = value
             .as_mapping()
             .is_some_and(|mapping| mapping.contains_key(Value::String("frontmatter".into())));
-        let raw: RawSchema = match serde_yaml::from_value(value) {
+        let raw: RawSchema = match yaml_serde::from_value(value) {
             Ok(raw) => raw,
             Err(error) => {
                 self.error_at(
@@ -1770,7 +1770,7 @@ impl Loader {
         ))
     }
 
-    fn range_for_yaml_error(&self, error: &serde_yaml::Error) -> SourceRange {
+    fn range_for_yaml_error(&self, error: &yaml_serde::Error) -> SourceRange {
         let Some(location) = error.location() else {
             return self.document_range;
         };

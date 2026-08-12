@@ -305,7 +305,7 @@ fn parse_frontmatter(
         end_line: closing_line as u64,
     };
     let body = source.get(body_start..body_end).unwrap_or_default();
-    let yaml = serde_yaml::from_str::<serde_yaml::Value>(body);
+    let yaml = yaml_serde::from_str::<yaml_serde::Value>(body);
     let options = MarkedYamlOptions::default()
         .error_on_duplicate_keys(true)
         .prevent_coercion(true);
@@ -313,20 +313,20 @@ fn parse_frontmatter(
     // The exact fallback parses through an event stream that keeps no markers,
     // so entries parsed by it have no position beyond the block's own.
     let parsed = match (yaml, marked) {
-        (Ok(serde_yaml::Value::Mapping(_)), Ok(marked)) => marked_frontmatter_mapping(&marked),
+        (Ok(yaml_serde::Value::Mapping(_)), Ok(marked)) => marked_frontmatter_mapping(&marked),
         (Ok(_), Ok(_)) => Err("frontmatter must be a YAML mapping".into()),
         // Preserve exact scalar lexemes when valid YAML uses constructs that
         // marked-yaml deliberately does not model, notably tags and aliases.
         (Ok(_), Err(_)) => {
             exact_frontmatter_mapping(body).map(|value| (value, MarkedAnchors::new()))
         }
-        // serde_yaml cannot represent arbitrary-range YAML numbers even
+        // yaml_serde cannot represent arbitrary-range YAML numbers even
         // though marked-yaml and the exact fallback retain their lexemes.
-        // The branch necessarily depends on serde_yaml's unstructured wording.
-        (Err(error), Ok(marked)) if serde_yaml_numeric_range_error(&error) => {
+        // The branch necessarily depends on yaml_serde's unstructured wording.
+        (Err(error), Ok(marked)) if yaml_serde_numeric_range_error(&error) => {
             marked_frontmatter_mapping(&marked)
         }
-        (Err(error), Err(_)) if serde_yaml_numeric_range_error(&error) => {
+        (Err(error), Err(_)) if yaml_serde_numeric_range_error(&error) => {
             exact_frontmatter_mapping(body).map(|value| (value, MarkedAnchors::new()))
         }
         (Err(error), _) => Err(format!("invalid YAML frontmatter: {error}")),
@@ -447,7 +447,7 @@ impl<'a> LineCursor<'a> {
     }
 }
 
-fn serde_yaml_numeric_range_error(error: &serde_yaml::Error) -> bool {
+fn yaml_serde_numeric_range_error(error: &yaml_serde::Error) -> bool {
     let message = error.to_string();
     message.contains("invalid type: integer")
         || (message.contains("invalid value: string") && message.contains("expected a float"))

@@ -22,9 +22,9 @@ pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
-serde_yaml = "0.9"
 unicode-normalization = "0.1"
 yaml-rust2 = "0.10"
+yaml_serde = "0.10"
 
 [dev-dependencies]
 proptest = "1"
