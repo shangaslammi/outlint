@@ -122,9 +122,13 @@ written for a reader approaches, so that where an implementation set it decides
 nothing about a document anyone meant to write. A block exceeding it is
 `invalid-frontmatter`. An alias carries the nesting of the value it names to
 wherever it appears, so a block whose text nests shallowly may still name a
-value nesting arbitrarily deep, and each further alias to an aliased value
-deepens it again. What such a limit bounds MUST therefore be the depth of the
-value the block resolves to rather than the depth its text is written at.
+value nesting arbitrarily deep. Naming a value twice at the same level copies
+that nesting rather than adding to it, but an alias written inside further
+collections adds their levels to the nesting it already carries, so a value
+holding an alias and named by an alias in turn deepens a block line by line
+however shallowly each of those lines is written. What such a limit bounds MUST
+therefore be the depth of the value the block resolves to rather than the depth
+its text is written at.
 
 ---
 
@@ -145,11 +149,13 @@ constraints: [<constraint>, ...]   # optional, see §5
 ```
 
 A schema document is read as YAML on the same terms as frontmatter, so an
-implementation MAY refuse one nesting deeper than the limit of §1.6. A schema
-exceeding it is schema error `syntax`. The limit binds the document as written,
-not the rule nesting it expresses: a rule and its `sections` list are two
-levels, so the shallowest limit §1.6 permits still admits far deeper rule
-nesting than the six header levels of §1.2 can address.
+implementation MAY refuse one nesting deeper than the limit of §1.6, and the
+depth it counts MUST likewise be the depth the document's aliases resolve to
+rather than the depth its text is written at. A schema exceeding it is schema
+error `syntax`. What the limit measures is that YAML nesting and not the rule
+nesting the document expresses: a rule and its `sections` list are two levels of
+YAML, so the shallowest limit §1.6 permits still admits far deeper rule nesting
+than the six header levels of §1.2 can address.
 
 ### 2.1 Rule object
 
