@@ -510,7 +510,7 @@ fn marked_yaml_to_json(
             pointer.push('/');
             pointer.push_str(&index.to_string());
             // An element has no key, so it is named by where it begins.
-            record_marked_anchor(anchors, pointer, marked_node_start(item));
+            record_marked_anchor(anchors, pointer, marked_element_start(item));
             values.push(marked_yaml_to_json(item, pointer, anchors)?);
             pointer.truncate(restore);
         }
@@ -520,6 +520,24 @@ fn marked_yaml_to_json(
         return Err("unsupported YAML frontmatter node".into());
     };
     marked_mapping_to_json(mapping, pointer, anchors).map(serde_json::Value::Object)
+}
+
+/// Where a sequence element begins in the source, if it is written at all.
+///
+/// A `-` with nothing after it is an element whose value is an implicit null:
+/// it occupies no source text, and marked-yaml reports it at the next token it
+/// scanned, which belongs to a later element. Such an element has no position
+/// of its own, so it takes none and falls back to the block. A plain scalar
+/// cannot otherwise be empty, so an empty scalar that may coerce is exactly
+/// this case; a quoted empty string does not coerce and is written where
+/// marked-yaml reports it.
+fn marked_element_start(value: &MarkedNode) -> Option<&MarkedMarker> {
+    if let Some(scalar) = value.as_scalar() {
+        if scalar.as_str().is_empty() && scalar.may_coerce() {
+            return None;
+        }
+    }
+    marked_node_start(value)
 }
 
 /// Where a node begins in the source.
@@ -1782,6 +1800,65 @@ mod tests {
                 "element {index} is misplaced"
             );
         }
+    }
+
+    #[test]
+    fn unwritten_sequence_elements_take_no_anchor() {
+        // `-` with nothing after it is an element that occupies no source.
+        // marked-yaml reports each one at the next token it scanned, so
+        // accepting that position would name a later element's text.
+        let source = concat!(
+            "---\n",       // 1
+            "gaps:\n",     // 2
+            "  -\n",       // 3
+            "  -\n",       // 4
+            "  - 3\n",     // 5
+            "written:\n",  // 6
+            "  - \"\"\n",  // 7
+            "  - ''\n",    // 8
+            "  - 3\n",     // 9
+            "trailing:\n", // 10
+            "  - 1\n",     // 11
+            "  -\n",       // 12
+            "---\n",       // 13
+            "# Title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        let anchor = |pointer: &str| {
+            anchors
+                .get(pointer)
+                .map(|anchor| (anchor.line, anchor.column))
+        };
+
+        // Unwritten elements fall back to the block; the one written element
+        // of the same sequence still gets its own position.
+        assert_eq!(anchor("/gaps/0"), None);
+        assert_eq!(anchor("/gaps/1"), None);
+        assert_eq!(anchor("/gaps/2"), Some((5, 5)));
+        // A quoted empty string is written, so it keeps its position. Both
+        // quotings parse to the same empty value that an unwritten element
+        // does not, which is what separates the two cases.
+        assert_eq!(anchor("/written/0"), Some((7, 5)));
+        assert_eq!(anchor("/written/1"), Some((8, 5)));
+        assert_eq!(anchor("/written/2"), Some((9, 5)));
+        assert_eq!(
+            value.get("written"),
+            Some(&serde_json::json!(["", "", 3])),
+            "quoted empties must stay strings"
+        );
+        assert_eq!(
+            value.get("gaps"),
+            Some(&serde_json::json!([null, null, 3])),
+            "unwritten elements must stay null"
+        );
+        // A trailing one is the same case; it merely had no later token to
+        // borrow, so it was already unplaced.
+        assert_eq!(anchor("/trailing/0"), Some((11, 5)));
+        assert_eq!(anchor("/trailing/1"), None);
     }
 
     #[test]

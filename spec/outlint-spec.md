@@ -474,6 +474,12 @@ Setext heading), or the first byte of the frontmatter entry named by
 | `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and whenever the entry's position is unavailable |
 | constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, which is attached to the schema root and so has no parent header | the parent section's header line; line 1 at the root scope |
 
+An entry's position is unavailable whenever the entry occupies no source text
+of its own. A sequence element written as `-` with nothing after it is such an
+entry: it has the null value but no spelling, so it anchors to the block
+rather than to any neighbouring entry's text. A quoted empty string is
+written, and anchors at its opening quote.
+
 Constraint diagnostics additionally list the concrete headers involved, if
 any, each by its own header path (§5.3). Which diagnostics the `title`
 matcher and reachability produce is defined in §1.4.
