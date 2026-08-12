@@ -3,7 +3,10 @@
 //! Validation is deliberately separate from parsing and IO: callers can load
 //! and parse fixture text once, then pass only values to [`validate`].
 
-use crate::loader::{preloaded_json_schema_registry, NoExternalRetrieve};
+use crate::loader::{
+    json_schema_reference_budget_message, json_schema_reference_count,
+    preloaded_json_schema_registry, NoExternalRetrieve, MAX_JSON_SCHEMA_REFERENCES,
+};
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
     ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
@@ -284,6 +287,23 @@ fn frontmatter_schema(policy: &FrontmatterPolicy) -> Option<&FrontmatterSchema> 
 fn compile_frontmatter_schema(
     schema: &FrontmatterSchema,
 ) -> Result<jsonschema::Validator, PrepareValidationError> {
+    // This is the second place a linked graph is compiled, and compiling a
+    // reference chain costs a stack frame per link, so the budget is charged
+    // here too rather than trusted to have been charged upstream. Today the
+    // loader is the only constructor of a `FrontmatterSchema` and refuses the
+    // same graphs, but a compile that overruns the stack aborts the process
+    // instead of returning, which is not a failure a later caller can recover
+    // from — so the check belongs at the call, not at the one path into it.
+    let references = std::iter::once(&schema.root)
+        .chain(schema.resources.values())
+        .fold(0usize, |total, document| {
+            total.saturating_add(json_schema_reference_count(document))
+        });
+    if references > MAX_JSON_SCHEMA_REFERENCES {
+        return Err(PrepareValidationError {
+            message: json_schema_reference_budget_message(),
+        });
+    }
     let mut registry = preloaded_json_schema_registry()
         .add(schema.root_uri.as_str(), &schema.root)
         .map_err(|error| PrepareValidationError {
@@ -2143,5 +2163,55 @@ mod tests {
                 DiagnosticId::FrontmatterSchema
             ]
         );
+    }
+
+    #[test]
+    fn preparing_refuses_a_reference_chain_longer_than_the_compiler_can_recurse_over() {
+        // Preparing a validator compiles the linked graph a second time, and
+        // compiling a reference re-enters the compiler at its target, so a
+        // chain costs a stack frame per link here exactly as it does in the
+        // loader -- while every link sits at the same JSON depth, which is why
+        // no nesting bound sees it. An overrun aborts the process rather than
+        // returning, so this path cannot rely on the loader having refused
+        // first; it charges the budget itself. Both sides of the boundary are
+        // pinned, since a bound that quietly drifted below what it promises
+        // would refuse graphs the compiler handles comfortably.
+        let document = parse_markdown("---\nstatus: draft\n---\n", MarkdownOptions::default());
+
+        let mut schema = load_schema("version: 1\nsections: []\n")
+            .expect("test schema is valid")
+            .schema;
+        schema.frontmatter = FrontmatterPolicy::Optional {
+            schema: Some(reference_chain_schema(MAX_JSON_SCHEMA_REFERENCES - 1)),
+        };
+        assert!(validate(&schema, &document)
+            .expect("a graph spending the whole budget still prepares")
+            .is_empty());
+
+        schema.frontmatter = FrontmatterPolicy::Optional {
+            schema: Some(reference_chain_schema(MAX_JSON_SCHEMA_REFERENCES)),
+        };
+        let error = validate(&schema, &document).expect_err("one reference more is refused");
+        assert_eq!(error.message, json_schema_reference_budget_message());
+    }
+
+    /// Builds a graph whose root reference starts a chain of `links` hops
+    /// ending at `true`, declaring `links + 1` references in all.
+    fn reference_chain_schema(links: usize) -> FrontmatterSchema {
+        let mut definitions = serde_json::Map::new();
+        definitions.insert("end".into(), serde_json::Value::Bool(true));
+        for index in 0..links {
+            let target = if index + 1 == links {
+                "#/$defs/end".to_owned()
+            } else {
+                format!("#/$defs/{}", index + 1)
+            };
+            definitions.insert(index.to_string(), serde_json::json!({ "$ref": target }));
+        }
+        FrontmatterSchema {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            root: serde_json::json!({ "$ref": "#/$defs/0", "$defs": definitions }),
+            resources: std::collections::BTreeMap::new(),
+        }
     }
 }
