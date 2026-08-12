@@ -1,0 +1,256 @@
+case document-field-version
+  source "version: 2\nsections: []\n"
+  verdict invalid
+  error unsupported-version 0:9..10 "2" "unsupported schema version 2; expected 1"
+
+case document-field-title
+  source "version: 1\ntitle: [nope]\nsections: []\n"
+  verdict invalid
+  error invalid-document-shape 0:18..23 "[nope" "title must be a string and cannot be null"
+
+case document-field-sections
+  source "version: 1\nsections: nope\n"
+  verdict invalid
+  error invalid-document-shape 0:21..25 "nope" "sections must be a sequence and cannot be null"
+
+case document-field-constraints
+  source "version: 1\nsections: []\nconstraints: nope\n"
+  verdict invalid
+  error invalid-document-shape 0:37..41 "nope" "constraints must be a sequence and cannot be null"
+
+case document-field-options
+  source "version: 1\noptions: nope\nsections: []\n"
+  verdict invalid
+  error invalid-document-shape 0:20..24 "nope" "options must be a mapping and cannot be null"
+
+case document-field-frontmatter
+  source "version: 1\nfrontmatter: nope\nsections: []\n"
+  verdict invalid
+  error invalid-document-shape 0:24..28 "nope" "frontmatter must be a mapping and cannot be null"
+
+case document-field-unknown
+  source "version: 1\nsections: []\nunexpected: 1\n"
+  verdict invalid
+  error invalid-document-shape 0:0..38 "version: 1\nsections: []\nunexpected: 1\n" "unknown field `unexpected`"
+
+case document-missing-required-field
+  source "title: Doc\n"
+  verdict invalid
+  error invalid-document-shape 0:0..11 "title: Doc\n" "missing required field `version`"
+  error invalid-document-shape 0:0..11 "title: Doc\n" "missing required field `sections`"
+
+case document-not-a-mapping
+  source "- version: 1\n"
+  verdict invalid
+  error invalid-document-shape 0:0..13 "- version: 1\n" "schema document must be a mapping"
+
+case option-field-match-case
+  source "version: 1\noptions:\n  match_case: yes please\nsections: []\n"
+  verdict invalid
+  error invalid-document-shape 0:34..44 "yes please" "options.match_case must be a bool and cannot be null"
+
+case option-field-unknown
+  source "version: 1\noptions:\n  strip_inline_markup: true\n  unexpected: true\nsections: []\n"
+  verdict invalid
+  error invalid-document-shape 0:41..67 ": true\n  unexpected: true\n" "unknown field `unexpected`"
+
+case frontmatter-field-required
+  source "version: 1\nfrontmatter:\n  required: sometimes\nsections: []\n"
+  verdict invalid
+  error invalid-document-shape 0:36..45 "sometimes" "frontmatter.required must be a bool and cannot be null"
+
+case frontmatter-field-schema-shape
+  source "version: 1\nfrontmatter:\n  schema: [nope]\nsections: []\n"
+  verdict invalid
+  error invalid-document-shape 0:34..39 "[nope" "frontmatter.schema must be a path string or mapping and cannot be null"
+
+case frontmatter-field-schema-inline
+  source "version: 1\nfrontmatter:\n  schema:\n    type: object\nsections: []\n"
+  verdict invalid
+  error invalid-frontmatter-schema 0:42..51 ": object\n" "inline frontmatter JSON Schema is not implemented yet; use a linked JSON file"
+
+case frontmatter-field-schema-unpreloaded
+  source "version: 1\nfrontmatter:\n  schema: linked.json\nsections: []\n"
+  verdict invalid
+  error invalid-frontmatter-schema 0:34..45 "linked.json" "linked frontmatter schema requires a schema file path context"
+
+case frontmatter-conflicting-policy
+  source "version: 1\nfrontmatter:\n  required: true\n  allow: false\nsections: []\n"
+  verdict invalid
+  error conflicting-frontmatter 0:34..56 ": true\n  allow: false\n" "frontmatter cannot be both required and forbidden"
+
+case rule-not-a-mapping
+  source "version: 1\nsections:\n  - nope\n"
+  verdict invalid
+  error invalid-document-shape 0:25..29 "nope" "each section rule must be a mapping"
+
+case rule-field-match-missing
+  source "version: 1\nsections:\n  - id: intro\n"
+  verdict invalid
+  error invalid-document-shape 0:27..35 ": intro\n" "missing required field `match`"
+
+case rule-field-invalid-matcher
+  source "version: 1\nsections:\n  - match: \"/[unclosed/\"\n"
+  verdict invalid
+  error invalid-matcher 0:32..33 "\"" "invalid regex matcher `/[unclosed/`: regex parse error:\n    \\A(?:[unclosed)\\z\n         ^\nerror: unclosed character class"
+
+case rule-field-invalid-repeat
+  source "version: 1\nsections:\n  - match: Intro\n    repeat: \"3..1\"\n"
+  verdict invalid
+  error invalid-repeat 0:50..51 "\"" "invalid repeat `3..1`"
+
+case rule-field-repeat-shape
+  source "version: 1\nsections:\n  - match: Intro\n    repeat: 3..1\n"
+  verdict invalid
+  error invalid-repeat 0:50..54 "3..1" "invalid repeat `3..1`"
+
+case rule-field-conflicting-cardinality
+  source "version: 1\nsections:\n  - match: Intro\n    required: true\n    repeat: \"2\"\n"
+  verdict invalid
+  error conflicting-cardinality 0:69..70 "\"" "required and repeat cannot both be declared"
+
+case rule-field-reserved-id
+  source "version: 1\nsections:\n  - id: fm\n    match: Intro\n"
+  verdict invalid
+  error reserved-id 0:29..31 "fm" "top-level rule id `fm` is reserved for frontmatter refs"
+
+case rule-field-duplicate-id
+  source "version: 1\nsections:\n  - id: intro\n    match: Intro\n  - id: intro\n    match: Other\n"
+  verdict invalid
+  error duplicate-id 0:60..65 "intro" "duplicate rule id `intro` in one scope"
+
+case rule-field-unknown
+  source "version: 1\nsections:\n  - match: Intro\n    unexpected: true\n"
+  verdict invalid
+  error invalid-document-shape 0:30..59 ": Intro\n    unexpected: true\n" "unknown field `unexpected`"
+
+case nested-rule-field-invalid-matcher
+  source "version: 1\nsections:\n  - match: Intro\n    sections:\n      - match: \"/[unclosed/\"\n"
+  verdict invalid
+  error invalid-matcher 0:67..68 "\"" "invalid regex matcher `/[unclosed/`: regex parse error:\n    \\A(?:[unclosed)\\z\n         ^\nerror: unclosed character class"
+
+case constraint-unresolved-ref
+  source "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: { if: intro, then: missing }\n"
+  verdict invalid
+  error unresolved-ref 0:77..108 ": { if: intro, then: missing }\n" "unresolved ref `missing`"
+
+case constraint-forbidden-ref
+  source "version: 1\nsections:\n  - id: intro\n    match: Intro\n  - id: gone\n    match: Gone\n    allow: false\nconstraints:\n  - requires: { if: intro, then: gone }\n"
+  verdict invalid
+  error forbidden-ref 0:123..151 ": { if: intro, then: gone }\n" "ref `gone` passes through or targets an allow: false rule"
+
+case constraint-operand-shape
+  source "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: intro\n"
+  verdict invalid
+  error invalid-document-shape 0:77..85 ": intro\n" "requires operand must be an object"
+
+case constraint-duplicate-ref
+  source "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - one_of: [intro, intro]\n"
+  verdict invalid
+  error duplicate-ref 0:75..92 ": [intro, intro]\n" "constraint contains a duplicate ref"
+
+case constraint-ordered-scope-mismatch
+  source "version: 1\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n  - id: other\n    match: Other\nconstraints:\n  - ordered: [intro.deep, other]\n"
+  verdict invalid
+  error ordered-scope-mismatch 0:158..180 ": [intro.deep, other]\n" "ordered ref `intro.deep` passes through a repeatable ancestor"
+  error ordered-scope-mismatch 0:158..180 ": [intro.deep, other]\n" "all ordered refs must resolve in the same scope"
+
+case constraint-not-a-mapping
+  source "version: 1\nsections: []\nconstraints:\n  - nope\n"
+  verdict invalid
+  error invalid-document-shape 0:41..45 "nope" "constraint must be a single-key object"
+
+case nested-constraint-unresolved-ref
+  source "version: 1\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n    constraints:\n      - requires: { if: deep, then: missing }\n"
+  verdict invalid
+  error unresolved-ref 0:136..166 ": { if: deep, then: missing }\n" "unresolved ref `missing`"
+
+case duplicate-key-document-field
+  source "version: 1\nversion: 2\nsections: []\n"
+  verdict invalid
+  error syntax 0:0..1 "v" "invalid YAML: duplicate entry with key \"version\""
+
+case duplicate-key-quoted-against-plain
+  source "version: 1\n\"version\": 2\nsections: []\n"
+  verdict invalid
+  error syntax 0:0..1 "v" "invalid YAML: duplicate entry with key \"version\""
+
+case duplicate-key-rule-field
+  source "version: 1\nsections:\n  - match: Intro\n    match: Other\n"
+  verdict invalid
+  error syntax 0:25..26 "m" "invalid YAML: sections[0]: duplicate entry with key \"match\" at line 3 column 5"
+
+case non-standard-tag-on-a-scalar
+  source "version: 1\ntitle: !custom Doc\nsections: []\n"
+  verdict invalid
+  error invalid-document-shape 0:0..43 "version: 1\ntitle: !custom Doc\nsections: []\n" "title must be a string and cannot be null"
+
+case non-standard-tag-on-the-document
+  source "--- !custom\nversion: 1\nsections: []\n"
+  verdict valid
+
+case alias-expanded-into-a-rule
+  source "version: 1\nsections:\n  - &base\n    match: Intro\n  - *base\n"
+  verdict invalid
+  error duplicate-id 0:0..58 "version: 1\nsections:\n  - &base\n    match: Intro\n"... "duplicate rule id `intro` in one scope"
+
+case alias-in-key-position
+  source "version: 1\nsections: []\nanchors: &a name\n*a : 1\n"
+  verdict invalid
+  error invalid-document-shape 0:0..48 "version: 1\nsections: []\nanchors: &a name\n*a : 1\n" "unknown field `anchors`"
+  error invalid-document-shape 0:0..48 "version: 1\nsections: []\nanchors: &a name\n*a : 1\n" "unknown field `name`"
+
+case undefined-alias
+  source "version: 1\nsections: *missing\n"
+  verdict invalid
+  error syntax 0:21..22 "*" "invalid YAML: unknown anchor at line 2 column 11"
+
+case byte-order-mark-before-the-document
+  source "﻿version: 1\nsections: []\n"
+  verdict invalid
+  error syntax 0:0..27 "﻿version: 1\nsections: []\n" "invalid YAML: deserializing from YAML containing more than one document is not supported"
+
+case byte-order-mark-inside-a-value
+  source "version: 1\ntitle: ﻿Doc\nsections: []\n"
+  verdict valid
+  node title 0:18..24 "﻿Doc"
+
+case two-documents
+  source "version: 1\nsections: []\n---\nversion: 1\nsections: []\n"
+  verdict invalid
+  error syntax 0:0..52 "version: 1\nsections: []\n---\nversion: 1\nsections:"... "invalid YAML: deserializing from YAML containing more than one document is not supported"
+
+case two-documents-with-a-trailing-marker
+  source "version: 1\nsections: []\n...\n"
+  verdict valid
+
+case syntax-colon-in-a-plain-scalar
+  source "version: 1\ntitle: a: bad\nsections: []\n"
+  verdict invalid
+  error syntax 0:19..20 ":" "invalid YAML: mapping values are not allowed in this context at line 2 column 9"
+
+case syntax-tab-indentation
+  source "version: 1\nsections:\n\t- match: Intro\n"
+  verdict invalid
+  error syntax 0:21..22 "\t" "invalid YAML: found character that cannot start any token at line 3 column 1, while scanning for the next token"
+
+case syntax-unclosed-quote
+  source "version: 1\ntitle: \"unterminated\nsections: []\n"
+  verdict invalid
+  error syntax 0:45..45 "" "invalid YAML: found unexpected end of stream at line 4 column 1, while scanning a quoted scalar at line 2 column 8"
+
+case syntax-unknown-escape
+  source "version: 1\ntitle: \"bad \\q escape\"\nsections: []\n"
+  verdict invalid
+  error syntax 0:23..24 "\\" "invalid YAML: found unknown escape character at line 2 column 13, while parsing a quoted scalar at line 2 column 8"
+
+case syntax-empty-flow-element
+  source "version: 1\nsections: []\nconstraints: [, nope]\n"
+  verdict invalid
+  error syntax 0:38..39 "," "invalid YAML: did not find expected node content at line 3 column 15, while parsing a flow node"
+
+case syntax-empty-document
+  source ""
+  verdict invalid
+  error invalid-document-shape 0:0..0 "" "schema document must be a mapping"
+

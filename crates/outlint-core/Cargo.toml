@@ -20,6 +20,9 @@ marked-yaml = "0.8"
 num-bigint = "0.4"
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
+# Pinned exactly: every `0.0.z` release is a breaking change under Cargo's
+# semver rules, and upstream ships breaking changes in them.
+saphyr-parser = "=0.0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 unicode-normalization = "0.1"
