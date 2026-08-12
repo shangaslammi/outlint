@@ -474,27 +474,40 @@ Setext heading), or the first byte of the frontmatter entry named by
 | `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and whenever the entry's position is unavailable |
 | constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, which is attached to the schema root and so has no parent header | the parent section's header line; line 1 at the root scope |
 
-An entry's position is unavailable in two cases. The first is an entry whose
-spelling holds no character other than a line break, which has nothing to
-anchor to and so anchors to the block rather than to a neighbouring entry's
-text. A sequence element written as `-` with nothing after it is such an
-entry, and so is a block scalar with no content line, such as `- >-`, `- |`,
-or `- |+` over blank lines alone. A mapping member is named by its key, which
-is written ahead of its value and so has text in the usual `key: value`
-spelling, but YAML's explicit-key syntax admits a textless key — a `? >-`
-line, whose member takes the empty key — and such a member anchors to the
-block by the same rule. What costs an entry its own position is having no
-text, not having no value: `- null` and `- ~` are spelled out and anchor at
-that spelling.
+An entry's position is unavailable in two cases. The first is an entry with no
+first character of its own for a parser to report a position at: an entry
+whose text, once YAML has resolved its spelling, holds no character other than
+a line break. The rule is about the resolved text and not about the spelling.
+A sequence element written as `-` with nothing after it resolves to the null
+value and has no text at all; a block scalar with no content line, such as
+`- >-`, `- |`, or `- |+` over blank lines alone, has a spelling of several
+characters but resolves to the empty string or to whatever breaks its chomping
+indicator keeps. Neither has a first character of its own text, so both anchor
+to the block rather than to a neighbouring entry's text. A mapping member is
+named by its key, which is written ahead of its value and so has text in the
+usual `key: value` spelling, but YAML's explicit-key syntax admits a textless
+key — a `? >-` line, whose member takes the empty key — and such a member
+anchors to the block by the same rule. What costs an entry its own position is
+resolving to no text, not resolving to no value: `- null` and `- ~` resolve to
+null but are spelled out, and anchor at that spelling.
 
 A quoted scalar whose text is only line breaks — `""`, `''`, and `"\n"` alike
-— anchors to the block as well. That is a deliberate limit rather than an
-oversight: such a scalar is written, but nothing separates it from an entry
-whose reported position was borrowed from a later one, and reading the source
-at that position does not settle it either, since a textless element followed
-by a quoted string borrows a position that is itself an opening quote. A
-coarse but correct anchor is preferred to a precise one that may name another
-entry's text, and `pointer` names the entry exactly either way.
+— resolves to such a text as well and so falls under that first case, as a
+consequence of the rule above rather than as a rule of its own. It is the one
+entry the rule treats more coarsely than it must, since a quoted scalar's
+opening quote is a character of its own that a parser can report a position
+at. An implementation whose position-tracking parser reports each scalar's
+style alongside its position SHOULD therefore anchor such an entry at that
+opening quote instead: a quoted scalar always has its opening quote in the
+source, so its reported position is never borrowed from a later entry, while a
+plain, literal, or folded scalar resolving to line breaks alone always is. An
+implementation whose parser does not expose the style has no sound test to
+hand — the resolved text is the same either way, and reading the source at the
+reported position does not settle it, since a textless element followed by a
+quoted string borrows a position that is itself an opening quote — and MUST
+then anchor the entry to the block, a coarse but correct anchor being
+preferred to a precise one that may name another entry's text. `pointer` names
+the entry exactly under either choice.
 
 The second case is a document whose frontmatter is parsed without positions at
 all, which an implementation MAY do for YAML constructs its position-tracking
