@@ -541,11 +541,22 @@ fn marked_yaml_to_json(
 ///
 /// Nothing in the text tells a written all-break scalar apart from an unwritten
 /// one — `""` and `"\n"` are marked correctly but read the same here — so they
-/// fall back too. Deliberately: no sound test separates them. A source peek
-/// cannot, since a textless entry followed by a quoted string puts a quote at
-/// the borrowed position, and `may_coerce` cannot, since it is false for quoted
-/// and block scalars alike. A coarse but correct anchor beats a precise wrong
-/// one, and the JSON Pointer still names the entry exactly.
+/// fall back too, giving up an anchor they had every right to keep. Nothing
+/// marked-yaml exposes separates them: a source peek cannot, since a textless
+/// entry followed by a quoted string puts a quote at the borrowed position, and
+/// `may_coerce` cannot, since it is false for quoted and block scalars alike.
+///
+/// The scalar's style would separate them, and that is a limit of this parser's
+/// surface rather than of the problem. `yaml-rust2`, already read for
+/// [`TScalarStyle`] in [`parse_exact_yaml`], reports a style beside a marker on
+/// the same event, and a quoted scalar always has its opening quote in the
+/// source, so it is never marked at a later entry's token — while a plain,
+/// literal, or folded all-break scalar always is. Reading it here would mean a
+/// third walk over the block or a correlation pass between two trees, which is
+/// not worth a finer anchor while this module still runs three YAML parsers
+/// over the same text and is due to be cut down to one. Until then a coarse but
+/// correct anchor beats a precise wrong one, and the JSON Pointer names the
+/// entry exactly either way.
 fn is_textless(text: &str) -> bool {
     text.bytes().all(|byte| byte == b'\n')
 }
@@ -595,12 +606,19 @@ fn marked_key_start(key: &MarkedScalarNode) -> Option<&MarkedMarker> {
 /// marked-yaml reports a block mapping's span from the `:` of its first key
 /// rather than from the mapping itself, so the earlier of the node's own start
 /// and its first key's start is the one that names the node.
+///
+/// The first key goes through [`marked_key_start`] so that a borrowed marker
+/// cannot enter here either. A textless first key needs YAML's `? ` form, which
+/// puts the mapping's own start on the `?` and the borrowed marker on a later
+/// token, so the `min` below would discard it anyway; taking it from the guard
+/// keeps that a consequence of the one rule rather than a coincidence this
+/// function has to be reasoned about separately to trust.
 fn marked_node_start(value: &MarkedNode) -> Option<&MarkedMarker> {
     let own = value.span().start();
     let first_key = value
         .as_mapping()
         .and_then(|mapping| mapping.iter().next())
-        .and_then(|(key, _)| key.span().start());
+        .and_then(|(key, _)| marked_key_start(key));
     match (own, first_key) {
         (Some(own), Some(key)) if (key.line(), key.column()) < (own.line(), own.column()) => {
             Some(key)
@@ -2120,23 +2138,27 @@ mod tests {
     fn a_quoted_line_break_takes_no_anchor_by_design() {
         // `- "\n"` is written and marked-yaml marks it correctly, at its
         // opening quote. It takes no anchor even so, because its text is
-        // nothing but a line break and no sound test tells that apart from a
-        // textless element's borrowed mark. A peek at the marked byte cannot:
-        // an unwritten element followed by a quoted string borrows a mark that
-        // lands on exactly such a quote, as `/borrowed` below shows. Nor can
-        // `may_coerce`, which is false for quoted and block scalars alike. The
-        // precision is given up deliberately; the pointer names the element
+        // nothing but a line break and nothing marked-yaml exposes tells that
+        // apart from a textless element's borrowed mark. A peek at the marked
+        // byte cannot: an unwritten element followed by a quoted string borrows
+        // a mark that lands on exactly such a quote, as `/borrowed` below
+        // shows. Nor can `may_coerce`, which is false for quoted and block
+        // scalars alike. The scalar's style would, but reading it costs another
+        // parse; the precision is given up deliberately until this module has
+        // one YAML parser instead of three, and the pointer names the element
         // exactly either way.
         let source = concat!(
             "---\n",         // 1
             "written:\n",    // 2
             "  - \"\\n\"\n", // 3
             "  - \" \"\n",   // 4
-            "  - 2\n",       // 5
-            "borrowed:\n",   // 6
-            "  -\n",         // 7
-            "  - \"x\"\n",   // 8
-            "---\n",         // 9
+            "  - \"\\r\"\n", // 5
+            "  - \"\\t\"\n", // 6
+            "  - 2\n",       // 7
+            "borrowed:\n",   // 8
+            "  -\n",         // 9
+            "  - \"x\"\n",   // 10
+            "---\n",         // 11
             "# Title\n",
         );
         let document = parse_markdown(source, MarkdownOptions::default());
@@ -2152,24 +2174,29 @@ mod tests {
 
         assert_eq!(
             value.get("written"),
-            Some(&serde_json::json!(["\n", " ", 2])),
+            Some(&serde_json::json!(["\n", " ", "\r", "\t", 2])),
             "an escaped break is the element's whole value"
         );
         assert_eq!(anchor("/written/0"), None);
-        // The limit is line breaks and nothing else. A space is a character
-        // marked-yaml can mark, so a scalar holding one keeps its position and
-        // the rule stays as narrow as the ambiguity that forces it.
+        // The limit is `\n` and nothing wider. A break is the only character a
+        // scalar can hold with nothing in the source for marked-yaml to have
+        // marked; every other whitespace character — a carriage return and a
+        // tab as much as a space — comes from source the scalar owns, so a
+        // scalar holding one keeps its position and the rule stays as narrow as
+        // the ambiguity that forces it.
         assert_eq!(anchor("/written/1"), Some((4, 5)));
         assert_eq!(anchor("/written/2"), Some((5, 5)));
+        assert_eq!(anchor("/written/3"), Some((6, 5)));
+        assert_eq!(anchor("/written/4"), Some((7, 5)));
         // The unwritten element's mark is the next element's, and that one
         // begins at an opening quote: the very byte a peek would read as proof
         // that the element before it was written.
         assert_eq!(anchor("/borrowed/0"), None);
-        assert_eq!(anchor("/borrowed/1"), Some((8, 5)));
+        assert_eq!(anchor("/borrowed/1"), Some((10, 5)));
         assert_eq!(
             source
                 .lines()
-                .nth(7)
+                .nth(9)
                 .and_then(|line| line.as_bytes().get(4)),
             Some(&b'"'),
             "the borrowed position holds a quote"
@@ -2743,6 +2770,24 @@ mod tests {
     /// The prefix of [`ARBITRARY_ELEMENTS`] whose elements have no text.
     const ARBITRARY_TEXTLESS_ELEMENTS: usize = 6;
 
+    /// Whether a document holds one of these spellings as a whole entry.
+    ///
+    /// Naive containment overcounts, because a textless spelling is a prefix of
+    /// a written one: `- >-` opens `- >-\n    text` too, so a document holding
+    /// only the written form would be counted as holding a textless element. A
+    /// match therefore counts only when nothing continues the spelling — no
+    /// line indented past the two columns the entry itself sits at, and no
+    /// `  : ` line giving an explicit key its value.
+    fn holds_spelling(source: &str, spellings: &[&str]) -> bool {
+        spellings.iter().any(|spelling| {
+            let written = format!("\n  {}\n", spelling.trim_end());
+            source.match_indices(&written).any(|(index, matched)| {
+                let rest = &source[index + matched.len()..];
+                !rest.starts_with("   ") && !rest.starts_with("  : ")
+            })
+        })
+    }
+
     /// The key spellings a generated nested mapping draws its first member
     /// from, indented two columns in.
     ///
@@ -2879,11 +2924,7 @@ mod tests {
             };
             parsed += 1;
             required += assert_written_entries_keep_anchors(&source, value, anchors);
-            let holds = |spellings: &[&str]| {
-                spellings
-                    .iter()
-                    .any(|spelling| source.contains(&format!("\n  {}\n", spelling.trim_end())))
-            };
+            let holds = |spellings: &[&str]| holds_spelling(&source, spellings);
             if source.contains("\n  -") {
                 sequences += 1;
                 if holds(&ARBITRARY_ELEMENTS[..ARBITRARY_TEXTLESS_ELEMENTS]) {
