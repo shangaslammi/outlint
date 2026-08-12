@@ -305,31 +305,27 @@ fn parse_frontmatter(
         end_line: closing_line as u64,
     };
     let body = source.get(body_start..body_end).unwrap_or_default();
-    let yaml = yaml_serde::from_str::<yaml_serde::Value>(body);
-    let options = MarkedYamlOptions::default()
-        .error_on_duplicate_keys(true)
-        .prevent_coercion(true);
-    let marked = marked_yaml::parse_yaml_with_options(0, body, options);
-    // The exact fallback parses through an event stream that keeps no markers,
-    // so entries parsed by it have no position beyond the block's own.
-    let parsed = match (yaml, marked) {
-        (Ok(yaml_serde::Value::Mapping(_)), Ok(marked)) => marked_frontmatter_mapping(&marked),
-        (Ok(_), Ok(_)) => Err("frontmatter must be a YAML mapping".into()),
-        // Preserve exact scalar lexemes when valid YAML uses constructs that
-        // marked-yaml deliberately does not model, notably tags and aliases.
-        (Ok(_), Err(_)) => {
-            exact_frontmatter_mapping(body).map(|value| (value, MarkedAnchors::new()))
+    let parsed = match frontmatter_documents(body) {
+        // §1.6: empty content, comments included, is not a mapping, while an
+        // explicit `{}` is. Both reach marked-yaml as the same empty mapping.
+        FrontmatterDocuments::None => Err("frontmatter must be a YAML mapping".into()),
+        FrontmatterDocuments::Several => Err("frontmatter must be a single YAML document".into()),
+        FrontmatterDocuments::One | FrontmatterDocuments::Unreadable => {
+            let options = MarkedYamlOptions::default()
+                .error_on_duplicate_keys(true)
+                .prevent_coercion(true);
+            match marked_yaml::parse_yaml_with_options(0, body, options) {
+                Ok(marked) => marked_frontmatter_mapping(&marked),
+                // Preserve exact scalar lexemes when valid YAML uses constructs
+                // that marked-yaml deliberately does not model, notably tags and
+                // aliases. That fallback parses through an event stream keeping
+                // no markers, so entries parsed by it have no position beyond
+                // the block's own.
+                Err(_) => {
+                    exact_frontmatter_mapping(body).map(|value| (value, MarkedAnchors::new()))
+                }
+            }
         }
-        // yaml_serde cannot represent arbitrary-range YAML numbers even
-        // though marked-yaml and the exact fallback retain their lexemes.
-        // The branch necessarily depends on yaml_serde's unstructured wording.
-        (Err(error), Ok(marked)) if yaml_serde_numeric_range_error(&error) => {
-            marked_frontmatter_mapping(&marked)
-        }
-        (Err(error), Err(_)) if yaml_serde_numeric_range_error(&error) => {
-            exact_frontmatter_mapping(body).map(|value| (value, MarkedAnchors::new()))
-        }
-        (Err(error), _) => Err(format!("invalid YAML frontmatter: {error}")),
     };
     let frontmatter = match parsed {
         Ok((value, anchors)) => DocumentFrontmatter::Mapping {
@@ -447,10 +443,66 @@ impl<'a> LineCursor<'a> {
     }
 }
 
-fn yaml_serde_numeric_range_error(error: &yaml_serde::Error) -> bool {
-    let message = error.to_string();
-    message.contains("invalid type: integer")
-        || (message.contains("invalid value: string") && message.contains("expected a float"))
+/// What the frontmatter body's YAML event stream says about its documents.
+///
+/// Neither tree this module builds can answer this on its own. marked-yaml
+/// reports an empty body as an empty mapping, so `---\n---` and `---\n{}\n---`
+/// arrive at it identically while §1.6 makes the first `invalid-frontmatter`
+/// and the second a valid empty mapping. It also stops at the first document of
+/// a stream, so a body opening a second one would otherwise be accepted with
+/// everything past the first silently dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrontmatterDocuments {
+    /// No document at all: empty, blank, or comment-only content.
+    None,
+    /// Exactly one document, which the tree parsers can be trusted with.
+    One,
+    /// More than one document, or content the scan could not read after the
+    /// first one closed. A bare `---` line would have closed the block before
+    /// the body reached here, so a second document is opened by a `...` end
+    /// marker rather than by a start marker. Either way marked-yaml stops at
+    /// the first document and cannot see what follows it.
+    Several,
+    /// The stream did not parse, and it failed early enough that the tree
+    /// parsers meet the same failure. The verdict is left to them, since they
+    /// report it against a position and this scan has none to give.
+    Unreadable,
+}
+
+/// Counts the documents the frontmatter body opens, without building a tree.
+///
+/// A document is exactly a `DocumentStart`, and a body holding none yields
+/// `StreamStart` followed directly by `StreamEnd`. Counting stops at the second
+/// one, which is all the caller distinguishes.
+fn frontmatter_documents(body: &str) -> FrontmatterDocuments {
+    let mut parser = YamlParser::new_from_str(body);
+    let mut documents = 0usize;
+    let mut closed = false;
+    loop {
+        let Ok((event, _)) = parser.next_token() else {
+            // Where the stream fails decides who can report it. A failure
+            // within the first document is one marked-yaml meets as well. A
+            // failure after that document closed is past the point marked-yaml
+            // stops at, so deferring would accept the body and drop the rest.
+            return if closed {
+                FrontmatterDocuments::Several
+            } else {
+                FrontmatterDocuments::Unreadable
+            };
+        };
+        match event {
+            YamlEvent::DocumentStart => {
+                documents += 1;
+                if documents > 1 {
+                    return FrontmatterDocuments::Several;
+                }
+            }
+            YamlEvent::DocumentEnd => closed = true,
+            YamlEvent::StreamEnd if documents == 0 => return FrontmatterDocuments::None,
+            YamlEvent::StreamEnd => return FrontmatterDocuments::One,
+            _ => {}
+        }
+    }
 }
 
 fn marked_frontmatter_mapping(
@@ -553,8 +605,8 @@ fn marked_yaml_to_json(
 /// source, so it is never marked at a later entry's token — while a plain,
 /// literal, or folded all-break scalar always is. Reading it here would mean a
 /// third walk over the block or a correlation pass between two trees, which is
-/// not worth a finer anchor while this module still runs three YAML parsers
-/// over the same text and is due to be cut down to one. Until then a coarse but
+/// not worth a finer anchor while this module still reads the same text with
+/// two YAML parsers and is due to be cut down to one. Until then a coarse but
 /// correct anchor beats a precise wrong one, and the JSON Pointer names the
 /// entry exactly either way.
 fn is_textless(text: &str) -> bool {
@@ -2179,7 +2231,16 @@ mod tests {
 
     #[test]
     fn empty_and_comment_only_frontmatter_are_not_mappings() {
-        for source in ["---\n---\n", "---\n# comment only\n---\n"] {
+        // marked-yaml reports every one of these as an empty mapping, so only
+        // the document count separates them from the explicit `{}` below.
+        for source in [
+            "---\n---\n",
+            "---\n\n---\n",
+            "---\n   \n---\n",
+            "---\n\t\n---\n",
+            "---\n# comment only\n---\n",
+            "---\n\n# comment after a blank line\n\n---\n",
+        ] {
             let document = parse_markdown(source, MarkdownOptions::default());
             let DocumentFrontmatter::Invalid { location, message } = document.frontmatter else {
                 panic!("empty YAML content must not become a mapping: {document:?}")
@@ -2189,11 +2250,66 @@ mod tests {
             assert_eq!(location.end_line, source.lines().count() as u64);
         }
 
-        let explicit_mapping = parse_markdown("---\n{}\n---\n", MarkdownOptions::default());
-        let DocumentFrontmatter::Mapping { value, .. } = explicit_mapping.frontmatter else {
-            panic!("an explicit empty mapping remains valid: {explicit_mapping:?}")
+        for source in ["---\n{}\n---\n", "---\n{ }\n---\n"] {
+            let explicit_mapping = parse_markdown(source, MarkdownOptions::default());
+            let DocumentFrontmatter::Mapping { value, .. } = explicit_mapping.frontmatter else {
+                panic!("an explicit empty mapping remains valid: {explicit_mapping:?}")
+            };
+            assert_eq!(value, serde_json::Map::new());
+        }
+    }
+
+    #[test]
+    fn frontmatter_holding_a_second_document_is_invalid() {
+        // A bare `---` line closes the block, so a second document can only be
+        // opened by a `...` end marker. marked-yaml stops at the first document
+        // and would otherwise drop everything after it without a word.
+        for source in [
+            "---\na: 1\n...\nb: 2\n---\n",
+            "---\na: 1\n...\nplain scalar\n---\n",
+            // Unreadable content after the first document closed: marked-yaml
+            // has already stopped and would accept `{a: 1}` on its own.
+            "---\na: 1\n...\n%YAML 1.2\n---\n",
+        ] {
+            let document = parse_markdown(source, MarkdownOptions::default());
+            let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
+                panic!("a second frontmatter document must be invalid: {document:?}")
+            };
+            assert_eq!(message, "frontmatter must be a single YAML document");
+        }
+
+        // A `...` that ends the only document opens nothing and stays valid.
+        let single = parse_markdown("---\na: 1\n...\n---\n", MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { value, .. } = single.frontmatter else {
+            panic!("a terminated single document remains valid: {single:?}")
         };
-        assert_eq!(value, serde_json::Map::new());
+        assert_eq!(value["a"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn recursive_frontmatter_aliases_terminate() {
+        // The exact fallback registers an anchor only once its node is fully
+        // parsed, so a container cannot alias itself. Without that, dropping
+        // the serde parser's recursion guard would leave nothing to stop this.
+        for source in [
+            "---\na: &x [*x]\n---\n",
+            "---\na: &x {k: *x}\n---\n",
+            "---\na: &x [[[*x]]]\n---\n",
+            "---\na: &x [*y]\nb: &y [*x]\n---\n",
+        ] {
+            let document = parse_markdown(source, MarkdownOptions::default());
+            assert!(
+                matches!(document.frontmatter, DocumentFrontmatter::Invalid { .. }),
+                "recursive alias was accepted: {source:?}"
+            );
+        }
+
+        // A backward reference to a completed node still resolves.
+        let document = parse_markdown("---\na: &x [1]\nb: *x\n---\n", MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("a backward alias remains valid: {document:?}")
+        };
+        assert_eq!(value["b"], serde_json::json!([1]));
     }
 
     #[test]
