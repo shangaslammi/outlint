@@ -120,7 +120,11 @@ wrong one above, because what one level costs a reader does not depend on how
 much input named it. The limit MUST be at least 64 levels, which no frontmatter
 written for a reader approaches, so that where an implementation set it decides
 nothing about a document anyone meant to write. A block exceeding it is
-`invalid-frontmatter`.
+`invalid-frontmatter`. An alias carries the nesting of the value it names to
+wherever it appears, so a block whose text nests shallowly may still name a
+value nesting arbitrarily deep, and each further alias to an aliased value
+deepens it again. What such a limit bounds MUST therefore be the depth of the
+value the block resolves to rather than the depth its text is written at.
 
 ---
 

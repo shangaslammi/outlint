@@ -41,7 +41,12 @@ feature set of the `0.1.0` workspace.
   cardinality count, and no constraint. A document with no `h1` conforms.
 - **Frontmatter.** Presence checking (`required`, `allow`) plus value
   validation delegated to a JSON Schema given inline or as a path relative to
-  the schema file, including linked `$ref` resource graphs.
+  the schema file, including linked `$ref` resource graphs. A block that does
+  not parse is reported with the YAML parser's own wording and position, and a
+  byte-order mark leading the block is dropped rather than becoming part of the
+  first key. Alias expansion is bounded by a multiple of the block's own size
+  and collection nesting by a fixed depth limit, which the value an alias
+  expands to counts against exactly as the written text does.
 - **Core library** (`outlint-core`): a pure, IO-free schema loader, Markdown
   outline parser, and validator. Schema loading collects every error rather
   than stopping at the first, and never returns a partial schema.
