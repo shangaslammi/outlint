@@ -888,13 +888,38 @@ struct ExactYamlScalar {
 /// compared against it.
 ///
 /// Two equal keys hash alike, which is all the duplicate check needs: a digest
-/// narrows the candidates and equality still decides, so a collision costs one
-/// comparison rather than a wrong verdict. The hash is not held anywhere and
-/// nothing depends on its value, so which hasher produces it is free to change.
+/// narrows the candidates and equality still decides, so keys colliding without
+/// being equal cost comparisons rather than a wrong verdict. The hash is not
+/// held anywhere and nothing depends on its value, so which hasher produces it
+/// is free to change.
 fn exact_yaml_key_digest(key: &ExactYamlNode) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     std::hash::Hash::hash(key, &mut hasher);
     std::hash::Hasher::finish(&hasher)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whole-node key comparisons this thread has made, kept only by a test
+    /// build.
+    ///
+    /// The count is what lets a test pin how few comparisons the digest leaves
+    /// to make, which no verdict and no timing reveals: a digest narrow enough
+    /// to fill its buckets returns the same answers, only quadratically. Each
+    /// test runs on its own thread and nothing here parses on another, so a
+    /// test reads exactly the comparisons its own parse made.
+    static KEY_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Compares two mapping keys, counting the comparison for the tests that pin
+/// how few of them the digest leaves.
+///
+/// An ordinary build compiles to the equality alone; the counter exists under
+/// `cfg(test)` and nowhere else.
+fn exact_yaml_keys_equal(left: &ExactYamlNode, right: &ExactYamlNode) -> bool {
+    #[cfg(test)]
+    KEY_COMPARISONS.with(|made| made.set(made.get() + 1));
+    left == right
 }
 
 fn exact_frontmatter_mapping(
@@ -1133,15 +1158,24 @@ impl<'source> ExactYamlReader<'source> {
                     // differently the two nodes compare here.
                     //
                     // Equality still decides, but only against the keys hashing
-                    // alike, so a mapping of many keys costs one hash each
-                    // rather than a comparison against every key before it.
-                    // Comparing each against all of them is quadratic in whole
-                    // nodes, and an aliased collection makes each of those
-                    // comparisons large as well: a hundred kilobytes of such
-                    // keys took over a minute to refuse.
+                    // alike, so a mapping of many keys costs one hash and one
+                    // ordered lookup each rather than a comparison against
+                    // every key before it. That is `O(n log n)` in the number
+                    // of keys and not linear — the map is ordered — and it is
+                    // only as good as the digest: a bucket holding `k`
+                    // colliding but unequal keys still compares whole nodes `k`
+                    // times over, so a digest that collided often would be
+                    // quadratic again. Comparing each key against all of them
+                    // unconditionally is that quadratic case always, and an
+                    // aliased collection makes each of those comparisons large
+                    // as well: a hundred kilobytes of such keys took over a
+                    // minute to refuse.
                     let digest = exact_yaml_key_digest(&key);
                     let alike = keys.entry(digest).or_default();
-                    if alike.iter().any(|&entry| entries[entry].0 == key) {
+                    if alike
+                        .iter()
+                        .any(|&entry| exact_yaml_keys_equal(&entries[entry].0, &key))
+                    {
                         return Err("frontmatter contains a duplicate mapping key".into());
                     }
                     alike.push(entries.len());
@@ -2918,6 +2952,46 @@ mod tests {
         assert_eq!(node[0], serde_json::json!(1));
     }
 
+    /// Frontmatter whose every line reaches the line above it through a *key*.
+    ///
+    /// Each line anchors a one-entry mapping whose key is a sequence holding an
+    /// alias to the line before, so the two levels a line adds are added around
+    /// its key and nowhere else. No line of the source nests past three levels
+    /// and every value in the block is a plain scalar, which leaves the key the
+    /// only path the depth can travel.
+    fn key_deepened_frontmatter(lines: usize) -> String {
+        let mut source = String::from("---\na0: &a0 {x: y}\n");
+        for line in 1..lines {
+            source.push_str(&format!("a{line}: &a{line} {{? [*a{}] : v}}\n", line - 1));
+        }
+        source.push_str("---\n# Title\n");
+        source
+    }
+
+    #[test]
+    fn alias_nesting_reached_through_a_mapping_key_is_bounded() {
+        // A mapping reaches whatever its keys reach as surely as whatever its
+        // values do, and the key is the position where an alias can deepen a
+        // block without a single line of it nesting deeply: charge the values
+        // alone and each line here records a depth of one while building two
+        // more levels than the line before, so the tree outgrows the limit
+        // unreported line after line. That is the same accumulation the
+        // value-position case above pins, at the one position where the depth
+        // an alias carries has no second path to travel by. A collection key
+        // is no string, so the shallow block is refused too — but for that
+        // reason and not for its depth, which is what makes the pair of
+        // messages evidence that the depth was counted at all rather than that
+        // something refused the shape.
+        assert_eq!(
+            expect_invalid_frontmatter(&key_deepened_frontmatter(70)),
+            "frontmatter nests YAML beyond its depth limit"
+        );
+        assert_eq!(
+            expect_invalid_frontmatter(&key_deepened_frontmatter(4)),
+            "frontmatter mapping keys must be strings"
+        );
+    }
+
     #[test]
     fn nesting_depth_counts_collections_that_are_open_at_once() {
         // Siblings are not nesting: a mapping of many one-level entries closes
@@ -3180,7 +3254,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_key_detection_stays_linear_in_the_number_of_keys() {
+    fn duplicate_key_detection_does_not_compare_every_pair_of_keys() {
         // The keys the ordered check exists for are the ones the conversion
         // never reduces to a string, and an alias makes such a key as large as
         // the node it names. Comparing each new key against every key before it
@@ -3190,18 +3264,34 @@ mod tests {
         // compares only against the keys that hash alike, and this block is
         // sized so that the difference is the difference between passing and
         // hanging rather than something a machine's speed decides.
+        //
+        // What is pinned is the count of whole-node comparisons and not a
+        // complexity class: the check is `O(n log n)` in the number of keys
+        // through an ordered map, and quadratic still in whatever fills one
+        // bucket. Timing alone would not see a digest narrow enough to fill
+        // them — the same block took a third of a second either way — so the
+        // count is asserted directly, and the bound is stated per key so that
+        // it says what it means: the keys here are all distinct, so a digest
+        // worth having leaves nothing to compare at all.
+        const KEYS: usize = 2_000;
         let mut source = format!("---\nbig: &b [{}]\n", vec!["1"; 450].join(","));
-        for key in 0..2_000 {
+        for key in 0..KEYS {
             source.push_str(&format!("? [*b,{key}]\n: {key}\n"));
         }
         source.push_str("---\n# Title\n");
+        KEY_COMPARISONS.with(|made| made.set(0));
         let started = std::time::Instant::now();
         let message = expect_invalid_frontmatter(&source);
         let elapsed = started.elapsed();
+        let compared = KEY_COMPARISONS.with(std::cell::Cell::get);
         // Every key is distinct, so the block is refused only once the walk has
         // compared all of them and the conversion has reached a key that is no
         // string: the verdict is evidence the check ran over the whole block.
         assert_eq!(message, "frontmatter mapping keys must be strings");
+        assert!(
+            compared < KEYS,
+            "{KEYS} distinct collection keys cost {compared} whole-node comparisons"
+        );
         assert!(
             elapsed < std::time::Duration::from_secs(5),
             "two thousand collection keys took {elapsed:?} to compare"
