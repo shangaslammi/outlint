@@ -100,6 +100,16 @@ strings. YAML integer and finite decimal scalars are converted to JSON numbers
 without an implementation-sized integer limit or binary floating-point
 rounding; implementations MUST preserve their exact mathematical value.
 
+A YAML alias resolves to a copy of the value it names, so a block of a few
+lines can name a value many orders of magnitude larger than itself: each level
+of aliases multiplies the level below it. An implementation MAY therefore bound
+how large a value one frontmatter block may expand to, and such a bound MUST
+scale with the block's own size rather than being a fixed constant, so that
+whether a document is accepted does not depend on where an implementation set
+an absolute ceiling. A block exceeding the bound is `invalid-frontmatter`. An
+implementation MUST NOT instead validate a truncated value, which would report
+a verdict on a document it did not read in full.
+
 ---
 
 ## 2. Schema format

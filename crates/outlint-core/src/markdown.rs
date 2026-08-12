@@ -783,54 +783,119 @@ fn exact_frontmatter_mapping(
     Ok(mapping)
 }
 
+/// How many nodes the exact fallback may build per parser event it has read.
+///
+/// An alias is one event that copies a whole subtree, so without a ceiling a
+/// chain of them multiplies: fourteen lines of `a: &x [*w,*w,*w,*w]` name
+/// hundreds of millions of nodes, which §1.6 lets an implementation refuse. The
+/// factor
+/// matches the one the discarded serde parse used to impose for free —
+/// `yaml_serde` caps alias repetition at `events.len() * 100` — which is wide
+/// enough that no document written to be read has ever met it.
+const EXACT_YAML_NODES_PER_EVENT: usize = 100;
+
+/// What the exact fallback has spent: parser events read, and nodes built.
+///
+/// The two together bound alias expansion. Events measure the input, since each
+/// one needs source text of its own to exist, and nodes measure the tree the
+/// input produces, alias copies included. Holding the second under a multiple
+/// of the first bounds the memory a frontmatter block can ask for by its own
+/// size, which is the property the removed serde parse had been supplying.
+///
+/// The count of events read *so far* stands in for the count of events in the
+/// whole stream, so that nothing has to parse the block twice to know its size.
+/// It never binds tighter than the material an alias could copy: an anchor
+/// resolves only once its node has been parsed, so every event of that node is
+/// already counted by the time an alias to it is read.
+#[derive(Debug, Default)]
+struct ExactYamlBudget {
+    events: usize,
+    nodes: usize,
+}
+
+impl ExactYamlBudget {
+    /// Records `nodes` further nodes, refusing the ones that overrun the budget.
+    ///
+    /// Called before the nodes are built, so the refusal precedes the
+    /// allocation rather than reporting it after the fact.
+    fn spend(&mut self, nodes: usize) -> Result<(), String> {
+        self.nodes = self.nodes.saturating_add(nodes);
+        if self.nodes > self.events.saturating_mul(EXACT_YAML_NODES_PER_EVENT) {
+            return Err("frontmatter expands YAML aliases beyond its size limit".into());
+        }
+        Ok(())
+    }
+}
+
+/// A parsed node held for the aliases that name it, with its size in nodes.
+///
+/// The size is what an alias to it costs, and is recorded here because that
+/// cost has to be charged before the copy is made rather than measured from it.
+#[derive(Debug)]
+struct AnchoredYamlNode {
+    node: ExactYamlNode,
+    nodes: usize,
+}
+
 fn parse_exact_yaml(source: &str) -> Result<ExactYamlNode, String> {
     let mut parser = YamlParser::new_from_str(source);
     let mut anchors = BTreeMap::new();
-    expect_yaml_event(&mut parser, |event| matches!(event, YamlEvent::StreamStart))?;
-    expect_yaml_event(&mut parser, |event| {
+    let mut budget = ExactYamlBudget::default();
+    expect_yaml_event(&mut parser, &mut budget, |event| {
+        matches!(event, YamlEvent::StreamStart)
+    })?;
+    expect_yaml_event(&mut parser, &mut budget, |event| {
         matches!(event, YamlEvent::DocumentStart)
     })?;
-    let event = next_yaml_event(&mut parser)?;
-    let value = parse_exact_yaml_node(event, &mut parser, &mut anchors)?;
-    expect_yaml_event(&mut parser, |event| matches!(event, YamlEvent::DocumentEnd))?;
-    expect_yaml_event(&mut parser, |event| matches!(event, YamlEvent::StreamEnd))?;
+    let event = next_yaml_event(&mut parser, &mut budget)?;
+    let value = parse_exact_yaml_node(event, &mut parser, &mut anchors, &mut budget)?;
+    expect_yaml_event(&mut parser, &mut budget, |event| {
+        matches!(event, YamlEvent::DocumentEnd)
+    })?;
+    expect_yaml_event(&mut parser, &mut budget, |event| {
+        matches!(event, YamlEvent::StreamEnd)
+    })?;
     Ok(value)
 }
 
 fn parse_exact_yaml_node(
     event: YamlEvent,
     parser: &mut YamlParser<std::str::Chars<'_>>,
-    anchors: &mut BTreeMap<usize, ExactYamlNode>,
+    anchors: &mut BTreeMap<usize, AnchoredYamlNode>,
+    budget: &mut ExactYamlBudget,
 ) -> Result<ExactYamlNode, String> {
-    match event {
+    let spent = budget.nodes;
+    let (node, anchor) = match event {
         YamlEvent::Scalar(value, style, anchor, tag) => {
-            let node = ExactYamlNode::Scalar(ExactYamlScalar { value, style, tag });
-            remember_yaml_anchor(anchors, anchor, &node);
-            Ok(node)
+            budget.spend(1)?;
+            (
+                ExactYamlNode::Scalar(ExactYamlScalar { value, style, tag }),
+                anchor,
+            )
         }
         YamlEvent::SequenceStart(anchor, tag) => {
+            budget.spend(1)?;
             let mut values = Vec::new();
             loop {
-                let event = next_yaml_event(parser)?;
+                let event = next_yaml_event(parser, budget)?;
                 if matches!(event, YamlEvent::SequenceEnd) {
                     break;
                 }
-                values.push(parse_exact_yaml_node(event, parser, anchors)?);
+                values.push(parse_exact_yaml_node(event, parser, anchors, budget)?);
             }
-            let node = ExactYamlNode::Sequence { tag, values };
-            remember_yaml_anchor(anchors, anchor, &node);
-            Ok(node)
+            (ExactYamlNode::Sequence { tag, values }, anchor)
         }
         YamlEvent::MappingStart(anchor, tag) => {
+            budget.spend(1)?;
             let mut entries = Vec::new();
             loop {
-                let event = next_yaml_event(parser)?;
+                let event = next_yaml_event(parser, budget)?;
                 if matches!(event, YamlEvent::MappingEnd) {
                     break;
                 }
-                let key = parse_exact_yaml_node(event, parser, anchors)?;
-                let event = next_yaml_event(parser)?;
-                let value = parse_exact_yaml_node(event, parser, anchors)?;
+                let key = parse_exact_yaml_node(event, parser, anchors, budget)?;
+                let event = next_yaml_event(parser, budget)?;
+                let value = parse_exact_yaml_node(event, parser, anchors, budget)?;
                 if entries
                     .iter()
                     .any(|(existing, _): &(ExactYamlNode, ExactYamlNode)| existing == &key)
@@ -839,29 +904,45 @@ fn parse_exact_yaml_node(
                 }
                 entries.push((key, value));
             }
-            let node = ExactYamlNode::Mapping { tag, entries };
-            remember_yaml_anchor(anchors, anchor, &node);
-            Ok(node)
+            (ExactYamlNode::Mapping { tag, entries }, anchor)
         }
-        YamlEvent::Alias(anchor) => anchors
-            .get(&anchor)
-            .cloned()
-            .ok_or_else(|| "frontmatter contains an unresolved YAML alias".into()),
-        _ => Err("frontmatter contains an unexpected YAML parser event".into()),
-    }
+        YamlEvent::Alias(anchor) => {
+            let anchored = anchors
+                .get(&anchor)
+                .ok_or("frontmatter contains an unresolved YAML alias")?;
+            budget.spend(anchored.nodes)?;
+            // An alias event carries no anchor of its own, so the copy names
+            // nothing and is not remembered.
+            (anchored.node.clone(), 0)
+        }
+        _ => return Err("frontmatter contains an unexpected YAML parser event".into()),
+    };
+    remember_yaml_anchor(anchors, anchor, &node, budget.nodes - spent);
+    Ok(node)
 }
 
 fn remember_yaml_anchor(
-    anchors: &mut BTreeMap<usize, ExactYamlNode>,
+    anchors: &mut BTreeMap<usize, AnchoredYamlNode>,
     anchor: usize,
     node: &ExactYamlNode,
+    nodes: usize,
 ) {
     if anchor != 0 {
-        anchors.insert(anchor, node.clone());
+        anchors.insert(
+            anchor,
+            AnchoredYamlNode {
+                node: node.clone(),
+                nodes,
+            },
+        );
     }
 }
 
-fn next_yaml_event(parser: &mut YamlParser<std::str::Chars<'_>>) -> Result<YamlEvent, String> {
+fn next_yaml_event(
+    parser: &mut YamlParser<std::str::Chars<'_>>,
+    budget: &mut ExactYamlBudget,
+) -> Result<YamlEvent, String> {
+    budget.events += 1;
     parser
         .next_token()
         .map(|(event, _)| event)
@@ -870,9 +951,10 @@ fn next_yaml_event(parser: &mut YamlParser<std::str::Chars<'_>>) -> Result<YamlE
 
 fn expect_yaml_event(
     parser: &mut YamlParser<std::str::Chars<'_>>,
+    budget: &mut ExactYamlBudget,
     expected: impl FnOnce(&YamlEvent) -> bool,
 ) -> Result<(), String> {
-    let event = next_yaml_event(parser)?;
+    let event = next_yaml_event(parser, budget)?;
     if expected(&event) {
         Ok(())
     } else {
@@ -2310,6 +2392,47 @@ mod tests {
             panic!("a backward alias remains valid: {document:?}")
         };
         assert_eq!(value["b"], serde_json::json!([1]));
+    }
+
+    #[test]
+    fn frontmatter_alias_expansion_is_bounded() {
+        // Every level aliases the one below it four times, so nine lines name
+        // 4^9 scalars and each further line would multiply that again. Nothing
+        // recurses and nothing nests deeply, so neither the anchor rule nor the
+        // parser's recursion limit applies: only the node budget stops it.
+        let mut bomb = String::from("---\na0: &x0 [1,1,1,1]\n");
+        for level in 1..=8 {
+            let alias = format!("*x{}", level - 1);
+            bomb.push_str(&format!(
+                "a{level}: &x{level} [{alias},{alias},{alias},{alias}]\n"
+            ));
+        }
+        bomb.push_str("---\n# Title\n");
+        let document = parse_markdown(&bomb, MarkdownOptions::default());
+        // A failure here means the bomb was accepted, so the panic names the
+        // value rather than printing it: it is the very thing the budget
+        // exists to keep out of memory.
+        let DocumentFrontmatter::Invalid { location, message } = document.frontmatter else {
+            panic!("an alias bomb must be rejected")
+        };
+        assert_eq!(
+            message,
+            "frontmatter expands YAML aliases beyond its size limit"
+        );
+        assert_eq!((location.start_line, location.end_line), (1, 11));
+
+        // The budget scales with the block, so ordinary reuse stays clear of
+        // it: aliasing one node ten times costs ten copies of a small node.
+        let mut reused = String::from("---\nbase: &base [1, 2, 3]\n");
+        for entry in 0..10 {
+            reused.push_str(&format!("copy{entry}: *base\n"));
+        }
+        reused.push_str("---\n# Title\n");
+        let document = parse_markdown(&reused, MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
+            panic!("repeated aliases to one node remain valid: {document:?}")
+        };
+        assert_eq!(value["copy9"], serde_json::json!([1, 2, 3]));
     }
 
     #[test]
