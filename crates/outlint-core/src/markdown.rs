@@ -10,8 +10,8 @@ use std::{
 };
 
 use marked_yaml::{
-    types::MarkedMappingNode, LoaderOptions as MarkedYamlOptions, Marker as MarkedMarker,
-    Node as MarkedNode,
+    types::{MarkedMappingNode, MarkedScalarNode},
+    LoaderOptions as MarkedYamlOptions, Marker as MarkedMarker, Node as MarkedNode,
 };
 use num_bigint::BigUint;
 use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag};
@@ -483,7 +483,7 @@ fn marked_mapping_to_json(
         let restore = pointer.len();
         push_pointer_token(pointer, key.as_str());
         // A member is spelled `key: value`, so the key names the whole entry.
-        record_marked_anchor(anchors, pointer, key.span().start());
+        record_marked_anchor(anchors, pointer, marked_key_start(key));
         let converted = marked_yaml_to_json(value, pointer, anchors)?;
         pointer.truncate(restore);
         object.insert(key.as_str().to_owned(), converted);
@@ -522,33 +522,72 @@ fn marked_yaml_to_json(
     marked_mapping_to_json(mapping, pointer, anchors).map(serde_json::Value::Object)
 }
 
+/// Whether a scalar's text holds nothing marked-yaml can have marked it at.
+///
+/// marked-yaml marks a scalar at the first character of its text, so a scalar
+/// with no such character has no mark to give and is reported at the next token
+/// the scanner reached — which belongs to a later entry. Accepting that mark
+/// would name text the entry does not own, and would have two entries claim one
+/// position, so a textless scalar takes no position and the entry it stands for
+/// falls back to the block, as §6.2 provides for an entry whose position is
+/// unavailable.
+///
+/// Textless is exactly "no character other than a line break". A block scalar
+/// with no content line — `>-`, `|`, or `|+` over blank lines alone — keeps at
+/// most the breaks its chomping indicator retains, while any content line
+/// contributes a character that marked-yaml marks. What costs a scalar its own
+/// position is therefore having no text, not having no value: `null` and `~`
+/// are spelled out and keep their position.
+///
+/// Nothing in the text tells a written all-break scalar apart from an unwritten
+/// one — `""` and `"\n"` are marked correctly but read the same here — so they
+/// fall back too. Deliberately: no sound test separates them. A source peek
+/// cannot, since a textless entry followed by a quoted string puts a quote at
+/// the borrowed position, and `may_coerce` cannot, since it is false for quoted
+/// and block scalars alike. A coarse but correct anchor beats a precise wrong
+/// one, and the JSON Pointer still names the entry exactly.
+fn is_textless(text: &str) -> bool {
+    text.bytes().all(|byte| byte == b'\n')
+}
+
 /// Where a sequence element begins in the source, if it has text of its own.
 ///
-/// marked-yaml marks a scalar at the first character of its text, so an element
-/// with no text has no mark to give and is reported at the next token the
-/// scanner reached — which belongs to a later element. `-` with nothing after
-/// it is such an element, and so is a block scalar with no content line
-/// (`- >-`, `- |`, or `- |+` over blank lines only): both are marked at the
-/// following entry, so accepting the mark would name text the element does not
-/// own.
-///
-/// Textless is exactly "no character other than a line break": a block scalar
-/// with no content line keeps at most the breaks its chomping indicator
-/// retains, while any content line contributes a character that marked-yaml
-/// marks. An element like that therefore takes no position and falls back to
-/// the block, as §6.2 provides for an entry whose position is unavailable.
-///
-/// Nothing in the text tells a written empty scalar apart from an unwritten
-/// one — `- ""` and `- "\n"` are marked correctly but read the same here — so
-/// they fall back too. A coarse but correct anchor beats a precise wrong one,
-/// and the JSON Pointer still names the entry exactly.
+/// An element is named by position alone, so a textless one — `-` with nothing
+/// after it, or an empty block scalar — is reported at the following entry and
+/// takes no position at all. See [`is_textless`].
 fn marked_element_start(value: &MarkedNode) -> Option<&MarkedMarker> {
     if let Some(scalar) = value.as_scalar() {
-        if scalar.as_str().bytes().all(|byte| byte == b'\n') {
+        if is_textless(scalar.as_str()) {
             return None;
         }
     }
     marked_node_start(value)
+}
+
+/// Where a mapping key begins in the source, if it has text of its own.
+///
+/// A member is named by its key, which usually settles the matter: a key is
+/// written before its value, so it cannot borrow a mark from within its own
+/// member. YAML's explicit-key syntax admits a textless key even so —
+///
+/// ```yaml
+/// ? >-
+/// next: second
+/// ```
+///
+/// is the pair `"": null` followed by `next`, and the empty key is marked at
+/// the `next` that follows it. Such a key takes no position, by the same rule
+/// and for the same reason as a textless sequence element. See [`is_textless`].
+///
+/// The mapping-keys-must-be-strings check upstream does not cover this: it is
+/// guarded by `may_coerce`, which is false for a block scalar, so a textless
+/// block key is accepted as the empty string. A plain `?` key does coerce, and
+/// is rejected there as the null key it is.
+fn marked_key_start(key: &MarkedScalarNode) -> Option<&MarkedMarker> {
+    if is_textless(key.as_str()) {
+        return None;
+    }
+    key.span().start()
 }
 
 /// Where a node begins in the source.
@@ -1954,6 +1993,190 @@ mod tests {
     }
 
     #[test]
+    fn textless_mapping_keys_take_no_anchor() {
+        // A key is written before its value, so it cannot normally borrow a
+        // mark from inside its own member. YAML's explicit-key syntax breaks
+        // that: `? >-` is a key with no text, and marked-yaml marks it at the
+        // following member's key, which that member also claims.
+        let source = concat!(
+            "---\n",            // 1
+            "folded:\n",        // 2
+            "  ? >-\n",         // 3
+            "  next: second\n", // 4
+            "literal:\n",       // 5
+            "  ? |\n",          // 6
+            "  next: second\n", // 7
+            "kept:\n",          // 8
+            "  ? |+\n",         // 9
+            "\n",               // 10
+            "  next: second\n", // 11
+            "quoted:\n",        // 12
+            "  ? \"\"\n",       // 13
+            "  next: second\n", // 14
+            "valued:\n",        // 15
+            "  ? >-\n",         // 16
+            "  : first\n",      // 17
+            "  next: second\n", // 18
+            "written:\n",       // 19
+            "  ? >-\n",         // 20
+            "    text\n",       // 21
+            "  next: second\n", // 22
+            "spelled:\n",       // 23
+            "  ? plain\n",      // 24
+            "  next: second\n", // 25
+            "wrapped:\n",       // 26
+            "  ? multi\n",      // 27
+            "    line\n",       // 28
+            "  next: second\n", // 29
+            "\"top\": 1\n",     // 30
+            "---\n",            // 31
+            "# Title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        let anchor = |pointer: &str| {
+            anchors
+                .get(pointer)
+                .map(|anchor| (anchor.line, anchor.column))
+        };
+
+        // An empty block scalar key is marked at the `next` that follows it, so
+        // the two members would claim one position and one of them would name
+        // the other's text.
+        assert_eq!(anchor("/folded/"), None);
+        assert_eq!(anchor("/folded/next"), Some((4, 3)));
+        assert_eq!(anchor("/literal/"), None);
+        assert_eq!(anchor("/literal/next"), Some((7, 3)));
+        // `|+` keeps the blank line, so the key is "\n" rather than "", and it
+        // still has no content line to be marked at.
+        assert_eq!(anchor("/kept/\n"), None);
+        assert_eq!(anchor("/kept/next"), Some((11, 3)));
+        assert_eq!(
+            value.get("kept"),
+            Some(&serde_json::json!({"\n": null, "next": "second"})),
+            "a kept blank line is still part of the key"
+        );
+        // A quoted empty key is marked where it is written, but its text does
+        // not distinguish it from a textless one, so it falls back too.
+        assert_eq!(anchor("/quoted/"), None);
+        assert_eq!(anchor("/quoted/next"), Some((14, 3)));
+        // The same key given a value borrows that value's line instead. It is
+        // no better placed for having landed inside its own member: the mark is
+        // the `:` that separates a key the member never spells.
+        assert_eq!(anchor("/valued/"), None);
+        assert_eq!(anchor("/valued/next"), Some((18, 3)));
+        assert_eq!(
+            value.get("valued"),
+            Some(&serde_json::json!({"": "first", "next": "second"})),
+            "an empty key must still carry its value"
+        );
+        // A block key with a content line is marked at that content, and a
+        // plain key at its first character, so both keep their positions. A
+        // plain key may span lines and is marked where it begins.
+        assert_eq!(anchor("/written/text"), Some((21, 5)));
+        assert_eq!(anchor("/written/next"), Some((22, 3)));
+        assert_eq!(anchor("/spelled/plain"), Some((24, 5)));
+        assert_eq!(anchor("/spelled/next"), Some((25, 3)));
+        assert_eq!(anchor("/wrapped/multi line"), Some((27, 5)));
+        assert_eq!(anchor("/wrapped/next"), Some((29, 3)));
+        // Ordinary keys are untouched, quoting included.
+        assert_eq!(anchor("/folded"), Some((2, 1)));
+        assert_eq!(anchor("/top"), Some((30, 1)));
+
+        assert_distinct_anchors(source, anchors);
+    }
+
+    #[test]
+    fn a_textless_key_does_not_borrow_the_following_member() {
+        // The whole of a frontmatter block can be this shape, where the member
+        // whose mark is borrowed is a sibling rather than a nested member: `/`
+        // is not an ancestor of `/next`, so the two would name one position
+        // while naming unrelated entries.
+        let source = "---\n? >-\nnext: second\n---\n\n# Title\n";
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        assert_eq!(
+            value,
+            &serde_json::json!({"": null, "next": "second"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            "the explicit key parses to an empty-keyed member"
+        );
+        assert_eq!(anchors.get("/"), None);
+        assert_eq!(
+            anchors.get("/next"),
+            Some(FrontmatterAnchor { line: 3, column: 1 })
+        );
+    }
+
+    #[test]
+    fn a_quoted_line_break_takes_no_anchor_by_design() {
+        // `- "\n"` is written and marked-yaml marks it correctly, at its
+        // opening quote. It takes no anchor even so, because its text is
+        // nothing but a line break and no sound test tells that apart from a
+        // textless element's borrowed mark. A peek at the marked byte cannot:
+        // an unwritten element followed by a quoted string borrows a mark that
+        // lands on exactly such a quote, as `/borrowed` below shows. Nor can
+        // `may_coerce`, which is false for quoted and block scalars alike. The
+        // precision is given up deliberately; the pointer names the element
+        // exactly either way.
+        let source = concat!(
+            "---\n",         // 1
+            "written:\n",    // 2
+            "  - \"\\n\"\n", // 3
+            "  - \" \"\n",   // 4
+            "  - 2\n",       // 5
+            "borrowed:\n",   // 6
+            "  -\n",         // 7
+            "  - \"x\"\n",   // 8
+            "---\n",         // 9
+            "# Title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        let anchor = |pointer: &str| {
+            anchors
+                .get(pointer)
+                .map(|anchor| (anchor.line, anchor.column))
+        };
+
+        assert_eq!(
+            value.get("written"),
+            Some(&serde_json::json!(["\n", " ", 2])),
+            "an escaped break is the element's whole value"
+        );
+        assert_eq!(anchor("/written/0"), None);
+        // The limit is line breaks and nothing else. A space is a character
+        // marked-yaml can mark, so a scalar holding one keeps its position and
+        // the rule stays as narrow as the ambiguity that forces it.
+        assert_eq!(anchor("/written/1"), Some((4, 5)));
+        assert_eq!(anchor("/written/2"), Some((5, 5)));
+        // The unwritten element's mark is the next element's, and that one
+        // begins at an opening quote: the very byte a peek would read as proof
+        // that the element before it was written.
+        assert_eq!(anchor("/borrowed/0"), None);
+        assert_eq!(anchor("/borrowed/1"), Some((8, 5)));
+        assert_eq!(
+            source
+                .lines()
+                .nth(7)
+                .and_then(|line| line.as_bytes().get(4)),
+            Some(&b'"'),
+            "the borrowed position holds a quote"
+        );
+    }
+
+    #[test]
     fn line_cursor_measures_forward_without_rescanning() {
         // The single-walk property, pinned without timing: the cursor keeps
         // what it has measured and refuses a column it has already passed,
@@ -2383,12 +2606,121 @@ mod tests {
             .is_some_and(|rest| ancestor.is_empty() || rest.is_empty() || rest.starts_with('/'))
     }
 
+    /// Every entry that must hold a position holds one, counted.
+    ///
+    /// The invariants above bind only the anchors that are there, so recording
+    /// none at all would satisfy every one of them. This is the floor under
+    /// them. An entry is required to hold a position when its spelling must
+    /// have had a character for marked-yaml to mark: a member whose key is not
+    /// all line breaks, and an element whose value cannot have come from a
+    /// textless spelling. A null element is exempt, since `-` and `null` yield
+    /// the same value, and so is an all-break string, since `- >-` and `- "\n"`
+    /// do.
+    ///
+    /// Positions come all together or not at all: a document that marked-yaml
+    /// declines to parse falls back to a conversion that keeps no markers, and
+    /// §6.2 anchors its every entry to the block. A block with no position at
+    /// all is therefore required to have none, and the yield report is what
+    /// keeps that exemption from swallowing the floor — it counts the entries
+    /// required across a run, which an implementation that dropped every anchor
+    /// would drive to zero.
+    ///
+    /// The count returned is how many entries this document required.
+    fn assert_written_entries_keep_anchors(
+        source: &str,
+        value: &serde_json::Map<String, serde_json::Value>,
+        anchors: &FrontmatterAnchors,
+    ) -> usize {
+        if anchors.0.is_empty() {
+            return 0;
+        }
+        assert_written_members_keep_anchors(source, value, &mut String::new(), anchors)
+    }
+
+    fn assert_written_members_keep_anchors(
+        source: &str,
+        members: &serde_json::Map<String, serde_json::Value>,
+        pointer: &mut String,
+        anchors: &FrontmatterAnchors,
+    ) -> usize {
+        let mut required = 0;
+        for (key, member) in members {
+            let restore = pointer.len();
+            push_pointer_token(pointer, key);
+            if !text_may_be_textless(key) {
+                required += 1;
+                assert_anchor_kept(source, pointer, anchors);
+            }
+            required += assert_written_values_keep_anchors(source, member, pointer, anchors);
+            pointer.truncate(restore);
+        }
+        required
+    }
+
+    fn assert_written_values_keep_anchors(
+        source: &str,
+        value: &serde_json::Value,
+        pointer: &mut String,
+        anchors: &FrontmatterAnchors,
+    ) -> usize {
+        match value {
+            serde_json::Value::Object(members) => {
+                assert_written_members_keep_anchors(source, members, pointer, anchors)
+            }
+            serde_json::Value::Array(elements) => {
+                let mut required = 0;
+                for (index, element) in elements.iter().enumerate() {
+                    let restore = pointer.len();
+                    pointer.push('/');
+                    pointer.push_str(&index.to_string());
+                    if !value_may_be_textless(element) {
+                        required += 1;
+                        assert_anchor_kept(source, pointer, anchors);
+                    }
+                    required +=
+                        assert_written_values_keep_anchors(source, element, pointer, anchors);
+                    pointer.truncate(restore);
+                }
+                required
+            }
+            _ => 0,
+        }
+    }
+
+    fn assert_anchor_kept(source: &str, pointer: &str, anchors: &FrontmatterAnchors) {
+        assert!(
+            anchors.get(pointer).is_some(),
+            "{pointer} is written but kept no anchor in {source:?}"
+        );
+    }
+
+    /// Whether a converted value could have been spelled with no text at all.
+    fn value_may_be_textless(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Null => true,
+            serde_json::Value::String(text) => text_may_be_textless(text),
+            _ => false,
+        }
+    }
+
+    /// Whether text could have come from a spelling with no character in it.
+    ///
+    /// Written out here rather than taken from [`is_textless`] on purpose: a
+    /// floor that called the rule it is holding up would widen along with it,
+    /// and a rule that discarded more positions than line breaks force would
+    /// pass unnoticed.
+    fn text_may_be_textless(text: &str) -> bool {
+        text.chars().all(|character| character == '\n')
+    }
+
     /// The element spellings a generated block sequence draws from.
     ///
     /// The first six are textless in one form or another and are the class
     /// that borrows a later entry's marker; the rest are written and must keep
-    /// a position of their own. A spelling may span lines, so it carries its
-    /// own continuation, indented past the `-` that opens it.
+    /// a position of their own, `- " "` among them, since the rule turns on
+    /// line breaks alone and a space is a character like any other. A spelling
+    /// may span lines, so it carries its own continuation, indented past the
+    /// `-` that opens it.
     const ARBITRARY_ELEMENTS: &[&str] = &[
         "-",
         "- \"\"",
@@ -2400,7 +2732,9 @@ mod tests {
         "- ~",
         "- 1",
         "- ok",
+        "- \" \"",
         "- >-\n    text",
+        "- |\n    text",
         "- key: 1",
         "- [1, 2]",
         "- {p: 1}",
@@ -2408,6 +2742,35 @@ mod tests {
 
     /// The prefix of [`ARBITRARY_ELEMENTS`] whose elements have no text.
     const ARBITRARY_TEXTLESS_ELEMENTS: usize = 6;
+
+    /// The key spellings a generated nested mapping draws its first member
+    /// from, indented two columns in.
+    ///
+    /// The first five are textless keys, which YAML admits only through the
+    /// explicit `? ` form and which borrow the following member's marker; the
+    /// rest are written and must keep a position of their own. Each spelling
+    /// carries its own continuation lines, and the mapping it opens is closed
+    /// off by a written member, so a borrowed marker always has a neighbour to
+    /// collide with.
+    const ARBITRARY_KEYS: &[&str] = &[
+        "? >-",
+        "? |",
+        "? |+\n",
+        "? \"\"",
+        "? ''",
+        "? >-\n    text",
+        "? |\n    text",
+        "? \" \"",
+        "? plain",
+        "? plain\n  : 1",
+        "? multi\n    line\n  : 1",
+        "plain: 1",
+        "\"quoted\": 1",
+        "'single': 1",
+    ];
+
+    /// The prefix of [`ARBITRARY_KEYS`] whose keys have no text.
+    const ARBITRARY_TEXTLESS_KEYS: usize = 5;
 
     /// A frontmatter block of arbitrary entries, some of which parse.
     ///
@@ -2437,6 +2800,12 @@ mod tests {
                     }
                     text
                 }),
+            // A nested mapping, whose members are named by their keys. Only
+            // one drawn key per mapping: the textless spellings all parse to
+            // the same key, and a duplicate would spend the case.
+            1 => (0..ARBITRARY_KEYS.len()).prop_map(|key| {
+                format!("\n  {}\n  next: 2", ARBITRARY_KEYS[key])
+            }),
         ];
         proptest::collection::vec(("[a-z\u{00e0}-\u{00ff}]{1,3}", indent, body), 1..6).prop_map(
             |entries| {
@@ -2477,48 +2846,62 @@ mod tests {
             source in arbitrary_frontmatter_document(),
         ) {
             let document = parse_markdown(&source, MarkdownOptions::default());
-            if let DocumentFrontmatter::Mapping { location, anchors, .. } = &document.frontmatter {
+            if let DocumentFrontmatter::Mapping { location, value, anchors } = &document.frontmatter {
                 assert_valid_anchors(&source, location, anchors);
+                assert_written_entries_keep_anchors(&source, value, anchors);
             }
         }
     }
 
     #[test]
-    fn arbitrary_frontmatter_documents_reach_block_sequences() {
+    fn arbitrary_frontmatter_documents_reach_textless_entries() {
         // A generator that cannot reach the shape under test leaves a dead
         // property that passes forever. This one has to reach a parsed mapping
-        // holding a block sequence, and one holding a textless element, often
-        // enough that the anchor invariants are actually being exercised.
+        // holding a block sequence, a nested mapping, and a textless entry of
+        // either kind, often enough that the anchor invariants are actually
+        // being exercised — and it has to leave written entries behind for the
+        // retention floor to hold up.
         use proptest::{strategy::ValueTree, test_runner::TestRunner};
 
         const SAMPLES: usize = 512;
         let strategy = arbitrary_frontmatter_document();
         let mut runner = TestRunner::deterministic();
-        let (mut parsed, mut sequences, mut textless) = (0, 0, 0);
+        let (mut parsed, mut sequences, mut mappings) = (0, 0, 0);
+        let (mut textless_elements, mut textless_keys, mut required) = (0, 0, 0);
         for _ in 0..SAMPLES {
             let source = strategy
                 .new_tree(&mut runner)
                 .expect("the strategy generates a document")
                 .current();
             let document = parse_markdown(&source, MarkdownOptions::default());
-            if !matches!(document.frontmatter, DocumentFrontmatter::Mapping { .. }) {
+            let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
                 continue;
-            }
+            };
             parsed += 1;
-            if !source.contains("\n  -") {
-                continue;
+            required += assert_written_entries_keep_anchors(&source, value, anchors);
+            let holds = |spellings: &[&str]| {
+                spellings
+                    .iter()
+                    .any(|spelling| source.contains(&format!("\n  {}\n", spelling.trim_end())))
+            };
+            if source.contains("\n  -") {
+                sequences += 1;
+                if holds(&ARBITRARY_ELEMENTS[..ARBITRARY_TEXTLESS_ELEMENTS]) {
+                    textless_elements += 1;
+                }
             }
-            sequences += 1;
-            if ARBITRARY_ELEMENTS[..ARBITRARY_TEXTLESS_ELEMENTS]
-                .iter()
-                .any(|spelling| source.contains(&format!("\n  {}\n", spelling.trim_end())))
-            {
-                textless += 1;
+            if source.contains("\n  next: 2") {
+                mappings += 1;
+                if holds(&ARBITRARY_KEYS[..ARBITRARY_TEXTLESS_KEYS]) {
+                    textless_keys += 1;
+                }
             }
         }
         println!(
             "of {SAMPLES} generated documents: {parsed} parsed as a mapping, \
-             {sequences} held a block sequence, {textless} held a textless element"
+             {sequences} held a block sequence ({textless_elements} of them a textless \
+             element), {mappings} held a nested mapping ({textless_keys} of them a \
+             textless key); {required} written entries had to keep an anchor"
         );
 
         assert!(parsed >= SAMPLES / 4, "only {parsed} documents parsed");
@@ -2527,8 +2910,20 @@ mod tests {
             "only {sequences} documents held a block sequence"
         );
         assert!(
-            textless >= SAMPLES / 32,
-            "only {textless} documents held a textless element"
+            textless_elements >= SAMPLES / 32,
+            "only {textless_elements} documents held a textless element"
+        );
+        assert!(
+            mappings >= SAMPLES / 16,
+            "only {mappings} documents held a nested mapping"
+        );
+        assert!(
+            textless_keys >= SAMPLES / 32,
+            "only {textless_keys} documents held a textless key"
+        );
+        assert!(
+            required >= SAMPLES,
+            "only {required} written entries were required to keep an anchor"
         );
     }
 }

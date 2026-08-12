@@ -474,17 +474,32 @@ Setext heading), or the first byte of the frontmatter entry named by
 | `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and whenever the entry's position is unavailable |
 | constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, which is attached to the schema root and so has no parent header | the parent section's header line; line 1 at the root scope |
 
-An entry's position is unavailable in two cases. The first is a sequence
-element with no text of its own, which has nothing to anchor to and so anchors
-to the block rather than to a neighbouring entry's text: `-` with nothing after
-it, and a block scalar with no content line, such as `- >-`, `- |`, or `- |+`
-over blank lines alone. An empty quoted string is indistinguishable from these
-by its text and anchors to the block as well. What costs an element its own
-position is having no text, not having no value: `- null` and `- ~` are
-spelled out and anchor at that spelling. The second case is a document whose
-frontmatter is parsed without positions at all, which an implementation MAY do
-for YAML constructs its position-tracking parser does not model, notably tags
-and aliases; every entry of such a document anchors to the block.
+An entry's position is unavailable in two cases. The first is an entry whose
+spelling holds no character other than a line break, which has nothing to
+anchor to and so anchors to the block rather than to a neighbouring entry's
+text. A sequence element written as `-` with nothing after it is such an
+entry, and so is a block scalar with no content line, such as `- >-`, `- |`,
+or `- |+` over blank lines alone. A mapping member is named by its key, which
+is written ahead of its value and so has text in the usual `key: value`
+spelling, but YAML's explicit-key syntax admits a textless key — a `? >-`
+line, whose member takes the empty key — and such a member anchors to the
+block by the same rule. What costs an entry its own position is having no
+text, not having no value: `- null` and `- ~` are spelled out and anchor at
+that spelling.
+
+A quoted scalar whose text is only line breaks — `""`, `''`, and `"\n"` alike
+— anchors to the block as well. That is a deliberate limit rather than an
+oversight: such a scalar is written, but nothing separates it from an entry
+whose reported position was borrowed from a later one, and reading the source
+at that position does not settle it either, since a textless element followed
+by a quoted string borrows a position that is itself an opening quote. A
+coarse but correct anchor is preferred to a precise one that may name another
+entry's text, and `pointer` names the entry exactly either way.
+
+The second case is a document whose frontmatter is parsed without positions at
+all, which an implementation MAY do for YAML constructs its position-tracking
+parser does not model, notably tags and aliases; every entry of such a
+document anchors to the block.
 
 Constraint diagnostics additionally list the concrete headers involved, if
 any, each by its own header path (§5.3). Which diagnostics the `title`
