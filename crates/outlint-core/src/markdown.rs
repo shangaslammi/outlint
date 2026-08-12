@@ -607,18 +607,29 @@ fn marked_key_start(key: &MarkedScalarNode) -> Option<&MarkedMarker> {
 /// rather than from the mapping itself, so the earlier of the node's own start
 /// and its first key's start is the one that names the node.
 ///
-/// The first key goes through [`marked_key_start`] so that a borrowed marker
-/// cannot enter here either. A textless first key needs YAML's `? ` form, which
-/// puts the mapping's own start on the `?` and the borrowed marker on a later
-/// token, so the `min` below would discard it anyway; taking it from the guard
-/// keeps that a consequence of the one rule rather than a coincidence this
-/// function has to be reasoned about separately to trust.
+/// The first key is taken raw, without the [`marked_key_start`] guard, and must
+/// be: the guard belongs to the *member* a key names, not to the *mapping* the
+/// key opens. A textless key must not anchor its own member, whose position it
+/// would take from a later entry, but it may still bound its parent, whose
+/// extent legitimately begins where the key's spelling begins even when that
+/// spelling resolves to no text. `- "": K` is the case that separates the two:
+/// the empty key takes no anchor of its own, while the element it opens starts
+/// at that opening quote and not at the `:` marked-yaml reports for the mapping.
+///
+/// A borrowed marker cannot get in here even so. A key is marked at a later
+/// entry's token only when it has no character of its own in the source, which
+/// in a mapping means YAML's explicit `? ` form over a block scalar with no
+/// content line — a quoted empty key has its opening quote and is marked at it.
+/// That form puts the mapping's own start on the `?` itself, ahead of every
+/// token the key could have borrowed from, so the `min` below keeps the `?` and
+/// discards the borrowed marker. A flow mapping is safe for the same shape of
+/// reason, its `{` preceding everything inside it.
 fn marked_node_start(value: &MarkedNode) -> Option<&MarkedMarker> {
     let own = value.span().start();
     let first_key = value
         .as_mapping()
         .and_then(|mapping| mapping.iter().next())
-        .and_then(|(key, _)| marked_key_start(key));
+        .and_then(|(key, _)| key.span().start());
     match (own, first_key) {
         (Some(own), Some(key)) if (key.line(), key.column()) < (own.line(), own.column()) => {
             Some(key)
@@ -2135,6 +2146,109 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_empty_key_still_opens_its_element() {
+        // A textless key gives up its own member's anchor, but not its parent's:
+        // the element it opens begins where the key is spelled, even though that
+        // spelling resolves to no text. marked-yaml reports the mapping's own
+        // span from the `:` that follows, so an element that took the mapping's
+        // own start would land past its own first byte and name the separator
+        // instead of the entry.
+        let source = concat!(
+            "---\n",                                // 1
+            "list:\n",                              // 2
+            "  - \"\": K\n",                        // 3
+            "  - '': L\n",                          // 4
+            "  - \"\\n\": M\n",                     // 5
+            "  - 2\n",                              // 6
+            "flow: [\"\": K, '': L, \"\\n\": M]\n", // 7
+            "---\n",                                // 8
+            "# Title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        let anchor = |pointer: &str| {
+            anchors
+                .get(pointer)
+                .map(|anchor| (anchor.line, anchor.column))
+        };
+
+        assert_eq!(
+            value.get("list"),
+            Some(&serde_json::json!([{"": "K"}, {"": "L"}, {"\n": "M"}, 2])),
+            "each element is a mapping under an empty key"
+        );
+        // Column 5 is the opening quote, which is the element's first byte. The
+        // mapping's own start is the `:` further along the line — column 7 on
+        // lines 3 and 4, column 9 on line 5, none of them the element.
+        assert_eq!(anchor("/list/0"), Some((3, 5)));
+        assert_eq!(anchor("/list/1"), Some((4, 5)));
+        assert_eq!(anchor("/list/2"), Some((5, 5)));
+        assert_eq!(anchor("/list/3"), Some((6, 5)));
+        // The members those keys name still take no anchor, which is the whole
+        // asymmetry: a textless key cannot place its own member and can place
+        // the mapping it opens.
+        assert_eq!(anchor("/list/0/"), None);
+        assert_eq!(anchor("/list/1/"), None);
+        assert_eq!(anchor("/list/2/\n"), None);
+        // Flow syntax is the same rule on one line: columns 8, 15 and 22 are the
+        // opening quotes, while 11, 18 and 27 are where the mapping's own span
+        // begins, one past the `:`.
+        assert_eq!(anchor("/flow/0"), Some((7, 8)));
+        assert_eq!(anchor("/flow/1"), Some((7, 15)));
+        assert_eq!(anchor("/flow/2"), Some((7, 22)));
+        assert_eq!(
+            source.lines().nth(6).map(|line| (
+                line.as_bytes().get(7),
+                line.as_bytes().get(14),
+                line.as_bytes().get(21)
+            )),
+            Some((Some(&b'"'), Some(&b'\''), Some(&b'"'))),
+            "the anchored positions hold the opening quotes"
+        );
+
+        assert_distinct_anchors(source, anchors);
+    }
+
+    #[test]
+    fn a_block_scalar_over_several_blank_lines_takes_no_anchor() {
+        // `|+` keeps every trailing break, so two blank content lines resolve to
+        // `"\n\n"`. That is still a text with no character marked-yaml can have
+        // marked the scalar at, so the element borrows the following one's `-`
+        // and must fall back. A rule written for one break alone would accept
+        // that borrowed marker, and no other invariant would notice: the `-` at
+        // column 3 differs from the next element's own column 5, so the two
+        // never collide.
+        let source = concat!(
+            "---\n",    // 1
+            "list:\n",  // 2
+            "  - |+\n", // 3
+            "\n",       // 4
+            "\n",       // 5
+            "  - 2\n",  // 6
+            "---\n",    // 7
+            "# Title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+
+        let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        assert_eq!(
+            value.get("list"),
+            Some(&serde_json::json!(["\n\n", 2])),
+            "both kept blank lines are part of the value"
+        );
+        assert_eq!(anchors.get("/list/0"), None);
+        assert_eq!(
+            anchors.get("/list/1"),
+            Some(FrontmatterAnchor { line: 6, column: 5 })
+        );
+    }
+
+    #[test]
     fn a_quoted_line_break_takes_no_anchor_by_design() {
         // `- "\n"` is written and marked-yaml marks it correctly, at its
         // opening quote. It takes no anchor even so, because its text is
@@ -2742,12 +2856,19 @@ mod tests {
 
     /// The element spellings a generated block sequence draws from.
     ///
-    /// The first six are textless in one form or another and are the class
+    /// The first seven are textless in one form or another and are the class
     /// that borrows a later entry's marker; the rest are written and must keep
     /// a position of their own, `- " "` among them, since the rule turns on
     /// line breaks alone and a space is a character like any other. A spelling
     /// may span lines, so it carries its own continuation, indented past the
     /// `-` that opens it.
+    ///
+    /// The mappings under a quoted empty key are here because the element they
+    /// open is placed by a rule of its own — [`marked_node_start`] prefers the
+    /// first key to the mapping's own span start — and a corpus that cannot
+    /// spell that shape cannot witness the rule at all. Both syntaxes are drawn:
+    /// a block mapping is reported from the `:` after the key, a flow mapping
+    /// from its `{`, so only the block form leans on the preference.
     const ARBITRARY_ELEMENTS: &[&str] = &[
         "-",
         "- \"\"",
@@ -2755,6 +2876,7 @@ mod tests {
         "- >-",
         "- |",
         "- |+\n",
+        "- |+\n\n",
         "- null",
         "- ~",
         "- 1",
@@ -2765,10 +2887,18 @@ mod tests {
         "- key: 1",
         "- [1, 2]",
         "- {p: 1}",
+        "- \"\": 1",
+        "- '': 1\n    next: 2",
+        "- {\"\": 1}",
+        "- {'': 1, next: 2}",
     ];
 
     /// The prefix of [`ARBITRARY_ELEMENTS`] whose elements have no text.
-    const ARBITRARY_TEXTLESS_ELEMENTS: usize = 6;
+    const ARBITRARY_TEXTLESS_ELEMENTS: usize = 7;
+
+    /// The suffix of [`ARBITRARY_ELEMENTS`] that are mappings under a quoted
+    /// empty key, the shape [`marked_node_start`]'s first-key preference places.
+    const ARBITRARY_EMPTY_KEY_ELEMENTS: usize = 4;
 
     /// Whether a document holds one of these spellings as a whole entry.
     ///
@@ -2913,6 +3043,7 @@ mod tests {
         let mut runner = TestRunner::deterministic();
         let (mut parsed, mut sequences, mut mappings) = (0, 0, 0);
         let (mut textless_elements, mut textless_keys, mut required) = (0, 0, 0);
+        let mut empty_key_elements = 0;
         for _ in 0..SAMPLES {
             let source = strategy
                 .new_tree(&mut runner)
@@ -2930,6 +3061,11 @@ mod tests {
                 if holds(&ARBITRARY_ELEMENTS[..ARBITRARY_TEXTLESS_ELEMENTS]) {
                     textless_elements += 1;
                 }
+                if holds(
+                    &ARBITRARY_ELEMENTS[ARBITRARY_ELEMENTS.len() - ARBITRARY_EMPTY_KEY_ELEMENTS..],
+                ) {
+                    empty_key_elements += 1;
+                }
             }
             if source.contains("\n  next: 2") {
                 mappings += 1;
@@ -2941,7 +3077,8 @@ mod tests {
         println!(
             "of {SAMPLES} generated documents: {parsed} parsed as a mapping, \
              {sequences} held a block sequence ({textless_elements} of them a textless \
-             element), {mappings} held a nested mapping ({textless_keys} of them a \
+             element, {empty_key_elements} of them a mapping under a quoted empty key), \
+             {mappings} held a nested mapping ({textless_keys} of them a \
              textless key); {required} written entries had to keep an anchor"
         );
 
@@ -2953,6 +3090,14 @@ mod tests {
         assert!(
             textless_elements >= SAMPLES / 32,
             "only {textless_elements} documents held a textless element"
+        );
+        // A mapping under a quoted empty key is the one element whose position
+        // comes from its first key rather than from its own span, and the corpus
+        // once lacked it entirely — which let a change to that preference look
+        // equivalent over every document this generator could produce.
+        assert!(
+            empty_key_elements >= SAMPLES / 32,
+            "only {empty_key_elements} documents held a mapping under a quoted empty key"
         );
         assert!(
             mappings >= SAMPLES / 16,
