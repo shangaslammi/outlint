@@ -463,6 +463,8 @@ not by one per character. The column is the first byte of what the row below
 names — the header's own first byte (its ATX marker, or its text for a
 Setext heading), or the first byte of the frontmatter entry named by
 `pointer` — and 1 wherever the row names a whole line or falls back to one.
+Where a row provides for a fallback anchor, the column is the first byte of
+whatever that fallback names.
 
 | Diagnostic | Target | Source anchor |
 |---|---|---|
@@ -471,7 +473,7 @@ Setext heading), or the first byte of the frontmatter entry named by
 | `missing-section`, `too-few-sections` | `missing_header`: `parent` is the enclosing scope's path, `matcher` the unsatisfied rule's label | the parent section's header line; line 1 at the root scope |
 | `missing-title` | `missing_header` with empty `parent` and the `title` matcher's label | line 1 |
 | `missing-frontmatter`, `forbidden-frontmatter`, `invalid-frontmatter` | `frontmatter` | the block's first line, or line 1 when absent |
-| `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and whenever the entry's position is unavailable |
+| `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and a fallback anchor (below) whenever the entry's position is unavailable |
 | constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, which is attached to the schema root and so has no parent header | the parent section's header line; line 1 at the root scope |
 
 An entry's position is unavailable in two cases. The first is an entry with no
@@ -482,14 +484,24 @@ A sequence element written as `-` with nothing after it resolves to the null
 value and has no text at all; a block scalar with no content line, such as
 `- >-`, `- |`, or `- |+` over blank lines alone, has a spelling of several
 characters but resolves to the empty string or to whatever breaks its chomping
-indicator keeps. Neither has a first character of its own text, so both anchor
-to the block rather than to a neighbouring entry's text. A mapping member is
-named by its key, which is written ahead of its value and so has text in the
-usual `key: value` spelling, but YAML's explicit-key syntax admits a textless
-key — a `? >-` line, whose member takes the empty key — and such a member
-anchors to the block by the same rule. What costs an entry its own position is
-resolving to no text, not resolving to no value: `- null` and `- ~` resolve to
-null but are spelled out, and anchor at that spelling.
+indicator keeps. Neither has a first character of its own text. A mapping
+member is named by its key, which is written ahead of its value and so has
+text in the usual `key: value` spelling, but YAML's explicit-key syntax admits
+a textless key — a `? >-` line, whose member takes the empty key — and such a
+member has none either, by the same rule. What costs an entry its own position
+is resolving to no text, not resolving to no value: `- null` and `- ~` resolve
+to null but are spelled out, and anchor at that spelling.
+
+Such an entry MUST NOT be anchored to a neighbouring entry's text. That is the
+requirement; where it is anchored instead is left open, because the position a
+position-tracking parser reports for it is a later entry's and no anchor at
+all is preferable to one naming an entry the diagnostic is not about. The
+block's first line is always permitted and is the floor this specification
+guarantees. An implementation MAY instead anchor the entry to the nearest
+enclosing entry that has a position of its own — `/list/0` to `/list`, and
+`/list` to the block — which names the entry containing the failure rather
+than the whole of the frontmatter. `pointer` names the entry exactly under
+any of these choices.
 
 A quoted scalar whose text is only line breaks — `""`, `''`, and `"\n"` alike
 — resolves to such a text as well and so falls under that first case, as a
@@ -504,10 +516,10 @@ plain, literal, or folded scalar resolving to line breaks alone always is. An
 implementation whose parser does not expose the style has no sound test to
 hand — the resolved text is the same either way, and reading the source at the
 reported position does not settle it, since a textless element followed by a
-quoted string borrows a position that is itself an opening quote — and MUST
-then anchor the entry to the block, a coarse but correct anchor being
-preferred to a precise one that may name another entry's text. `pointer` names
-the entry exactly under either choice.
+quoted string borrows a position that is itself an opening quote — and it MUST
+then fall back as above rather than take the reported position, a coarse but
+correct anchor being preferred to a precise one that may name another entry's
+text.
 
 The second case is a document whose frontmatter is parsed without positions at
 all, which an implementation MAY do for YAML constructs its position-tracking
