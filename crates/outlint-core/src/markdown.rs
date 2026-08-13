@@ -15,7 +15,6 @@ use saphyr_parser::{
     Event as ExactEvent, Marker, Parser as ExactParser, ScalarStyle, ScanError, Span, StrInput,
     Tag as YamlTag,
 };
-use yaml_rust2::parser::{Event as YamlEvent, Parser as YamlParser};
 
 use crate::{ByteOffset, HeaderLevel, TextRange};
 
@@ -455,65 +454,30 @@ impl<'a> LineCursor<'a> {
 /// How deeply YAML collections may nest before Outlint refuses to read them.
 ///
 /// Every tree over YAML in this crate is built and walked by recursion — the
-/// frontmatter reader, its conversion to JSON, the schema loader's trees, and
-/// the dropping of the JSON value itself — so nesting costs stack rather than the
-/// heap the [node budget](EXACT_YAML_NODES_PER_EVENT) bounds. A compact block
-/// sequence nests without indenting, so `- - - …` on one short line reaches a
-/// depth no stack survives, and the parser's own `recursion limit` counts flow
-/// nesting alone and never sees it. A fixed limit is the right shape here where
-/// a size-scaled one is not: what a level costs is a stack frame, which the
-/// input's size says nothing about.
+/// frontmatter reader, the schema loader's reader, their conversions to JSON,
+/// and the dropping of the JSON value itself — so nesting costs stack rather
+/// than the heap the [node budget](EXACT_YAML_NODES_PER_EVENT) bounds. A
+/// compact block sequence nests without indenting, so `- - - …` on one short
+/// line reaches a depth no stack survives, and the parser's own `recursion
+/// limit` counts flow nesting alone and never sees it. A fixed limit is the
+/// right shape here where a size-scaled one is not: what a level costs is a
+/// stack frame, which the input's size says nothing about.
 ///
-/// The value is `yaml_serde`'s own long-standing recursion limit, which this
-/// module had for free while frontmatter was parsed through serde, and
-/// serde_json's default nesting limit for the same purpose. Frontmatter written
-/// to be read nests two or three deep and a schema a handful, so the limit is
-/// an order of magnitude clear of any document meant for a reader, and §1.6
-/// requires at least half of it of any implementation.
-const MAX_YAML_DEPTH: usize = 128;
+/// The value is the recursion limit the discarded serde parsers enforced,
+/// which both document paths had for free while they parsed through serde,
+/// and serde_json's default nesting limit for the same purpose. Frontmatter
+/// written to be read nests two or three deep and a schema a handful, so the
+/// limit is an order of magnitude clear of any document meant for a reader,
+/// and §1.6 requires at least half of it of any implementation.
+pub(crate) const MAX_YAML_DEPTH: usize = 128;
 
-/// Follows one event's effect on nesting depth, reporting an overrun.
+/// A YAML document asked for more than one of this module's limits allows.
 ///
-/// Counting events is what makes the bound safe to apply: the event stream is
-/// produced iteratively, so the scan reaches any depth the input names without
-/// recursing itself.
-fn track_yaml_depth(event: &YamlEvent, depth: &mut usize) -> bool {
-    match event {
-        YamlEvent::SequenceStart(..) | YamlEvent::MappingStart(..) => {
-            *depth += 1;
-            *depth > MAX_YAML_DEPTH
-        }
-        YamlEvent::SequenceEnd | YamlEvent::MappingEnd => {
-            *depth = depth.saturating_sub(1);
-            false
-        }
-        _ => false,
-    }
-}
-
-/// Reports whether a whole YAML document nests past [`MAX_YAML_DEPTH`].
-///
-/// The frontmatter reader enforces the same limit inside its own build, where
-/// an alias can also splice in depth no event stream shows. A schema document
-/// is still read by tree parsers with no bound of their own, so it gets this
-/// scan, which is cheaper than the parses it guards: it allocates nothing per
-/// level. A stream that does not parse is not too deep, and is left to the
-/// parse that reports it against a position.
-pub(crate) fn yaml_nesting_exceeds_limit(source: &str) -> bool {
-    let mut parser = YamlParser::new_from_str(source);
-    let mut depth = 0usize;
-    loop {
-        let Ok((event, _)) = parser.next_token() else {
-            return false;
-        };
-        if track_yaml_depth(&event, &mut depth) {
-            return true;
-        }
-        if matches!(event, YamlEvent::StreamEnd) {
-            return false;
-        }
-    }
-}
+/// The refusal carries no words of its own: which limit was overrun is known
+/// at the call that charged it, and each document path names the document it
+/// was reading — frontmatter or schema — in its own vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct YamlLimitExceeded;
 
 /// Appends `/` and an RFC 6901-escaped mapping key to a JSON Pointer.
 fn push_pointer_token(pointer: &mut String, token: &str) {
@@ -527,9 +491,37 @@ fn push_pointer_token(pointer: &mut String, token: &str) {
     }
 }
 
-fn json_number(source: &str) -> Result<serde_json::Value, String> {
-    serde_json::from_str(source)
-        .map_err(|error| format!("frontmatter number `{source}` is not representable: {error}"))
+/// Why a YAML scalar or tag resolves to no JSON value.
+///
+/// The variants carry facts rather than sentences because two document paths
+/// share the conversion and neither's vocabulary suits the other: the
+/// frontmatter reader speaks of "frontmatter" and the schema loader of
+/// "invalid YAML". Each wording lives beside the path that reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum YamlValueError {
+    /// An explicitly `!!null`-tagged scalar not spelled like a null.
+    TaggedNull,
+    /// An explicitly `!!bool`-tagged scalar not spelled like a boolean.
+    TaggedBool,
+    /// An explicitly `!!int`-tagged scalar not spelled like an integer.
+    TaggedInt,
+    /// An explicitly `!!float`-tagged scalar not spelled like a float.
+    TaggedFloat,
+    /// A collection tag — `!!seq` or `!!map` — on a scalar.
+    ScalarTag,
+    /// The wrong core-schema tag on a collection; carries the expected suffix.
+    ContainerTag(&'static str),
+    /// An infinity or NaN, which JSON has no value for.
+    NonFinite,
+    /// A number the JSON value domain refused; carries the spelling and why.
+    Unrepresentable { lexeme: String, error: String },
+}
+
+fn json_number(source: &str) -> Result<serde_json::Value, YamlValueError> {
+    serde_json::from_str(source).map_err(|error| YamlValueError::Unrepresentable {
+        lexeme: source.to_owned(),
+        error: error.to_string(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -542,7 +534,7 @@ fn json_number_preserving_lexeme(
     source: &str,
     canonical: &str,
     expected_kind: JsonNumberKind,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, YamlValueError> {
     // JSON's decimal point/exponent markers distinguish floats from integers.
     // Preserve a valid spelling only when it cannot erase that YAML identity.
     let source_kind = if source
@@ -630,10 +622,10 @@ impl std::hash::Hash for SpannedYamlNode {
 /// alias expansion clones nodes anyway. What the borrow would have saved is
 /// smaller than what threading its lifetime through the tree would cost.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ExactYamlScalar {
-    value: String,
-    style: ScalarStyle,
-    tag: Option<YamlTag>,
+pub(crate) struct ExactYamlScalar {
+    pub(crate) value: String,
+    pub(crate) style: ScalarStyle,
+    pub(crate) tag: Option<YamlTag>,
 }
 
 /// Digests a mapping key, so that only the keys that could be equal to it are
@@ -688,7 +680,7 @@ fn exact_frontmatter_mapping(
     Ok((mapping, anchors))
 }
 
-/// How many nodes the frontmatter reader may build per parser event it has read.
+/// How many nodes a YAML reader may build per parser event it has read.
 ///
 /// An alias is one event that copies a whole subtree, so without a ceiling a
 /// chain of them multiplies: fourteen lines of `a: &x [*w,*w,*w,*w]` name
@@ -697,9 +689,9 @@ fn exact_frontmatter_mapping(
 /// matches the one the discarded serde parse used to impose for free —
 /// `yaml_serde` caps alias repetition at `events.len() * 100` — which is wide
 /// enough that no document written to be read has ever met it.
-const EXACT_YAML_NODES_PER_EVENT: usize = 100;
+pub(crate) const EXACT_YAML_NODES_PER_EVENT: usize = 100;
 
-/// What the frontmatter reader has spent: parser events read, and nodes built.
+/// What a YAML reader has spent: parser events read, and nodes built.
 ///
 /// The two together bound alias expansion. Events measure the input, since each
 /// one needs source text of its own to exist, and nodes measure the tree the
@@ -713,9 +705,9 @@ const EXACT_YAML_NODES_PER_EVENT: usize = 100;
 /// resolves only once its node has been parsed, so every event of that node is
 /// already counted by the time an alias to it is read.
 #[derive(Debug, Default)]
-struct ExactYamlBudget {
-    events: usize,
-    nodes: usize,
+pub(crate) struct ExactYamlBudget {
+    pub(crate) events: usize,
+    pub(crate) nodes: usize,
 }
 
 impl ExactYamlBudget {
@@ -723,10 +715,10 @@ impl ExactYamlBudget {
     ///
     /// Called before the nodes are built, so the refusal precedes the
     /// allocation rather than reporting it after the fact.
-    fn spend(&mut self, nodes: usize) -> Result<(), String> {
+    pub(crate) fn spend(&mut self, nodes: usize) -> Result<(), YamlLimitExceeded> {
         self.nodes = self.nodes.saturating_add(nodes);
         if self.nodes > self.events.saturating_mul(EXACT_YAML_NODES_PER_EVENT) {
-            return Err("frontmatter expands YAML aliases beyond its size limit".into());
+            return Err(YamlLimitExceeded);
         }
         Ok(())
     }
@@ -760,6 +752,42 @@ struct AnchoredYamlNode {
     node: SpannedYamlNode,
     nodes: usize,
     depth: usize,
+}
+
+/// The frontmatter wording for an overrun alias budget.
+fn frontmatter_alias_error(YamlLimitExceeded: YamlLimitExceeded) -> String {
+    "frontmatter expands YAML aliases beyond its size limit".into()
+}
+
+/// The frontmatter wording for nesting past [`MAX_YAML_DEPTH`].
+fn frontmatter_depth_error(YamlLimitExceeded: YamlLimitExceeded) -> String {
+    "frontmatter nests YAML beyond its depth limit".into()
+}
+
+/// The frontmatter wording for a scalar or tag with no JSON value.
+fn frontmatter_value_error(error: YamlValueError) -> String {
+    match error {
+        YamlValueError::TaggedNull => {
+            "frontmatter contains an invalid explicitly tagged null".into()
+        }
+        YamlValueError::TaggedBool => {
+            "frontmatter contains an invalid explicitly tagged boolean".into()
+        }
+        YamlValueError::TaggedInt => {
+            "frontmatter contains an invalid explicitly tagged integer".into()
+        }
+        YamlValueError::TaggedFloat => {
+            "frontmatter contains an invalid explicitly tagged float".into()
+        }
+        YamlValueError::ScalarTag => "frontmatter contains an invalid tag for a YAML scalar".into(),
+        YamlValueError::ContainerTag(expected) => {
+            format!("frontmatter contains an invalid tag for a YAML {expected}")
+        }
+        YamlValueError::NonFinite => "frontmatter contains a non-finite number".into(),
+        YamlValueError::Unrepresentable { lexeme, error } => {
+            format!("frontmatter number `{lexeme}` is not representable: {error}")
+        }
+    }
 }
 
 /// Builds the exact tree by pulling one event at a time from `saphyr-parser`.
@@ -881,7 +909,7 @@ impl<'source> ExactYamlReader<'source> {
         let position = body_position(&span);
         let (node, anchor, reached, expanded) = match event {
             ExactEvent::Scalar(value, style, anchor, tag) => {
-                self.budget.spend(1)?;
+                self.budget.spend(1).map_err(frontmatter_alias_error)?;
                 (
                     ExactYamlNode::Scalar(ExactYamlScalar {
                         value: value.into_owned(),
@@ -894,8 +922,8 @@ impl<'source> ExactYamlReader<'source> {
                 )
             }
             ExactEvent::SequenceStart(anchor, tag) => {
-                let depth = deeper_yaml_nesting(depth, 1)?;
-                self.budget.spend(1)?;
+                let depth = deeper_yaml_nesting(depth, 1).map_err(frontmatter_depth_error)?;
+                self.budget.spend(1).map_err(frontmatter_alias_error)?;
                 let mut values = Vec::new();
                 let mut inner = 0;
                 loop {
@@ -918,8 +946,8 @@ impl<'source> ExactYamlReader<'source> {
                 )
             }
             ExactEvent::MappingStart(anchor, tag) => {
-                let depth = deeper_yaml_nesting(depth, 1)?;
-                self.budget.spend(1)?;
+                let depth = deeper_yaml_nesting(depth, 1).map_err(frontmatter_depth_error)?;
+                self.budget.spend(1).map_err(frontmatter_alias_error)?;
                 let mut entries: Vec<(SpannedYamlNode, SpannedYamlNode)> = Vec::new();
                 let mut keys: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
                 let mut inner = 0;
@@ -985,7 +1013,7 @@ impl<'source> ExactYamlReader<'source> {
                 // copy for the same reason the size is: a tree too deep to walk
                 // must not be built in order to discover that it is.
                 let reached = anchored.depth;
-                deeper_yaml_nesting(depth, reached)?;
+                deeper_yaml_nesting(depth, reached).map_err(frontmatter_depth_error)?;
                 // Charging the recorded size before the copy rather than
                 // measuring the copy afterwards is what keeps the peak at the
                 // limit rather than at the limit plus one more expansion of it.
@@ -993,7 +1021,9 @@ impl<'source> ExactYamlReader<'source> {
                 // node the budget had already paid for, copied once more before
                 // the refusal lands — so this ordering is worth about a factor
                 // of two, not the difference between refusing and not.
-                self.budget.spend(anchored.nodes)?;
+                self.budget
+                    .spend(anchored.nodes)
+                    .map_err(frontmatter_alias_error)?;
                 // An alias event carries no anchor of its own, so the copy names
                 // nothing and is not remembered. The copy is marked as the
                 // expansion it is, and the funnel below stamps it with the
@@ -1047,16 +1077,15 @@ impl<'source> ExactYamlReader<'source> {
 ///
 /// A collection opens one level, while an alias opens as many as the node it
 /// copies reaches, which is why the count is a parameter rather than always
-/// one. An event-counting scan such as [`yaml_nesting_exceeds_limit`] cannot
-/// see the second kind: an alias is a single event however deep the value it
-/// names, so nesting spliced in by an alias is a depth only this bound sees.
-/// The bound lives here in any case, because the recursion it guards is this
-/// builder's own and a bound that lives in a different function is one a later
-/// change can quietly remove.
-fn deeper_yaml_nesting(depth: usize, levels: usize) -> Result<usize, String> {
+/// one. An event-counting scan cannot see the second kind: an alias is a
+/// single event however deep the value it names, so nesting spliced in by an
+/// alias is a depth only this bound sees. The bound lives beside the readers
+/// in any case, because the recursion it guards is their own and a bound that
+/// lives in a different function is one a later change can quietly remove.
+pub(crate) fn deeper_yaml_nesting(depth: usize, levels: usize) -> Result<usize, YamlLimitExceeded> {
     let depth = depth.saturating_add(levels);
     if depth > MAX_YAML_DEPTH {
-        return Err("frontmatter nests YAML beyond its depth limit".into());
+        return Err(YamlLimitExceeded);
     }
     Ok(depth)
 }
@@ -1118,9 +1147,11 @@ fn exact_yaml_to_json(
 ) -> Result<serde_json::Value, String> {
     let expansion = expansion.or_else(|| value.expanded.then_some(value.position));
     match value.node {
-        ExactYamlNode::Scalar(scalar) => exact_yaml_scalar_to_json(scalar),
+        ExactYamlNode::Scalar(scalar) => {
+            exact_yaml_scalar_to_json(scalar).map_err(frontmatter_value_error)
+        }
         ExactYamlNode::Sequence { tag, values } => {
-            validate_yaml_container_tag(tag.as_ref(), "seq")?;
+            validate_yaml_container_tag(tag.as_ref(), "seq").map_err(frontmatter_value_error)?;
             let mut converted = Vec::with_capacity(values.len());
             for (index, value) in values.into_iter().enumerate() {
                 let restore = pointer.len();
@@ -1135,7 +1166,7 @@ fn exact_yaml_to_json(
             Ok(serde_json::Value::Array(converted))
         }
         ExactYamlNode::Mapping { tag, entries } => {
-            validate_yaml_container_tag(tag.as_ref(), "map")?;
+            validate_yaml_container_tag(tag.as_ref(), "map").map_err(frontmatter_value_error)?;
             exact_yaml_mapping_to_json(entries, pointer, anchors, expansion)
         }
     }
@@ -1153,7 +1184,9 @@ fn exact_yaml_mapping_to_json(
         let ExactYamlNode::Scalar(key) = key.node else {
             return Err("frontmatter mapping keys must be strings".into());
         };
-        let serde_json::Value::String(key) = exact_yaml_scalar_to_json(key)? else {
+        let serde_json::Value::String(key) =
+            exact_yaml_scalar_to_json(key).map_err(frontmatter_value_error)?
+        else {
             return Err("frontmatter mapping keys must be strings".into());
         };
         let restore = pointer.len();
@@ -1221,32 +1254,40 @@ fn record_body_anchor(anchors: &mut BodyAnchors, pointer: &str, position: Option
     }
 }
 
-fn validate_yaml_container_tag(tag: Option<&YamlTag>, expected: &str) -> Result<(), String> {
+/// Requires a collection's core-schema tag, if any, to name its own kind.
+pub(crate) fn validate_yaml_container_tag(
+    tag: Option<&YamlTag>,
+    expected: &'static str,
+) -> Result<(), YamlValueError> {
     if standard_yaml_tag(tag).is_none_or(|tag| tag == expected) {
         Ok(())
     } else {
-        Err(format!(
-            "frontmatter contains an invalid tag for a YAML {expected}"
-        ))
+        Err(YamlValueError::ContainerTag(expected))
     }
 }
 
-fn exact_yaml_scalar_to_json(scalar: ExactYamlScalar) -> Result<serde_json::Value, String> {
+/// Resolves one scalar to the JSON value its text, style and tag spell.
+///
+/// Both document paths — frontmatter and the schema loader — convert through
+/// this one function, so a scalar means the same thing wherever it is read.
+pub(crate) fn exact_yaml_scalar_to_json(
+    scalar: ExactYamlScalar,
+) -> Result<serde_json::Value, YamlValueError> {
     let standard_tag = standard_yaml_tag(scalar.tag.as_ref());
     match standard_tag {
         Some("str") => Ok(serde_json::Value::String(scalar.value)),
         Some("null") => match scalar.value.as_str() {
             "null" | "Null" | "NULL" | "~" => Ok(serde_json::Value::Null),
-            _ => Err("frontmatter contains an invalid explicitly tagged null".into()),
+            _ => Err(YamlValueError::TaggedNull),
         },
         Some("bool") => match scalar.value.as_str() {
             "true" | "True" | "TRUE" => Ok(serde_json::Value::Bool(true)),
             "false" | "False" | "FALSE" => Ok(serde_json::Value::Bool(false)),
-            _ => Err("frontmatter contains an invalid explicitly tagged boolean".into()),
+            _ => Err(YamlValueError::TaggedBool),
         },
         Some("int") => exact_yaml_integer(&scalar.value),
         Some("float") => exact_yaml_float(&scalar.value),
-        Some("seq" | "map") => Err("frontmatter contains an invalid tag for a YAML scalar".into()),
+        Some("seq" | "map") => Err(YamlValueError::ScalarTag),
         Some(_) => Ok(serde_json::Value::String(scalar.value)),
         None if scalar.style != ScalarStyle::Plain => Ok(serde_json::Value::String(scalar.value)),
         None => plain_scalar_to_json(&scalar.value),
@@ -1257,9 +1298,8 @@ fn standard_yaml_tag(tag: Option<&YamlTag>) -> Option<&str> {
     tag.and_then(|tag| tag.is_yaml_core_schema().then_some(tag.suffix.as_str()))
 }
 
-fn exact_yaml_integer(source: &str) -> Result<serde_json::Value, String> {
-    let canonical = canonical_tagged_yaml_integer(source)
-        .ok_or_else(|| "frontmatter contains an invalid explicitly tagged integer".to_owned())?;
+fn exact_yaml_integer(source: &str) -> Result<serde_json::Value, YamlValueError> {
+    let canonical = canonical_tagged_yaml_integer(source).ok_or(YamlValueError::TaggedInt)?;
     json_number_preserving_lexeme(source, &canonical, JsonNumberKind::Integer)
 }
 
@@ -1295,26 +1335,26 @@ fn canonical_tagged_yaml_integer(source: &str) -> Option<String> {
     }
 }
 
-fn exact_yaml_float(source: &str) -> Result<serde_json::Value, String> {
+fn exact_yaml_float(source: &str) -> Result<serde_json::Value, YamlValueError> {
     if let Some(canonical) = crate::loader::canonical_float(source) {
         if matches!(canonical.as_str(), "inf" | "-inf" | "nan") {
-            return Err("frontmatter contains a non-finite number".into());
+            return Err(YamlValueError::NonFinite);
         }
         return json_number_preserving_lexeme(source, &canonical, JsonNumberKind::Float);
     }
     let unsigned = source.strip_prefix(['-', '+']).unwrap_or(source);
     let crate::FrontmatterScalar::Integer(value) = crate::loader::parse_frontmatter_scalar(source)
     else {
-        return Err("frontmatter contains an invalid explicitly tagged float".into());
+        return Err(YamlValueError::TaggedFloat);
     };
     if unsigned.is_empty() || !unsigned.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err("frontmatter contains an invalid explicitly tagged float".into());
+        return Err(YamlValueError::TaggedFloat);
     }
     json_number(&format!("{}e0", value.0))
 }
 
 /// Resolves an untagged plain scalar by the YAML core schema, §1.6-exactly.
-fn plain_scalar_to_json(source: &str) -> Result<serde_json::Value, String> {
+fn plain_scalar_to_json(source: &str) -> Result<serde_json::Value, YamlValueError> {
     match crate::loader::parse_frontmatter_scalar(source) {
         crate::FrontmatterScalar::Null => Ok(serde_json::Value::Null),
         crate::FrontmatterScalar::Boolean(value) => Ok(serde_json::Value::Bool(value)),
@@ -1323,7 +1363,7 @@ fn plain_scalar_to_json(source: &str) -> Result<serde_json::Value, String> {
         }
         crate::FrontmatterScalar::Float(value) => {
             if matches!(value.0.as_str(), "inf" | "-inf" | "nan") {
-                Err("frontmatter contains a non-finite number".into())
+                Err(YamlValueError::NonFinite)
             } else {
                 json_number_preserving_lexeme(source, &value.0, JsonNumberKind::Float)
             }
@@ -3084,16 +3124,6 @@ mod tests {
             document.frontmatter,
             DocumentFrontmatter::Mapping { .. }
         ));
-
-        // The scan the schema path uses answers the same question, counting
-        // the document's own root mapping as the first level.
-        let nested = |levels: usize| format!("deep:\n {}1\n", "- ".repeat(levels));
-        assert!(!yaml_nesting_exceeds_limit(&nested(MAX_YAML_DEPTH - 1)));
-        assert!(yaml_nesting_exceeds_limit(&nested(MAX_YAML_DEPTH)));
-        // Nothing to read is not too deep, and neither is a stream that fails
-        // to parse: the parse that reports it is the one with a position.
-        assert!(!yaml_nesting_exceeds_limit(""));
-        assert!(!yaml_nesting_exceeds_limit("key: value: bad\n"));
     }
 
     #[test]

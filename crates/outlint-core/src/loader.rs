@@ -6,16 +6,23 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
-use marked_yaml::Node as MarkedNode;
 use num_bigint::{BigInt, BigUint};
+use saphyr_parser::{
+    Event as YamlEvent, Parser as YamlParser, ScalarStyle, Span, StrInput, Tag as YamlTag,
+};
 use serde::Deserialize;
+use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
-use yaml_serde::{Mapping, Value};
 
+use crate::markdown::{
+    deeper_yaml_nesting, exact_yaml_scalar_to_json, validate_yaml_container_tag, ExactYamlBudget,
+    ExactYamlScalar, YamlValueError,
+};
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
     AtLeastTwo, ByteOffset, CanonicalFloat, CanonicalInteger, Cardinality, Constraint,
@@ -27,6 +34,9 @@ use crate::{
     SchemaVersion, ScopePath, SectionRule, SourceId, SourceLabel, SourceRange, TextRange,
     UpperBound,
 };
+
+/// The object domain schema documents are validated in: JSON Schema's own.
+type JsonMap = serde_json::Map<String, Value>;
 
 /// Loads an Outlint schema from UTF-8 source text.
 ///
@@ -70,10 +80,13 @@ struct PreparedExternalError {
 /// The path is returned exactly as declared. Resolution against a lexical file
 /// location belongs to the I/O shell.
 pub fn linked_frontmatter_schema_path(source: &str) -> Option<String> {
-    let value: Value = yaml_serde::from_str(source).ok()?;
-    let frontmatter = yaml_get(value.as_mapping()?, "frontmatter")?.as_mapping()?;
-    yaml_get(frontmatter, "schema")
-        .and_then(Value::as_str)
+    let value = schema_yaml_to_json(parse_schema_yaml(source).ok()?).ok()?;
+    value
+        .as_object()?
+        .get("frontmatter")?
+        .as_object()?
+        .get("schema")?
+        .as_str()
         .map(str::to_owned)
 }
 
@@ -326,7 +339,7 @@ fn single_external_error(error: PreparedExternalError) -> NonEmpty<PreparedExter
 /// mutual pair compiles today rather than overflowing.
 ///
 /// The value is the constant this crate already uses wherever structure has to
-/// be bounded, and which `serde_json` and `yaml_serde` default to. Measured
+/// be bounded, and which `serde_json` defaults to. Measured
 /// against the compiler, a link costs about 1.7 KB of stack optimized and
 /// about 6 KB unoptimized, so 128 links stay under a megabyte in the tightest
 /// configuration — an unoptimized build on a two-megabyte thread, where the
@@ -453,7 +466,7 @@ struct RawFrontmatter {
 #[serde(untagged)]
 enum RawFrontmatterSchema {
     Path(String),
-    Mapping(Mapping),
+    Mapping(JsonMap),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -523,64 +536,76 @@ struct RangeIndex {
 }
 
 impl RangeIndex {
-    fn from_source(source: &str) -> Self {
-        let Ok(root) = marked_yaml::parse_yaml(0, source) else {
-            return Self::default();
-        };
-        // marked-yaml markers count Unicode scalar values, while Outlint
-        // source ranges are UTF-8 byte offsets. This table bridges the units.
-        let char_offsets = source
-            .char_indices()
-            .map(|(offset, _)| offset)
-            .chain(std::iter::once(source.len()))
-            .collect::<Vec<_>>();
+    /// Reads every addressable range off the one tree the loader parsed.
+    ///
+    /// The walk mirrors the shape validation below: document fields, options,
+    /// frontmatter, and the rule and constraint forests. Lookups are linear
+    /// scans over each mapping's ordered entries, which is the right cost for
+    /// schema documents — a mapping here has a handful of keys, and the parse
+    /// has already rejected duplicates, so the first match is the only one.
+    fn from_tree(root: &SchemaYamlNode, char_offsets: &[usize]) -> Self {
         let mut index = Self::default();
         let Some(mapping) = root.as_mapping() else {
             return index;
         };
+        let expansion = subtree_expansion(root, None);
         for &field in DOCUMENT_FIELDS {
-            if let Some(node) = mapping.get_node(field) {
+            if let Some(node) = schema_mapping_get(mapping, field) {
                 index.ranges.insert(
                     RangeKey::DocumentField(field.into()),
-                    marked_node_range(node, &char_offsets, source),
+                    node_range(node, expansion, char_offsets),
                 );
             }
         }
-        if let Some(options) = mapping.get_mapping("options") {
-            for &field in OPTION_FIELDS {
-                if let Some(node) = options.get_node(field) {
+        for (section, fields) in [
+            ("options", OPTION_FIELDS),
+            ("frontmatter", FRONTMATTER_FIELDS),
+        ] {
+            let Some(node) = schema_mapping_get(mapping, section) else {
+                continue;
+            };
+            let expansion = subtree_expansion(node, expansion);
+            let Some(entries) = node.as_mapping() else {
+                continue;
+            };
+            for &field in fields {
+                if let Some(value) = schema_mapping_get(entries, field) {
                     index.ranges.insert(
-                        RangeKey::OptionField(field.into()),
-                        marked_node_range(node, &char_offsets, source),
+                        match section {
+                            "options" => RangeKey::OptionField(field.into()),
+                            _ => RangeKey::FrontmatterField(field.into()),
+                        },
+                        node_range(value, expansion, char_offsets),
                     );
                 }
             }
         }
-        if let Some(frontmatter) = mapping.get_mapping("frontmatter") {
-            for &field in FRONTMATTER_FIELDS {
-                if let Some(node) = frontmatter.get_node(field) {
-                    index.ranges.insert(
-                        RangeKey::FrontmatterField(field.into()),
-                        marked_node_range(node, &char_offsets, source),
-                    );
-                }
+        if let Some(node) = schema_mapping_get(mapping, "sections") {
+            let expansion = subtree_expansion(node, expansion);
+            if let Some(sections) = node.as_sequence() {
+                index.collect_rules(sections, &ScopePath(Vec::new()), expansion, char_offsets);
             }
         }
-        if let Some(sections) = mapping.get_sequence("sections") {
-            index.collect_rules(sections, &ScopePath(Vec::new()), &char_offsets, source);
-        }
-        if let Some(constraints) = mapping.get_sequence("constraints") {
-            index.collect_constraints(constraints, &ScopePath(Vec::new()), &char_offsets, source);
+        if let Some(node) = schema_mapping_get(mapping, "constraints") {
+            let expansion = subtree_expansion(node, expansion);
+            if let Some(constraints) = node.as_sequence() {
+                index.collect_constraints(
+                    constraints,
+                    &ScopePath(Vec::new()),
+                    expansion,
+                    char_offsets,
+                );
+            }
         }
         index
     }
 
     fn collect_rules(
         &mut self,
-        rules: &[MarkedNode],
+        rules: &[SchemaYamlNode],
         scope: &ScopePath,
+        expansion: Option<(usize, usize)>,
         char_offsets: &[usize],
-        source: &str,
     ) {
         for (index, node) in rules.iter().enumerate() {
             let path = RulePath {
@@ -589,36 +614,43 @@ impl RangeIndex {
             };
             self.ranges.insert(
                 RangeKey::Rule(path.clone()),
-                marked_node_range(node, char_offsets, source),
+                node_range(node, expansion, char_offsets),
             );
+            let expansion = subtree_expansion(node, expansion);
             let Some(mapping) = node.as_mapping() else {
                 continue;
             };
             for &field in RULE_FIELDS {
-                if let Some(value) = mapping.get_node(field) {
+                if let Some(value) = schema_mapping_get(mapping, field) {
                     self.ranges.insert(
                         RangeKey::RuleField(path.clone(), field.into()),
-                        marked_node_range(value, char_offsets, source),
+                        node_range(value, expansion, char_offsets),
                     );
                 }
             }
             let mut child_scope = scope.clone();
             child_scope.0.push(RuleIndex(index));
-            if let Some(children) = mapping.get_sequence("sections") {
-                self.collect_rules(children, &child_scope, char_offsets, source);
+            if let Some(node) = schema_mapping_get(mapping, "sections") {
+                let expansion = subtree_expansion(node, expansion);
+                if let Some(children) = node.as_sequence() {
+                    self.collect_rules(children, &child_scope, expansion, char_offsets);
+                }
             }
-            if let Some(constraints) = mapping.get_sequence("constraints") {
-                self.collect_constraints(constraints, &child_scope, char_offsets, source);
+            if let Some(node) = schema_mapping_get(mapping, "constraints") {
+                let expansion = subtree_expansion(node, expansion);
+                if let Some(constraints) = node.as_sequence() {
+                    self.collect_constraints(constraints, &child_scope, expansion, char_offsets);
+                }
             }
         }
     }
 
     fn collect_constraints(
         &mut self,
-        constraints: &[MarkedNode],
+        constraints: &[SchemaYamlNode],
         scope: &ScopePath,
+        expansion: Option<(usize, usize)>,
         char_offsets: &[usize],
-        source: &str,
     ) {
         for (index, node) in constraints.iter().enumerate() {
             self.ranges.insert(
@@ -626,7 +658,7 @@ impl RangeIndex {
                     scope: scope.clone(),
                     index: ConstraintIndex(index),
                 }),
-                marked_node_range(node, char_offsets, source),
+                node_range(node, expansion, char_offsets),
             );
         }
     }
@@ -647,123 +679,634 @@ impl RangeIndex {
     }
 }
 
-fn marked_node_range(node: &MarkedNode, char_offsets: &[usize], source: &str) -> SourceRange {
-    let span = node.span();
-    let start = span
-        .start()
-        .and_then(|marker| char_offsets.get(marker.character()))
+/// One node of the tree the schema loader builds out of parser events.
+///
+/// A mapping keeps its entries as an ordered `Vec` rather than a map so that
+/// two keys spelled differently but resolving alike stay visible to the
+/// duplicate checks, and so that a key which is not a scalar at all still has
+/// somewhere to live until the conversion rejects it. Collection tags are
+/// validated as the events arrive — a schema document may carry no
+/// non-standard tag at all — so only scalars still hold theirs, for the
+/// conversion that resolves their values.
+#[derive(Clone, Debug)]
+struct SchemaYamlNode {
+    kind: SchemaYamlKind,
+    /// Half-open character-index range of the node's own spelling. A scalar's
+    /// end is the parser's own, which is real under this engine; a
+    /// collection's start event is zero-width but its marker sits on the
+    /// collection's first token, so the range pairs it with the end event's
+    /// far edge.
+    start: usize,
+    end: usize,
+    /// The node is an alias's copy, and its range is the alias site. The whole
+    /// copy anchors there: the ranges its entries carry belong to the anchor's
+    /// definition, which is not the entry a range key into the copy names, and
+    /// §6.2 permits the nearest enclosing entry with a position of its own —
+    /// which the alias site is.
+    expanded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum SchemaYamlKind {
+    Scalar(ExactYamlScalar),
+    Sequence(Vec<SchemaYamlNode>),
+    Mapping(Vec<(SchemaYamlNode, SchemaYamlNode)>),
+}
+
+/// Equality ignores positions: the duplicate checks ask whether two keys are
+/// the same key, and two spellings of one key are no less duplicates for
+/// sitting on different lines.
+impl PartialEq for SchemaYamlNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+impl Eq for SchemaYamlNode {}
+
+impl std::hash::Hash for SchemaYamlNode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+    }
+}
+
+impl SchemaYamlNode {
+    fn as_mapping(&self) -> Option<&[(SchemaYamlNode, SchemaYamlNode)]> {
+        match &self.kind {
+            SchemaYamlKind::Mapping(entries) => Some(entries),
+            _ => None,
+        }
+    }
+
+    fn as_sequence(&self) -> Option<&[SchemaYamlNode]> {
+        match &self.kind {
+            SchemaYamlKind::Sequence(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    fn scalar_text(&self) -> Option<&str> {
+        match &self.kind {
+            SchemaYamlKind::Scalar(scalar) => Some(&scalar.value),
+            _ => None,
+        }
+    }
+}
+
+/// The value of the entry whose key spells `key`, by linear scan.
+///
+/// Scalar keys compare on their text, so `version` and `"version"` name the
+/// same field here exactly as they collide in the JSON object the document
+/// converts to.
+fn schema_mapping_get<'a>(
+    entries: &'a [(SchemaYamlNode, SchemaYamlNode)],
+    key: &str,
+) -> Option<&'a SchemaYamlNode> {
+    entries
+        .iter()
+        .find(|(candidate, _)| candidate.scalar_text() == Some(key))
+        .map(|(_, value)| value)
+}
+
+/// The range a subtree's entries anchor at, once an alias expansion encloses
+/// them: the alias site's own range, carried down from the copy's root.
+fn subtree_expansion(
+    node: &SchemaYamlNode,
+    inherited: Option<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    inherited.or_else(|| node.expanded.then_some((node.start, node.end)))
+}
+
+/// Converts one node's character-index range into a byte-offset source range.
+fn node_range(
+    node: &SchemaYamlNode,
+    expansion: Option<(usize, usize)>,
+    char_offsets: &[usize],
+) -> SourceRange {
+    let (start, end) = expansion.unwrap_or((node.start, node.end));
+    char_range(start, end, char_offsets)
+}
+
+/// A half-open character-index range as a byte-offset range into the source.
+///
+/// `saphyr-parser` markers count characters, while Outlint source ranges are
+/// UTF-8 byte offsets; the caller's table bridges the units, so no marker
+/// index ever slices the source directly. A zero-width range — a parse
+/// error's marker, or a scalar the parser synthesised for an entry with no
+/// spelling of its own — is widened to the one character it points at, so a
+/// caret has something to sit under; at the end of input it stays empty.
+fn char_range(start: usize, end: usize, char_offsets: &[usize]) -> SourceRange {
+    let source_end = char_offsets.last().copied().unwrap_or(0);
+    let start_byte = char_offsets.get(start).copied().unwrap_or(source_end);
+    let mut end_byte = char_offsets
+        .get(end)
         .copied()
-        .unwrap_or(0);
-    let mut end = span
-        .end()
-        .and_then(|marker| char_offsets.get(marker.character()))
-        .copied()
-        .unwrap_or(start);
-    if node.as_scalar().is_some() && end <= start {
-        // marked-yaml can report a zero-width span for a plain scalar. When
-        // its decoded scalar spelling is present verbatim at the marker, that
-        // byte length is the narrowest sound repair. Otherwise the next
-        // character boundary is a conservative one-scalar fallback.
-        end = node
-            .as_scalar()
-            .map(|scalar| scalar.as_str())
-            .filter(|scalar| !scalar.is_empty())
-            .filter(|scalar| {
-                source
-                    .get(start..)
-                    .is_some_and(|tail| tail.starts_with(scalar))
-            })
-            .map(|scalar| start + scalar.len())
-            .or_else(|| {
-                span.start()
-                    .and_then(|marker| char_offsets.get(marker.character() + 1))
-                    .copied()
-            })
-            .unwrap_or(start);
+        .unwrap_or(source_end)
+        .max(start_byte);
+    if end_byte <= start_byte {
+        end_byte = char_offsets
+            .get(start + 1)
+            .copied()
+            .unwrap_or(end_byte)
+            .max(end_byte);
     }
     SourceRange {
         source: SourceId(0),
         range: TextRange {
-            start: ByteOffset(start),
-            end: ByteOffset(end.max(start)),
+            start: ByteOffset(start_byte),
+            end: ByteOffset(end_byte),
         },
     }
 }
 
-fn yaml_location_range(source: &str, line: usize, column: usize) -> TextRange {
-    // yaml_serde reports one-based lines and Unicode-scalar columns. Treat the
-    // location as an unstructured third-party boundary and clamp both axes.
-    let (line_start, line_end) = yaml_line_bounds(source, line);
-    let line_text = source.get(line_start..line_end).unwrap_or_default();
-    let column_offset = line_text
-        .char_indices()
-        .nth(column.saturating_sub(1))
-        .map_or(line_text.len(), |(offset, _)| offset);
-    let start = line_start
-        .checked_add(column_offset)
-        .unwrap_or(source.len())
-        .min(source.len());
-    let width = line_text
-        .get(column_offset..)
-        .and_then(|tail| tail.chars().next())
-        .map_or(0, |character| character.len_utf8());
-    let end = start
-        .checked_add(width)
-        .unwrap_or(source.len())
-        .min(source.len());
-    TextRange {
-        start: ByteOffset(start),
-        end: ByteOffset(end),
+/// A schema document the YAML engine refused, before validation began.
+///
+/// The range is in character indices — `None` anchors at the whole document —
+/// and the kind rides along because not every refusal is a syntax error: a
+/// non-string mapping key, for example, is a shape complaint with a position.
+#[derive(Debug)]
+struct SchemaYamlError {
+    kind: SchemaErrorKind,
+    span: Option<(usize, usize)>,
+    message: String,
+}
+
+impl SchemaYamlError {
+    fn syntax(span: &Span, mark: usize, message: String) -> Self {
+        Self {
+            kind: SchemaErrorKind::Syntax,
+            span: Some((
+                span.start.index() + mark,
+                (span.end.index() + mark).max(span.start.index() + mark),
+            )),
+            message,
+        }
     }
 }
 
-fn yaml_line_bounds(source: &str, line: usize) -> (usize, usize) {
-    let target_line = line.saturating_sub(1);
-    let bytes = source.as_bytes();
-    let mut line_start = 0;
+/// A parsed node held for the aliases that name it, with its size and depth.
+///
+/// Both numbers exist so an alias can be charged before the copy is made: the
+/// size against the node budget, and the depth against the nesting limit the
+/// copy carries to wherever it lands.
+#[derive(Debug)]
+struct AnchoredSchemaYamlNode {
+    node: SchemaYamlNode,
+    nodes: usize,
+    depth: usize,
+}
 
-    for _ in 0..target_line {
-        let mut line_end = line_start;
-        while bytes
-            .get(line_end)
-            .is_some_and(|byte| !matches!(*byte, b'\r' | b'\n'))
-        {
-            line_end = line_end.saturating_add(1);
+/// A node just built, beside how deeply its own collections nest — carried out
+/// of the build because measuring it afterwards would be another walk of the
+/// same recursion the depth bound exists to keep within the stack.
+#[derive(Debug)]
+struct SchemaYamlSubtree {
+    node: SchemaYamlNode,
+    depth: usize,
+}
+
+/// Builds the schema tree by pulling one event at a time from `saphyr-parser`.
+///
+/// This is the schema-document counterpart of the frontmatter reader in
+/// `markdown.rs`, and it carries the same three protections through the same
+/// shared machinery: the [`ExactYamlBudget`] that bounds alias expansion by
+/// the input's own size, the [`MAX_YAML_DEPTH`](crate::markdown::MAX_YAML_DEPTH)
+/// bound charged as the recursion descends, and the
+/// alias-charged-before-clone ordering that refuses a bomb before building
+/// it. What differs is only what a node remembers — character spans for
+/// [`RangeIndex`], where frontmatter keeps line and column — and the words a
+/// refusal is reported in.
+struct SchemaYamlReader<'source> {
+    parser: YamlParser<'source, StrInput<'source>>,
+    anchors: BTreeMap<usize, AnchoredSchemaYamlNode>,
+    budget: ExactYamlBudget,
+    /// Characters removed from the head of the source before parsing — a
+    /// byte-order mark or nothing — counted back into every reported index.
+    mark: usize,
+}
+
+impl<'source> SchemaYamlReader<'source> {
+    fn new(source: &'source str, mark: usize) -> Self {
+        Self {
+            parser: YamlParser::new_from_str(source),
+            anchors: BTreeMap::new(),
+            budget: ExactYamlBudget::default(),
+            mark,
         }
+    }
 
-        let Some(terminator) = bytes.get(line_end).copied() else {
-            return (source.len(), source.len());
+    /// Reads the next event, charging the budget for the input it took.
+    fn next_event(&mut self) -> Result<(YamlEvent<'source>, Span), SchemaYamlError> {
+        self.budget.events += 1;
+        match self.parser.next_event() {
+            Some(Ok(read)) => Ok(read),
+            Some(Err(error)) => {
+                let marker = error.marker();
+                let span = Span::new(*marker, *marker);
+                // `ScanError`'s own rendering calls its character index a byte
+                // and holds a zero-based column, so the position is respelled:
+                // a one-based line and a one-based character column, with a
+                // removed byte-order mark counted back into the first line.
+                let column = marker.col() + 1 + if marker.line() == 1 { self.mark } else { 0 };
+                Err(SchemaYamlError::syntax(
+                    &span,
+                    self.mark,
+                    format!(
+                        "invalid YAML: {} at line {} column {column}",
+                        error.info(),
+                        marker.line(),
+                    ),
+                ))
+            }
+            None => Err(SchemaYamlError {
+                kind: SchemaErrorKind::Syntax,
+                span: None,
+                message: "invalid YAML: the document ends before its structure does".into(),
+            }),
+        }
+    }
+
+    /// Refuses the second document a schema must not contain, at its start.
+    ///
+    /// The refusal lands before any of the second document's content is read:
+    /// raw `next_event` does not clear the parser's anchor table between
+    /// documents, so reading on would resolve the second document's aliases
+    /// against the first one's anchors. The serde-era engine reported this
+    /// verdict with no location at all; the start event's span is a real one.
+    fn second_document_error(&self, span: &Span) -> SchemaYamlError {
+        let column = span.start.col() + 1 + if span.start.line() == 1 { self.mark } else { 0 };
+        SchemaYamlError::syntax(
+            span,
+            self.mark,
+            format!(
+                "invalid YAML: a second document opens at line {} column {column}; \
+                 a schema is a single YAML document",
+                span.start.line(),
+            ),
+        )
+    }
+
+    /// Rejects every tag outside the `tag:yaml.org,2002:` namespace.
+    ///
+    /// The core-schema tags keep the meaning the conversion gives them; a
+    /// non-standard tag has no meaning a schema document could put to use, and
+    /// the engine this loader left rejected such documents too.
+    fn reject_non_standard_tag(
+        &self,
+        tag: Option<&YamlTag>,
+        span: &Span,
+    ) -> Result<(), SchemaYamlError> {
+        match tag {
+            Some(tag) if !tag.is_yaml_core_schema() => Err(SchemaYamlError::syntax(
+                span,
+                self.mark,
+                format!(
+                    "invalid YAML: non-standard tag `{}{}`",
+                    tag.handle, tag.suffix
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn depth_error(&self, span: &Span) -> SchemaYamlError {
+        SchemaYamlError::syntax(
+            span,
+            self.mark,
+            "invalid YAML: nesting exceeds the depth limit".into(),
+        )
+    }
+
+    fn budget_error(&self, span: &Span) -> SchemaYamlError {
+        SchemaYamlError::syntax(
+            span,
+            self.mark,
+            "invalid YAML: alias expansion exceeds the document's size limit".into(),
+        )
+    }
+
+    fn value_error(&self, error: YamlValueError, span: &Span) -> SchemaYamlError {
+        SchemaYamlError::syntax(span, self.mark, schema_value_error(error))
+    }
+
+    /// Builds the node the given event opens, reading whatever it contains.
+    ///
+    /// `depth` counts the collections already open around this node; the
+    /// document's own root mapping is the first level, and the bound is
+    /// charged before the frame is taken rather than after. What the node
+    /// reaches below itself is returned with it, since an alias to it has to
+    /// be charged that depth at a site this call knows nothing of.
+    fn node(
+        &mut self,
+        event: YamlEvent<'source>,
+        span: Span,
+        depth: usize,
+    ) -> Result<SchemaYamlSubtree, SchemaYamlError> {
+        let spent = self.budget.nodes;
+        let start = span.start.index() + self.mark;
+        let (kind, end, anchor, reached) = match event {
+            YamlEvent::Scalar(value, style, anchor, tag) => {
+                let tag = tag.map(Cow::into_owned);
+                self.reject_non_standard_tag(tag.as_ref(), &span)?;
+                self.budget.spend(1).map_err(|_| self.budget_error(&span))?;
+                (
+                    SchemaYamlKind::Scalar(ExactYamlScalar {
+                        value: value.into_owned(),
+                        style,
+                        tag,
+                    }),
+                    span.end.index() + self.mark,
+                    anchor,
+                    0,
+                )
+            }
+            YamlEvent::SequenceStart(anchor, tag) => {
+                let tag = tag.map(Cow::into_owned);
+                self.reject_non_standard_tag(tag.as_ref(), &span)?;
+                validate_yaml_container_tag(tag.as_ref(), "seq")
+                    .map_err(|error| self.value_error(error, &span))?;
+                let depth = deeper_yaml_nesting(depth, 1).map_err(|_| self.depth_error(&span))?;
+                self.budget.spend(1).map_err(|_| self.budget_error(&span))?;
+                let mut values = Vec::new();
+                let mut inner = 0;
+                let end;
+                loop {
+                    let (event, span) = self.next_event()?;
+                    if matches!(event, YamlEvent::SequenceEnd) {
+                        end = span.end.index() + self.mark;
+                        break;
+                    }
+                    let value = self.node(event, span, depth)?;
+                    inner = inner.max(value.depth);
+                    values.push(value.node);
+                }
+                (SchemaYamlKind::Sequence(values), end, anchor, inner + 1)
+            }
+            YamlEvent::MappingStart(anchor, tag) => {
+                let tag = tag.map(Cow::into_owned);
+                self.reject_non_standard_tag(tag.as_ref(), &span)?;
+                validate_yaml_container_tag(tag.as_ref(), "map")
+                    .map_err(|error| self.value_error(error, &span))?;
+                let depth = deeper_yaml_nesting(depth, 1).map_err(|_| self.depth_error(&span))?;
+                self.budget.spend(1).map_err(|_| self.budget_error(&span))?;
+                let mut entries: Vec<(SchemaYamlNode, SchemaYamlNode)> = Vec::new();
+                let mut keys: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+                let mut inner = 0;
+                let end;
+                loop {
+                    let (event, span) = self.next_event()?;
+                    if matches!(event, YamlEvent::MappingEnd) {
+                        end = span.end.index() + self.mark;
+                        break;
+                    }
+                    let key = self.node(event, span, depth)?;
+                    let (event, span) = self.next_event()?;
+                    let value = self.node(event, span, depth)?;
+                    inner = inner.max(key.depth).max(value.depth);
+                    let (key, value) = (key.node, value.node);
+                    // Whole-node equality catches the keys the conversion
+                    // never reduces to a string; keys that do resolve are
+                    // caught again there, on the resolved text. The digest
+                    // narrows the candidates so an aliased flood of large
+                    // keys costs hashes rather than quadratic comparisons.
+                    let digest = schema_yaml_key_digest(&key);
+                    let alike = keys.entry(digest).or_default();
+                    if alike.iter().any(|&entry| entries[entry].0 == key) {
+                        return Err(duplicate_schema_key_error(&key));
+                    }
+                    alike.push(entries.len());
+                    entries.push((key, value));
+                }
+                (SchemaYamlKind::Mapping(entries), end, anchor, inner + 1)
+            }
+            YamlEvent::Alias(anchor) => {
+                let Some(anchored) = self.anchors.get(&anchor) else {
+                    return Err(SchemaYamlError::syntax(
+                        &span,
+                        self.mark,
+                        "invalid YAML: unresolved alias".into(),
+                    ));
+                };
+                // Charged before the clone, size and depth both: a tree too
+                // large or too deep to walk must not be built in order to
+                // discover that it is.
+                let (nodes, reached) = (anchored.nodes, anchored.depth);
+                deeper_yaml_nesting(depth, reached).map_err(|_| self.depth_error(&span))?;
+                self.budget
+                    .spend(nodes)
+                    .map_err(|_| self.budget_error(&span))?;
+                let mut node = self
+                    .anchors
+                    .get(&anchor)
+                    .expect("charged against a node the table holds")
+                    .node
+                    .clone();
+                // The whole copy anchors at the alias site: its root takes the
+                // site's own span, and `expanded` tells every walk to carry
+                // that range over the definition spans the copy's entries
+                // still hold. See [`SchemaYamlNode::expanded`].
+                node.start = start;
+                node.end = (span.end.index() + self.mark).max(start);
+                node.expanded = true;
+                return Ok(SchemaYamlSubtree {
+                    node,
+                    depth: reached,
+                });
+            }
+            _ => {
+                return Err(SchemaYamlError {
+                    kind: SchemaErrorKind::Syntax,
+                    span: None,
+                    message: "invalid YAML: unexpected document boundary".into(),
+                })
+            }
         };
-        let terminator_width = usize::from(
-            terminator == b'\r' && bytes.get(line_end.saturating_add(1)).copied() == Some(b'\n'),
-        ) + 1;
-        line_start = line_end.saturating_add(terminator_width).min(source.len());
+        let node = SchemaYamlNode {
+            kind,
+            start,
+            end: end.max(start),
+            expanded: false,
+        };
+        if anchor != 0 {
+            // Anchor zero is `saphyr-parser`'s "no anchor", and a node is
+            // registered only once it is built, so a collection cannot alias
+            // itself: the alias inside is refused as unresolved.
+            self.anchors.insert(
+                anchor,
+                AnchoredSchemaYamlNode {
+                    node: node.clone(),
+                    nodes: self.budget.nodes - spent,
+                    depth: reached,
+                },
+            );
+        }
+        Ok(SchemaYamlSubtree {
+            node,
+            depth: reached,
+        })
     }
+}
 
-    let mut line_end = line_start;
-    while bytes
-        .get(line_end)
-        .is_some_and(|byte| !matches!(*byte, b'\r' | b'\n'))
-    {
-        line_end = line_end.saturating_add(1);
+/// Digests a mapping key so only the keys that could equal it are compared.
+fn schema_yaml_key_digest(key: &SchemaYamlNode) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(key, &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
+/// Names a duplicate mapping key at the duplicate occurrence's own range.
+fn duplicate_schema_key_error(key: &SchemaYamlNode) -> SchemaYamlError {
+    SchemaYamlError {
+        kind: SchemaErrorKind::Syntax,
+        span: Some((key.start, key.end)),
+        message: match key.scalar_text() {
+            Some(text) => format!("invalid YAML: duplicate mapping key `{text}`"),
+            None => "invalid YAML: duplicate mapping key".into(),
+        },
     }
-    (line_start, line_end)
+}
+
+/// Reads a schema document's one YAML document, keeping every span.
+///
+/// A leading byte-order mark is removed before parsing — the parser would
+/// otherwise deliver it as the first character of the first key, leaving a
+/// document whose `version` entry is invisibly named something else — and
+/// every reported index counts it back in. A source holding no document at
+/// all parses as an empty scalar, which the shape validation then rejects as
+/// the non-mapping it is. A second document is refused at its own start
+/// marker; see [`SchemaYamlReader::second_document_error`].
+fn parse_schema_yaml(source: &str) -> Result<SchemaYamlNode, SchemaYamlError> {
+    let (body, mark) = match source.strip_prefix('\u{feff}') {
+        Some(body) => (body, 1),
+        None => (source, 0),
+    };
+    let mut reader = SchemaYamlReader::new(body, mark);
+    let boundary_error = || SchemaYamlError {
+        kind: SchemaErrorKind::Syntax,
+        span: None,
+        message: "invalid YAML: unexpected document boundary".into(),
+    };
+    let (event, _) = reader.next_event()?;
+    if !matches!(event, YamlEvent::StreamStart) {
+        return Err(boundary_error());
+    }
+    let (event, _) = reader.next_event()?;
+    if matches!(event, YamlEvent::StreamEnd) {
+        // Nothing but comments or blank lines: the empty scalar the YAML data
+        // model gives such a stream, which fails shape validation as a null.
+        return Ok(SchemaYamlNode {
+            kind: SchemaYamlKind::Scalar(ExactYamlScalar {
+                value: "~".into(),
+                style: ScalarStyle::Plain,
+                tag: None,
+            }),
+            start: 0,
+            end: 0,
+            expanded: false,
+        });
+    }
+    if !matches!(event, YamlEvent::DocumentStart(_)) {
+        return Err(boundary_error());
+    }
+    let (event, span) = reader.next_event()?;
+    let value = reader.node(event, span, 0)?.node;
+    let (event, _) = reader.next_event()?;
+    if !matches!(event, YamlEvent::DocumentEnd) {
+        return Err(boundary_error());
+    }
+    match reader.next_event()? {
+        (YamlEvent::StreamEnd, _) => Ok(value),
+        (YamlEvent::DocumentStart(_), span) => Err(reader.second_document_error(&span)),
+        _ => Err(boundary_error()),
+    }
+}
+
+/// Converts the parsed tree into the JSON value domain validation runs in.
+///
+/// Scalars resolve through the same conversion the frontmatter path uses, so
+/// a scalar means the same thing in both document kinds, §1.6-exactness
+/// included. Mapping keys must resolve to strings here — the JSON object this
+/// builds has no other kind of key — and the resolved text is where two
+/// spellings of one key are recognised as the duplicate they are.
+fn schema_yaml_to_json(node: SchemaYamlNode) -> Result<Value, SchemaYamlError> {
+    let span = (node.start, node.end);
+    match node.kind {
+        SchemaYamlKind::Scalar(scalar) => {
+            exact_yaml_scalar_to_json(scalar).map_err(|error| SchemaYamlError {
+                kind: SchemaErrorKind::Syntax,
+                span: Some(span),
+                message: schema_value_error(error),
+            })
+        }
+        SchemaYamlKind::Sequence(values) => Ok(Value::Array(
+            values
+                .into_iter()
+                .map(schema_yaml_to_json)
+                .collect::<Result<_, _>>()?,
+        )),
+        SchemaYamlKind::Mapping(entries) => {
+            let mut object = JsonMap::new();
+            for (key, value) in entries {
+                let key_span = (key.start, key.end);
+                let non_string_key = || SchemaYamlError {
+                    kind: SchemaErrorKind::InvalidDocumentShape,
+                    span: Some(key_span),
+                    message: "mapping keys must be strings".into(),
+                };
+                let SchemaYamlKind::Scalar(scalar) = key.kind else {
+                    return Err(non_string_key());
+                };
+                let Value::String(key) =
+                    exact_yaml_scalar_to_json(scalar).map_err(|error| SchemaYamlError {
+                        kind: SchemaErrorKind::Syntax,
+                        span: Some(key_span),
+                        message: schema_value_error(error),
+                    })?
+                else {
+                    return Err(non_string_key());
+                };
+                let value = schema_yaml_to_json(value)?;
+                if object.contains_key(&key) {
+                    return Err(SchemaYamlError {
+                        kind: SchemaErrorKind::Syntax,
+                        span: Some(key_span),
+                        message: format!("invalid YAML: duplicate mapping key `{key}`"),
+                    });
+                }
+                object.insert(key, value);
+            }
+            Ok(Value::Object(object))
+        }
+    }
+}
+
+/// The schema-document wording for a scalar or tag with no JSON value.
+fn schema_value_error(error: YamlValueError) -> String {
+    match error {
+        YamlValueError::TaggedNull => "invalid YAML: invalid explicitly tagged null".into(),
+        YamlValueError::TaggedBool => "invalid YAML: invalid explicitly tagged boolean".into(),
+        YamlValueError::TaggedInt => "invalid YAML: invalid explicitly tagged integer".into(),
+        YamlValueError::TaggedFloat => "invalid YAML: invalid explicitly tagged float".into(),
+        YamlValueError::ScalarTag => "invalid YAML: invalid tag for a YAML scalar".into(),
+        YamlValueError::ContainerTag(expected) => {
+            format!("invalid YAML: invalid tag for a YAML {expected}")
+        }
+        YamlValueError::NonFinite => "invalid YAML: a non-finite number has no JSON value".into(),
+        YamlValueError::Unrepresentable { lexeme, error } => {
+            format!("invalid YAML: number `{lexeme}` is not representable: {error}")
+        }
+    }
 }
 
 struct Loader {
-    source: Arc<str>,
     sources: SchemaSources,
     document_range: SourceRange,
-    /// Whether the source's own text nests collections past the limit. What
-    /// this counts is parser events, so an alias contributes one level here
-    /// however deep the value it names, and the depth a walk over the built
-    /// tree actually reaches can exceed it. Nothing more is needed on this
-    /// path: marked-yaml refuses a document defining an anchor at all, so the
-    /// range index never expands one, and `yaml_serde` applies its own
-    /// recursion limit — the same 128 — while expanding, inheriting it across
-    /// each alias jump. Answered before the first walk runs and reported by
-    /// [`Loader::load`], which owns the error list.
-    too_deep: bool,
+    /// Character-index → byte-offset bridge for the primary source, shared by
+    /// the range index and every positioned refusal the parse produced.
+    char_offsets: Vec<usize>,
+    /// The one tree parsed over the source, or the refusal that stopped it.
+    /// Consumed by [`Loader::load`]; the range index was read off it first.
+    parsed: Option<Result<SchemaYamlNode, SchemaYamlError>>,
     ranges: RangeIndex,
     errors: Vec<SchemaError>,
     nodes: BTreeMap<SchemaNode, SourceRange>,
@@ -784,13 +1327,18 @@ impl Loader {
                 end: ByteOffset(source.len()),
             },
         };
-        // The range index is the first tree built over the source and recurses
-        // over it, so the depth question is settled before it, not in `load`.
-        let too_deep = crate::markdown::yaml_nesting_exceeds_limit(&source);
-        let ranges = if too_deep {
-            RangeIndex::default()
-        } else {
-            RangeIndex::from_source(&source)
+        let char_offsets = source
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain(std::iter::once(source.len()))
+            .collect::<Vec<_>>();
+        // One parse serves everything: the reader bounds nesting and alias
+        // expansion itself, so the tree it yields is safe for every recursive
+        // walk that follows — the range index here, the conversion in `load`.
+        let parsed = parse_schema_yaml(&source);
+        let ranges = match &parsed {
+            Ok(tree) => RangeIndex::from_tree(tree, &char_offsets),
+            Err(_) => RangeIndex::default(),
         };
         let mut sources = primary_sources(Arc::clone(&source), label);
         let external_schema = external_schema.map(|external| {
@@ -828,9 +1376,9 @@ impl Loader {
         });
         Self {
             sources,
-            source,
             document_range,
-            too_deep,
+            char_offsets,
+            parsed: Some(parsed),
             ranges,
             errors: Vec::new(),
             nodes: BTreeMap::new(),
@@ -840,27 +1388,21 @@ impl Loader {
     }
 
     fn load(mut self) -> LoadSchemaResult {
-        if self.too_deep {
-            // The whole document is the anchor: the position where the nesting
-            // passed the limit is a position no reader of the schema can act
-            // on, since what is wrong is the shape of the document, not a
-            // character of it.
-            self.error_at(
-                SchemaErrorKind::Syntax,
-                self.document_range,
-                "invalid YAML: nesting exceeds the depth limit",
-            );
-            return self.failure();
-        }
-        let value: Value = match yaml_serde::from_str(&self.source) {
+        let parsed = self
+            .parsed
+            .take()
+            .expect("the tree is parsed once and consumed once");
+        let tree = match parsed {
+            Ok(tree) => tree,
+            Err(error) => {
+                self.push_yaml_error(error);
+                return self.failure();
+            }
+        };
+        let value = match schema_yaml_to_json(tree) {
             Ok(value) => value,
             Err(error) => {
-                let range = self.range_for_yaml_error(&error);
-                self.error_at(
-                    SchemaErrorKind::Syntax,
-                    range,
-                    format!("invalid YAML: {error}"),
-                );
+                self.push_yaml_error(error);
                 return self.failure();
             }
         };
@@ -870,12 +1412,12 @@ impl Loader {
             return self.failure();
         }
 
-        // The marked tree is validated first because yaml_serde's data-model
-        // errors do not carry the precise value ranges required by §6.
+        // The shapes are validated against the tree's ranges first because
+        // serde's data-model errors carry no positions at all.
         let frontmatter_declared = value
-            .as_mapping()
-            .is_some_and(|mapping| mapping.contains_key(Value::String("frontmatter".into())));
-        let raw: RawSchema = match yaml_serde::from_value(value) {
+            .as_object()
+            .is_some_and(|mapping| mapping.contains_key("frontmatter"));
+        let raw: RawSchema = match serde_json::from_value(value) {
             Ok(raw) => raw,
             Err(error) => {
                 self.error_at(
@@ -977,7 +1519,7 @@ impl Loader {
     }
 
     fn validate_document_shape(&mut self, value: &Value) {
-        let Some(mapping) = value.as_mapping() else {
+        let Some(mapping) = value.as_object() else {
             self.shape_error_at(self.document_range, "schema document must be a mapping");
             return;
         };
@@ -985,15 +1527,15 @@ impl Loader {
         self.validate_required_field(mapping, "version", self.document_range);
         self.validate_required_field(mapping, "sections", self.document_range);
 
-        if let Some(value) = yaml_get(mapping, "version") {
+        if let Some(value) = mapping.get("version") {
             if !is_yaml_integer(value) {
                 self.shape_error_at(
                     self.range(RangeKey::DocumentField("version".into())),
-                    "version must be an integer and cannot be null",
+                    "version must be an integer that fits in 64 bits and cannot be null",
                 );
             }
         }
-        if let Some(value) = yaml_get(mapping, "title") {
+        if let Some(value) = mapping.get("title") {
             if !matches!(value, Value::String(_)) {
                 self.shape_error_at(
                     self.range(RangeKey::DocumentField("title".into())),
@@ -1001,17 +1543,17 @@ impl Loader {
                 );
             }
         }
-        if let Some(value) = yaml_get(mapping, "options") {
+        if let Some(value) = mapping.get("options") {
             self.validate_options_shape(value);
         }
-        if let Some(value) = yaml_get(mapping, "frontmatter") {
+        if let Some(value) = mapping.get("frontmatter") {
             self.validate_frontmatter_shape(value);
         }
-        if let Some(value) = yaml_get(mapping, "sections") {
+        if let Some(value) = mapping.get("sections") {
             let range = self.range(RangeKey::DocumentField("sections".into()));
             self.validate_rules_shape(value, &ScopePath(Vec::new()), range);
         }
-        if let Some(value) = yaml_get(mapping, "constraints") {
+        if let Some(value) = mapping.get("constraints") {
             let range = self.range(RangeKey::DocumentField("constraints".into()));
             self.validate_constraints_shape(value, &ScopePath(Vec::new()), range);
         }
@@ -1019,13 +1561,13 @@ impl Loader {
 
     fn validate_frontmatter_shape(&mut self, value: &Value) {
         let range = self.range(RangeKey::DocumentField("frontmatter".into()));
-        let Some(mapping) = value.as_mapping() else {
+        let Some(mapping) = value.as_object() else {
             self.shape_error_at(range, "frontmatter must be a mapping and cannot be null");
             return;
         };
         self.validate_known_fields(mapping, FRONTMATTER_FIELDS, range);
         for field in ["required", "allow"] {
-            if let Some(value) = yaml_get(mapping, field) {
+            if let Some(value) = mapping.get(field) {
                 if !matches!(value, Value::Bool(_)) {
                     self.shape_error_at(
                         self.range(RangeKey::FrontmatterField(field.into())),
@@ -1034,8 +1576,8 @@ impl Loader {
                 }
             }
         }
-        if let Some(value) = yaml_get(mapping, "schema") {
-            if !matches!(value, Value::String(_) | Value::Mapping(_)) {
+        if let Some(value) = mapping.get("schema") {
+            if !matches!(value, Value::String(_) | Value::Object(_)) {
                 self.shape_error_at(
                     self.range(RangeKey::FrontmatterField("schema".into())),
                     "frontmatter.schema must be a path string or mapping and cannot be null",
@@ -1172,13 +1714,13 @@ impl Loader {
 
     fn validate_options_shape(&mut self, value: &Value) {
         let range = self.range(RangeKey::DocumentField("options".into()));
-        let Some(mapping) = value.as_mapping() else {
+        let Some(mapping) = value.as_object() else {
             self.shape_error_at(range, "options must be a mapping and cannot be null");
             return;
         };
         self.validate_known_fields(mapping, OPTION_FIELDS, range);
         for field in ["match_case", "strip_inline_markup", "allow_skipped_levels"] {
-            if let Some(value) = yaml_get(mapping, field) {
+            if let Some(value) = mapping.get(field) {
                 if !matches!(value, Value::Bool(_)) {
                     self.shape_error_at(
                         self.range(RangeKey::OptionField(field.into())),
@@ -1190,7 +1732,7 @@ impl Loader {
     }
 
     fn validate_rules_shape(&mut self, value: &Value, scope: &ScopePath, range: SourceRange) {
-        let Some(rules) = value.as_sequence() else {
+        let Some(rules) = value.as_array() else {
             self.shape_error_at(range, "sections must be a sequence and cannot be null");
             return;
         };
@@ -1200,14 +1742,14 @@ impl Loader {
                 index: RuleIndex(index),
             };
             let rule_range = self.range(RangeKey::Rule(path.clone()));
-            let Some(mapping) = value.as_mapping() else {
+            let Some(mapping) = value.as_object() else {
                 self.shape_error_at(rule_range, "each section rule must be a mapping");
                 continue;
             };
             self.validate_known_fields(mapping, RULE_FIELDS, rule_range);
             self.validate_required_field(mapping, "match", rule_range);
             for field in ["id", "match", "repeat"] {
-                if let Some(value) = yaml_get(mapping, field) {
+                if let Some(value) = mapping.get(field) {
                     if !matches!(value, Value::String(_)) {
                         self.shape_error_at(
                             self.range(RangeKey::RuleField(path.clone(), field.into())),
@@ -1217,7 +1759,7 @@ impl Loader {
                 }
             }
             for field in ["allow", "required", "strict"] {
-                if let Some(value) = yaml_get(mapping, field) {
+                if let Some(value) = mapping.get(field) {
                     if !matches!(value, Value::Bool(_)) {
                         self.shape_error_at(
                             self.range(RangeKey::RuleField(path.clone(), field.into())),
@@ -1228,11 +1770,11 @@ impl Loader {
             }
             let mut child_scope = scope.clone();
             child_scope.0.push(RuleIndex(index));
-            if let Some(children) = yaml_get(mapping, "sections") {
+            if let Some(children) = mapping.get("sections") {
                 let range = self.range(RangeKey::RuleField(path.clone(), "sections".into()));
                 self.validate_rules_shape(children, &child_scope, range);
             }
-            if let Some(constraints) = yaml_get(mapping, "constraints") {
+            if let Some(constraints) = mapping.get("constraints") {
                 let range = self.range(RangeKey::RuleField(path, "constraints".into()));
                 self.validate_constraints_shape(constraints, &child_scope, range);
             }
@@ -1240,7 +1782,7 @@ impl Loader {
     }
 
     fn validate_constraints_shape(&mut self, value: &Value, scope: &ScopePath, range: SourceRange) {
-        let Some(constraints) = value.as_sequence() else {
+        let Some(constraints) = value.as_array() else {
             self.shape_error_at(range, "constraints must be a sequence and cannot be null");
             return;
         };
@@ -1254,7 +1796,7 @@ impl Loader {
     }
 
     fn validate_constraint_shape(&mut self, value: &Value, range: SourceRange) {
-        let Some(mapping) = value.as_mapping() else {
+        let Some(mapping) = value.as_object() else {
             self.shape_error_at(range, "constraint must be a single-key object");
             return;
         };
@@ -1262,8 +1804,7 @@ impl Loader {
             self.shape_error_at(range, "constraint must contain exactly one keyword");
             return;
         }
-        let Some((Value::String(keyword), operand)) = mapping.iter().next() else {
-            self.shape_error_at(range, "constraint keyword must be a string");
+        let Some((keyword, operand)) = mapping.iter().next() else {
             return;
         };
         match keyword.as_str() {
@@ -1271,7 +1812,7 @@ impl Loader {
                 self.validate_ref_sequence(keyword, operand, true, range);
             }
             "requires" | "conflicts" => {
-                let Some(implication) = operand.as_mapping() else {
+                let Some(implication) = operand.as_object() else {
                     self.shape_error_at(range, format!("{keyword} operand must be an object"));
                     return;
                 };
@@ -1284,11 +1825,11 @@ impl Loader {
                 self.validate_known_fields(implication, &allowed, range);
                 self.validate_required_field(implication, "if", range);
                 self.validate_required_field(implication, consequence, range);
-                if let Some(condition) = yaml_get(implication, "if") {
+                if let Some(condition) = implication.get("if") {
                     self.validate_ref_scalar(condition, range);
                 }
-                if let Some(value) = yaml_get(implication, consequence) {
-                    if value.is_sequence() {
+                if let Some(value) = implication.get(consequence) {
+                    if value.is_array() {
                         self.validate_ref_sequence(consequence, value, false, range);
                     } else {
                         self.validate_ref_scalar(value, range);
@@ -1306,7 +1847,7 @@ impl Loader {
         require_two: bool,
         range: SourceRange,
     ) {
-        let Some(values) = value.as_sequence() else {
+        let Some(values) = value.as_array() else {
             self.shape_error_at(range, format!("{name} must be a sequence of refs"));
             return;
         };
@@ -1326,20 +1867,19 @@ impl Loader {
         }
     }
 
-    fn validate_known_fields(&mut self, mapping: &Mapping, allowed: &[&str], range: SourceRange) {
+    fn validate_known_fields(&mut self, mapping: &JsonMap, allowed: &[&str], range: SourceRange) {
+        // A JSON object's keys are strings by construction: a YAML key that
+        // was not one has already been rejected by the conversion, with the
+        // key's own range.
         for key in mapping.keys() {
-            let Some(key) = key.as_str() else {
-                self.shape_error_at(range, "mapping keys must be strings");
-                continue;
-            };
-            if !allowed.contains(&key) {
+            if !allowed.contains(&key.as_str()) {
                 self.shape_error_at(range, format!("unknown field `{key}`"));
             }
         }
     }
 
-    fn validate_required_field(&mut self, mapping: &Mapping, field: &str, range: SourceRange) {
-        if yaml_get(mapping, field).is_none() {
+    fn validate_required_field(&mut self, mapping: &JsonMap, field: &str, range: SourceRange) {
+        if !mapping.contains_key(field) {
             self.shape_error_at(range, format!("missing required field `{field}`"));
         }
     }
@@ -1602,7 +2142,7 @@ impl Loader {
         value: Value,
         range: SourceRange,
     ) -> Option<Constraint> {
-        let Some(mapping) = value.as_mapping() else {
+        let Some(mapping) = value.as_object() else {
             self.shape_error_at(range, "constraint must be a single-key object");
             return None;
         };
@@ -1610,10 +2150,7 @@ impl Loader {
             self.shape_error_at(range, "constraint must contain exactly one keyword");
             return None;
         }
-        let Some((Value::String(keyword), operand)) = mapping.iter().next() else {
-            self.shape_error_at(range, "constraint keyword must be a string");
-            return None;
-        };
+        let (keyword, operand) = mapping.iter().next()?;
         match keyword.as_str() {
             "one_of" | "any_of" | "at_most_one" | "all_or_none" => {
                 let refs = self.parse_proposition_list(schema, scope, operand, false, range)?;
@@ -1647,7 +2184,7 @@ impl Loader {
         requires: bool,
         range: SourceRange,
     ) -> Option<Constraint> {
-        let Some(mapping) = operand.as_mapping() else {
+        let Some(mapping) = operand.as_object() else {
             self.shape_error_at(range, "requires/conflicts operand must be an object");
             return None;
         };
@@ -1662,11 +2199,11 @@ impl Loader {
             );
             return None;
         }
-        let Some(condition_value) = yaml_get(mapping, "if") else {
+        let Some(condition_value) = mapping.get("if") else {
             self.shape_error_at(range, "requires/conflicts operand is missing `if`");
             return None;
         };
-        let Some(consequence_value) = yaml_get(mapping, consequence_key) else {
+        let Some(consequence_value) = mapping.get(consequence_key) else {
             self.shape_error_at(
                 range,
                 format!("requires/conflicts operand is missing `{consequence_key}`"),
@@ -1729,7 +2266,7 @@ impl Loader {
         operand: &Value,
         range: SourceRange,
     ) -> Option<Constraint> {
-        let values = operand.as_sequence().or_else(|| {
+        let values = operand.as_array().or_else(|| {
             self.shape_error_at(range, "ordered requires a list of refs");
             None
         })?;
@@ -1798,7 +2335,7 @@ impl Loader {
         ordered: bool,
         range: SourceRange,
     ) -> Option<Vec<Proposition>> {
-        let values = operand.as_sequence().or_else(|| {
+        let values = operand.as_array().or_else(|| {
             self.shape_error_at(range, "constraint operand must be a list of refs");
             None
         })?;
@@ -1888,14 +2425,13 @@ impl Loader {
         ))
     }
 
-    fn range_for_yaml_error(&self, error: &yaml_serde::Error) -> SourceRange {
-        let Some(location) = error.location() else {
-            return self.document_range;
+    /// Reports a refusal from the YAML engine against the source's bytes.
+    fn push_yaml_error(&mut self, error: SchemaYamlError) {
+        let range = match error.span {
+            Some((start, end)) => char_range(start, end, &self.char_offsets),
+            None => self.document_range,
         };
-        SourceRange {
-            source: SourceId(0),
-            range: yaml_location_range(&self.source, location.line(), location.column()),
-        }
+        self.error_at(error.kind, range, error.message);
     }
 
     fn range(&self, key: RangeKey) -> SourceRange {
@@ -2258,10 +2794,12 @@ fn strip_sign(source: &str) -> (bool, &str) {
     }
 }
 
-fn yaml_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
-    mapping.get(Value::String(key.to_owned()))
-}
-
+/// Whether a value is an integer the schema's own fields can hold.
+///
+/// The engine preserves a number's exact spelling, so an integer of any
+/// magnitude arrives here as a number rather than failing the parse; one that
+/// does not fit the 64-bit fields is a shape complaint against the value, not
+/// a syntax error against the document.
 fn is_yaml_integer(value: &Value) -> bool {
     match value {
         Value::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
@@ -2271,26 +2809,26 @@ fn is_yaml_integer(value: &Value) -> bool {
 
 fn scalar_or_sequence(value: &Value) -> Vec<&Value> {
     value
-        .as_sequence()
+        .as_array()
         .map_or_else(|| vec![value], |values| values.iter().collect())
 }
 
 fn constraint_ref_strings(value: &Value) -> Vec<&str> {
-    let Some(mapping) = value.as_mapping() else {
+    let Some(mapping) = value.as_object() else {
         return Vec::new();
     };
-    let Some((Value::String(keyword), operand)) = mapping.iter().next() else {
+    let Some((keyword, operand)) = mapping.iter().next() else {
         return Vec::new();
     };
     match keyword.as_str() {
         "one_of" | "any_of" | "at_most_one" | "all_or_none" | "ordered" => operand
-            .as_sequence()
+            .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
             .collect(),
         "requires" | "conflicts" => {
-            let Some(implication) = operand.as_mapping() else {
+            let Some(implication) = operand.as_object() else {
                 return Vec::new();
             };
             let consequence = if keyword == "requires" {
@@ -2298,11 +2836,12 @@ fn constraint_ref_strings(value: &Value) -> Vec<&str> {
             } else {
                 "then_not"
             };
-            let mut result = yaml_get(implication, "if")
+            let mut result = implication
+                .get("if")
                 .and_then(Value::as_str)
                 .into_iter()
                 .collect::<Vec<_>>();
-            if let Some(value) = yaml_get(implication, consequence) {
+            if let Some(value) = implication.get(consequence) {
                 result.extend(
                     scalar_or_sequence(value)
                         .into_iter()
@@ -2393,74 +2932,35 @@ mod tests {
     }
 
     #[test]
-    fn yaml_location_ranges_clamp_to_character_boundaries_on_the_reported_line() {
-        let source = "å\nx";
-        assert_eq!(
-            yaml_location_range(source, 0, 0),
-            TextRange {
-                start: ByteOffset(0),
-                end: ByteOffset(2),
-            }
-        );
-        assert_eq!(
-            yaml_location_range(source, 1, usize::MAX),
-            TextRange {
-                start: ByteOffset(2),
-                end: ByteOffset(2),
-            }
-        );
-        assert_eq!(
-            yaml_location_range(source, usize::MAX, 1),
-            TextRange {
-                start: ByteOffset(source.len()),
-                end: ByteOffset(source.len()),
-            }
-        );
-
-        let crlf = "😀x\r\nz";
-        assert_eq!(
-            yaml_location_range(crlf, 1, 1),
-            TextRange {
-                start: ByteOffset(0),
-                end: ByteOffset(4),
-            }
-        );
-        assert_eq!(
-            yaml_location_range(crlf, 1, usize::MAX),
-            TextRange {
-                start: ByteOffset(5),
-                end: ByteOffset(5),
-            }
-        );
-        assert_eq!(
-            yaml_location_range(crlf, 2, 1),
-            TextRange {
-                start: ByteOffset(7),
-                end: ByteOffset(8),
-            }
-        );
-    }
-
-    #[test]
-    fn a_second_schema_document_is_refused_without_a_position() {
-        // The deserializer refuses more than one document itself, so nothing in
-        // the loader looks for a second `---`. Its refusal carries no location,
-        // which is why the whole document is the best anchor available and the
-        // reader is told nothing about where the second document began. Pinned
-        // so that giving the guard a position of its own reads as the
-        // improvement it is rather than as an unexplained range change.
-        for source in [
-            "version: 1\nsections: []\n---\nversion: 1\nsections: []\n",
-            "version: 1\nsections: []\n...\n---\nsections: []\n",
+    fn a_second_schema_document_is_refused_at_its_own_start_marker() {
+        // The refusal lands on the second `---` before any of that document's
+        // content is read — raw `next_event` does not clear the anchor table
+        // between documents — and it carries the marker's real span, where the
+        // serde-era engine could only anchor the whole document. The `---`
+        // sits in the first column, so this doubles as the pin that a
+        // first-column range survives the character-to-byte conversion.
+        for (source, line) in [
+            (
+                "version: 1\nsections: []\n---\nversion: 1\nsections: []\n",
+                3,
+            ),
+            ("version: 1\nsections: []\n...\n---\nsections: []\n", 4),
         ] {
             let invalid = invalid(source);
             assert_eq!(invalid.errors.first.kind, SchemaErrorKind::Syntax);
             assert_eq!(
                 invalid.errors.first.message,
-                "invalid YAML: deserializing from YAML containing more than one document \
-                 is not supported"
+                format!(
+                    "invalid YAML: a second document opens at line {line} column 1; \
+                     a schema is a single YAML document"
+                )
             );
-            assert_eq!(source_slice(source, invalid.errors.first.range), source);
+            assert_eq!(source_slice(source, invalid.errors.first.range), "---");
+            let start = invalid.errors.first.range.range.start.0;
+            assert!(
+                start == 0 || source.as_bytes()[start - 1] == b'\n',
+                "the `---` anchor must sit in the first column"
+            );
         }
 
         // A `...` that closes the only document opens nothing.
@@ -2512,35 +3012,42 @@ mod tests {
 
     #[test]
     fn schema_nesting_is_bounded() {
-        // Every tree the loader builds over the source recurses, so a schema
-        // nesting past the depth limit is refused before the first of them is
-        // built rather than overrunning the stack inside one. Two levels per
-        // rule plus the document's own mapping puts the deepest schema that
-        // fits at 63 rules, and the first that does not at 64.
+        // The reader charges the depth limit as its own recursion descends, so
+        // a schema nesting past it is refused at the exact node that would
+        // overrun the stack, before that node is built. Two levels per rule
+        // plus the document's own mapping puts the deepest schema that fits at
+        // 63 rules, and the first that does not at 64 — the boundary the
+        // serde-era engine's identical limit drew.
         let schema = valid(&nested_rule_schema(63));
         assert_eq!(schema.sections.len(), 1);
 
         for rules in [64, 5_000] {
-            let invalid = invalid(&nested_rule_schema(rules));
+            let source = nested_rule_schema(rules);
+            let invalid = invalid(&source);
             assert_eq!(invalid.errors.first.kind, SchemaErrorKind::Syntax);
             assert_eq!(
                 invalid.errors.first.message,
                 "invalid YAML: nesting exceeds the depth limit"
             );
-            // Nothing was read deeply enough to place the failure, so it is
-            // anchored to the whole document.
-            let source = nested_rule_schema(rules);
-            assert_eq!(source_slice(&source, invalid.errors.first.range), source);
+            // The refusal is anchored where the 64th rule's mapping opens —
+            // its first key — however much deeper the document goes on, since
+            // nothing past the refusal is read.
+            let overrun = source
+                .match_indices("match")
+                .nth(63)
+                .map(|(offset, _)| offset)
+                .expect("the fixture spells one `match` per rule");
+            assert_eq!(invalid.errors.first.range.range.start, ByteOffset(overrun));
         }
     }
 
     /// A schema whose `constraints` entries chain anchors, each wrapping an
     /// alias to the entry above it in one more sequence.
     ///
-    /// Every entry is one flow sequence in the source, so the event depth the
-    /// pre-parse scan counts stays at three however many links the chain has,
-    /// while the tree the parser builds reaches `links` levels below the
-    /// `constraints` sequence once the aliases are expanded.
+    /// Every entry is one flow sequence in the source, so no event stream ever
+    /// shows more than three open collections, while the tree the reader
+    /// builds reaches `links` levels below the `constraints` sequence once
+    /// the aliases are expanded.
     fn alias_deepened_schema(links: usize) -> String {
         let mut source =
             String::from("version: 1\nsections:\n  - match: Title\nconstraints:\n  - &x0 [1]\n");
@@ -2551,31 +3058,27 @@ mod tests {
     }
 
     #[test]
-    fn alias_expanded_schema_nesting_is_bounded_only_by_the_parsers_own_limit() {
-        // Depth an alias splices in is depth the pre-parse scan cannot see:
-        // `yaml_nesting_exceeds_limit` counts the levels the source text
-        // opens, and an alias is one event however deep the value it names.
-        // The only guard the schema path has against the expanded tree lives
-        // inside `yaml_serde`, which charges its own recursion limit across
-        // each alias jump while building the value — a guard this crate does
-        // not own, and one that leaves with the dependency when this path
-        // stops parsing through it. The frontmatter path made that trade once
-        // and silently inherited the absence of the same guard (ec565c6, two
-        // commits to recover); this test is what makes the loss loud here.
-        // The 127-link fixture is shallow enough to build harmlessly were the
-        // guard gone, at which point the loader would walk it to a
-        // constraint-shape complaint and the message assertions below would
-        // fail plainly, naming the refusal that went missing.
+    fn alias_expanded_schema_nesting_is_bounded_only_by_the_readers_own_limit() {
+        // Depth an alias splices in is depth no event stream shows: an alias
+        // is one event however deep the value it names. The reader therefore
+        // charges an alias the whole depth of the node it copies — before the
+        // clone — exactly as the frontmatter reader does. This guard used to
+        // live inside `yaml_serde`; the frontmatter path once dropped that
+        // dependency without replacing what it supplied (ec565c6, 25 GB of
+        // RSS, two commits to recover), and this pin is what makes the same
+        // loss loud on the schema path. The 127-link fixture is shallow
+        // enough to build harmlessly were the guard gone, at which point the
+        // loader would walk it to a constraint-shape complaint and the
+        // message assertions below would fail plainly.
         //
         // The boundary from both sides: at 126 links the expanded tree fills
-        // the parser's limit of 128 exactly (root mapping, `constraints`
-        // sequence, 126 chained levels) and is built — proven by the loader
-        // getting past parsing to reject the entries as constraints — and one
-        // more link flips the outcome to the parser's own refusal, an
-        // ordinary syntax diagnostic anchored where the chain starts, not a
-        // crash.
+        // the limit of 128 exactly (root mapping, `constraints` sequence, 126
+        // chained levels) and is built — proven by the loader getting past
+        // parsing to reject the entries as constraints — and one more link
+        // flips the outcome to an ordinary syntax diagnostic anchored at the
+        // alias that splices the overrun in, not a crash. The boundary is the
+        // one `yaml_serde`'s recursion limit drew before the port.
         let at_limit = alias_deepened_schema(126);
-        assert!(!crate::markdown::yaml_nesting_exceeds_limit(&at_limit));
         let built = invalid(&at_limit);
         assert_eq!(
             built.errors.first.kind,
@@ -2588,18 +3091,155 @@ mod tests {
 
         for links in [127, 2_000] {
             let source = alias_deepened_schema(links);
-            assert!(!crate::markdown::yaml_nesting_exceeds_limit(&source));
             let refused = invalid(&source);
             assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
             assert_eq!(
                 refused.errors.first.message,
-                "invalid YAML: recursion limit exceeded at line 5 column 5"
+                "invalid YAML: nesting exceeds the depth limit"
             );
-            // The reported position is the anchor opening the chain.
-            assert_eq!(source_slice(&source, refused.errors.first.range), "&");
-            // The same parse serves linked-schema discovery, which reports
+            // The reported position is the alias whose expansion would pass
+            // the limit, however many further links the chain spells.
+            assert_eq!(source_slice(&source, refused.errors.first.range), "*x125");
+            // The same engine serves linked-schema discovery, which reports
             // the refused document as declaring no linked schema.
             assert_eq!(linked_frontmatter_schema_path(&source), None);
+        }
+    }
+
+    /// A schema whose every `x` entry aliases the one above it four times.
+    ///
+    /// The `depth + 1` short lines this writes name `4 ^ (depth + 1)` leaf
+    /// scalars between them; nothing nests deeply, so only the node budget
+    /// stops it — the same shape the frontmatter bomb fixtures pin.
+    fn alias_bomb_schema(depth: usize) -> String {
+        let mut bomb = String::from("version: 1\nsections: []\nx0: &x0 [1,1,1,1]\n");
+        for level in 1..=depth {
+            let alias = format!("*x{}", level - 1);
+            bomb.push_str(&format!(
+                "x{level}: &x{level} [{alias},{alias},{alias},{alias}]\n"
+            ));
+        }
+        bomb
+    }
+
+    #[test]
+    fn schema_alias_expansion_is_bounded_by_the_node_budget() {
+        // The wall clock is part of the assertion: a loader that expands the
+        // bomb before refusing it returns the right verdict a gigabyte too
+        // late, which is the regression the budget exists to prevent.
+        for depth in [9, 12, 15] {
+            let bomb = alias_bomb_schema(depth);
+            let started = std::time::Instant::now();
+            let refused = invalid(&bomb);
+            let elapsed = started.elapsed();
+            assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
+            assert_eq!(
+                refused.errors.first.message,
+                "invalid YAML: alias expansion exceeds the document's size limit"
+            );
+            // The refusal lands on the alias whose copy overruns the budget.
+            assert!(source_slice(&bomb, refused.errors.first.range).starts_with("*x"));
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "an alias bomb at depth {depth} took {elapsed:?}, \
+                 so it was expanded before being refused"
+            );
+        }
+
+        // Ordinary reuse stays far under the budget: the aliased matcher is
+        // copied once and the schema loads.
+        let schema =
+            valid("version: 1\nsections:\n  - match: &m Intro\n  - id: other\n    match: *m\n");
+        assert_eq!(schema.sections.len(), 2);
+    }
+
+    #[test]
+    fn non_standard_tags_are_rejected_anywhere_in_a_schema_document() {
+        // Judgment call: a tag outside the yaml.org namespace has no meaning a
+        // schema could use, and the serde-era engine rejected such documents
+        // too. The refusal is uniform — scalar, collection, or the document's
+        // own root — where the old engine incidentally accepted a root tag.
+        let scalar = invalid("version: 1\ntitle: !custom Doc\nsections: []\n");
+        assert_eq!(scalar.errors.first.kind, SchemaErrorKind::Syntax);
+        assert_eq!(
+            scalar.errors.first.message,
+            "invalid YAML: non-standard tag `!custom`"
+        );
+        assert_eq!(
+            source_slice(
+                "version: 1\ntitle: !custom Doc\nsections: []\n",
+                scalar.errors.first.range
+            ),
+            "Doc"
+        );
+
+        let root = invalid("--- !custom\nversion: 1\nsections: []\n");
+        assert_eq!(root.errors.first.kind, SchemaErrorKind::Syntax);
+        assert_eq!(
+            root.errors.first.message,
+            "invalid YAML: non-standard tag `!custom`"
+        );
+
+        // Core-schema tags keep their meaning.
+        let schema = valid("version: !!int 1\ntitle: !!str Doc\nsections: []\n");
+        assert!(schema.title.is_some());
+    }
+
+    #[test]
+    fn an_oversized_version_is_a_shape_error_at_the_value() {
+        // The engine preserves a number's exact spelling, so an integer of any
+        // magnitude parses; one that does not fit the schema's own 64-bit
+        // field is now a shape complaint against the value — the serde-era
+        // engine refused the whole parse as a syntax error instead.
+        let source = "version: 99999999999999999999999999\nsections: []\n";
+        let invalid = invalid(source);
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidDocumentShape
+        );
+        assert_eq!(
+            invalid.errors.first.message,
+            "version must be an integer that fits in 64 bits and cannot be null"
+        );
+        assert_eq!(
+            source_slice(source, invalid.errors.first.range),
+            "99999999999999999999999999"
+        );
+    }
+
+    #[test]
+    fn one_leading_byte_order_mark_is_removed_before_parsing() {
+        // Left in place, the mark becomes the first character of the first
+        // key, and the loader rejects the document naming a `version` field
+        // the author cannot see is misspelled. Exactly one is removed — the
+        // same rule the frontmatter path applies — and every reported range
+        // counts it back in, so a second mark stays visible.
+        let schema = valid("\u{feff}version: 1\nsections: []\n");
+        assert_eq!(schema.version, SchemaVersion::V1);
+
+        let source = "\u{feff}\u{feff}version: 1\nsections: []\n";
+        let doubled = invalid(source);
+        assert!(doubled
+            .errors
+            .iter()
+            .any(|error| error.message == "unknown field `\u{feff}version`"));
+    }
+
+    #[test]
+    fn duplicate_keys_are_rejected_on_resolved_text_at_the_duplicate() {
+        // `a` and `"a"` are one key however differently they are spelled; the
+        // refusal names the key and anchors at the duplicate occurrence.
+        for source in [
+            "version: 1\nversion: 2\nsections: []\n",
+            "version: 1\n\"version\": 2\nsections: []\n",
+        ] {
+            let refused = invalid(source);
+            assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
+            assert_eq!(
+                refused.errors.first.message,
+                "invalid YAML: duplicate mapping key `version`"
+            );
+            assert!(refused.errors.first.range.range.start >= ByteOffset(11));
         }
     }
 
