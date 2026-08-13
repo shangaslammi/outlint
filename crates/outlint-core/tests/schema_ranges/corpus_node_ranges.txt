@@ -76,7 +76,7 @@ nested-refs constraint 0.0 0:178..221 "requires: { if: child, then: \"$.other\" 
 nested-refs rule 0 0:25..221 "id: group\n    match: \"Group\"\n    required: false"...
 nested-refs rule 0.0 0:96..157 "id: child\n        match: \"Child\"\n        require"...
 nested-refs rule 1 0:223..272 "id: other\n    match: \"Other\"\n    required: false"...
-ordered-across-ancestors constraint 0 0:447..470 "ordered: [intro, body]\n"
+ordered-across-ancestors constraint 0 0:646..669 "ordered: [intro, body]\n"
 ordered-across-ancestors rule 0 0:25..56 "id: intro\n    match: \"Intro\"\n  "
 ordered-across-ancestors rule 1 0:58..85 "id: body\n    match: \"Body\"\n"
 ordered-occurrences constraint 0 0:88..104 "ordered: [a, b]\n"
@@ -111,3 +111,5 @@ title-cardinality-skips rule 0 0:42..75 "match: \"Item\"\n    repeat: \"2..2\"\n
 title-cardinality-skips title 0:18..27 "\"Project\""
 title-matcher-label rule 0 0:53..90 "match: \"Overview\"\n    required: true\n"
 title-matcher-label title 0:18..38 "\"/Handbook v[0-9]+/\""
+title-null rule 0 0:295..332 "match: \"Overview\"\n    required: true\n"
+title-null title 0:276..280 "null"

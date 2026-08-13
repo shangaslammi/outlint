@@ -1,0 +1,9 @@
+version: 1
+# `title: null` declares a document with no `h1` at all: the `sections` scope
+# binds the document's own top-level `h2`s, and a present `h1` is denied
+# wholesale at the title node, its subtree validated no further — like any
+# header a deny rule matches.
+title: null
+sections:
+  - match: "Overview"
+    required: true

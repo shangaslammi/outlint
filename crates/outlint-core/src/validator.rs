@@ -530,11 +530,14 @@ impl<'a> Validator<'a> {
     /// predate the outline form and keep their spellings: the rule's absence
     /// is `missing-title` anchored at [`SchemaNode::Title`], a mismatched
     /// `h1` is `not-allowed` there rather than an ignored header, a surplus
-    /// `h1` is one `too-many-sections` on the second, and the `sections`
-    /// scope keeps reporting as the legacy root — cardinality misses name no
-    /// parent header and constraints target the document. Each `h1` still
-    /// binds its own child scope, so two same-named sections under different
-    /// `h1`s are budgeted per parent exactly as in every nested scope.
+    /// `h1` is one `too-many-sections` on the second, and a lone `h1`'s
+    /// `sections` scope keeps reporting as the legacy root — cardinality
+    /// misses name no parent header and constraints target the document.
+    /// Each `h1` still binds its own child scope, so two same-named sections
+    /// under different `h1`s are budgeted per parent exactly as in every
+    /// nested scope — and when more than one `h1` binds, each instance's
+    /// diagnostics carry the owning `h1`'s path so the failing subtrees stay
+    /// apart.
     fn validate_sugar_root(
         &mut self,
         top: &[PathedSection<'a>],
@@ -551,6 +554,7 @@ impl<'a> Validator<'a> {
         if provenance == OutlineProvenance::NoTitle || !has_h1 {
             // The headless scope: the virtual root stands in at level 1 and
             // the `sections` rules bind the document's top-level `h2`s.
+            // One scope instance, so the legacy document voice is unambiguous.
             if provenance == OutlineProvenance::Title {
                 self.emit(
                     Diagnostic {
@@ -589,7 +593,7 @@ impl<'a> Validator<'a> {
             }
             let admitted =
                 admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
-            self.bind_sugar_sections(&admitted, rule, prepared, frontmatter);
+            self.bind_sugar_sections(&admitted, rule, prepared, frontmatter, None);
             return;
         }
 
@@ -597,10 +601,14 @@ impl<'a> Validator<'a> {
         // mismatch reporting as a wrong title rather than dropping the header
         // — its children are still the document's real structure and are
         // still validated. Deeper top-level headers join only when skipped
-        // levels are allowed, and then under ordinary matching: one that
-        // matches the title matcher counts against the one-title bound.
+        // levels are allowed, and never as the title: the title rule is an
+        // `h1` rule, so only `h1`s occupy it or count against its one-title
+        // bound. An admitted deeper header instead binds into the `sections`
+        // scope — the title rule's child scope — like any skipped child of a
+        // bound header.
         let admitted = admitted_at_root(top, HeaderLevel::H1, schema.options.allow_skipped_levels);
         let mut occurrences = Vec::new();
+        let mut admitted_strays = Vec::new();
         for pathed in &admitted {
             if pathed.section.heading.level == HeaderLevel::H1 {
                 if provenance == OutlineProvenance::Title
@@ -615,8 +623,15 @@ impl<'a> Validator<'a> {
                     );
                 }
                 occurrences.push(pathed);
-            } else if prepared.matcher.matches(&pathed.section.heading.text) {
-                occurrences.push(pathed);
+            } else {
+                // A top-level header deeper than `h1` can only precede the
+                // document's first `h1` — any later one nests under an `h1`
+                // in the parse tree — so joining the first instance below
+                // keeps document order.
+                admitted_strays.push(PathedSection {
+                    section: pathed.section,
+                    path: pathed.path.clone(),
+                });
             }
         }
         // One diagnostic per document, anchored on the second occurrence in
@@ -646,34 +661,58 @@ impl<'a> Validator<'a> {
                 true,
             );
         }
-        for occurrence in &occurrences {
-            let children = child_sections(occurrence.section, &occurrence.path);
-            self.bind_sugar_sections(&children, rule, prepared, frontmatter);
+        // The instance voice depends on how many `h1`s bound the rule. A
+        // single-`h1` sugar document reads as "the document" — the legacy
+        // root voice, with cardinality misses naming no parent and
+        // constraints targeting the document — and that voice is a corpus
+        // compatibility gate. With more than one `h1` the same voice would
+        // collapse two failing subtrees into byte-identical diagnostics, so
+        // each occurrence's diagnostics then carry the owning `h1`: the full
+        // path saying which subtree failed.
+        let attribute = occurrences.len() > 1;
+        for (index, occurrence) in occurrences.iter().enumerate() {
+            let mut children = child_sections(occurrence.section, &occurrence.path);
+            if index == 0 && !admitted_strays.is_empty() {
+                let mut merged = std::mem::take(&mut admitted_strays);
+                merged.extend(children);
+                children = merged;
+            }
+            let owner = attribute.then_some((&occurrence.section.heading, &occurrence.path));
+            self.bind_sugar_sections(&children, rule, prepared, frontmatter, owner);
         }
     }
 
     /// Binds one instance of a sugar schema's `sections` scope.
     ///
-    /// The scope reports as the legacy root: no parent header for cardinality
-    /// misses, the document as constraint target, and the empty schema scope
-    /// — which is the public address of the `sections` list. Section paths
-    /// still carry their real ancestor chain, enclosing `h1` included.
+    /// With no `owner`, the scope reports as the legacy root: no parent
+    /// header for cardinality misses, the document as constraint target, and
+    /// the empty schema scope — which is the public address of the `sections`
+    /// list. With an `owner` — one `h1` of several, where the legacy voice
+    /// would repeat itself verbatim per subtree — cardinality misses name the
+    /// owning `h1` as their parent, and constraints target and anchor on it.
+    /// The schema scope stays the empty path either way: which instance bound
+    /// the rules does not move where the rules live. Section paths always
+    /// carry their real ancestor chain, enclosing `h1` included.
     fn bind_sugar_sections(
         &mut self,
         sections: &[PathedSection<'a>],
         rule: &'a SectionRule,
         prepared: &PreparedRule,
         frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
+        owner: Option<(&'a Heading, &HeaderPath)>,
     ) {
         let scope = ScopePath(Vec::new());
-        let path = HeaderPath::default();
+        let (parent, path) = match owner {
+            Some((heading, path)) => (Some(heading), path.clone()),
+            None => (None, HeaderPath::default()),
+        };
         let bound = self.bind_scope(BindScopeInput {
             sections,
             rules: &rule.sections,
             prepared_rules: &prepared.sections,
             strict: rule.strict,
             schema_scope: &scope,
-            parent: None,
+            parent,
             parent_path: &path,
         });
         self.validate_constraints(
@@ -689,7 +728,7 @@ impl<'a> Validator<'a> {
             },
             &rule.constraints,
             &scope,
-            None,
+            parent,
             &path,
         );
     }
@@ -2113,6 +2152,119 @@ mod tests {
                 },
             )]
         );
+    }
+
+    #[test]
+    fn multi_h1_sugar_cardinality_misses_carry_the_owning_h1() {
+        // Two failing `h1` subtrees under the legacy document voice would be
+        // byte-identical; with more than one bound `h1` each instance's
+        // diagnostics name their owner instead, so both parents appear.
+        assert_eq!(
+            ids_and_targets(
+                "version: 1\ntitle: \"*\"\nsections:\n  - match: Overview\n    required: true\n",
+                "# One\n# Two\n",
+            ),
+            [
+                (
+                    DiagnosticId::TooManySections,
+                    DiagnosticTarget::Header(HeaderPath(vec!["Two".into()])),
+                ),
+                (
+                    DiagnosticId::MissingSection,
+                    DiagnosticTarget::MissingHeader {
+                        parent: HeaderPath(vec!["One".into()]),
+                        matcher: "Overview".into(),
+                    },
+                ),
+                (
+                    DiagnosticId::MissingSection,
+                    DiagnosticTarget::MissingHeader {
+                        parent: HeaderPath(vec!["Two".into()]),
+                        matcher: "Overview".into(),
+                    },
+                ),
+            ]
+        );
+
+        // A single bound `h1` keeps the exact legacy voice: no parent header
+        // on the miss. That voice is pinned corpus-wide; this is the local
+        // witness that the attribution switch is the occurrence count.
+        assert_eq!(
+            ids_and_targets(
+                "version: 1\ntitle: \"*\"\nsections:\n  - match: Overview\n    required: true\n",
+                "# One\n",
+            ),
+            [(
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "Overview".into(),
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn multi_h1_sugar_constraints_target_the_owning_h1() {
+        let schema = "version: 1\nsections:\n  - id: a\n    match: A\n    required: false\n  \
+                      - id: b\n    match: B\n    required: false\nconstraints:\n  - requires: { if: a, then: b }\n";
+
+        // One `h1`: the legacy voice, the document as target.
+        let single = load_schema(schema).expect("test schema is valid");
+        let document = parse_markdown("# One\n## A\n", MarkdownOptions::default());
+        let single_diagnostics = validate(&single.schema, &document).expect("schema prepares");
+        assert_eq!(single_diagnostics.len(), 1);
+        assert_eq!(single_diagnostics[0].id, DiagnosticId::Requires);
+        assert_eq!(single_diagnostics[0].target, DiagnosticTarget::Document);
+        assert_eq!(single_diagnostics[0].location.line, 1);
+
+        // Two `h1`s, both violating: each violation targets and anchors on
+        // its own `h1` header instead of naming the document twice.
+        let document = parse_markdown("# One\n## A\n# Two\n## A\n", MarkdownOptions::default());
+        let diagnostics = validate(&single.schema, &document).expect("schema prepares");
+        let requires = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.id == DiagnosticId::Requires)
+            .map(|diagnostic| (diagnostic.target.clone(), diagnostic.location.line))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requires,
+            [
+                (DiagnosticTarget::Header(HeaderPath(vec!["One".into()])), 1),
+                (DiagnosticTarget::Header(HeaderPath(vec!["Two".into()])), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_admitted_top_level_h2_never_occupies_the_title_slot() {
+        // MAJOR-2 ruling: only `h1`s count for the title. With skipped levels
+        // allowed, a leading `h2` that the title matcher would accept used to
+        // consume the one-title bound — every leading `h2` under `title: "*"`
+        // — yielding a phantom surplus title plus a missing section. It now
+        // binds into the `sections` scope instead, where `Overview` under the
+        // real `h1` and the unmatched `Intro` are both ordinary open-scope
+        // members.
+        let schema = "version: 1\noptions:\n  allow_skipped_levels: true\ntitle: \"*\"\n\
+                      sections:\n  - match: Overview\n    required: true\n";
+        assert_eq!(
+            ids_and_targets(schema, "## Intro\n# Doc\n## Overview\n"),
+            []
+        );
+    }
+
+    #[test]
+    fn an_admitted_top_level_h2_binds_the_titled_documents_sections_scope() {
+        // The stray is not merely excluded from the title slot — it joins the
+        // `sections` scope and can satisfy its rules. This pins the ruled
+        // behavior against both regressions at once: under the old counting,
+        // `Intro` matches `*` and occupies the title slot (surplus title plus
+        // two missing-`Intro` instances); were the stray dropped outright,
+        // the required `Intro` rule would fire. Only binding into the
+        // `sections` scope leaves the document clean.
+        let schema = "version: 1\noptions:\n  allow_skipped_levels: true\ntitle: \"*\"\n\
+                      sections:\n  - match: Intro\n    required: true\n";
+        assert_eq!(ids_and_targets(schema, "## Intro\n# Doc\n"), []);
     }
 
     #[test]

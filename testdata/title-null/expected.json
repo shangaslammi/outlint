@@ -1,0 +1,22 @@
+{
+  "pass.md": [],
+  "titled.md": [
+    {
+      "id": "not-allowed",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Surprise"
+        ]
+      }
+    },
+    {
+      "id": "missing-section",
+      "target": {
+        "kind": "missing_header",
+        "parent": [],
+        "matcher": "Overview"
+      }
+    }
+  ]
+}

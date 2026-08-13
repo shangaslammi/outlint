@@ -5,10 +5,12 @@ sections:
   - id: body
     match: "Body"
 constraints:
-  # Attached to the flat root scope, so occurrences under different `h1`
-  # ancestors are compared against each other.
-  #
-  # Two `h1` headers also break the single top-level spine, so every document
-  # here additionally carries one `too-many-sections` on the second `h1`.
-  # `in-order.md` satisfies the ordering and is left with only that.
+  # Attached to the sugar `sections` scope, which binds once per enclosing
+  # `h1`: occurrences are compared within one instance, so ordering never
+  # reaches across ancestors here. `inverted.md` fires inside its one part;
+  # `across.md` inverts the same pair across two parts and the constraint
+  # stays vacuously satisfied, since each instance holds only one of the
+  # refs — that document reports only the surplus `h1`. Cross-part ordering
+  # is the general form's business: `outline-parts-ordered/` orders the
+  # parts themselves.
   - ordered: [intro, body]
