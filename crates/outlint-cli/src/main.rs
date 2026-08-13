@@ -612,14 +612,14 @@ fn discover_schema(document: &Path) -> Result<PathBuf, String> {
             Err(error) => {
                 return Err(format!(
                     "cannot inspect schema candidate '{}': {error}",
-                    candidate.display()
+                    schema_loading::path_display(&candidate)
                 ));
             }
         }
     }
     Err(format!(
         "no .outlint.yml found for Markdown input '{}'",
-        document.display()
+        schema_loading::path_display(document)
     ))
 }
 
@@ -628,7 +628,7 @@ fn display_path(path: &Path) -> String {
         .ok()
         .and_then(|current| path.strip_prefix(current).ok())
         .filter(|path| !path.as_os_str().is_empty());
-    relative.unwrap_or(path).display().to_string()
+    schema_loading::path_display(relative.unwrap_or(path))
 }
 
 fn render_schema_errors(invalid: &InvalidSchema, fallback_path: &str) -> Vec<RenderedDiagnostic> {

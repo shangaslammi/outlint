@@ -81,7 +81,7 @@ fn preload_linked_json_schema(
         };
         resources.push(JsonSchemaResourceInput {
             uri: logical_uri,
-            label: Some(SourceLabel(lexical_path.display().to_string())),
+            label: Some(SourceLabel(path_display(&lexical_path))),
             contents,
         });
         let Some(references) = references else {
@@ -123,7 +123,7 @@ fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
 fn path_file_uri(path: &Path) -> Result<String, String> {
     let display = path
         .to_str()
-        .ok_or_else(|| format!("path '{}' is not valid UTF-8", path.display()))?
+        .ok_or_else(|| format!("path '{}' is not valid UTF-8", path_display(path)))?
         .replace('\\', "/");
     let mut uri = if display.starts_with('/') {
         "file://".to_owned()
@@ -165,21 +165,51 @@ pub(crate) fn file_uri_path(uri: &str) -> Option<PathBuf> {
             index += 1;
         }
     }
-    String::from_utf8(bytes).ok().map(PathBuf::from)
+    String::from_utf8(bytes).ok().map(uri_decoded_path)
+}
+
+/// A file URI spells a Windows drive path with a slash before the drive
+/// (`file:///C:/dir/x.json`); decoding must drop that slash or the resulting
+/// `/C:/dir/x.json` is not a path Windows can read. On Unix `/C:/dir` is an
+/// ordinary path and is preserved as-is.
+fn uri_decoded_path(decoded: String) -> PathBuf {
+    if cfg!(windows) {
+        let bytes = decoded.as_bytes();
+        if bytes.first() == Some(&b'/')
+            && bytes.get(1).is_some_and(u8::is_ascii_alphabetic)
+            && bytes.get(2) == Some(&b':')
+            && matches!(bytes.get(3), None | Some(b'/'))
+        {
+            return PathBuf::from(&decoded[1..]);
+        }
+    }
+    PathBuf::from(decoded)
+}
+
+/// Renders a path for diagnostics, labels, and error messages. Output paths
+/// are canonical forward-slash on every platform; native separators are for
+/// filesystem access only. On Unix a backslash is an ordinary name byte, so
+/// this only rewrites separators where `\` cannot appear inside a name.
+pub(crate) fn path_display(path: &Path) -> String {
+    let text = path.display().to_string();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text
+    }
 }
 
 pub(crate) fn read_utf8_file(path: &Path, kind: &str) -> Result<String, String> {
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("cannot inspect {kind} '{}': {error}", path.display()))?;
+    let shown = path_display(path);
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("cannot inspect {kind} '{shown}': {error}"))?;
     if metadata.is_dir() {
         return Err(format!(
-            "{kind} '{}' is a directory; pass individual files instead",
-            path.display()
+            "{kind} '{shown}' is a directory; pass individual files instead"
         ));
     }
-    let bytes = fs::read(path)
-        .map_err(|error| format!("cannot read {kind} '{}': {error}", path.display()))?;
-    decode_utf8(bytes).map_err(|error| format!("{kind} '{}': {error}", path.display()))
+    let bytes = fs::read(path).map_err(|error| format!("cannot read {kind} '{shown}': {error}"))?;
+    decode_utf8(bytes).map_err(|error| format!("{kind} '{shown}': {error}"))
 }
 
 pub(crate) fn read_stdin_utf8() -> Result<String, String> {
