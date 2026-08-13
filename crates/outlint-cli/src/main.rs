@@ -318,7 +318,7 @@ struct RenderedDiagnostic {
 /// text they carry has different provenance: only [`Self::Header`] names text
 /// that occurs in the document, [`Self::MissingHeader`]'s matcher is schema
 /// text, and the remaining two name no header at all.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum RenderedTarget {
     Header {
         path: Vec<String>,
@@ -336,20 +336,20 @@ enum RenderedTarget {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RenderedLineRange {
     start_line: u64,
     end_line: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RenderedLocation {
     path: String,
     line: u64,
     column: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum RenderedSchemaNode {
     Title,
     Frontmatter,
@@ -359,14 +359,14 @@ enum RenderedSchemaNode {
     Constraint { scope: Vec<usize>, index: usize },
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RenderedInvolvedHeader {
     header_path: Vec<String>,
     line: u64,
     column: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum RenderedReference {
     Rule {
         anchor: &'static str,
@@ -379,7 +379,7 @@ enum RenderedReference {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum RenderedMatcher {
     Exact(String),
     Glob(String),
@@ -387,7 +387,7 @@ enum RenderedMatcher {
     Any,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum RenderedScalar {
     Null,
     Boolean(bool),
@@ -829,26 +829,61 @@ fn line_column(source: &str, byte_offset: usize) -> (u64, u64) {
     (line, column)
 }
 
+/// The total per-file ordering key; [`sort_diagnostics`] documents each tier.
+type DiagnosticSortKey<'a> = (
+    u64,
+    u64,
+    &'a str,
+    Option<&'a RenderedLocation>,
+    Option<&'a RenderedTarget>,
+    &'a str,
+    Option<&'a RenderedSchemaNode>,
+    &'a [RenderedInvolvedHeader],
+    &'a [RenderedReference],
+    &'a str,
+);
+
+fn diagnostic_sort_key(diagnostic: &RenderedDiagnostic) -> DiagnosticSortKey<'_> {
+    (
+        diagnostic.line,
+        diagnostic.column,
+        diagnostic.id.as_str(),
+        diagnostic.schema_location.as_ref(),
+        diagnostic.target.as_ref(),
+        diagnostic.message.as_str(),
+        diagnostic.schema_node.as_ref(),
+        &diagnostic.involved_headers,
+        &diagnostic.references,
+        diagnostic.source_path.as_str(),
+    )
+}
+
+/// Sorts one file's diagnostics into the order both output formats promise.
+///
+/// The key is **total**: it compares every rendered field, so the emitted
+/// order is a pure function of the diagnostic set and can never depend on the
+/// order the validator happened to produce them in. The tiers, most
+/// significant first:
+///
+/// 1. source `line`, then byte `column`;
+/// 2. diagnostic `id`, lexicographically;
+/// 3. `schema_location` as `(path, line, column)`, absent first;
+/// 4. `target`, by kind in the §6.1 order (`header`, `missing_header`,
+///    `document`, `frontmatter`), then by its members in declaration order
+///    (path segments; parent then matcher; line range then pointer), absent
+///    first — schema errors have no target;
+/// 5. `message`, lexicographically by bytes;
+/// 6. `schema_node`, `involved_headers`, `references`, and `source_path`, in
+///    that order, purely so no two distinct diagnostics ever compare equal.
+///
+/// The target outranks the message so that key-equal lines group by what they
+/// are about rather than alphabetizing prose, and because for the one tie
+/// family that occurs in practice — `frontmatter-schema` findings sharing a
+/// fallback anchor — the frontmatter target orders by JSON Pointer first,
+/// which matches the `(instance_path, message)` normalization the validator
+/// already applies to those errors.
 fn sort_diagnostics(diagnostics: &mut [RenderedDiagnostic]) {
-    diagnostics.sort_by(|left, right| {
-        (
-            left.line,
-            left.column,
-            left.id.as_str(),
-            left.schema_location
-                .as_ref()
-                .map(|location| (location.path.as_str(), location.line, location.column)),
-        )
-            .cmp(&(
-                right.line,
-                right.column,
-                right.id.as_str(),
-                right
-                    .schema_location
-                    .as_ref()
-                    .map(|location| (location.path.as_str(), location.line, location.column)),
-            ))
-    });
+    diagnostics.sort_by(|left, right| diagnostic_sort_key(left).cmp(&diagnostic_sort_key(right)));
 }
 
 fn finish_invocation(output: InvocationOutput, format: OutputFormat, color: ColorChoice) -> u8 {
@@ -1328,8 +1363,9 @@ fn scalar_json(scalar: &RenderedScalar) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        diagnostic_json, escape_human, escape_human_quoted, line_column, parse_check_args,
-        ParseOutcome, RenderedDiagnostic,
+        diagnostic_json, diagnostic_sort_key, escape_human, escape_human_quoted, line_column,
+        parse_check_args, sort_diagnostics, ParseOutcome, RenderedDiagnostic, RenderedLineRange,
+        RenderedLocation, RenderedMatcher, RenderedReference, RenderedTarget,
     };
     use crate::schema_loading::{decode_utf8, file_uri_path};
     use std::path::Path;
@@ -1400,6 +1436,148 @@ mod tests {
             escape_human_quoted("say \"hi\" \\ now\t"),
             "say \\\"hi\\\" \\\\ now\\t"
         );
+    }
+
+    /// Builds one diagnostic tying the pre-total sort key `(line, column, id,
+    /// schema_location)`; the varying fields are exactly the tiebreakers.
+    fn key_tied_diagnostic(
+        target: Option<RenderedTarget>,
+        message: &str,
+        references: Vec<RenderedReference>,
+    ) -> RenderedDiagnostic {
+        RenderedDiagnostic {
+            id: "too-few-sections".into(),
+            message: message.into(),
+            source_path: "document.md".into(),
+            line: 3,
+            column: 1,
+            target,
+            schema_node: None,
+            schema_location: Some(RenderedLocation {
+                path: "schema.outlint.yml".into(),
+                line: 2,
+                column: 5,
+            }),
+            involved_headers: Vec::new(),
+            references,
+        }
+    }
+
+    /// Diagnostics that all tie under `(line, column, id, schema_location)`,
+    /// listed in the order the total key promises: target kind, then target
+    /// members, then message, with references as a final backstop.
+    fn key_tied_fixture() -> Vec<RenderedDiagnostic> {
+        let frontmatter = |pointer: &str| RenderedTarget::Frontmatter {
+            line_range: Some(RenderedLineRange {
+                start_line: 1,
+                end_line: 3,
+            }),
+            pointer: Some(pointer.into()),
+        };
+        vec![
+            key_tied_diagnostic(
+                Some(RenderedTarget::Header {
+                    path: vec!["Alpha".into()],
+                }),
+                "m",
+                Vec::new(),
+            ),
+            key_tied_diagnostic(
+                Some(RenderedTarget::Header {
+                    path: vec!["Alpha".into(), "Beta".into()],
+                }),
+                "m",
+                Vec::new(),
+            ),
+            key_tied_diagnostic(
+                Some(RenderedTarget::MissingHeader {
+                    parent: Vec::new(),
+                    matcher: "Step *".into(),
+                }),
+                "m",
+                Vec::new(),
+            ),
+            key_tied_diagnostic(Some(RenderedTarget::Document), "matched 0", Vec::new()),
+            key_tied_diagnostic(Some(RenderedTarget::Document), "matched 1", Vec::new()),
+            key_tied_diagnostic(Some(frontmatter("/a")), "m", Vec::new()),
+            key_tied_diagnostic(Some(frontmatter("/b")), "m", Vec::new()),
+            key_tied_diagnostic(
+                Some(frontmatter("/b")),
+                "m",
+                vec![RenderedReference::Rule {
+                    anchor: "/",
+                    path: vec!["a".into()],
+                    matcher: RenderedMatcher::Exact("A".into()),
+                }],
+            ),
+        ]
+    }
+
+    fn key_strings(diagnostics: &[RenderedDiagnostic]) -> Vec<String> {
+        diagnostics
+            .iter()
+            .map(|diagnostic| format!("{:?}", diagnostic_sort_key(diagnostic)))
+            .collect()
+    }
+
+    #[test]
+    fn diagnostics_tied_on_the_old_key_sort_into_the_documented_total_order() {
+        let canonical = key_tied_fixture();
+        // The key is total on the fixture: every adjacent pair is strictly
+        // ordered, so no two distinct diagnostics compare equal.
+        for pair in canonical.windows(2) {
+            assert!(
+                diagnostic_sort_key(&pair[0]) < diagnostic_sort_key(&pair[1]),
+                "fixture entries compare equal or reversed: {pair:#?}"
+            );
+        }
+        // Reversal simulates the worst emission-order flip a validator-walk
+        // refactor could produce; a merely stable sort on the old partial key
+        // would preserve it and fail here.
+        let mut reversed = key_tied_fixture();
+        reversed.reverse();
+        sort_diagnostics(&mut reversed);
+        assert_eq!(key_strings(&reversed), key_strings(&canonical));
+    }
+
+    #[test]
+    fn every_emission_order_sorts_to_the_same_sequence() {
+        let size = key_tied_fixture().len();
+        let mut indices = (0..size).collect::<Vec<_>>();
+        let mut permutations = Vec::new();
+        heap_permutations(&mut indices, size, &mut permutations);
+        for permutation in permutations {
+            let mut slots = key_tied_fixture().into_iter().map(Some).collect::<Vec<_>>();
+            let mut shuffled = permutation
+                .iter()
+                .map(|&index| slots[index].take().expect("each index appears once"))
+                .collect::<Vec<_>>();
+            sort_diagnostics(&mut shuffled);
+            // Strict order under a total key means the sorted arrangement of
+            // this multiset is unique, so every permutation lands on it.
+            for pair in shuffled.windows(2) {
+                assert!(
+                    diagnostic_sort_key(&pair[0]) < diagnostic_sort_key(&pair[1]),
+                    "permutation {permutation:?} did not sort strictly"
+                );
+            }
+        }
+    }
+
+    fn heap_permutations(indices: &mut Vec<usize>, size: usize, output: &mut Vec<Vec<usize>>) {
+        if size <= 1 {
+            output.push(indices.clone());
+            return;
+        }
+        for step in 0..size {
+            heap_permutations(indices, size - 1, output);
+            let last = size - 1;
+            if size % 2 == 0 {
+                indices.swap(step, last);
+            } else {
+                indices.swap(0, last);
+            }
+        }
     }
 
     #[test]

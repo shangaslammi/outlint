@@ -239,6 +239,12 @@ impl PreparedValidator {
     ///
     /// Frontmatter validation is included, and `fm.` propositions in
     /// constraints evaluate against the document's frontmatter (§4.6).
+    ///
+    /// Diagnostic order is deterministic for a given schema and document but
+    /// follows the validation walk and is not a contract of this crate: a
+    /// refactor may reorder it between releases. Callers that promise an
+    /// output order must sort on diagnostic content, as the CLI does with a
+    /// documented total key.
     pub fn validate(&self, document: &Document) -> Vec<Diagnostic> {
         Validator::new(&self.schema, document).run(&self.plan)
     }
@@ -247,6 +253,8 @@ impl PreparedValidator {
 /// Prepares and validates one document.
 ///
 /// Use [`PreparedValidator`] directly when validating multiple documents.
+/// Diagnostic order is deterministic but not a contract; see
+/// [`PreparedValidator::validate`].
 pub fn validate(
     schema: &Schema,
     document: &Document,
