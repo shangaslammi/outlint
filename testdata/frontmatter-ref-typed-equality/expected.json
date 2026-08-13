@@ -1,0 +1,11 @@
+{
+  "pass-string-count.md": [],
+  "pass-float-count.md": [],
+  "pass-typed.md": [],
+  "fail-quoted-bool.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ]
+}

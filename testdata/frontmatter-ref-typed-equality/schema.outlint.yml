@@ -1,0 +1,4 @@
+version: 1
+sections: []
+constraints:
+  - requires: { if: fm.count=1, then: fm.checked=true }

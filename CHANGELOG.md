@@ -28,7 +28,10 @@ feature set of the `0.1.0` workspace.
   reference paths.
 - **Constraints.** `one_of`, `any_of`, `at_most_one`, `all_or_none`,
   `requires`, `conflicts`, and `ordered`, usable at the schema root or inside
-  any rule scope.
+  any rule scope. Constraint refs may address frontmatter as well as rules:
+  `fm.key` is presence of a non-null value, `fm.key=value` is typed scalar
+  equality under the YAML core schema, and dotted paths step through nested
+  mappings.
 - **Options.** `match_case`, `strip_inline_markup`, and
   `allow_skipped_levels`, normalized with defaults applied by the loader.
 - **Document shape.** `title` is the rule for every `h1` and `sections`
@@ -74,8 +77,6 @@ feature set of the `0.1.0` workspace.
 
 ### Known gaps
 
-- `fm.` propositions in constraints are accepted and validated by the loader
-  but are **not evaluated**: a constraint depending on one is never satisfied.
 - `npm/` distribution packaging exists but is not functional.
 - No pre-built binaries are published; `cargo install outlint` builds from
   source.

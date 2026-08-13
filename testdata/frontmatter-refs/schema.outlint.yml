@@ -1,0 +1,11 @@
+version: 1
+sections:
+  - id: migration
+    match: Migration
+    required: false
+  - id: breaking-changes
+    match: Breaking Changes
+    required: false
+constraints:
+  - requires: { if: fm.status=deprecated, then: migration }
+  - requires: { if: breaking-changes, then: fm.semver=major }

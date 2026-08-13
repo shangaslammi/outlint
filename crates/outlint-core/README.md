@@ -27,9 +27,10 @@ where the two disagree, the specification wins.
   `all_or_none`, `requires`, `conflicts`, and `ordered` constraints over
   rules addressed by id.
 - **YAML frontmatter** — presence policy and delegated JSON Schema
-  validation (draft 2020-12) of the frontmatter mapping. `fm.`
-  presence/equality propositions are accepted by the loader but are **not
-  yet evaluated**: a constraint that depends on one is never satisfied.
+  validation (draft 2020-12) of the frontmatter mapping, plus `fm.`
+  propositions in constraints: `fm.key` presence and `fm.key=value` typed
+  scalar equality under the YAML core schema, with dotted paths into
+  nested mappings.
 
 Diagnostics carry stable ids (`missing-section`, `unexpected-section`,
 `ordered`, `frontmatter-schema`, …) plus document and schema-side source
