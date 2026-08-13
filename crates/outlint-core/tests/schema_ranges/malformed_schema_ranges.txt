@@ -209,6 +209,7 @@ case undefined-alias
 case byte-order-mark-before-the-document
   source "﻿version: 1\nsections: []\n"
   verdict valid
+  node title 0:24..26 "[]"
 
 case byte-order-mark-inside-a-value
   source "version: 1\ntitle: ﻿Doc\nsections: []\n"
@@ -223,6 +224,7 @@ case two-documents
 case two-documents-with-a-trailing-marker
   source "version: 1\nsections: []\n...\n"
   verdict valid
+  node title 0:21..23 "[]"
 
 case syntax-colon-in-a-plain-scalar
   source "version: 1\ntitle: a: bad\nsections: []\n"

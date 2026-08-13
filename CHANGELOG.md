@@ -21,11 +21,15 @@ feature set of the `0.1.0` workspace.
   semantics, rule identifiers and reference paths, constraints, diagnostics,
   options, and a normative validation algorithm.
   [`spec/cli.md`](spec/cli.md) defines the command-line contract.
-- **Schema language.** `title` and nested `sections` rules; exact, glob,
-  anchored-regex (RE2 dialect), and `*` matchers with first-match-wins
-  resolution; `required` / `repeat: "min..max"` cardinality; `strict` scopes
-  and `allow: false` denials; explicit and derived rule `id`s with dotted
-  reference paths.
+- **Schema language.** A top-level `outline:` list of `h1` rules — carrying
+  cardinality, `strict`, denial, and child `sections` like any nested rule —
+  or its permanent sugar: a `title` matcher with a `sections` list for the
+  common single-`h1` document, `title: null` for a document with no `h1` at
+  all, and bare `sections` without `title`, which implies `title: "*"` —
+  exactly one `h1` of any text. Exact, glob, anchored-regex (RE2 dialect),
+  and `*` matchers with first-match-wins resolution; `required` /
+  `repeat: "min..max"` cardinality; `strict` scopes and `allow: false`
+  denials; explicit and derived rule `id`s with dotted reference paths.
 - **Constraints.** `one_of`, `any_of`, `at_most_one`, `all_or_none`,
   `requires`, `conflicts`, and `ordered`, usable at the schema root or inside
   any rule scope. Constraint refs may address frontmatter as well as rules:
@@ -34,14 +38,17 @@ feature set of the `0.1.0` workspace.
   mappings.
 - **Options.** `match_case`, `strip_inline_markup`, and
   `allow_skipped_levels`, normalized with defaults applied by the loader.
-- **Document shape.** `title` is the rule for every `h1` and `sections`
-  describes the `h2` headings. A document has at most one `h1`; if one exists
-  the root scope is its `h2` children, otherwise it is the document's `h2`s. A
-  surplus `h1` is `too-many-sections`. A header outside the `h1` and
-  everything below it — or, with no `h1`, outside the document's `h2`s and
-  everything below them — is `detached-section` at any level, reported once
-  per detached subtree root, and takes part in no rule matching, no
-  cardinality count, and no constraint. A document with no `h1` conforms.
+- **Document shape.** The document root is a virtual level-0 header enclosing
+  the whole document: `outline` rules describe its `h1` children exactly as
+  nested rules describe any header's children, and every scope — the root
+  included — is bound per parent header. Under the sugar, `title` is the rule
+  for the document's one `h1` and `sections` describes the `h2`s beneath it —
+  the document's own `h2`s under `title: null`. A document missing its `h1`
+  where a title matcher is spelled or implied is `missing-title`; a surplus
+  `h1` there is `too-many-sections`. A top-level header deeper than the root
+  admits skips a level against the virtual root itself, reported as
+  `skipped-level` once per skipping subtree root unless `allow_skipped_levels`
+  admits it into the enclosing scope.
 - **Frontmatter.** Presence checking (`required`, `allow`) plus value
   validation delegated to a JSON Schema given inline or as a path relative to
   the schema file, including linked `$ref` resource graphs. A block that does

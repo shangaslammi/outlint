@@ -1,6 +1,11 @@
 {
   "pass.md": [],
-  "no-spine.md": [],
+  "no-spine.md": [
+    {
+      "id": "missing-title",
+      "target": { "kind": "missing_header", "matcher": "*", "parent": [] }
+    }
+  ],
   "two-parts.md": [
     {
       "id": "too-many-sections",

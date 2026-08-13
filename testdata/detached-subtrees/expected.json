@@ -20,6 +20,10 @@
           "Orphan"
         ]
       }
+    },
+    {
+      "id": "missing-title",
+      "target": { "kind": "missing_header", "matcher": "*", "parent": [] }
     }
   ],
   "detached-subtree.md": [

@@ -92,9 +92,10 @@ pub enum OutlineProvenance {
     /// `h1` rule whose child rules are the top-level `sections` list.
     Title,
     /// `sections:` without `title:` — desugars like [`Self::Title`] with an
-    /// any-text matcher. Under the adopted strict reading this implies
-    /// `title: "*"`; the current validator still accepts a document with no
-    /// `h1` until that reading is enforced.
+    /// any-text matcher: `title: "*"` implied, so the document must have
+    /// exactly one `h1`. A document with none writes `title: null` into its
+    /// schema instead. With no `title:` key to blame, title diagnostics
+    /// anchor on the `sections` key — the spelling that implied the rule.
     BareSections,
     /// `title: null` — the document is declared to have no `h1`. Desugars to
     /// a denied any-text `h1` rule: a present `h1` is `not-allowed`, and the
