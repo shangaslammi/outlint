@@ -6,7 +6,7 @@ case document-field-version
 case document-field-title
   source "version: 1\ntitle: [nope]\nsections: []\n"
   verdict invalid
-  error invalid-document-shape 0:18..24 "[nope]" "title must be a string and cannot be null"
+  error invalid-document-shape 0:18..24 "[nope]" "title must be a string or null"
 
 case document-field-sections
   source "version: 1\nsections: nope\n"
