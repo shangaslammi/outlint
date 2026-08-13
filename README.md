@@ -24,8 +24,11 @@ command you run in CI. It never rewrites your files — it only reports.
 cargo install outlint
 ```
 
-This builds the `outlint` binary from source. Pre-built binaries are not
-published yet.
+This builds the `outlint` binary from source. Alternatively, each release
+ships pre-built binaries and installer scripts on its
+[GitHub Release](https://github.com/shangaslammi/outlint/releases) — see the
+release page for the shell and PowerShell one-liners and per-platform
+archives with checksums.
 
 ## Quickstart
 
