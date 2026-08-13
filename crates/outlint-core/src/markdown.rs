@@ -9,14 +9,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use marked_yaml::{
-    types::{MarkedMappingNode, MarkedScalarNode},
-    LoaderOptions as MarkedYamlOptions, Marker as MarkedMarker, Node as MarkedNode,
-};
 use num_bigint::BigUint;
 use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag};
 use saphyr_parser::{
-    Event as ExactEvent, Parser as ExactParser, ScalarStyle, ScanError, StrInput, Tag as YamlTag,
+    Event as ExactEvent, Marker, Parser as ExactParser, ScalarStyle, ScanError, Span, StrInput,
+    Tag as YamlTag,
 };
 use yaml_rust2::parser::{Event as YamlEvent, Parser as YamlParser};
 
@@ -62,8 +59,9 @@ pub enum DocumentFrontmatter {
         location: FrontmatterLocation,
         /// Positions of the entries inside the block, keyed by JSON Pointer.
         ///
-        /// Empty when the block was parsed by a path that carries no markers;
-        /// callers must then fall back to [`Self::Mapping::location`].
+        /// An entry whose spelling has no character of its own — a block
+        /// scalar with no content line — is absent; callers then fall back to
+        /// [`Self::Mapping::location`].
         anchors: FrontmatterAnchors,
     },
     /// A delimited block exists but is not a valid JSON-compatible YAML mapping.
@@ -117,7 +115,7 @@ impl FrontmatterAnchors {
         self.0.get(pointer).copied()
     }
 
-    /// Whether no entry position is known, as on marker-free parse paths.
+    /// Whether no entry position is known, as in an empty `{}` mapping.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -306,69 +304,57 @@ fn parse_frontmatter(
     };
     let body = source.get(body_start..body_end).unwrap_or_default();
     // A byte-order mark heading the block is removed once, here, where the body
-    // is cut out and before any of the three readers below is handed it. YAML
-    // gives one no meaning at the head of a stream, but neither parser drops it
-    // either, so it arrives as the first character of the first key and leaves
-    // a document whose `version` entry is invisibly named something else while
-    // §1.6's mapping keys are the text their author wrote. Removing it in one
-    // of the readers instead would have them disagree about what the block
-    // says, and the answer would depend on which of them a document happened to
-    // reach. Exactly one is removed, so a second stays part of the key and
-    // remains as visible as any other stray character.
+    // is cut out and before the reader below is handed it. YAML gives one no
+    // meaning at the head of a stream, but the parser does not drop it either,
+    // so it arrives as the first character of the first key and leaves a
+    // document whose `version` entry is invisibly named something else while
+    // §1.6's mapping keys are the text their author wrote. Exactly one is
+    // removed, so a second stays part of the key and remains as visible as any
+    // other stray character, and every reported position counts it back in.
     let (body, mark) = match body.strip_prefix('\u{feff}') {
         Some(body) => (body, 1),
         None => (body, 0),
     };
-    let parsed = match scan_frontmatter(body) {
-        // §1.6: empty content, comments included, is not a mapping, while an
-        // explicit `{}` is. Both reach marked-yaml as the same empty mapping.
-        FrontmatterScan::None => Err("frontmatter must be a YAML mapping".into()),
-        FrontmatterScan::Several => Err("frontmatter must be a single YAML document".into()),
-        FrontmatterScan::TooDeep => Err("frontmatter nests YAML beyond its depth limit".into()),
-        FrontmatterScan::One | FrontmatterScan::Unreadable => {
-            let options = MarkedYamlOptions::default()
-                .error_on_duplicate_keys(true)
-                .prevent_coercion(true);
-            match marked_yaml::parse_yaml_with_options(0, body, options) {
-                Ok(marked) => marked_frontmatter_mapping(&marked),
-                // Preserve exact scalar lexemes when valid YAML uses constructs
-                // that marked-yaml deliberately does not model, notably tags and
-                // aliases. That fallback parses through an event stream keeping
-                // no markers, so entries parsed by it have no position beyond
-                // the block's own.
-                Err(_) => {
-                    exact_frontmatter_mapping(body, mark).map(|value| (value, MarkedAnchors::new()))
-                }
-            }
-        }
-    };
-    let frontmatter = match parsed {
-        Ok((value, anchors)) => DocumentFrontmatter::Mapping {
+    let frontmatter = match exact_frontmatter_mapping(body, mark) {
+        Ok((value, positions)) => DocumentFrontmatter::Mapping {
             value,
             location,
-            anchors: document_frontmatter_anchors(source, lines, &location, anchors, mark),
+            anchors: document_frontmatter_anchors(source, lines, &location, positions, mark),
         },
         Err(message) => DocumentFrontmatter::Invalid { location, message },
     };
     (frontmatter, Some(range))
 }
 
-/// Entry positions as marked-yaml reports them, in the order the conversion
-/// walks them: one-based lines counted from the frontmatter body, and one-based
-/// *character* columns. Duplicate mapping keys are rejected upstream, so no
-/// pointer occurs twice.
-type MarkedAnchors = Vec<(String, MarkedPosition)>;
+/// Entry positions as the conversion walk records them: one-based lines
+/// counted from the frontmatter body, and one-based *character* columns.
+/// Duplicate mapping keys are rejected upstream, so no pointer occurs twice.
+type BodyAnchors = Vec<(String, BodyPosition)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct MarkedPosition {
+struct BodyPosition {
     line: usize,
     column: usize,
 }
 
-/// Lifts body-relative marked-yaml positions into document coordinates.
+/// Reads a span's start into a body position.
 ///
-/// The body handed to marked-yaml starts on the document's second line, so a
-/// document line is the marked line plus one. Marked columns count characters
+/// `saphyr-parser` counts columns from zero — its scanner opens every stream
+/// at column 0 — while every column this module reports is one-based, so the
+/// base is reconciled here and nowhere else. The marker's column counts
+/// characters, not bytes; [`LineCursor`] is what converts one against the
+/// document's own line.
+fn body_position(span: &Span) -> BodyPosition {
+    BodyPosition {
+        line: span.start.line(),
+        column: span.start.col() + 1,
+    }
+}
+
+/// Lifts body-relative parser positions into document coordinates.
+///
+/// The body handed to the parser starts on the document's second line, so a
+/// document line is the body line plus one. Body columns count characters
 /// while [`DiagnosticLocation`](crate::DiagnosticLocation) counts bytes, so the
 /// column is re-measured against the document line itself. That re-measurement
 /// doubles as a consistency check: a position that does not fall inside the
@@ -382,7 +368,7 @@ struct MarkedPosition {
 /// only a guard against depending on that.
 ///
 /// `mark` is how many characters the block's removed byte-order mark took from
-/// the head of the body, which is the only text the parsers were not shown.
+/// the head of the body, which is the only text the parser was not shown.
 /// Positions on the body's first line are counted back over it, so an entry is
 /// reported where the document actually spells it rather than one character
 /// earlier.
@@ -390,13 +376,13 @@ fn document_frontmatter_anchors(
     source: &str,
     lines: &LineIndex,
     location: &FrontmatterLocation,
-    mut marked: MarkedAnchors,
+    mut positions: BodyAnchors,
     mark: usize,
 ) -> FrontmatterAnchors {
-    marked.sort_unstable_by_key(|(_, position)| (position.line, position.column));
+    positions.sort_unstable_by_key(|(_, position)| (position.line, position.column));
     let mut anchors = BTreeMap::new();
     let mut cursor = LineCursor::default();
-    for (pointer, position) in marked {
+    for (pointer, position) in positions {
         let Some(line) = position.line.checked_add(1) else {
             continue;
         };
@@ -466,83 +452,11 @@ impl<'a> LineCursor<'a> {
     }
 }
 
-/// What the frontmatter body's YAML event stream says about it.
-///
-/// Neither tree this module builds can answer this on its own. marked-yaml
-/// reports an empty body as an empty mapping, so `---\n---` and `---\n{}\n---`
-/// arrive at it identically while §1.6 makes the first `invalid-frontmatter`
-/// and the second a valid empty mapping. It also stops at the first document of
-/// a stream, so a body opening a second one would otherwise be accepted with
-/// everything past the first silently dropped. Neither tree can be asked how
-/// deeply the body nests either, since building one is what overruns the stack.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FrontmatterScan {
-    /// No document at all: empty, blank, or comment-only content.
-    None,
-    /// Exactly one document, which the tree parsers can be trusted with.
-    One,
-    /// More than one document, or content the scan could not read after the
-    /// first one closed. A bare `---` line would have closed the block before
-    /// the body reached here, so a second document is opened by a `...` end
-    /// marker rather than by a start marker. Either way marked-yaml stops at
-    /// the first document and cannot see what follows it.
-    Several,
-    /// Collections nested past [`MAX_YAML_DEPTH`], which no tree parser here
-    /// may be handed.
-    TooDeep,
-    /// The stream did not parse, and it failed early enough that the tree
-    /// parsers meet the same failure. The verdict is left to them, since they
-    /// report it against a position and this scan has none to give.
-    Unreadable,
-}
-
-/// Reads the frontmatter body's event stream, without building a tree.
-///
-/// A document is exactly a `DocumentStart`, and a body holding none yields
-/// `StreamStart` followed directly by `StreamEnd`. Counting stops at the second
-/// one, which is all the caller distinguishes. Depth is tracked in the same
-/// pass, because both questions are answered by the same events and the body
-/// should not be read twice to ask them separately.
-fn scan_frontmatter(body: &str) -> FrontmatterScan {
-    let mut parser = YamlParser::new_from_str(body);
-    let mut documents = 0usize;
-    let mut closed = false;
-    let mut depth = 0usize;
-    loop {
-        let Ok((event, _)) = parser.next_token() else {
-            // Where the stream fails decides who can report it. A failure
-            // within the first document is one marked-yaml meets as well. A
-            // failure after that document closed is past the point marked-yaml
-            // stops at, so deferring would accept the body and drop the rest.
-            return if closed {
-                FrontmatterScan::Several
-            } else {
-                FrontmatterScan::Unreadable
-            };
-        };
-        if track_yaml_depth(&event, &mut depth) {
-            return FrontmatterScan::TooDeep;
-        }
-        match event {
-            YamlEvent::DocumentStart => {
-                documents += 1;
-                if documents > 1 {
-                    return FrontmatterScan::Several;
-                }
-            }
-            YamlEvent::DocumentEnd => closed = true,
-            YamlEvent::StreamEnd if documents == 0 => return FrontmatterScan::None,
-            YamlEvent::StreamEnd => return FrontmatterScan::One,
-            _ => {}
-        }
-    }
-}
-
 /// How deeply YAML collections may nest before Outlint refuses to read them.
 ///
 /// Every tree over YAML in this crate is built and walked by recursion — the
-/// marked-yaml loader, the exact fallback, both conversions to JSON, and the
-/// dropping of the JSON value itself — so nesting costs stack rather than the
+/// frontmatter reader, its conversion to JSON, the schema loader's trees, and
+/// the dropping of the JSON value itself — so nesting costs stack rather than the
 /// heap the [node budget](EXACT_YAML_NODES_PER_EVENT) bounds. A compact block
 /// sequence nests without indenting, so `- - - …` on one short line reaches a
 /// depth no stack survives, and the parser's own `recursion limit` counts flow
@@ -579,11 +493,12 @@ fn track_yaml_depth(event: &YamlEvent, depth: &mut usize) -> bool {
 
 /// Reports whether a whole YAML document nests past [`MAX_YAML_DEPTH`].
 ///
-/// The frontmatter path folds this question into [`scan_frontmatter`], which
-/// reads the same stream for other reasons. A schema document has no such scan
-/// to join, so it gets this one, which is still cheaper than the tree parses it
-/// guards: it allocates nothing per level. A stream that does not parse is not
-/// too deep, and is left to the parse that reports it against a position.
+/// The frontmatter reader enforces the same limit inside its own build, where
+/// an alias can also splice in depth no event stream shows. A schema document
+/// is still read by tree parsers with no bound of their own, so it gets this
+/// scan, which is cheaper than the parses it guards: it allocates nothing per
+/// level. A stream that does not parse is not too deep, and is left to the
+/// parse that reports it against a position.
 pub(crate) fn yaml_nesting_exceeds_limit(source: &str) -> bool {
     let mut parser = YamlParser::new_from_str(source);
     let mut depth = 0usize;
@@ -598,205 +513,6 @@ pub(crate) fn yaml_nesting_exceeds_limit(source: &str) -> bool {
             return false;
         }
     }
-}
-
-fn marked_frontmatter_mapping(
-    value: &MarkedNode,
-) -> Result<(serde_json::Map<String, serde_json::Value>, MarkedAnchors), String> {
-    let Some(mapping) = value.as_mapping() else {
-        return Err("frontmatter must be a YAML mapping".into());
-    };
-    let mut anchors = MarkedAnchors::new();
-    let mut pointer = String::new();
-    let object = marked_mapping_to_json(mapping, &mut pointer, &mut anchors)?;
-    Ok((object, anchors))
-}
-
-fn marked_mapping_to_json(
-    mapping: &MarkedMappingNode,
-    pointer: &mut String,
-    anchors: &mut MarkedAnchors,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let mut object = serde_json::Map::new();
-    for (key, value) in mapping.iter() {
-        if key.may_coerce()
-            && !matches!(
-                crate::loader::parse_frontmatter_scalar(key.as_str()),
-                crate::FrontmatterScalar::String(_)
-            )
-        {
-            return Err("frontmatter mapping keys must be strings".into());
-        }
-        let restore = pointer.len();
-        push_pointer_token(pointer, key.as_str());
-        // A member is spelled `key: value`, so the key names the whole entry.
-        record_marked_anchor(anchors, pointer, marked_key_start(key));
-        let converted = marked_yaml_to_json(value, pointer, anchors)?;
-        pointer.truncate(restore);
-        object.insert(key.as_str().to_owned(), converted);
-    }
-    Ok(object)
-}
-
-fn marked_yaml_to_json(
-    value: &MarkedNode,
-    pointer: &mut String,
-    anchors: &mut MarkedAnchors,
-) -> Result<serde_json::Value, String> {
-    if let Some(scalar) = value.as_scalar() {
-        if !scalar.may_coerce() {
-            return Ok(serde_json::Value::String(scalar.as_str().to_owned()));
-        }
-        return marked_scalar_to_json(scalar.as_str());
-    }
-    if let Some(sequence) = value.as_sequence() {
-        let mut values = Vec::with_capacity(sequence.len());
-        for (index, item) in sequence.iter().enumerate() {
-            let restore = pointer.len();
-            // Sequence index tokens need no RFC 6901 escaping.
-            pointer.push('/');
-            pointer.push_str(&index.to_string());
-            // An element has no key, so it is named by where it begins.
-            record_marked_anchor(anchors, pointer, marked_element_start(item));
-            values.push(marked_yaml_to_json(item, pointer, anchors)?);
-            pointer.truncate(restore);
-        }
-        return Ok(serde_json::Value::Array(values));
-    }
-    let Some(mapping) = value.as_mapping() else {
-        return Err("unsupported YAML frontmatter node".into());
-    };
-    marked_mapping_to_json(mapping, pointer, anchors).map(serde_json::Value::Object)
-}
-
-/// Whether a scalar's text holds nothing marked-yaml can have marked it at.
-///
-/// marked-yaml marks a scalar at the first character of its text, so a scalar
-/// with no such character has no mark to give and is reported at the next token
-/// the scanner reached — which belongs to a later entry. Accepting that mark
-/// would name text the entry does not own, and would have two entries claim one
-/// position, so a textless scalar takes no position and the entry it stands for
-/// falls back to the block, as §6.2 provides for an entry whose position is
-/// unavailable.
-///
-/// Textless is exactly "no character other than a line break". A block scalar
-/// with no content line — `>-`, `|`, or `|+` over blank lines alone — keeps at
-/// most the breaks its chomping indicator retains, while any content line
-/// contributes a character that marked-yaml marks. What costs a scalar its own
-/// position is therefore having no text, not having no value: `null` and `~`
-/// are spelled out and keep their position.
-///
-/// Nothing in the text tells a written all-break scalar apart from an unwritten
-/// one — `""` and `"\n"` are marked correctly but read the same here — so they
-/// fall back too, giving up an anchor they had every right to keep. Nothing
-/// marked-yaml exposes separates them: a source peek cannot, since a textless
-/// entry followed by a quoted string puts a quote at the borrowed position, and
-/// `may_coerce` cannot, since it is false for quoted and block scalars alike.
-///
-/// The scalar's style would separate them, and that is a limit of this parser's
-/// surface rather than of the problem. `yaml-rust2`, already read by
-/// [`scan_frontmatter`], reports a [style](ScalarStyle) beside a marker on
-/// the same event, and a quoted scalar always has its opening quote in the
-/// source, so it is never marked at a later entry's token — while a plain,
-/// literal, or folded all-break scalar always is. Reading it here would mean a
-/// third walk over the block or a correlation pass between two trees, which is
-/// not worth a finer anchor while this module still reads the same text with
-/// two YAML parsers and is due to be cut down to one. Until then a coarse but
-/// correct anchor beats a precise wrong one, and the JSON Pointer names the
-/// entry exactly either way.
-fn is_textless(text: &str) -> bool {
-    text.bytes().all(|byte| byte == b'\n')
-}
-
-/// Where a sequence element begins in the source, if it has text of its own.
-///
-/// An element is named by position alone, so a textless one — `-` with nothing
-/// after it, or an empty block scalar — is reported at the following entry and
-/// takes no position at all. See [`is_textless`].
-fn marked_element_start(value: &MarkedNode) -> Option<&MarkedMarker> {
-    if let Some(scalar) = value.as_scalar() {
-        if is_textless(scalar.as_str()) {
-            return None;
-        }
-    }
-    marked_node_start(value)
-}
-
-/// Where a mapping key begins in the source, if it has text of its own.
-///
-/// A member is named by its key, which usually settles the matter: a key is
-/// written before its value, so it cannot borrow a mark from within its own
-/// member. YAML's explicit-key syntax admits a textless key even so —
-///
-/// ```yaml
-/// ? >-
-/// next: second
-/// ```
-///
-/// is the pair `"": null` followed by `next`, and the empty key is marked at
-/// the `next` that follows it. Such a key takes no position, by the same rule
-/// and for the same reason as a textless sequence element. See [`is_textless`].
-///
-/// The mapping-keys-must-be-strings check upstream does not cover this: it is
-/// guarded by `may_coerce`, which is false for a block scalar, so a textless
-/// block key is accepted as the empty string. A plain `?` key does coerce, and
-/// is rejected there as the null key it is.
-fn marked_key_start(key: &MarkedScalarNode) -> Option<&MarkedMarker> {
-    if is_textless(key.as_str()) {
-        return None;
-    }
-    key.span().start()
-}
-
-/// Where a node begins in the source.
-///
-/// marked-yaml reports a block mapping's span from the `:` of its first key
-/// rather than from the mapping itself, so the earlier of the node's own start
-/// and its first key's start is the one that names the node.
-///
-/// The first key is taken raw, without the [`marked_key_start`] guard, and must
-/// be: the guard belongs to the *member* a key names, not to the *mapping* the
-/// key opens. A textless key must not anchor its own member, whose position it
-/// would take from a later entry, but it may still bound its parent, whose
-/// extent legitimately begins where the key's spelling begins even when that
-/// spelling resolves to no text. `- "": K` is the case that separates the two:
-/// the empty key takes no anchor of its own, while the element it opens starts
-/// at that opening quote and not at the `:` marked-yaml reports for the mapping.
-///
-/// A borrowed marker cannot get in here even so. A key is marked at a later
-/// entry's token only when it has no character of its own in the source, which
-/// in a mapping means YAML's explicit `? ` form over a block scalar with no
-/// content line — a quoted empty key has its opening quote and is marked at it.
-/// That form puts the mapping's own start on the `?` itself, ahead of every
-/// token the key could have borrowed from, so the `min` below keeps the `?` and
-/// discards the borrowed marker. A flow mapping is safe for the same shape of
-/// reason, its `{` preceding everything inside it.
-fn marked_node_start(value: &MarkedNode) -> Option<&MarkedMarker> {
-    let own = value.span().start();
-    let first_key = value
-        .as_mapping()
-        .and_then(|mapping| mapping.iter().next())
-        .and_then(|(key, _)| key.span().start());
-    match (own, first_key) {
-        (Some(own), Some(key)) if (key.line(), key.column()) < (own.line(), own.column()) => {
-            Some(key)
-        }
-        (Some(own), _) => Some(own),
-        (None, key) => key,
-    }
-}
-
-fn record_marked_anchor(anchors: &mut MarkedAnchors, pointer: &str, marker: Option<&MarkedMarker>) {
-    let Some(marker) = marker else {
-        return;
-    };
-    anchors.push((
-        pointer.to_owned(),
-        MarkedPosition {
-            line: marker.line(),
-            column: marker.column(),
-        },
-    ));
 }
 
 /// Appends `/` and an RFC 6901-escaped mapping key to a JSON Pointer.
@@ -848,7 +564,7 @@ fn json_number_preserving_lexeme(
     json_number(canonical)
 }
 
-/// One node of the tree the exact fallback builds out of parser events.
+/// One node of the tree the frontmatter reader builds out of parser events.
 ///
 /// A mapping keeps its entries as an ordered `Vec` rather than a map so that
 /// two keys spelled differently but resolving alike stay visible to the
@@ -863,12 +579,48 @@ enum ExactYamlNode {
     Scalar(ExactYamlScalar),
     Sequence {
         tag: Option<YamlTag>,
-        values: Vec<Self>,
+        values: Vec<SpannedYamlNode>,
     },
     Mapping {
         tag: Option<YamlTag>,
-        entries: Vec<(Self, Self)>,
+        entries: Vec<(SpannedYamlNode, SpannedYamlNode)>,
     },
+}
+
+/// An [`ExactYamlNode`] beside where the block spells it.
+///
+/// The position is the node's first token: a scalar's own start, and for a
+/// collection the start event's marker, which sits on the first `-`, the flow
+/// opener, or the first key — ahead of the `:` marked-yaml used to report a
+/// block mapping from. It rides outside the node because equality must not see
+/// it: the duplicate checks ask whether two keys are the same key, and two
+/// spellings of one key are no less duplicates for sitting on different lines.
+#[derive(Clone, Debug)]
+struct SpannedYamlNode {
+    node: ExactYamlNode,
+    /// One-based body line and character column of the node's first token.
+    position: BodyPosition,
+    /// The node is an alias's copy, and `position` is the alias site. The
+    /// whole copy anchors there: the positions its entries carry belong to the
+    /// anchor's definition, which is not the entry a pointer into the copy
+    /// names, and §6.2 permits the nearest enclosing entry with a position of
+    /// its own — which the alias site is, at the cost of one position per
+    /// expansion rather than provenance on every node.
+    expanded: bool,
+}
+
+impl PartialEq for SpannedYamlNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node
+    }
+}
+
+impl Eq for SpannedYamlNode {}
+
+impl std::hash::Hash for SpannedYamlNode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.node.hash(state);
+    }
 }
 
 /// A scalar's source text beside the two things that decide what it means.
@@ -892,7 +644,7 @@ struct ExactYamlScalar {
 /// being equal cost comparisons rather than a wrong verdict. The hash is not
 /// held anywhere and nothing depends on its value, so which hasher produces it
 /// is free to change.
-fn exact_yaml_key_digest(key: &ExactYamlNode) -> u64 {
+fn exact_yaml_key_digest(key: &SpannedYamlNode) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     std::hash::Hash::hash(key, &mut hasher);
     std::hash::Hasher::finish(&hasher)
@@ -916,7 +668,7 @@ thread_local! {
 ///
 /// An ordinary build compiles to the equality alone; the counter exists under
 /// `cfg(test)` and nowhere else.
-fn exact_yaml_keys_equal(left: &ExactYamlNode, right: &ExactYamlNode) -> bool {
+fn exact_yaml_keys_equal(left: &SpannedYamlNode, right: &SpannedYamlNode) -> bool {
     #[cfg(test)]
     KEY_COMPARISONS.with(|made| made.set(made.get() + 1));
     left == right
@@ -925,15 +677,18 @@ fn exact_yaml_keys_equal(left: &ExactYamlNode, right: &ExactYamlNode) -> bool {
 fn exact_frontmatter_mapping(
     source: &str,
     mark: usize,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let value = exact_yaml_to_json(parse_exact_yaml(source, mark)?)?;
+) -> Result<(serde_json::Map<String, serde_json::Value>, BodyAnchors), String> {
+    let tree = parse_exact_yaml(source, mark)?;
+    let mut pointer = String::new();
+    let mut anchors = BodyAnchors::new();
+    let value = exact_yaml_to_json(tree, &mut pointer, &mut anchors, None)?;
     let serde_json::Value::Object(mapping) = value else {
         return Err("frontmatter must be a YAML mapping".into());
     };
-    Ok(mapping)
+    Ok((mapping, anchors))
 }
 
-/// How many nodes the exact fallback may build per parser event it has read.
+/// How many nodes the frontmatter reader may build per parser event it has read.
 ///
 /// An alias is one event that copies a whole subtree, so without a ceiling a
 /// chain of them multiplies: fourteen lines of `a: &x [*w,*w,*w,*w]` name
@@ -944,7 +699,7 @@ fn exact_frontmatter_mapping(
 /// enough that no document written to be read has ever met it.
 const EXACT_YAML_NODES_PER_EVENT: usize = 100;
 
-/// What the exact fallback has spent: parser events read, and nodes built.
+/// What the frontmatter reader has spent: parser events read, and nodes built.
 ///
 /// The two together bound alias expansion. Events measure the input, since each
 /// one needs source text of its own to exist, and nodes measure the tree the
@@ -986,7 +741,7 @@ impl ExactYamlBudget {
 /// same recursion the bound exists to keep within the stack.
 #[derive(Debug)]
 struct ExactYamlSubtree {
-    node: ExactYamlNode,
+    node: SpannedYamlNode,
     depth: usize,
 }
 
@@ -1002,7 +757,7 @@ struct ExactYamlSubtree {
 /// being built is deeper than any text in the block.
 #[derive(Debug)]
 struct AnchoredYamlNode {
-    node: ExactYamlNode,
+    node: SpannedYamlNode,
     nodes: usize,
     depth: usize,
 }
@@ -1040,34 +795,55 @@ impl<'source> ExactYamlReader<'source> {
     /// The parser stops yielding after the stream ends, which the callers below
     /// reach only by reading past a boundary they have already checked for, so
     /// an exhausted stream is reported as the boundary error it would be.
-    fn next_event(&mut self) -> Result<ExactEvent<'source>, String> {
+    fn next_event(&mut self) -> Result<(ExactEvent<'source>, Span), String> {
         self.budget.events += 1;
         match self.parser.next_event() {
-            // The span is deliberately dropped: this fallback records no
-            // positions, so carrying one would be a field nothing reads.
-            Some(Ok((event, _))) => Ok(event),
+            Some(Ok(read)) => Ok(read),
             Some(Err(error)) => Err(self.syntax_error(&error)),
             None => Err("frontmatter contains an unexpected YAML document boundary".into()),
         }
     }
 
-    /// Names a parse failure at the position the block's own text puts it.
+    /// A marker's character index and one-based column, with the removed
+    /// byte-order mark counted back in.
     ///
     /// The parser is handed the body with its byte-order mark already removed,
     /// so every character index it reports is short by the mark, and a column on
     /// the first line is short by it too while later lines are unaffected.
+    fn spelled_position(&self, marker: &Marker) -> (usize, usize) {
+        (
+            marker.index() + self.mark,
+            marker.col() + 1 + if marker.line() == 1 { self.mark } else { 0 },
+        )
+    }
+
+    /// Names a parse failure at the position the block's own text puts it.
+    ///
     /// `ScanError`'s own rendering is reproduced here rather than interpolated
     /// because those numbers are exactly what has to be counted back: its
     /// `Display` prints the info, the character index it calls a byte, the
     /// one-based line, and the column one past the zero-based one it holds.
     fn syntax_error(&self, error: &ScanError) -> String {
         let marker = error.marker();
-        let column = marker.col() + 1 + if marker.line() == 1 { self.mark } else { 0 };
+        let (index, column) = self.spelled_position(marker);
         format!(
-            "invalid YAML frontmatter: {} at byte {} line {} column {column}",
+            "invalid YAML frontmatter: {} at byte {index} line {} column {column}",
             error.info(),
-            marker.index() + self.mark,
             marker.line(),
+        )
+    }
+
+    /// Refuses the second document a body must not open, at its start marker.
+    ///
+    /// The removed serde-era parser reported this verdict with no location at
+    /// all; the start event's span is a real one, so it is given the same way
+    /// [`Self::syntax_error`] gives its positions.
+    fn second_document_error(&self, span: &Span) -> String {
+        let (index, column) = self.spelled_position(&span.start);
+        format!(
+            "frontmatter must be a single YAML document: \
+             a second one opens at byte {index} line {} column {column}",
+            span.start.line(),
         )
     }
 
@@ -1076,7 +852,7 @@ impl<'source> ExactYamlReader<'source> {
         &mut self,
         expected: impl FnOnce(&ExactEvent<'source>) -> bool,
     ) -> Result<(), String> {
-        let event = self.next_event()?;
+        let (event, _) = self.next_event()?;
         if expected(&event) {
             Ok(())
         } else {
@@ -1095,10 +871,15 @@ impl<'source> ExactYamlReader<'source> {
     fn node(
         &mut self,
         event: ExactEvent<'source>,
+        span: Span,
         depth: usize,
     ) -> Result<ExactYamlSubtree, String> {
         let spent = self.budget.nodes;
-        let (node, anchor, reached) = match event {
+        // A collection-start event's span is zero-width, but its marker sits
+        // on the collection's first token — the first `-`, the flow opener,
+        // or the first key — which is exactly where the node begins.
+        let position = body_position(&span);
+        let (node, anchor, reached, expanded) = match event {
             ExactEvent::Scalar(value, style, anchor, tag) => {
                 self.budget.spend(1)?;
                 (
@@ -1109,6 +890,7 @@ impl<'source> ExactYamlReader<'source> {
                     }),
                     anchor,
                     0,
+                    false,
                 )
             }
             ExactEvent::SequenceStart(anchor, tag) => {
@@ -1117,11 +899,11 @@ impl<'source> ExactYamlReader<'source> {
                 let mut values = Vec::new();
                 let mut inner = 0;
                 loop {
-                    let event = self.next_event()?;
+                    let (event, span) = self.next_event()?;
                     if matches!(event, ExactEvent::SequenceEnd) {
                         break;
                     }
-                    let value = self.node(event, depth)?;
+                    let value = self.node(event, span, depth)?;
                     inner = inner.max(value.depth);
                     values.push(value.node);
                 }
@@ -1132,22 +914,23 @@ impl<'source> ExactYamlReader<'source> {
                     },
                     anchor,
                     inner + 1,
+                    false,
                 )
             }
             ExactEvent::MappingStart(anchor, tag) => {
                 let depth = deeper_yaml_nesting(depth, 1)?;
                 self.budget.spend(1)?;
-                let mut entries: Vec<(ExactYamlNode, ExactYamlNode)> = Vec::new();
+                let mut entries: Vec<(SpannedYamlNode, SpannedYamlNode)> = Vec::new();
                 let mut keys: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
                 let mut inner = 0;
                 loop {
-                    let event = self.next_event()?;
+                    let (event, span) = self.next_event()?;
                     if matches!(event, ExactEvent::MappingEnd) {
                         break;
                     }
-                    let key = self.node(event, depth)?;
-                    let event = self.next_event()?;
-                    let value = self.node(event, depth)?;
+                    let key = self.node(event, span, depth)?;
+                    let (event, span) = self.next_event()?;
+                    let value = self.node(event, span, depth)?;
                     inner = inner.max(key.depth).max(value.depth);
                     let (key, value) = (key.node, value.node);
                     // Whole-node equality catches the keys the conversion never
@@ -1188,6 +971,7 @@ impl<'source> ExactYamlReader<'source> {
                     },
                     anchor,
                     inner + 1,
+                    false,
                 )
             }
             ExactEvent::Alias(anchor) => {
@@ -1211,10 +995,19 @@ impl<'source> ExactYamlReader<'source> {
                 // of two, not the difference between refusing and not.
                 self.budget.spend(anchored.nodes)?;
                 // An alias event carries no anchor of its own, so the copy names
-                // nothing and is not remembered.
-                (anchored.node.clone(), 0, reached)
+                // nothing and is not remembered. The copy is marked as the
+                // expansion it is, and the funnel below stamps it with the
+                // alias site's own position: the definition's positions ride
+                // along inside it, but the site is what a pointer into the
+                // copy anchors at. See [`SpannedYamlNode::expanded`].
+                (anchored.node.node.clone(), 0, reached, true)
             }
             _ => return Err("frontmatter contains an unexpected YAML parser event".into()),
+        };
+        let node = SpannedYamlNode {
+            node,
+            position,
+            expanded,
         };
         self.remember_anchor(anchor, &node, self.budget.nodes - spent, reached);
         Ok(ExactYamlSubtree {
@@ -1229,7 +1022,13 @@ impl<'source> ExactYamlReader<'source> {
     /// only once it is built, so a collection cannot alias itself: the parser
     /// resolves `&x` as soon as it reads it, while this table does not, and the
     /// alias inside is refused as unresolved.
-    fn remember_anchor(&mut self, anchor: usize, node: &ExactYamlNode, nodes: usize, depth: usize) {
+    fn remember_anchor(
+        &mut self,
+        anchor: usize,
+        node: &SpannedYamlNode,
+        nodes: usize,
+        depth: usize,
+    ) {
         if anchor != 0 {
             self.anchors.insert(
                 anchor,
@@ -1248,12 +1047,12 @@ impl<'source> ExactYamlReader<'source> {
 ///
 /// A collection opens one level, while an alias opens as many as the node it
 /// copies reaches, which is why the count is a parameter rather than always
-/// one. [`scan_frontmatter`] rejects an over-deep block before either tree
-/// parser is handed it, but it counts the levels the *events* open and an alias
-/// is a single event however deep the value it names, so nesting spliced in by
-/// an alias is a depth only this bound sees. It would be enforced here in any
-/// case, because the recursion it guards is this builder's own and a bound that
-/// lives in a different function is one a later change can quietly remove.
+/// one. An event-counting scan such as [`yaml_nesting_exceeds_limit`] cannot
+/// see the second kind: an alias is a single event however deep the value it
+/// names, so nesting spliced in by an alias is a depth only this bound sees.
+/// The bound lives here in any case, because the recursion it guards is this
+/// builder's own and a bound that lives in a different function is one a later
+/// change can quietly remove.
 fn deeper_yaml_nesting(depth: usize, levels: usize) -> Result<usize, String> {
     let depth = depth.saturating_add(levels);
     if depth > MAX_YAML_DEPTH {
@@ -1262,62 +1061,164 @@ fn deeper_yaml_nesting(depth: usize, levels: usize) -> Result<usize, String> {
     Ok(depth)
 }
 
-/// Reads one YAML document out of the block, keeping every scalar's spelling.
+/// Reads the block's one YAML document, keeping every scalar's spelling.
 ///
 /// `mark` is how many characters [`parse_frontmatter`] took off the head of the
 /// body, which is a byte-order mark or nothing at all. The text arrives without
 /// them, so they are carried here only to put a reported position back where the
 /// document spells it.
-fn parse_exact_yaml(source: &str, mark: usize) -> Result<ExactYamlNode, String> {
+///
+/// The stream's document count is read off the same events the tree is built
+/// from. A body holding no document at all — blank or comment-only content —
+/// reaches `StreamEnd` directly, and §1.6 keeps it apart from the explicit
+/// `{}` that parses to an empty mapping. A body opening a second document is
+/// refused at that document's start marker, before anything of its content:
+/// only `Parser::load` clears the parser's anchor table between documents, so
+/// a second document read through raw events would resolve its aliases against
+/// the first one's anchors.
+fn parse_exact_yaml(source: &str, mark: usize) -> Result<SpannedYamlNode, String> {
     let mut reader = ExactYamlReader::new(source, mark);
     reader.expect_event(|event| matches!(event, ExactEvent::StreamStart))?;
-    // The payload distinguishes an explicit `---` from an implicit start, which
-    // a frontmatter block has already consumed at its own delimiter.
-    reader.expect_event(|event| matches!(event, ExactEvent::DocumentStart(_)))?;
-    let event = reader.next_event()?;
-    let value = reader.node(event, 0)?.node;
-    // A second document would be read with the first one's anchors still in the
-    // parser's table, since only `Parser::load` clears them between documents.
-    // Refusing at the boundary is what keeps that unreachable.
+    let (event, _) = reader.next_event()?;
+    if matches!(event, ExactEvent::StreamEnd) {
+        return Err("frontmatter must be a YAML mapping".into());
+    }
+    // The payload distinguishes an explicit `---` from an implicit start, and
+    // either opens a first document: the block's own delimiter was consumed by
+    // the Markdown layer, but a `...` end marker heading the body still puts
+    // an implicit start on what follows it, and a `--- ` line the delimiter
+    // check does not match (it is not exactly `---`) an explicit one.
+    if !matches!(event, ExactEvent::DocumentStart(_)) {
+        return Err("frontmatter contains an unexpected YAML document boundary".into());
+    }
+    let (event, span) = reader.next_event()?;
+    let value = reader.node(event, span, 0)?.node;
     reader.expect_event(|event| matches!(event, ExactEvent::DocumentEnd))?;
-    reader.expect_event(|event| matches!(event, ExactEvent::StreamEnd))?;
-    Ok(value)
+    match reader.next_event() {
+        Ok((ExactEvent::StreamEnd, _)) => Ok(value),
+        Ok((ExactEvent::DocumentStart(_), span)) => Err(reader.second_document_error(&span)),
+        // Content past the closed document that does not even open a second
+        // one cleanly: the verdict is the same, there is just no start marker
+        // to give, and what the scanner tripped on is not this block's
+        // business to relay.
+        _ => Err("frontmatter must be a single YAML document".into()),
+    }
 }
 
-fn exact_yaml_to_json(value: ExactYamlNode) -> Result<serde_json::Value, String> {
-    match value {
+/// Converts one node to JSON, recording each entry's position as it walks.
+///
+/// `expansion` is the alias site the surrounding subtree was copied to, when
+/// this node sits inside such a copy; every entry within anchors there. See
+/// [`SpannedYamlNode::expanded`].
+fn exact_yaml_to_json(
+    value: SpannedYamlNode,
+    pointer: &mut String,
+    anchors: &mut BodyAnchors,
+    expansion: Option<BodyPosition>,
+) -> Result<serde_json::Value, String> {
+    let expansion = expansion.or_else(|| value.expanded.then_some(value.position));
+    match value.node {
         ExactYamlNode::Scalar(scalar) => exact_yaml_scalar_to_json(scalar),
         ExactYamlNode::Sequence { tag, values } => {
             validate_yaml_container_tag(tag.as_ref(), "seq")?;
-            values
-                .into_iter()
-                .map(exact_yaml_to_json)
-                .collect::<Result<Vec<_>, _>>()
-                .map(serde_json::Value::Array)
+            let mut converted = Vec::with_capacity(values.len());
+            for (index, value) in values.into_iter().enumerate() {
+                let restore = pointer.len();
+                // Sequence index tokens need no RFC 6901 escaping.
+                pointer.push('/');
+                pointer.push_str(&index.to_string());
+                // An element has no key, so it is named by where it begins.
+                record_body_anchor(anchors, pointer, entry_anchor(&value, expansion));
+                converted.push(exact_yaml_to_json(value, pointer, anchors, expansion)?);
+                pointer.truncate(restore);
+            }
+            Ok(serde_json::Value::Array(converted))
         }
         ExactYamlNode::Mapping { tag, entries } => {
             validate_yaml_container_tag(tag.as_ref(), "map")?;
-            exact_yaml_mapping_to_json(entries)
+            exact_yaml_mapping_to_json(entries, pointer, anchors, expansion)
         }
     }
 }
 
 fn exact_yaml_mapping_to_json(
-    mapping: Vec<(ExactYamlNode, ExactYamlNode)>,
+    mapping: Vec<(SpannedYamlNode, SpannedYamlNode)>,
+    pointer: &mut String,
+    anchors: &mut BodyAnchors,
+    expansion: Option<BodyPosition>,
 ) -> Result<serde_json::Value, String> {
     let mut object = serde_json::Map::new();
     for (key, value) in mapping {
-        let ExactYamlNode::Scalar(key) = key else {
+        let position = entry_anchor(&key, expansion);
+        let ExactYamlNode::Scalar(key) = key.node else {
             return Err("frontmatter mapping keys must be strings".into());
         };
         let serde_json::Value::String(key) = exact_yaml_scalar_to_json(key)? else {
             return Err("frontmatter mapping keys must be strings".into());
         };
-        if object.insert(key, exact_yaml_to_json(value)?).is_some() {
+        let restore = pointer.len();
+        push_pointer_token(pointer, &key);
+        // A member is spelled `key: value`, so the key names the whole entry.
+        record_body_anchor(anchors, pointer, position);
+        let converted = exact_yaml_to_json(value, pointer, anchors, expansion)?;
+        pointer.truncate(restore);
+        if object.insert(key, converted).is_some() {
             return Err("frontmatter contains a duplicate mapping key".into());
         }
     }
     Ok(serde_json::Value::Object(object))
+}
+
+/// Where a pointer to this entry sends a reader, if anywhere.
+///
+/// Inside an alias expansion every entry anchors at the alias site, and an
+/// entry that is itself an expansion anchors at its own site the same way.
+/// Everywhere else the entry's own position names it, withheld only from the
+/// scalars [`is_textless`] describes, whose reported position belongs to a
+/// later entry.
+fn entry_anchor(entry: &SpannedYamlNode, expansion: Option<BodyPosition>) -> Option<BodyPosition> {
+    if let Some(site) = expansion {
+        return Some(site);
+    }
+    if !entry.expanded {
+        if let ExactYamlNode::Scalar(scalar) = &entry.node {
+            if is_textless(scalar) {
+                return None;
+            }
+        }
+    }
+    Some(entry.position)
+}
+
+/// Whether a scalar has no character of its own for a position to name.
+///
+/// The parser marks a scalar at its first character, so a scalar with no such
+/// character is reported at the next token the scanner reached — which belongs
+/// to a later entry. Accepting that mark would name text the entry does not
+/// own, and would have two entries claim one position, so such a scalar takes
+/// no position and the entry it stands for falls back to the block, as §6.2
+/// provides for an entry whose position is unavailable.
+///
+/// Only a literal or folded scalar can be spelled that way. A block scalar
+/// with no content line — `>-`, `|`, or `|+` over blank lines alone — keeps at
+/// most the breaks its chomping indicator retains, and its span is measured to
+/// sit on the next entry's token. Every other style owns a character wherever
+/// it appears: a quoted scalar has its opening quote however empty its text,
+/// and an unwritten plain scalar is synthesised by the parser with a
+/// zero-width span at the very place — after its `-` — the entry would have
+/// been spelled. The style is read beside the text because the text alone
+/// cannot tell a written all-break scalar from an unwritten one: `- "\n"` and
+/// `- |+` over one blank line resolve alike, and only the first owns a
+/// position.
+fn is_textless(scalar: &ExactYamlScalar) -> bool {
+    matches!(scalar.style, ScalarStyle::Literal | ScalarStyle::Folded)
+        && scalar.value.bytes().all(|byte| byte == b'\n')
+}
+
+fn record_body_anchor(anchors: &mut BodyAnchors, pointer: &str, position: Option<BodyPosition>) {
+    if let Some(position) = position {
+        anchors.push((pointer.to_owned(), position));
+    }
 }
 
 fn validate_yaml_container_tag(tag: Option<&YamlTag>, expected: &str) -> Result<(), String> {
@@ -1348,7 +1249,7 @@ fn exact_yaml_scalar_to_json(scalar: ExactYamlScalar) -> Result<serde_json::Valu
         Some("seq" | "map") => Err("frontmatter contains an invalid tag for a YAML scalar".into()),
         Some(_) => Ok(serde_json::Value::String(scalar.value)),
         None if scalar.style != ScalarStyle::Plain => Ok(serde_json::Value::String(scalar.value)),
-        None => marked_scalar_to_json(&scalar.value),
+        None => plain_scalar_to_json(&scalar.value),
     }
 }
 
@@ -1412,7 +1313,8 @@ fn exact_yaml_float(source: &str) -> Result<serde_json::Value, String> {
     json_number(&format!("{}e0", value.0))
 }
 
-fn marked_scalar_to_json(source: &str) -> Result<serde_json::Value, String> {
+/// Resolves an untagged plain scalar by the YAML core schema, §1.6-exactly.
+fn plain_scalar_to_json(source: &str) -> Result<serde_json::Value, String> {
     match crate::loader::parse_frontmatter_scalar(source) {
         crate::FrontmatterScalar::Null => Ok(serde_json::Value::Null),
         crate::FrontmatterScalar::Boolean(value) => Ok(serde_json::Value::Bool(value)),
@@ -2291,12 +2193,12 @@ mod tests {
         // `flow: ["ää", 5]` puts the second element on byte column 16 but
         // character column 14.
         assert_eq!(anchor("/flow/1"), Some((11, 16)));
-        // A block mapping inside a sequence starts at its first key, not at
-        // the `:` marked-yaml reports as the mapping's own span start.
+        // A block mapping inside a sequence starts at its first key, which is
+        // where the parser puts the mapping-start event's marker.
         assert_eq!(anchor("/items/0"), Some((13, 5)));
         assert_eq!(anchor("/items/0/key"), Some((13, 5)));
-        // A flow mapping is the opposite case: its own `{` precedes its first
-        // key, so the same rule keeps the `{`.
+        // A flow mapping's own `{` precedes its first key, and the start
+        // marker sits on it.
         assert_eq!(anchor("/flowseq/0"), Some((14, 11)));
         assert_eq!(anchor("/flowseq/0/p"), Some((14, 12)));
         assert_eq!(anchor("/flowseq/1"), Some((14, 19)));
@@ -2342,14 +2244,17 @@ mod tests {
     }
 
     #[test]
-    fn textless_sequence_elements_take_no_anchor() {
-        // An element with no text of its own is marked at the next token the
+    fn only_empty_block_scalars_take_no_anchor() {
+        // A block scalar with no content line is marked at the next token the
         // scanner reached, which belongs to a later element, so accepting that
-        // position would name text the element does not own. `-` with nothing
-        // after it is one such element and an empty block scalar is another.
+        // position would name text the element does not own. It is the one
+        // spelling left without an anchor: an unwritten `-` element gets a
+        // synthesised scalar whose zero-width span sits after its own dash,
+        // and a quoted empty owns its opening quote, so both now anchor where
+        // they are spelled.
         //
         // A textless mapping key rides along at `keyed`. YAML admits one only
-        // through the explicit `? ` form, and `marked_key_start` withholds its
+        // through the explicit `? ` form, and `entry_anchor` withholds its
         // anchor for the same reason and by the same rule.
         let source = concat!(
             "---\n",            // 1
@@ -2407,14 +2312,14 @@ mod tests {
                 .map(|anchor| (anchor.line, anchor.column))
         };
 
-        // Unwritten elements fall back to the block; the one written element
-        // of the same sequence still gets its own position.
-        assert_eq!(anchor("/gaps/0"), None);
-        assert_eq!(anchor("/gaps/1"), None);
+        // An unwritten element is synthesised with a zero-width span right
+        // after its own dash — a true line and column, one past the `-`.
+        assert_eq!(anchor("/gaps/0"), Some((3, 4)));
+        assert_eq!(anchor("/gaps/1"), Some((4, 4)));
         assert_eq!(anchor("/gaps/2"), Some((5, 5)));
-        // An empty block scalar occupies source but has no content line, so it
-        // borrows the same way. Its mark is the `-` of the next element, which
-        // that element also claims.
+        // An empty block scalar occupies source but has no content line, so
+        // its mark is borrowed: the `-` of the next element, which that
+        // element also claims. It falls back to the block.
         assert_eq!(anchor("/folded/0"), None);
         assert_eq!(anchor("/folded/1"), Some((8, 5)));
         assert_eq!(anchor("/literal/0"), None);
@@ -2440,11 +2345,12 @@ mod tests {
             Some(&serde_json::json!(["\n\n", 2])),
             "both kept blank lines are part of the value"
         );
-        // A quoted empty string is marked where it is written, but nothing in
-        // an empty text distinguishes it from an unwritten element, so it falls
-        // back rather than resting on a rule that cannot tell the two apart.
-        assert_eq!(anchor("/quoted/0"), None);
-        assert_eq!(anchor("/quoted/1"), None);
+        // A quoted empty string is marked where it is written — its opening
+        // quote is a character of its own — and the scalar's style, reported
+        // beside the position on the same event, is what tells it apart from
+        // an empty block scalar resolving to the same text.
+        assert_eq!(anchor("/quoted/0"), Some((22, 5)));
+        assert_eq!(anchor("/quoted/1"), Some((23, 5)));
         assert_eq!(anchor("/quoted/2"), Some((24, 5)));
         assert_eq!(
             value.get("quoted"),
@@ -2492,10 +2398,10 @@ mod tests {
             Some(&serde_json::json!({"": null, "next": "second"})),
             "the explicit key parses to an empty-keyed member"
         );
-        // A trailing textless element is the same case; it merely had no later
-        // token to borrow, so it was already unplaced.
+        // A trailing unwritten element is synthesised at its own dash like
+        // any other; it needs no later token to sit on.
         assert_eq!(anchor("/trailing/0"), Some((40, 5)));
-        assert_eq!(anchor("/trailing/1"), None);
+        assert_eq!(anchor("/trailing/1"), Some((41, 4)));
 
         // No two entries may claim one position, which is what borrowing did.
         let mut placed: Vec<_> = anchors
@@ -2517,12 +2423,10 @@ mod tests {
 
     #[test]
     fn a_quoted_empty_key_still_opens_its_element() {
-        // A textless key gives up its own member's anchor, but not its parent's:
-        // the element it opens begins where the key is spelled, even though that
-        // spelling resolves to no text. marked-yaml reports the mapping's own
-        // span from the `:` that follows, so an element that took the mapping's
-        // own start would land past its own first byte and name the separator
-        // instead of the entry.
+        // A quoted empty key owns its opening quote, so both the member it
+        // names and the mapping element it opens anchor there: the parser
+        // reports a block mapping from its first key's own first character,
+        // not from the `:` marked-yaml used to hand back.
         let source = concat!(
             "---\n",                                // 1
             "list:\n",                              // 2
@@ -2550,22 +2454,21 @@ mod tests {
             Some(&serde_json::json!([{"": "K"}, {"": "L"}, {"\n": "M"}, 2])),
             "each element is a mapping under an empty key"
         );
-        // Column 5 is the opening quote, which is the element's first byte. The
-        // mapping's own start is the `:` further along the line — column 7 on
-        // lines 3 and 4, column 9 on line 5, none of them the element.
+        // Column 5 is the opening quote, which is the element's first byte.
         assert_eq!(anchor("/list/0"), Some((3, 5)));
         assert_eq!(anchor("/list/1"), Some((4, 5)));
         assert_eq!(anchor("/list/2"), Some((5, 5)));
         assert_eq!(anchor("/list/3"), Some((6, 5)));
-        // The members those keys name still take no anchor, which is the whole
-        // asymmetry: a textless key cannot place its own member and can place
-        // the mapping it opens.
-        assert_eq!(anchor("/list/0/"), None);
-        assert_eq!(anchor("/list/1/"), None);
-        assert_eq!(anchor("/list/2/\n"), None);
-        // Flow syntax is the same rule on one line: columns 8, 15 and 22 are the
-        // opening quotes, while 11, 18 and 27 are where the mapping's own span
-        // begins, one past the `:`.
+        // The members those keys name anchor at the same quote: the key's
+        // spelling is a character of its own, however empty its resolved
+        // text, and sharing a position with the element it opens is the
+        // legitimate parent-child coincidence.
+        assert_eq!(anchor("/list/0/"), Some((3, 5)));
+        assert_eq!(anchor("/list/1/"), Some((4, 5)));
+        assert_eq!(anchor("/list/2/\n"), Some((5, 5)));
+        // Flow syntax is the same rule on one line: columns 8, 15 and 22 are
+        // the opening quotes, each anchoring both the flow mapping's `{`-less
+        // element and the member under its empty key.
         assert_eq!(anchor("/flow/0"), Some((7, 8)));
         assert_eq!(anchor("/flow/1"), Some((7, 15)));
         assert_eq!(anchor("/flow/2"), Some((7, 22)));
@@ -2600,25 +2503,110 @@ mod tests {
         let mut cursor = LineCursor::new(2, "ab");
         assert_eq!(cursor.byte_column(3), Some(3));
         assert_eq!(LineCursor::new(2, "ab").byte_column(4), None);
-        // Marked columns are one-based; a zero names nothing.
+        // Body columns are one-based; a zero names nothing.
         assert_eq!(LineCursor::new(2, "ab").byte_column(0), None);
     }
 
     #[test]
-    fn marker_free_frontmatter_parsing_records_no_anchors() {
-        // A YAML tag and an alias both force the exact fallback, which parses
-        // through an event stream that keeps no positions.
-        for source in [
+    fn first_column_anchors_survive_the_zero_based_parser() {
+        // `saphyr-parser` counts columns from zero where every column this
+        // module reports is one-based, and [`LineCursor::byte_column`] answers
+        // `None` below one. Losing the `+ 1` at the `body_position` boundary
+        // would therefore not shift these anchors — it would silently drop
+        // every entry sitting on its line's first column, which is where
+        // ordinary top-level frontmatter keys live.
+        let document = parse_markdown(
+            "---\na: 1\nb: 2\n---\n# Title\n",
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        assert_eq!(
+            anchors.get("/a"),
+            Some(FrontmatterAnchor { line: 2, column: 1 })
+        );
+        assert_eq!(
+            anchors.get("/b"),
+            Some(FrontmatterAnchor { line: 3, column: 1 })
+        );
+    }
+
+    #[test]
+    fn tagged_and_aliased_frontmatter_keep_their_anchors() {
+        // A YAML tag or an alias used to force a marker-free fallback that
+        // cost every entry of the block its position — the defect this module
+        // read two parsers to live with. One spanned reader has no second
+        // path to fall back to, so these blocks keep their anchors like any
+        // other.
+        let document = parse_markdown(
             "---\ncount: !!str 5\n---\n# Title\n",
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        assert_eq!(
+            anchors.get("/count"),
+            Some(FrontmatterAnchor { line: 2, column: 1 })
+        );
+
+        let document = parse_markdown(
             "---\nanchored: &a 1\nalias: *a\n---\n# Title\n",
-        ] {
-            let document = parse_markdown(source, MarkdownOptions::default());
-            let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
-                panic!("expected parsed frontmatter: {document:?}")
-            };
-            assert!(!value.is_empty());
-            assert!(anchors.is_empty(), "{source:?} recorded {anchors:?}");
-        }
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        assert_eq!(
+            anchors.get("/anchored"),
+            Some(FrontmatterAnchor { line: 2, column: 1 })
+        );
+        assert_eq!(
+            anchors.get("/alias"),
+            Some(FrontmatterAnchor { line: 3, column: 1 })
+        );
+    }
+
+    #[test]
+    fn alias_expansions_anchor_at_the_alias_site() {
+        // An alias is expanded by cloning the anchored node, so the clone's
+        // entries carry the definition's positions — which are not the entries
+        // the pointers into the copy name. The whole copy anchors at the
+        // alias site instead: one position per expansion, and a real one,
+        // where §6.2 lets an entry fall back to the nearest enclosing entry
+        // with a position of its own.
+        let source = concat!(
+            "---\n",             // 1
+            "base: &x\n",        // 2
+            "  bad: \"oops\"\n", // 3
+            "  tags:\n",         // 4
+            "    - 1\n",         // 5
+            "ref: *x\n",         // 6
+            "---\n",
+            "# Title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        let anchor = |pointer: &str| {
+            anchors
+                .get(pointer)
+                .map(|anchor| (anchor.line, anchor.column))
+        };
+
+        // The definition's entries anchor at their own spellings.
+        assert_eq!(anchor("/base"), Some((2, 1)));
+        assert_eq!(anchor("/base/bad"), Some((3, 3)));
+        assert_eq!(anchor("/base/tags"), Some((4, 3)));
+        assert_eq!(anchor("/base/tags/0"), Some((5, 7)));
+        // The copy's member anchors at its own key, and everything inside the
+        // expansion — however deeply nested — at the `*x` that spliced it in.
+        assert_eq!(anchor("/ref"), Some((6, 1)));
+        assert_eq!(anchor("/ref/bad"), Some((6, 6)));
+        assert_eq!(anchor("/ref/tags"), Some((6, 6)));
+        assert_eq!(anchor("/ref/tags/0"), Some((6, 6)));
     }
 
     #[test]
@@ -2639,8 +2627,9 @@ mod tests {
 
     #[test]
     fn empty_and_comment_only_frontmatter_are_not_mappings() {
-        // marked-yaml reports every one of these as an empty mapping, so only
-        // the document count separates them from the explicit `{}` below.
+        // Each of these bodies holds no document at all — the stream ends
+        // without ever opening one — which is what separates them from the
+        // explicit `{}` below.
         for source in [
             "---\n---\n",
             "---\n\n---\n",
@@ -2670,21 +2659,33 @@ mod tests {
     #[test]
     fn frontmatter_holding_a_second_document_is_invalid() {
         // A bare `---` line closes the block, so a second document can only be
-        // opened by a `...` end marker. marked-yaml stops at the first document
-        // and would otherwise drop everything after it without a word.
+        // opened by a `...` end marker. The refusal names the second document's
+        // start marker, a position the discarded serde-era parser never had.
         for source in [
             "---\na: 1\n...\nb: 2\n---\n",
             "---\na: 1\n...\nplain scalar\n---\n",
-            // Unreadable content after the first document closed: marked-yaml
-            // has already stopped and would accept `{a: 1}` on its own.
-            "---\na: 1\n...\n%YAML 1.2\n---\n",
         ] {
             let document = parse_markdown(source, MarkdownOptions::default());
             let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
                 panic!("a second frontmatter document must be invalid: {document:?}")
             };
-            assert_eq!(message, "frontmatter must be a single YAML document");
+            assert_eq!(
+                message,
+                "frontmatter must be a single YAML document: \
+                 a second one opens at byte 9 line 3 column 1"
+            );
         }
+
+        // Unreadable content after the first document closed never opens a
+        // second one cleanly, so the verdict has no start marker to name.
+        let document = parse_markdown(
+            "---\na: 1\n...\n%YAML 1.2\n---\n",
+            MarkdownOptions::default(),
+        );
+        let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
+            panic!("unreadable content after the document must be invalid: {document:?}")
+        };
+        assert_eq!(message, "frontmatter must be a single YAML document");
 
         // A `...` that ends the only document opens nothing and stays valid.
         let single = parse_markdown("---\na: 1\n...\n---\n", MarkdownOptions::default());
@@ -2733,9 +2734,9 @@ mod tests {
 
     #[test]
     fn recursive_frontmatter_aliases_terminate() {
-        // The exact fallback registers an anchor only once its node is fully
-        // parsed, so a container cannot alias itself. Without that, dropping
-        // the serde parser's recursion guard would leave nothing to stop this.
+        // The reader registers an anchor only once its node is fully parsed,
+        // so a container cannot alias itself. Without that, dropping the
+        // serde parser's recursion guard would leave nothing to stop this.
         for source in [
             "---\na: &x [*x]\n---\n",
             "---\na: &x {k: *x}\n---\n",
@@ -2858,22 +2859,22 @@ mod tests {
             panic!("nesting within the limit stays valid: {document:?}")
         };
         assert_eq!(innermost_sequence(&value, levels)[0], serde_json::json!(1));
-        // A tag routes the same block through the exact fallback instead,
-        // which is the parser that reports no positions at all.
+        // A tag used to route the same block through a marker-free fallback;
+        // now it costs the block nothing, anchors included.
         let document = parse_markdown(
             &deeply_nested_frontmatter(levels, true),
             MarkdownOptions::default(),
         );
         let DocumentFrontmatter::Mapping {
             value,
-            anchors: fallback_anchors,
+            anchors: tagged_anchors,
             ..
         } = document.frontmatter
         else {
-            panic!("nesting within the limit stays valid through the fallback: {document:?}")
+            panic!("nesting within the limit stays valid when tagged: {document:?}")
         };
         assert_eq!(innermost_sequence(&value, levels)[0], serde_json::json!(1));
-        assert!(!anchors.is_empty() && fallback_anchors.is_empty());
+        assert!(!anchors.is_empty() && !tagged_anchors.is_empty());
 
         // One level over it, and at a depth that overran the stack before the
         // scan was asked, neither parser is handed the block at all.
@@ -3021,14 +3022,12 @@ mod tests {
     #[test]
     fn the_exact_builder_bounds_its_own_recursion() {
         // The builder descends by recursion, so the depth bound has to hold in
-        // the builder itself and not only in the scan that currently runs
-        // ahead of it. Called directly, without that scan, the same limit
-        // applies and counts the root mapping as its first level: a block of
+        // the builder itself: no scan runs ahead of it any more, and its own
+        // limit counts the root mapping as the first level. A block of
         // `MAX_YAML_DEPTH - 1` compact sequences under one key fills the limit
-        // exactly, and one more overruns it. If the bound lived only in
-        // `scan_frontmatter` this test would build the value instead.
+        // exactly, and one more overruns it.
         let nested = |levels: usize| format!("deep:\n {}1\n", "- ".repeat(levels));
-        let filled = exact_frontmatter_mapping(&nested(MAX_YAML_DEPTH - 1), NO_MARK)
+        let (filled, _) = exact_frontmatter_mapping(&nested(MAX_YAML_DEPTH - 1), NO_MARK)
             .expect("nesting that fills the limit is built");
         assert_eq!(innermost_sequence(&filled, MAX_YAML_DEPTH - 1)[0], 1);
         for levels in [MAX_YAML_DEPTH, MAX_YAML_DEPTH + 1] {
@@ -3117,7 +3116,7 @@ mod tests {
             ("a: !custom [one]\n", serde_json::json!(["one"])),
             ("a: !custom {one: two}\n", serde_json::json!({"one": "two"})),
         ] {
-            let mapping = exact_frontmatter_mapping(source, NO_MARK)
+            let (mapping, _) = exact_frontmatter_mapping(source, NO_MARK)
                 .unwrap_or_else(|error| panic!("{source:?}: {error}"));
             assert_eq!(mapping["a"], expected, "{source:?}");
         }
@@ -3151,7 +3150,7 @@ mod tests {
             // no tag this converter recognises and the plain scalar resolves.
             ("a: !thing 123\n", serde_json::json!(123)),
         ] {
-            let mapping = exact_frontmatter_mapping(source, NO_MARK)
+            let (mapping, _) = exact_frontmatter_mapping(source, NO_MARK)
                 .unwrap_or_else(|error| panic!("{source:?}: {error}"));
             assert_eq!(mapping["a"], expected, "{source:?}");
         }
@@ -3182,16 +3181,16 @@ mod tests {
         assert_eq!(fallback["d"], serde_json::json!("1\n"));
         assert_eq!(fallback["e"], serde_json::json!(1));
 
-        // The tag on the last entry is the only thing routing that block
-        // through this builder rather than the marked parse, so the same
-        // entries without it read the resolution the rest of the module gives
-        // them. The two must agree: a document's values may not depend on
-        // which parser happened to be handed it.
-        let marked = expect_frontmatter_mapping(&format!("---\n{entries}---\n"));
+        // The tag on the last entry used to route a block down a separate
+        // fallback path, and a document's values were not allowed to depend
+        // on which parser happened to be handed it. One reader makes the
+        // agreement structural; the pairing stays so a second path cannot
+        // quietly grow back.
+        let untagged = expect_frontmatter_mapping(&format!("---\n{entries}---\n"));
         for key in ["a", "b", "c", "d", "e"] {
             assert_eq!(
-                fallback[key], marked[key],
-                "the two parsers disagree on {key}"
+                fallback[key], untagged[key],
+                "a tag changed the resolution of {key}"
             );
         }
     }
@@ -3201,22 +3200,25 @@ mod tests {
         // `saphyr-parser` clears its anchor table between documents only inside
         // `Parser::load`, which this builder does not call, so reading a second
         // document through raw events would resolve its aliases against the
-        // first document's anchors. Refusing at the boundary is what keeps that
-        // unreachable, and the refusal has to be the builder's own: the scan
-        // that counts a block's documents today reads the body with a different
-        // parser, and is due to be removed once this one counts them.
+        // first document's anchors. Refusing at the second document's start
+        // marker, before any of its content, is what keeps that unreachable —
+        // and since the scan that used to count a block's documents with a
+        // second parser is gone, the refusal is the builder's own.
         //
         // Called directly, without that scan, both spellings of a second
-        // document are refused — and the alias in the second is refused with
-        // them rather than resolving to a value defined in the first.
-        for source in [
-            "a: 1\n--- \nb: 2\n",
-            "a: &x 1\n--- \nb: *x\n",
-            "a: 1\n...\nb: 2\n",
+        // document are refused at its start marker — and the alias in the
+        // second is refused with them rather than resolving to a value
+        // defined in the first.
+        for (source, position) in [
+            ("a: 1\n--- \nb: 2\n", "byte 5 line 2 column 1"),
+            ("a: &x 1\n--- \nb: *x\n", "byte 8 line 2 column 1"),
+            ("a: 1\n...\nb: 2\n", "byte 9 line 3 column 1"),
         ] {
             assert_eq!(
                 exact_frontmatter_mapping(source, NO_MARK),
-                Err("frontmatter contains an unexpected YAML document boundary".to_owned()),
+                Err(format!(
+                    "frontmatter must be a single YAML document: a second one opens at {position}"
+                )),
                 "a second document was read: {source:?}"
             );
         }
@@ -3300,11 +3302,9 @@ mod tests {
 
     #[test]
     fn frontmatter_syntax_errors_carry_the_parser_position() {
-        // Every malformed block is reported by the exact fallback, not only the
-        // ones holding a tag or an alias: the marked parse fails on anything
-        // that does not parse, and this builder is what runs next and what has
-        // a position to give. These messages are therefore the whole diagnostic
-        // surface for frontmatter that does not parse.
+        // Every malformed block is reported by this one reader. These
+        // messages are therefore the whole diagnostic surface for frontmatter
+        // that does not parse.
         //
         // The text is `saphyr-parser`'s own, recorded rather than translated. A
         // stray bracket is caught in its scanner and so reported earlier and
@@ -3393,19 +3393,17 @@ mod tests {
     #[test]
     fn frontmatter_drops_one_leading_byte_order_mark() {
         // A byte-order mark means nothing to YAML at the head of a stream, but
-        // neither parser here drops it and both hand it back as the first
-        // character of the first key. A document written with one would then
-        // have a `version` entry named something no reader can see, and a
-        // schema would report an unknown field naming a key its author did
-        // believe they had written.
+        // the parser does not drop it and hands it back as the first character
+        // of the first key. A document written with one would then have a
+        // `version` entry named something no reader can see, and a schema
+        // would report an unknown field naming a key its author did believe
+        // they had written.
         //
-        // It is removed where the body is cut out, so the block's three readers
-        // — the document scan, the marked parse, and the exact fallback — are
-        // all shown the same text. Removed inside one of them instead, the same
-        // document parsed to different keys depending on whether it happened to
-        // contain a tag, which is the only thing deciding which parser reads
-        // it. Every case below is therefore checked in both spellings: plain,
-        // and with a tag that routes the identical block through the fallback.
+        // It is removed where the body is cut out, ahead of the reader, which
+        // is also what keeps every reported position accountable for it. Every
+        // case below is still checked in both spellings — plain, and with a
+        // tag that used to route the identical block through a separate
+        // fallback — so the one-reader consolidation stays visible here.
         for tag in ["", "!!int "] {
             let marked = format!("---\n\u{feff}version: {tag}1\nx: 2\n---\n");
             let plain = format!("---\nversion: {tag}1\nx: 2\n---\n");
@@ -3452,13 +3450,11 @@ mod tests {
             Some(FrontmatterAnchor { line: 3, column: 1 }),
         );
 
-        // The scan that counts the block's documents reads the same stripped
-        // body as the parsers do, so it agrees with them about where the block
-        // begins. A block whose only content was the mark is the empty one it
-        // looks like, and it is refused for holding no mapping rather than for
-        // a document boundary its author never wrote. A `...` the mark used to
-        // hide is likewise read the same by scan and parser, so whether it
-        // opens a second document is decided once and not per reader.
+        // Document counting reads the same stripped body the tree is built
+        // from. A block whose only content was the mark is the empty one it
+        // looks like, and it is refused for holding no mapping rather than
+        // for a document boundary its author never wrote; a `...` the mark
+        // used to hide still ends only the first document.
         let empty = parse_markdown("---\n\u{feff}\n---\n", MarkdownOptions::default());
         let DocumentFrontmatter::Invalid { message, .. } = empty.frontmatter else {
             panic!("a block holding only a mark holds no mapping: {empty:?}")
@@ -3667,10 +3663,10 @@ mod tests {
                 "1.23456789012345678901234567891e5",
             ),
         ] {
-            // The tagged sibling is what routes the block through this builder
-            // at all; marked-yaml would take a block without it.
+            // The tagged sibling once routed the block through this builder
+            // alone; it stays so the tagged spelling keeps its coverage.
             let source = format!("first: {first}\nsecond: {second}\ntagged: !!str x\n");
-            let mapping = exact_frontmatter_mapping(&source, NO_MARK)
+            let (mapping, _) = exact_frontmatter_mapping(&source, NO_MARK)
                 .unwrap_or_else(|error| panic!("{source:?}: {error}"));
             assert_eq!(mapping["first"].to_string(), first);
             assert_eq!(mapping["second"].to_string(), second);
@@ -3897,29 +3893,22 @@ mod tests {
     /// The invariants above bind only the anchors that are there, so recording
     /// none at all would satisfy every one of them. This is the floor under
     /// them. An entry is required to hold a position when its spelling must
-    /// have had a character for marked-yaml to mark: a member whose key is not
+    /// have had a character for the parser to mark: a member whose key is not
     /// all line breaks, and an element whose value cannot have come from a
     /// textless spelling. A null element is exempt, since `-` and `null` yield
     /// the same value, and so is an all-break string, since `- >-` and `- "\n"`
-    /// do.
+    /// do — under the narrowed rule several of those exempt spellings do keep
+    /// an anchor, which the floor permits without requiring.
     ///
-    /// Positions come all together or not at all: a document that marked-yaml
-    /// declines to parse falls back to a conversion that keeps no markers, and
-    /// §6.2 anchors its every entry to the block. A block with no position at
-    /// all is therefore required to have none, and the yield report is what
-    /// keeps that exemption from swallowing the floor — it counts the entries
-    /// required across a run, which an implementation that dropped every anchor
-    /// would drive to zero.
-    ///
-    /// The count returned is how many entries this document required.
+    /// The count returned is how many entries this document required, and the
+    /// yield report is what keeps the exemptions from swallowing the floor: it
+    /// counts the entries required across a run, which an implementation that
+    /// dropped every anchor would drive to zero.
     fn assert_written_entries_keep_anchors(
         source: &str,
         value: &serde_json::Map<String, serde_json::Value>,
         anchors: &FrontmatterAnchors,
     ) -> usize {
-        if anchors.0.is_empty() {
-            return 0;
-        }
         assert_written_members_keep_anchors(source, value, &mut String::new(), anchors)
     }
 
@@ -4001,19 +3990,19 @@ mod tests {
 
     /// The element spellings a generated block sequence draws from.
     ///
-    /// The first seven are textless in one form or another and are the class
-    /// that borrows a later entry's marker; the rest are written and must keep
+    /// The first seven are textless in one form or another — the class the
+    /// anchor floor exempts, of which only the empty block scalars actually
+    /// borrow a later entry's marker now; the rest are written and must keep
     /// a position of their own, `- " "` among them, since the rule turns on
     /// line breaks alone and a space is a character like any other. A spelling
     /// may span lines, so it carries its own continuation, indented past the
     /// `-` that opens it.
     ///
     /// The mappings under a quoted empty key are here because the element they
-    /// open is placed by a rule of its own — [`marked_node_start`] prefers the
-    /// first key to the mapping's own span start — and a corpus that cannot
-    /// spell that shape cannot witness the rule at all. Both syntaxes are drawn:
-    /// a block mapping is reported from the `:` after the key, a flow mapping
-    /// from its `{`, so only the block form leans on the preference.
+    /// open anchors at that quote — the mapping-start marker sits on the first
+    /// key's first character — and a corpus that cannot spell the shape cannot
+    /// witness it at all. Both syntaxes are drawn: the block form starts at
+    /// the quote, the flow form at its `{`.
     const ARBITRARY_ELEMENTS: &[&str] = &[
         "-",
         "- \"\"",
@@ -4042,7 +4031,7 @@ mod tests {
     const ARBITRARY_TEXTLESS_ELEMENTS: usize = 7;
 
     /// The suffix of [`ARBITRARY_ELEMENTS`] that are mappings under a quoted
-    /// empty key, the shape [`marked_node_start`]'s first-key preference places.
+    /// empty key, the shape anchored at the key's own opening quote.
     const ARBITRARY_EMPTY_KEY_ELEMENTS: usize = 4;
 
     /// Whether a document holds one of these spellings as a whole entry.
