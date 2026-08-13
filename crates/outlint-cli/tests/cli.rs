@@ -1399,6 +1399,39 @@ fn human_output_escapes_untrusted_control_characters() {
 }
 
 #[test]
+fn human_output_prints_message_quotes_verbatim() {
+    // jsonschema's messages quote the property they talk about; the human
+    // renderer must print those quotes as-is (`"title" is a required
+    // property`), not as the JSON-escaped `\"title\"`. JSON-style escaping
+    // belongs only to `--format json`.
+    let directory = TempDir::new("human-quotes");
+    directory.write(
+        "schema.yml",
+        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+    );
+    directory.write(
+        "frontmatter.schema.json",
+        r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["title"]}"#,
+    );
+    directory.write("doc.md", "---\nstatus: draft\n---\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--color",
+            "never",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).contains("\"title\" is a required property"));
+    assert!(!stdout(&output).contains("\\\""));
+}
+
+#[test]
 fn option_delimiter_makes_help_spellings_into_paths() {
     let directory = TempDir::new("delimiter");
     directory.write("schema.yml", VALID_SCHEMA);

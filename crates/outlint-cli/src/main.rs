@@ -936,7 +936,7 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
     }
     if let Some(location) = &diagnostic.schema_location {
         output.push_str("; schema_location=\"");
-        output.push_str(&escape_human(&location.path));
+        output.push_str(&escape_human_quoted(&location.path));
         output.push_str(&format!("\":{}:{}", location.line, location.column));
     }
     if !diagnostic.involved_headers.is_empty() {
@@ -972,7 +972,7 @@ fn human_target(target: &RenderedTarget) -> String {
         RenderedTarget::MissingHeader { parent, matcher } => format!(
             "missing_header(parent=\"{}\",matcher=\"{}\")",
             human_header_path(parent),
-            escape_human(matcher)
+            escape_human_quoted(matcher)
         ),
         RenderedTarget::Document => "document".to_owned(),
         RenderedTarget::Frontmatter {
@@ -984,7 +984,7 @@ fn human_target(target: &RenderedTarget) -> String {
                 arguments.push(format!("lines={}:{}", range.start_line, range.end_line));
             }
             if let Some(pointer) = pointer {
-                arguments.push(format!("pointer=\"{}\"", escape_human(pointer)));
+                arguments.push(format!("pointer=\"{}\"", escape_human_quoted(pointer)));
             }
             if arguments.is_empty() {
                 "frontmatter".to_owned()
@@ -995,7 +995,39 @@ fn human_target(target: &RenderedTarget) -> String {
     }
 }
 
+/// Escapes untrusted text for a free-text position in human output.
+///
+/// The human renderer's escaping policy is: control characters are escaped so
+/// document- or schema-controlled text can never drive the terminal, and
+/// nothing else is — quotes, backslashes, and every other printable character
+/// appear verbatim. A message such as `"title" is a required property` prints
+/// with its quotes intact; JSON-style `\"` belongs only to `--format json`,
+/// where serde does the quoting. Text embedded inside a quote-delimited field
+/// goes through [`escape_human_quoted`] instead.
 fn escape_human(value: &str) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{1b}' => escaped.push_str("\\x1b"),
+            character if character.is_control() => {
+                escaped.push_str(&format!("\\u{{{:x}}}", u32::from(character)));
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+/// Escapes untrusted text destined for the inside of a `"…"`-delimited field
+/// (header paths, matchers, pointers, string scalars, schema locations).
+///
+/// On top of [`escape_human`]'s control-character policy, the two characters
+/// that would break or forge the delimiters — `"` and `\` — are escaped, so a
+/// quoted field always ends exactly where its closing quote says it does.
+fn escape_human_quoted(value: &str) -> String {
     let mut escaped = String::new();
     for character in value.chars() {
         match character {
@@ -1014,9 +1046,11 @@ fn escape_human(value: &str) -> String {
     escaped
 }
 
+/// Header paths appear only inside `"…"` delimiters in the human output, so
+/// the segments take the quoted escaping.
 fn human_header_path(path: &[String]) -> String {
     path.iter()
-        .map(|part| escape_human(part))
+        .map(|part| escape_human_quoted(part))
         .collect::<Vec<_>>()
         .join(" > ")
 }
@@ -1086,9 +1120,9 @@ fn human_reference(reference: &RenderedReference) -> String {
 
 fn human_matcher(matcher: &RenderedMatcher) -> String {
     match matcher {
-        RenderedMatcher::Exact(value) => format!("exact:\"{}\"", escape_human(value)),
-        RenderedMatcher::Glob(value) => format!("glob:\"{}\"", escape_human(value)),
-        RenderedMatcher::Regex(value) => format!("regex:\"{}\"", escape_human(value)),
+        RenderedMatcher::Exact(value) => format!("exact:\"{}\"", escape_human_quoted(value)),
+        RenderedMatcher::Glob(value) => format!("glob:\"{}\"", escape_human_quoted(value)),
+        RenderedMatcher::Regex(value) => format!("regex:\"{}\"", escape_human_quoted(value)),
         RenderedMatcher::Any => "any".to_owned(),
     }
 }
@@ -1098,7 +1132,7 @@ fn human_scalar(scalar: &RenderedScalar) -> String {
         RenderedScalar::Null => "null".to_owned(),
         RenderedScalar::Boolean(value) => value.to_string(),
         RenderedScalar::Integer(value) | RenderedScalar::Float(value) => escape_human(value),
-        RenderedScalar::String(value) => format!("\"{}\"", escape_human(value)),
+        RenderedScalar::String(value) => format!("\"{}\"", escape_human_quoted(value)),
     }
 }
 
@@ -1293,7 +1327,10 @@ fn scalar_json(scalar: &RenderedScalar) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostic_json, line_column, parse_check_args, ParseOutcome, RenderedDiagnostic};
+    use super::{
+        diagnostic_json, escape_human, escape_human_quoted, line_column, parse_check_args,
+        ParseOutcome, RenderedDiagnostic,
+    };
     use crate::schema_loading::{decode_utf8, file_uri_path};
     use std::path::Path;
 
@@ -1347,6 +1384,22 @@ mod tests {
         let json = diagnostic_json(&diagnostic);
         assert_eq!(json["location"]["line"].as_u64(), Some(line));
         assert_eq!(json["location"]["column"].as_u64(), Some(line));
+    }
+
+    #[test]
+    fn human_escaping_neutralizes_control_characters_and_nothing_else() {
+        // Free text keeps quotes and backslashes verbatim; only control
+        // characters are rewritten.
+        assert_eq!(
+            escape_human("\"title\" is a C:\\ property\u{1b}\n"),
+            "\"title\" is a C:\\ property\\x1b\\n"
+        );
+        // Inside a quote-delimited field the delimiter characters are escaped
+        // on top of the same control-character policy.
+        assert_eq!(
+            escape_human_quoted("say \"hi\" \\ now\t"),
+            "say \\\"hi\\\" \\\\ now\\t"
+        );
     }
 
     #[test]
