@@ -54,7 +54,49 @@
       "id": "missing-section",
       "target": {
         "kind": "missing_header",
-        "parent": [],
+        "parent": [
+          "Project"
+        ],
+        "matcher": "Item"
+      }
+    }
+  ],
+  "attributed.md": [
+    {
+      "id": "not-allowed",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Wrong"
+        ]
+      }
+    },
+    {
+      "id": "too-many-sections",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Project"
+        ]
+      }
+    },
+    {
+      "id": "missing-section",
+      "target": {
+        "kind": "missing_header",
+        "parent": [
+          "Wrong"
+        ],
+        "matcher": "Item"
+      }
+    },
+    {
+      "id": "too-few-sections",
+      "target": {
+        "kind": "missing_header",
+        "parent": [
+          "Project"
+        ],
         "matcher": "Item"
       }
     }

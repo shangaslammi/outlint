@@ -1,7 +1,5 @@
-# Alpha
+# Part
 
 ## Intro
-
-# Beta
 
 ## Body

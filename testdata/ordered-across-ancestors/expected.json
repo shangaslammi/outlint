@@ -1,35 +1,15 @@
 {
+  "in-order.md": [],
   "inverted.md": [
     {
-      "id": "too-many-sections",
-      "target": {
-        "kind": "header",
-        "path": [
-          "Beta"
-        ]
-      }
+      "id": "ordered",
+      "target": { "kind": "document" }
     }
   ],
-  "straddle.md": [
+  "across.md": [
     {
       "id": "too-many-sections",
-      "target": {
-        "kind": "header",
-        "path": [
-          "Beta"
-        ]
-      }
-    }
-  ],
-  "in-order.md": [
-    {
-      "id": "too-many-sections",
-      "target": {
-        "kind": "header",
-        "path": [
-          "Beta"
-        ]
-      }
+      "target": { "kind": "header", "path": ["Beta"] }
     }
   ]
 }
