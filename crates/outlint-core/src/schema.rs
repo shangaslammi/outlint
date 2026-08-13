@@ -15,27 +15,75 @@ use serde_json::Value as JsonValue;
 pub struct Schema {
     /// The schema language version used by this document.
     pub version: SchemaVersion,
-    /// Matcher for the document's `h1`, the header above the root scope.
-    pub title: Option<Matcher>,
     /// Document parsing and matching options, with defaults already applied.
     pub options: Options,
     /// The normalized frontmatter presence and value-validation policy.
     pub frontmatter: FrontmatterPolicy,
-    /// Rules for the root scope's `h2` headers, in first-match order.
-    pub sections: Vec<SectionRule>,
-    /// Presence and ordering constraints attached to the root scope.
+    /// Rules for the document's `h1` headers, in first-match order.
+    ///
+    /// This is the canonical form of the schema's top level. The
+    /// `title:` + `sections:` sugar desugars into a single synthesized rule
+    /// here — its matcher is the title matcher (or any-text when no title is
+    /// declared), its cardinality is exactly one, and its child rules are the
+    /// top-level `sections` list. [`Schema::outline_provenance`] records which
+    /// spelling produced the list; public [`ScopePath`]s keep addressing what
+    /// the source spelled, so for sugar schemas the empty scope names the
+    /// synthesized rule's child scope rather than this list.
+    ///
+    /// [`ScopePath`]: crate::ScopePath
+    pub outline: Vec<SectionRule>,
+    /// Presence and ordering constraints attached to the outline (`h1`) scope.
+    ///
+    /// Only the general `outline:` form can declare these. A sugar schema's
+    /// top-level constraints attach to the synthesized rule's child scope
+    /// (its `constraints` field) — the scope the `sections` list describes —
+    /// so this list is empty for every sugar schema.
     pub constraints: Vec<Constraint>,
     /// How the source document declared its `h1` level.
     pub outline_provenance: OutlineProvenance,
 }
 
+impl Schema {
+    /// Whether the h1 level was declared through sugar rather than `outline:`.
+    ///
+    /// Sugar schemas keep their pre-`outline` public addressing: the empty
+    /// [`ScopePath`] and the `$.` reference anchor both name the synthesized
+    /// rule's child scope (the `sections` list), and the synthesized `h1` rule
+    /// itself is addressed as [`SchemaNode::Title`] rather than as a rule.
+    ///
+    /// [`ScopePath`]: crate::ScopePath
+    /// [`SchemaNode::Title`]: crate::SchemaNode::Title
+    pub(crate) fn is_sugar(&self) -> bool {
+        !matches!(self.outline_provenance, OutlineProvenance::Outline)
+    }
+
+    /// The rules the empty public [`ScopePath`] (and the `$.` anchor) names.
+    ///
+    /// For the general form this is [`Schema::outline`]; for sugar it is the
+    /// synthesized rule's child scope, which is what the source's `sections`
+    /// list spelled. Rule references and scope walks resolve from here so
+    /// that a sugar schema's references keep meaning what they always meant.
+    ///
+    /// [`ScopePath`]: crate::ScopePath
+    pub(crate) fn addressed_root_rules(&self) -> &[SectionRule] {
+        if self.is_sugar() {
+            self.outline
+                .first()
+                .map_or(&[], |rule| rule.sections.as_slice())
+        } else {
+            &self.outline
+        }
+    }
+}
+
 /// The surface form a schema used to declare its `h1` level.
 ///
-/// The loader normalizes every form into [`Schema::title`] plus
-/// [`Schema::sections`], which is all the current validator reads. The
-/// provenance records which spelling produced that pair, so the validator can
-/// later keep `missing-title` anchored at [`SchemaNode::Title`] for the sugar
-/// forms while giving `outline:` and `title: null` their own semantics.
+/// The loader normalizes every form into [`Schema::outline`], the canonical
+/// `h1`-rule list. The provenance records which spelling produced it: the
+/// validator keeps `missing-title` and the wrong-title diagnostics anchored at
+/// [`SchemaNode::Title`] for the sugar forms, preserves their lax handling of
+/// documents without an `h1`, and gives `outline:` and `title: null` their own
+/// semantics.
 ///
 /// [`SchemaNode::Title`]: crate::SchemaNode::Title
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,15 +91,17 @@ pub enum OutlineProvenance {
     /// `title: <matcher>` with `sections:` — sugar for a single required
     /// `h1` rule whose child rules are the top-level `sections` list.
     Title,
-    /// `sections:` without `title:` — under the adopted strict reading this
-    /// implies `title: "*"`, but the current validator's title-absent
-    /// verdicts are preserved until the validator consumes the provenance.
+    /// `sections:` without `title:` — desugars like [`Self::Title`] with an
+    /// any-text matcher. Under the adopted strict reading this implies
+    /// `title: "*"`; the current validator still accepts a document with no
+    /// `h1` until that reading is enforced.
     BareSections,
-    /// `title: null` — the document is declared to have no `h1`. The
-    /// enforcing semantics land with the validator swap; until then the
-    /// current title-absent behavior applies.
+    /// `title: null` — the document is declared to have no `h1`. Desugars to
+    /// a denied any-text `h1` rule: a present `h1` is `not-allowed`, and the
+    /// `sections` list describes the document's top-level `h2` headers.
     NoTitle,
-    /// The general `outline:` form, normalized into `title` + `sections`.
+    /// The general `outline:` form: [`Schema::outline`] is exactly what the
+    /// source spelled.
     Outline,
 }
 

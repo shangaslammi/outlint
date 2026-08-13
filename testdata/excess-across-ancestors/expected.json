@@ -2,21 +2,33 @@
   "spread.md": [
     {
       "id": "too-many-sections",
-      "target": { "kind": "header", "path": ["Beta", "Note two"] }
+      "target": {
+        "kind": "header",
+        "path": [
+          "Beta",
+          "Note three"
+        ]
+      }
     },
     {
       "id": "too-many-sections",
-      "target": { "kind": "header", "path": ["Gamma", "Step three"] }
-    },
-    {
-      "id": "too-many-sections",
-      "target": { "kind": "header", "path": ["Beta"] }
+      "target": {
+        "kind": "header",
+        "path": [
+          "Beta"
+        ]
+      }
     }
   ],
   "within.md": [
     {
       "id": "too-many-sections",
-      "target": { "kind": "header", "path": ["Beta"] }
+      "target": {
+        "kind": "header",
+        "path": [
+          "Beta"
+        ]
+      }
     }
   ]
 }

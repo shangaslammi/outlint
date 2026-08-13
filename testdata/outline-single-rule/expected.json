@@ -2,20 +2,43 @@
   "pass.md": [],
   "missing-title.md": [
     {
-      "id": "missing-title",
-      "target": { "kind": "missing_header", "parent": [], "matcher": "Guide *" }
+      "id": "missing-section",
+      "target": {
+        "kind": "missing_header",
+        "parent": [],
+        "matcher": "Guide *"
+      }
+    },
+    {
+      "id": "skipped-level",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Overview"
+        ]
+      }
     }
   ],
   "wrong-title.md": [
     {
-      "id": "not-allowed",
-      "target": { "kind": "header", "path": ["Handbook"] }
+      "id": "missing-section",
+      "target": {
+        "kind": "missing_header",
+        "parent": [],
+        "matcher": "Guide *"
+      }
     }
   ],
   "missing-section.md": [
     {
       "id": "missing-section",
-      "target": { "kind": "missing_header", "parent": [], "matcher": "Overview" }
+      "target": {
+        "kind": "missing_header",
+        "parent": [
+          "Guide to Outlint"
+        ],
+        "matcher": "Overview"
+      }
     }
   ]
 }

@@ -82,8 +82,15 @@ ordered-across-ancestors rule 1 0:58..85 "id: body\n    match: \"Body\"\n"
 ordered-occurrences constraint 0 0:88..104 "ordered: [a, b]\n"
 ordered-occurrences rule 0 0:25..48 "id: a\n    match: \"A\"\n  "
 ordered-occurrences rule 1 0:50..71 "id: b\n    match: \"B\"\n"
-outline-single-rule rule 0 0:82..123 "match: \"Overview\"\n        required: true\n"
-outline-single-rule title 0:31..40 "\"Guide *\""
+outline-multi-part rule 0 0:286..384 "match: \"Part *\"\n    repeat: \"1..n\"\n    sections:"...
+outline-multi-part rule 0.0 0:343..384 "match: \"Overview\"\n        repeat: \"0..1\"\n"
+outline-parts-ordered constraint 0 0:580..607 "ordered: [guide, appendix]\n"
+outline-parts-ordered rule 0 0:352..465 "id: guide\n    match: \"Guide\"\n    required: true\n"...
+outline-parts-ordered rule 0.0 0:422..465 "match: \"Overview\"\n        required: true\n  "
+outline-parts-ordered rule 1 0:467..563 "id: appendix\n    match: \"Appendix\"\n    repeat: \""...
+outline-parts-ordered rule 1.0 0:543..563 "match: \"References\"\n"
+outline-single-rule rule 0 0:24..123 "match: \"Guide *\"\n    required: true\n    sections"...
+outline-single-rule rule 0.0 0:82..123 "match: \"Overview\"\n        required: true\n"
 single-spine rule 0 0:451..488 "match: \"Overview\"\n    repeat: \"0..n\"\n"
 strict-and-deny rule 0 0:25..121 "match: \"Overview\"\n    required: false\n    strict"...
 strict-and-deny rule 0.0 0:102..121 "match: \"Allowed\"\n  "

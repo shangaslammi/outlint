@@ -3,27 +3,60 @@
   "fail.md": [
     {
       "id": "not-allowed",
-      "target": { "kind": "header", "path": ["Wrong"] }
+      "target": {
+        "kind": "header",
+        "path": [
+          "Wrong"
+        ]
+      }
     },
     {
       "id": "skipped-level",
-      "target": { "kind": "header", "path": ["Wrong", "Item", "Deep"] }
+      "target": {
+        "kind": "header",
+        "path": [
+          "Wrong",
+          "Item",
+          "Deep"
+        ]
+      }
     },
     {
       "id": "too-few-sections",
-      "target": { "kind": "missing_header", "parent": [], "matcher": "Item" }
+      "target": {
+        "kind": "missing_header",
+        "parent": [],
+        "matcher": "Item"
+      }
     }
   ],
   "missing.md": [
     {
       "id": "missing-title",
-      "target": { "kind": "missing_header", "parent": [], "matcher": "Project" }
+      "target": {
+        "kind": "missing_header",
+        "parent": [],
+        "matcher": "Project"
+      }
     }
   ],
   "multiple.md": [
     {
       "id": "too-many-sections",
-      "target": { "kind": "header", "path": ["Project"] }
+      "target": {
+        "kind": "header",
+        "path": [
+          "Project"
+        ]
+      }
+    },
+    {
+      "id": "missing-section",
+      "target": {
+        "kind": "missing_header",
+        "parent": [],
+        "matcher": "Item"
+      }
     }
   ]
 }

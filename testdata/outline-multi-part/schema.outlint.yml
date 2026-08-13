@@ -1,0 +1,11 @@
+version: 1
+# The general form's new capability: any number of h1 headers, each `Part`
+# owning its own scope. Two `Overview` headers under two different parts
+# conform; two under one part exceed that part's own budget, reported with the
+# full path that names which part.
+outline:
+  - match: "Part *"
+    repeat: "1..n"
+    sections:
+      - match: "Overview"
+        repeat: "0..1"

@@ -1,0 +1,19 @@
+{
+  "two-parts.md": [],
+  "crowded-part.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Part One", "Overview"] }
+    }
+  ],
+  "no-parts.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Part *" }
+    },
+    {
+      "id": "skipped-level",
+      "target": { "kind": "header", "path": ["Overview"] }
+    }
+  ]
+}
