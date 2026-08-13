@@ -10,3 +10,8 @@ authors = ["Sami Hangaslammi <sami@infer.fi>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/shangaslammi/outlint"
 homepage = "https://github.com/shangaslammi/outlint"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
