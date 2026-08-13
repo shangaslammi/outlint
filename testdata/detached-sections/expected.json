@@ -2,22 +2,41 @@
   "pass.md": [],
   "pre-spine.md": [
     {
-      "id": "detached-section",
-      "target": { "kind": "header", "path": ["Overview"] }
+      "id": "skipped-level",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Overview"
+        ]
+      }
     }
   ],
   "pair.md": [
     {
-      "id": "detached-section",
-      "target": { "kind": "header", "path": ["Overview"] }
+      "id": "skipped-level",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Overview"
+        ]
+      }
     },
     {
-      "id": "detached-section",
-      "target": { "kind": "header", "path": ["Summary"] }
+      "id": "skipped-level",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Summary"
+        ]
+      }
     },
     {
       "id": "missing-section",
-      "target": { "kind": "missing_header", "parent": [], "matcher": "Overview" }
+      "target": {
+        "kind": "missing_header",
+        "parent": [],
+        "matcher": "Overview"
+      }
     }
   ]
 }

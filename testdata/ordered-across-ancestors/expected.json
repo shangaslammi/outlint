@@ -1,13 +1,35 @@
 {
   "inverted.md": [
-    { "id": "ordered", "target": { "kind": "document" } },
-    { "id": "too-many-sections", "target": { "kind": "header", "path": ["Beta"] } }
+    {
+      "id": "too-many-sections",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Beta"
+        ]
+      }
+    }
   ],
   "straddle.md": [
-    { "id": "ordered", "target": { "kind": "document" } },
-    { "id": "too-many-sections", "target": { "kind": "header", "path": ["Beta"] } }
+    {
+      "id": "too-many-sections",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Beta"
+        ]
+      }
+    }
   ],
   "in-order.md": [
-    { "id": "too-many-sections", "target": { "kind": "header", "path": ["Beta"] } }
+    {
+      "id": "too-many-sections",
+      "target": {
+        "kind": "header",
+        "path": [
+          "Beta"
+        ]
+      }
+    }
   ]
 }

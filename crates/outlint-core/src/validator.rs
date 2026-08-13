@@ -12,8 +12,8 @@ use crate::{
     ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
     DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef,
     FrontmatterScalar, FrontmatterSchema, HeaderLevel, Heading, HeadingLocation, Matcher,
-    Proposition, RefAnchor, RuleIndex, RuleOutcome, RuleRef, Schema, SchemaNode, ScopePath,
-    Section, SectionRule, TextRange, UpperBound,
+    OutlineProvenance, Proposition, RefAnchor, RuleIndex, RuleOutcome, RuleRef, Schema, SchemaNode,
+    ScopePath, Section, SectionRule, TextRange, UpperBound,
 };
 
 /// A stable identifier from the diagnostic vocabulary in specification §6.
@@ -30,10 +30,8 @@ pub enum DiagnosticId {
     /// Some headings matched a rule, but fewer than its minimum.
     TooFewSections,
     /// More headings matched a rule than its finite maximum, or the document
-    /// holds more than one `h1`.
+    /// holds more than one `h1` under a sugar schema.
     TooManySections,
-    /// A header is not reachable from the document's spine.
-    DetachedSection,
     /// The schema declares a title but the document has none.
     MissingTitle,
     /// Reserved for a required frontmatter block that is absent.
@@ -70,7 +68,6 @@ impl DiagnosticId {
             Self::MissingSection => "missing-section",
             Self::TooFewSections => "too-few-sections",
             Self::TooManySections => "too-many-sections",
-            Self::DetachedSection => "detached-section",
             Self::MissingTitle => "missing-title",
             Self::MissingFrontmatter => "missing-frontmatter",
             Self::ForbiddenFrontmatter => "forbidden-frontmatter",
@@ -263,20 +260,14 @@ pub fn validate(
 }
 
 struct ValidationPlan {
-    title: Option<PreparedMatcher>,
-    sections: Vec<PreparedRule>,
+    outline: Vec<PreparedRule>,
     frontmatter: Option<jsonschema::Validator>,
 }
 
 impl ValidationPlan {
     fn new(schema: &Schema) -> Result<Self, PrepareValidationError> {
         Ok(Self {
-            title: schema
-                .title
-                .as_ref()
-                .map(|matcher| PreparedMatcher::new(matcher, schema.options.match_case))
-                .transpose()?,
-            sections: prepare_rules(&schema.sections, schema.options.match_case)?,
+            outline: prepare_rules(&schema.outline, schema.options.match_case)?,
             frontmatter: frontmatter_schema(&schema.frontmatter)
                 .map(compile_frontmatter_schema)
                 .transpose()?,
@@ -451,58 +442,256 @@ impl<'a> Validator<'a> {
 
     fn run(mut self, plan: &ValidationPlan) -> Vec<Diagnostic> {
         self.validate_frontmatter(plan.frontmatter.as_ref());
-        let spine = Spine::of(&self.document.sections);
-        self.validate_title(&spine.reachable, plan.title.as_ref());
-        self.validate_single_spine(&spine);
+        let document = self.document;
+        let top = top_level_sections(&document.sections);
+        let has_h1 = top
+            .iter()
+            .any(|pathed| pathed.section.heading.level == HeaderLevel::H1);
+        // The document root is a virtual level-0 header enclosing the whole
+        // document: outline rules describe its `h1` children the way nested
+        // rules describe any header's children. Sugar keeps its lax handling
+        // of documents with no `h1` by letting the root stand in at level 1 —
+        // the `sections` scope then binds the document's own top-level `h2`s
+        // — and `title: null` declares that shape outright, whatever the
+        // document contains.
+        let root_level = match self.schema.outline_provenance {
+            OutlineProvenance::Outline => 0,
+            OutlineProvenance::NoTitle => 1,
+            OutlineProvenance::Title | OutlineProvenance::BareSections => u8::from(!has_h1),
+        };
         if !self.schema.options.allow_skipped_levels {
-            // Structural and schema-independent, like the reachability rule
-            // itself: a skipped level inside a detached subtree is still a
-            // skipped level, and reporting it does not enroll the subtree in
-            // any rule.
-            self.validate_skipped_levels(&self.document.sections, None, &HeaderPath::default());
+            // Structural and schema-independent: the walk covers the whole
+            // document, including subtrees the root never admits into any
+            // scope, and reporting a skipped level does not enroll a header
+            // in any rule. A top-level header deeper than the root's child
+            // level skips against the virtual root itself — the shape the
+            // retired `detached-section` diagnostic used to name.
+            self.validate_skipped_levels(&document.sections, root_level, &HeaderPath::default());
         }
-
-        // The root scope is the `h2` children of the document's `h1`, or every
-        // `h2` in the document when there is no `h1`: exactly the reachable
-        // `h2`s. Each one keeps its own ancestor chain, so two same-named root
-        // sections under different ancestors stay distinct. The scope is flat
-        // across `h1`s, which only matters on a document that already breaks
-        // the one-`h1` bound.
-        let root_sections = spine
-            .reachable
-            .into_iter()
-            .filter(|pathed| pathed.section.heading.level == HeaderLevel::H2)
-            .collect::<Vec<_>>();
-        let root_schema_scope = ScopePath(Vec::new());
-        let root_path = HeaderPath::default();
-        let root = self.bind_scope(BindScopeInput {
-            sections: &root_sections,
-            rules: &self.schema.sections,
-            prepared_rules: &plan.sections,
-            strict: false,
-            schema_scope: &root_schema_scope,
-            parent: None,
-            parent_path: &root_path,
-        });
-        let frontmatter = match &self.document.frontmatter {
+        let frontmatter = match &document.frontmatter {
             DocumentFrontmatter::Mapping { value, .. } => Some(value),
             DocumentFrontmatter::Absent | DocumentFrontmatter::Invalid { .. } => None,
         };
+        match self.schema.outline_provenance {
+            OutlineProvenance::Outline => self.validate_outline_root(&top, plan, frontmatter),
+            OutlineProvenance::Title
+            | OutlineProvenance::BareSections
+            | OutlineProvenance::NoTitle => {
+                self.validate_sugar_root(&top, has_h1, plan, frontmatter)
+            }
+        }
+        self.diagnostics
+    }
+
+    /// Binds the general form's outline scope: `h1` rules on the virtual root.
+    ///
+    /// Ordinary scope semantics apply — the outline scope is open unless a
+    /// rule closes its own, an unmatched `h1` is nobody's business, and
+    /// top-level constraints attach here, targeting the document since the
+    /// virtual root has no header to name.
+    fn validate_outline_root(
+        &mut self,
+        top: &[PathedSection<'a>],
+        plan: &ValidationPlan,
+        frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    ) {
+        let schema = self.schema;
+        let admitted = admitted_at_root(top, HeaderLevel::H1, schema.options.allow_skipped_levels);
+        let root_scope = ScopePath(Vec::new());
+        let root_path = HeaderPath::default();
+        let root = self.bind_scope(BindScopeInput {
+            sections: &admitted,
+            rules: &schema.outline,
+            prepared_rules: &plan.outline,
+            strict: false,
+            schema_scope: &root_scope,
+            parent: None,
+            parent_path: &root_path,
+        });
         self.validate_constraints(
             EvalCtx {
                 current: &root,
-                current_rules: &self.schema.sections,
+                current_rules: &schema.outline,
                 root: &root,
-                root_rules: &self.schema.sections,
+                root_rules: &schema.outline,
                 frontmatter,
-                match_case: self.schema.options.match_case,
+                match_case: schema.options.match_case,
             },
-            &self.schema.constraints,
-            &root_schema_scope,
+            &schema.constraints,
+            &root_scope,
             None,
             &root_path,
         );
-        self.diagnostics
+    }
+
+    /// Binds a sugar schema's synthesized `h1` rule with its legacy voice.
+    ///
+    /// The sugar desugars to one required `h1` rule, but its diagnostics
+    /// predate the outline form and keep their spellings: the rule's absence
+    /// is `missing-title` anchored at [`SchemaNode::Title`], a mismatched
+    /// `h1` is `not-allowed` there rather than an ignored header, a surplus
+    /// `h1` is one `too-many-sections` on the second, and the `sections`
+    /// scope keeps reporting as the legacy root — cardinality misses name no
+    /// parent header and constraints target the document. Each `h1` still
+    /// binds its own child scope, so two same-named sections under different
+    /// `h1`s are budgeted per parent exactly as in every nested scope.
+    fn validate_sugar_root(
+        &mut self,
+        top: &[PathedSection<'a>],
+        has_h1: bool,
+        plan: &ValidationPlan,
+        frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    ) {
+        let schema = self.schema;
+        let provenance = schema.outline_provenance;
+        let (Some(rule), Some(prepared)) = (schema.outline.first(), plan.outline.first()) else {
+            return;
+        };
+
+        if provenance == OutlineProvenance::NoTitle || !has_h1 {
+            // The headless scope: the virtual root stands in at level 1 and
+            // the `sections` rules bind the document's top-level `h2`s.
+            if provenance == OutlineProvenance::Title {
+                self.emit(
+                    Diagnostic {
+                        id: DiagnosticId::MissingTitle,
+                        // The title sits above the root scope, so it has no
+                        // parent.
+                        target: DiagnosticTarget::MissingHeader {
+                            parent: HeaderPath::default(),
+                            matcher: matcher_label(&rule.matcher),
+                        },
+                        location: root_location(),
+                        schema_node: Some(SchemaNode::Title),
+                        involved_headers: Vec::new(),
+                        references: Vec::new(),
+                        message: "the document has no required title".into(),
+                    },
+                    None,
+                    false,
+                );
+            }
+            if provenance == OutlineProvenance::NoTitle {
+                // `title: null` desugars to a denied `h1` rule: a present
+                // `h1` is rejected wholesale, its subtree validated no
+                // further, like any header a deny rule matches.
+                for pathed in top {
+                    if pathed.section.heading.level == HeaderLevel::H1 {
+                        self.emit_present(
+                            DiagnosticId::NotAllowed,
+                            pathed.path.clone(),
+                            &pathed.section.heading,
+                            Some(SchemaNode::Title),
+                            "the schema declares a document with no title",
+                        );
+                    }
+                }
+            }
+            let admitted =
+                admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
+            self.bind_sugar_sections(&admitted, rule, prepared, frontmatter);
+            return;
+        }
+
+        // The titled scope: every `h1` occupies the synthesized rule, a
+        // mismatch reporting as a wrong title rather than dropping the header
+        // — its children are still the document's real structure and are
+        // still validated. Deeper top-level headers join only when skipped
+        // levels are allowed, and then under ordinary matching: one that
+        // matches the title matcher counts against the one-title bound.
+        let admitted = admitted_at_root(top, HeaderLevel::H1, schema.options.allow_skipped_levels);
+        let mut occurrences = Vec::new();
+        for pathed in &admitted {
+            if pathed.section.heading.level == HeaderLevel::H1 {
+                if provenance == OutlineProvenance::Title
+                    && !prepared.matcher.matches(&pathed.section.heading.text)
+                {
+                    self.emit_present(
+                        DiagnosticId::NotAllowed,
+                        pathed.path.clone(),
+                        &pathed.section.heading,
+                        Some(SchemaNode::Title),
+                        "the title does not match the schema title matcher",
+                    );
+                }
+                occurrences.push(pathed);
+            } else if prepared.matcher.matches(&pathed.section.heading.text) {
+                occurrences.push(pathed);
+            }
+        }
+        // One diagnostic per document, anchored on the second occurrence in
+        // document order: that is where the bound breaks, and further surplus
+        // says nothing new. The `h1` is the title only when the schema
+        // declares one, and only then is there a schema node to blame.
+        if let Some(excess) = occurrences.get(1) {
+            let (schema_node, message) = if provenance == OutlineProvenance::Title {
+                (
+                    Some(SchemaNode::Title),
+                    "the document has more than one title",
+                )
+            } else {
+                (None, "the document has more than one h1 header")
+            };
+            self.emit(
+                Diagnostic {
+                    id: DiagnosticId::TooManySections,
+                    target: DiagnosticTarget::Header(excess.path.clone()),
+                    location: heading_location(&excess.section.heading.location),
+                    schema_node,
+                    involved_headers: Vec::new(),
+                    references: Vec::new(),
+                    message: message.to_owned(),
+                },
+                Some(&excess.section.heading),
+                true,
+            );
+        }
+        for occurrence in &occurrences {
+            let children = child_sections(occurrence.section, &occurrence.path);
+            self.bind_sugar_sections(&children, rule, prepared, frontmatter);
+        }
+    }
+
+    /// Binds one instance of a sugar schema's `sections` scope.
+    ///
+    /// The scope reports as the legacy root: no parent header for cardinality
+    /// misses, the document as constraint target, and the empty schema scope
+    /// — which is the public address of the `sections` list. Section paths
+    /// still carry their real ancestor chain, enclosing `h1` included.
+    fn bind_sugar_sections(
+        &mut self,
+        sections: &[PathedSection<'a>],
+        rule: &'a SectionRule,
+        prepared: &PreparedRule,
+        frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    ) {
+        let scope = ScopePath(Vec::new());
+        let path = HeaderPath::default();
+        let bound = self.bind_scope(BindScopeInput {
+            sections,
+            rules: &rule.sections,
+            prepared_rules: &prepared.sections,
+            strict: rule.strict,
+            schema_scope: &scope,
+            parent: None,
+            parent_path: &path,
+        });
+        self.validate_constraints(
+            EvalCtx {
+                current: &bound,
+                current_rules: &rule.sections,
+                // `$.` refs in a sugar schema resolve against the `sections`
+                // scope, as they always have — here, this instance of it.
+                root: &bound,
+                root_rules: &rule.sections,
+                frontmatter,
+                match_case: self.schema.options.match_case,
+            },
+            &rule.constraints,
+            &scope,
+            None,
+            &path,
+        );
     }
 
     fn validate_frontmatter(&mut self, validator: Option<&jsonschema::Validator>) {
@@ -631,149 +820,25 @@ impl<'a> Validator<'a> {
         );
     }
 
-    fn validate_title(
-        &mut self,
-        sections: &[PathedSection<'_>],
-        prepared: Option<&PreparedMatcher>,
-    ) {
-        let Some(matcher) = &self.schema.title else {
-            return;
-        };
-        let Some(prepared) = prepared else {
-            return;
-        };
-        // The title is the document's `h1`, always: `sections` describes `h2`.
-        let titles = sections
-            .iter()
-            .filter(|pathed| pathed.section.heading.level == HeaderLevel::H1)
-            .collect::<Vec<_>>();
-        if titles.is_empty() {
-            self.emit(
-                Diagnostic {
-                    id: DiagnosticId::MissingTitle,
-                    // The title sits above the root scope, so it has no parent.
-                    target: DiagnosticTarget::MissingHeader {
-                        parent: HeaderPath::default(),
-                        matcher: matcher_label(matcher),
-                    },
-                    location: root_location(),
-                    schema_node: Some(SchemaNode::Title),
-                    involved_headers: Vec::new(),
-                    references: Vec::new(),
-                    message: "the document has no required title".into(),
-                },
-                None,
-                false,
-            );
-            return;
-        }
-        for title in &titles {
-            if !prepared.matches(&title.section.heading.text) {
-                self.emit(
-                    Diagnostic {
-                        id: DiagnosticId::NotAllowed,
-                        // The offending title is present; only its text is wrong.
-                        target: DiagnosticTarget::Header(title.path.clone()),
-                        location: heading_location(&title.section.heading.location),
-                        schema_node: Some(SchemaNode::Title),
-                        involved_headers: Vec::new(),
-                        references: Vec::new(),
-                        message: "the title does not match the schema title matcher".into(),
-                    },
-                    Some(&title.section.heading),
-                    true,
-                );
-            }
-        }
-        // A surplus title is a surplus `h1`, so `validate_single_spine`
-        // reports it for every schema, titled or not.
-    }
-
-    /// Enforces the single top-level spine: at most one `h1`, and every header
-    /// reachable from it.
+    /// Reports every heading more than one level below its parent.
     ///
-    /// A schema describes the totality of the document, so no header is
-    /// implicitly outside it. The two diagnostics together say so, and neither
-    /// implies the other:
-    ///
-    /// - `# A` / `# B` / `## X` leaves every header reachable, yet forks the
-    ///   spine in two.
-    /// - `## X` / `# A` / `## Y` has one `h1`, yet `X` hangs outside it.
-    ///
-    /// A document with no `h1` at all conforms; its spine is its own `h2`s.
-    fn validate_single_spine(&mut self, spine: &Spine<'_>) {
-        let mut h1s = spine
-            .reachable
-            .iter()
-            .filter(|pathed| pathed.section.heading.level == HeaderLevel::H1)
-            .skip(1);
-        // One diagnostic per document, anchored on the second `h1` in document
-        // order: that is where the spine forks, and further surplus `h1`s name
-        // the same fork and say nothing new.
-        if let Some(excess) = h1s.next() {
-            // The `h1` is the title when the schema declares one, and only then
-            // is there a schema node to blame; the spine bound is structural.
-            let (schema_node, message) = if self.schema.title.is_some() {
-                (
-                    Some(SchemaNode::Title),
-                    "the document has more than one title",
-                )
-            } else {
-                (None, "the document has more than one h1 header")
-            };
-            self.emit(
-                Diagnostic {
-                    id: DiagnosticId::TooManySections,
-                    // Anchored on the surplus header, which is a real header.
-                    target: DiagnosticTarget::Header(excess.path.clone()),
-                    location: heading_location(&excess.section.heading.location),
-                    schema_node,
-                    involved_headers: Vec::new(),
-                    references: Vec::new(),
-                    message: message.to_owned(),
-                },
-                Some(&excess.section.heading),
-                true,
-            );
-        }
-
-        // Reported once per detached subtree *root* rather than once per
-        // detached header: a header below a detached one is misplaced only as
-        // a consequence of its ancestor, and moving that ancestor onto the
-        // spine takes the whole subtree with it. Detached *siblings* are
-        // independent misplacements, each with its own location, its own fix,
-        // and its own inline suppression anchor, so each is reported — unlike
-        // a forked spine, where one fork point explains every surplus `h1`.
-        for section in &spine.detached {
-            self.emit(
-                Diagnostic {
-                    id: DiagnosticId::DetachedSection,
-                    // The detached section is a real header, and its path —
-                    // one segment, no ancestor — is what shows it detached.
-                    target: DiagnosticTarget::Header(section.path.clone()),
-                    location: heading_location(&section.section.heading.location),
-                    // Structural, like a skipped level: nothing in the schema
-                    // asked for this header to sit where it does.
-                    schema_node: None,
-                    involved_headers: Vec::new(),
-                    references: Vec::new(),
-                    message: "the header is not reachable from the document's spine".into(),
-                },
-                Some(&section.section.heading),
-                true,
-            );
-        }
-    }
-
+    /// `parent_level` is the enclosing header's level, or the virtual document
+    /// root's stand-in level for the top of the forest: 0 in general, 1 when a
+    /// sugar or `title: null` schema binds a headless document's `h2`s
+    /// directly. A top-level header deeper than `parent_level + 1` therefore
+    /// skips against the document root itself — the shape the retired
+    /// `detached-section` diagnostic used to name — and, exactly like that
+    /// predecessor, it takes part in no rule unless `allow_skipped_levels`
+    /// admits it into the root's scope.
     fn validate_skipped_levels(
         &mut self,
         sections: &[Section],
-        parent: Option<&Heading>,
+        parent_level: u8,
         parent_path: &HeaderPath,
     ) {
         for section in sections {
             let path = appended_path(parent_path, &section.heading.diagnostic_text);
-            if parent.is_some_and(|parent| section.heading.level as u8 > parent.level as u8 + 1) {
+            if section.heading.level as u8 > parent_level + 1 {
                 self.emit(
                     Diagnostic {
                         id: DiagnosticId::SkippedLevel,
@@ -788,7 +853,7 @@ impl<'a> Validator<'a> {
                     true,
                 );
             }
-            self.validate_skipped_levels(&section.children, Some(&section.heading), &path);
+            self.validate_skipped_levels(&section.children, section.heading.level as u8, &path);
         }
     }
 
@@ -1081,88 +1146,44 @@ struct PathedSection<'d> {
     path: HeaderPath,
 }
 
-/// The document split into what the schema describes and what hangs outside it.
-///
-/// Every header must be reachable from the document's spine. A document has at
-/// most one `h1`; if one exists it is the spine and the root scope is its `h2`
-/// children, otherwise the root scope is the document's own `h2`s.
-///
-/// Reachable is the `h1` and everything below it — the whole subtree, not just
-/// the root scope, so an `h3` sitting directly under the `h1` is reachable even
-/// though it is in no scope. When there is no `h1`, reachable is the `h2`s and
-/// everything below them. Anything else is detached and takes part in no rule
-/// matching, no cardinality count and no constraint: the schema describes the
-/// totality of the document, so a header hanging outside it is not silently
-/// pooled in.
-#[derive(Debug)]
-struct Spine<'d> {
-    /// Every reachable header, flattened in document order with its complete
-    /// ancestor chain.
-    reachable: Vec<PathedSection<'d>>,
-    /// The root of each detached subtree, in document order. Descendants are
-    /// deliberately absent: they are detached only by consequence.
-    detached: Vec<PathedSection<'d>>,
-}
-
-impl<'d> Spine<'d> {
-    /// Splits a document's top-level section forest along reachability.
-    ///
-    /// A heading nests under the nearest preceding heading of a lower level, so
-    /// the whole question is decided at the top level of the forest. An `h1`
-    /// has no lower level to nest under and is therefore always top-level;
-    /// conversely, every header that follows an `h1` is inside some `h1`'s
-    /// subtree. So when the document has an `h1`, the unreachable headers are
-    /// exactly the top-level ones that are not `h1`s — which are exactly those
-    /// preceding the first `h1`. With no `h1`, the same argument one level
-    /// down leaves the top-level headers below `h2` — those preceding the first
-    /// `h2`, plus any in a document with no `h2` at all.
-    fn of(sections: &'d [Section]) -> Self {
-        let has_h1 = sections
-            .iter()
-            .any(|section| section.heading.level == HeaderLevel::H1);
-        let spine_level = if has_h1 {
-            HeaderLevel::H1
-        } else {
-            HeaderLevel::H2
-        };
-        let mut spine = Self {
-            reachable: Vec::new(),
-            detached: Vec::new(),
-        };
-        for section in sections {
-            if section.heading.level == spine_level {
-                collect_sections(
-                    std::slice::from_ref(section),
-                    &HeaderPath::default(),
-                    &mut spine.reachable,
-                );
-            } else {
-                spine.detached.push(PathedSection {
-                    section,
-                    path: appended_path(&HeaderPath::default(), &section.heading.diagnostic_text),
-                });
-            }
-        }
-        spine
-    }
-}
-
-/// Flattens the section forest in document order, giving every section the full
-/// ancestor chain that names it.
-fn collect_sections<'a>(
-    sections: &'a [Section],
-    parent_path: &HeaderPath,
-    output: &mut Vec<PathedSection<'a>>,
-) {
-    for section in sections {
-        let path = appended_path(parent_path, &section.heading.diagnostic_text);
-        // Pre-order, so the flattened order stays document order.
-        output.push(PathedSection {
+/// The document's top-level section forest — the virtual root's children —
+/// each with the one-segment path that names it.
+fn top_level_sections(sections: &[Section]) -> Vec<PathedSection<'_>> {
+    sections
+        .iter()
+        .map(|section| PathedSection {
             section,
-            path: path.clone(),
-        });
-        collect_sections(&section.children, &path, output);
-    }
+            path: appended_path(&HeaderPath::default(), &section.heading.diagnostic_text),
+        })
+        .collect()
+}
+
+/// The virtual root's bindable children.
+///
+/// `child_level` is the level the root's scope describes: `h1` for the outline
+/// scope, `h2` when a sugar or `title: null` schema binds a headless
+/// document's `sections` scope directly. A deeper top-level header skips
+/// levels against the virtual root; it binds into the root's scope only when
+/// `allow_skipped_levels` says so, and otherwise takes part in nothing — the
+/// preserved half of the retired detached-section semantics, with the
+/// skipped-level walk speaking about it. (Inside a *bound* scope, children
+/// bind whatever their level, as they always have; the virtual root differs
+/// because an unadmitted top-level subtree has no bound ancestor at all.)
+fn admitted_at_root<'d>(
+    top: &[PathedSection<'d>],
+    child_level: HeaderLevel,
+    allow_skipped: bool,
+) -> Vec<PathedSection<'d>> {
+    top.iter()
+        .filter(|pathed| {
+            let level = pathed.section.heading.level;
+            level == child_level || (allow_skipped && level > child_level)
+        })
+        .map(|pathed| PathedSection {
+            section: pathed.section,
+            path: pathed.path.clone(),
+        })
+        .collect()
 }
 
 fn child_sections<'d>(section: &'d Section, path: &HeaderPath) -> Vec<PathedSection<'d>> {
@@ -1649,7 +1670,7 @@ mod tests {
         let mut schema = load_schema("version: 1\nsections: []\n")
             .expect("test schema is valid")
             .schema;
-        schema.title = Some(Matcher::Regex(RegexPattern("(".into())));
+        schema.outline[0].matcher = Matcher::Regex(RegexPattern("(".into()));
         let error = PreparedValidator::new(&schema)
             .err()
             .expect("malformed regex must fail preparation");
@@ -1697,9 +1718,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Same rule, same matcher, two different enclosing headers: the paths
-        // distinguish them only because the enclosing `h1` is kept. Two `h1`
-        // headers also break the single top-level spine, so the shape that
-        // makes the paths differ is itself reported.
+        // distinguish them because the enclosing `h1` is kept, and each `h1`
+        // binds its own `sections` scope. Two `h1` headers also break the
+        // sugar's one-title bound, so the shape that makes the paths differ
+        // is itself reported.
         assert_eq!(
             targets,
             [
@@ -1716,7 +1738,7 @@ mod tests {
         );
     }
 
-    fn spine_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
+    fn surplus_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
         let loaded = load_schema(schema).expect("test schema is valid");
         let document = parse_markdown(markdown, MarkdownOptions::default());
         validate(&loaded.schema, &document)
@@ -1726,13 +1748,13 @@ mod tests {
             .collect()
     }
 
-    fn detached_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
+    fn skipped_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
         let loaded = load_schema(schema).expect("test schema is valid");
         let document = parse_markdown(markdown, MarkdownOptions::default());
         validate(&loaded.schema, &document)
             .expect("schema prepares")
             .into_iter()
-            .filter(|diagnostic| diagnostic.id == DiagnosticId::DetachedSection)
+            .filter(|diagnostic| diagnostic.id == DiagnosticId::SkippedLevel)
             .collect()
     }
 
@@ -1741,14 +1763,15 @@ mod tests {
         let schema = "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n";
 
         // One `h1` above any number of root sections is the intended shape.
-        assert!(spine_diagnostics(schema, "# One\n## Overview\n## Overview\n").is_empty());
-        // No `h1` at all is equally fine: the root scope is the whole document.
-        assert!(spine_diagnostics(schema, "## Overview\n").is_empty());
+        assert!(surplus_diagnostics(schema, "# One\n## Overview\n## Overview\n").is_empty());
+        // No `h1` at all is fine under sugar: the `sections` scope then binds
+        // the document's own top-level `h2`s.
+        assert!(surplus_diagnostics(schema, "## Overview\n").is_empty());
 
-        let two = spine_diagnostics(schema, "# One\n## Overview\n# Two\n## Overview\n");
+        let two = surplus_diagnostics(schema, "# One\n## Overview\n# Two\n## Overview\n");
         assert_eq!(two.len(), 1);
         let diagnostic = two.first().expect("one diagnostic was asserted");
-        // Anchored on the second `h1`, the point at which the spine forks.
+        // Anchored on the second `h1`, where the one-title bound breaks.
         assert_eq!(
             diagnostic.target,
             DiagnosticTarget::Header(HeaderPath(vec!["Two".into()]))
@@ -1758,7 +1781,7 @@ mod tests {
         assert_eq!(diagnostic.schema_node, None);
 
         // Surplus beyond the second header says nothing new.
-        let three = spine_diagnostics(schema, "# One\n# Two\n# Three\n## Overview\n");
+        let three = surplus_diagnostics(schema, "# One\n# Two\n# Three\n## Overview\n");
         assert_eq!(three.len(), 1);
         assert_eq!(
             three[0].target,
@@ -1767,26 +1790,28 @@ mod tests {
     }
 
     #[test]
-    fn h2_headers_outside_the_documents_h1_are_detached() {
+    fn h2_headers_outside_the_documents_h1_skip_against_the_virtual_root() {
         let schema = "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n";
 
         // Bounding the `h1` count is not enough on its own: this document has
         // exactly one `h1`, yet the leading `h2` precedes it with an empty
-        // ancestor chain while the trailing one sits under it.
-        let detached = detached_diagnostics(schema, "## Overview\n# Part One\n## Overview\n");
-        assert!(spine_diagnostics(schema, "## Overview\n# Part One\n## Overview\n").is_empty());
-        assert_eq!(detached.len(), 1);
-        let diagnostic = detached.first().expect("one diagnostic was asserted");
+        // ancestor chain while the trailing one sits under it. The leading
+        // one is a level skip against the virtual level-0 document root —
+        // what `detached-section` used to name.
+        let skipped = skipped_diagnostics(schema, "## Overview\n# Part One\n## Overview\n");
+        assert!(surplus_diagnostics(schema, "## Overview\n# Part One\n## Overview\n").is_empty());
+        assert_eq!(skipped.len(), 1);
+        let diagnostic = skipped.first().expect("one diagnostic was asserted");
         assert_eq!(
             diagnostic.target,
             DiagnosticTarget::Header(HeaderPath(vec!["Overview".into()]))
         );
         assert_eq!(diagnostic.location.line, 1);
-        // The `h1` is structural, so nothing in the schema is to blame — not
-        // even when the schema names it with `title:`.
+        // The skip is structural, so nothing in the schema is to blame — not
+        // even when the schema names the `h1` with `title:`.
         assert_eq!(diagnostic.schema_node, None);
         assert_eq!(
-            detached_diagnostics(
+            skipped_diagnostics(
                 "version: 1\ntitle: Part One\nsections:\n  - match: Overview\n    repeat: 0..n\n",
                 "## Overview\n# Part One\n",
             )[0]
@@ -1795,12 +1820,13 @@ mod tests {
         );
 
         // Every `h2` under the one `h1` conforms, and so does a document that
-        // has no `h1` at all: its root scope is the whole document.
-        assert!(detached_diagnostics(schema, "# Part One\n## Overview\n## Overview\n").is_empty());
-        assert!(detached_diagnostics(schema, "## Overview\n## Overview\n").is_empty());
+        // has no `h1` at all: the virtual root then stands in at level 1.
+        assert!(skipped_diagnostics(schema, "# Part One\n## Overview\n## Overview\n").is_empty());
+        assert!(skipped_diagnostics(schema, "## Overview\n## Overview\n").is_empty());
 
-        // Each detached header is its own misplacement, so each is reported.
-        let two = detached_diagnostics(schema, "## A\n## B\n# Part One\n## Overview\n");
+        // Each stray top-level header is its own misplacement, so each is
+        // reported.
+        let two = skipped_diagnostics(schema, "## A\n## B\n# Part One\n## Overview\n");
         assert_eq!(
             two.iter()
                 .map(|diagnostic| diagnostic.target.clone())
@@ -1811,16 +1837,16 @@ mod tests {
             ]
         );
 
-        // A detached header carries its own inline suppression, and the file
+        // A stray header carries its own inline suppression, and the file
         // suppression covers them all.
-        assert!(detached_diagnostics(
+        assert!(skipped_diagnostics(
             schema,
-            "<!-- outlint-disable detached-section -->\n## Overview\n# Part One\n",
+            "<!-- outlint-disable skipped-level -->\n## Overview\n# Part One\n",
         )
         .is_empty());
-        assert!(detached_diagnostics(
+        assert!(skipped_diagnostics(
             schema,
-            "<!-- outlint-disable-file detached-section -->\n## A\n## B\n# Part One\n",
+            "<!-- outlint-disable-file skipped-level -->\n## A\n## B\n# Part One\n",
         )
         .is_empty());
     }
@@ -1836,10 +1862,10 @@ mod tests {
     }
 
     #[test]
-    fn a_detached_header_takes_part_in_no_rule_matching_or_counting() {
-        // The out-of-scope `h2` neither satisfies the rule it would match nor
-        // withdraws the requirement: the root scope is the `h1`'s children,
-        // and none of them is a `Detached`.
+    fn an_unadmitted_top_level_header_takes_part_in_no_rule_matching_or_counting() {
+        // The stray `h2` neither satisfies the rule it would match nor
+        // withdraws the requirement: the `sections` scope binds the `h1`'s
+        // children, and none of them is a `Detached`.
         assert_eq!(
             ids_and_targets(
                 "version: 1\nsections:\n  - match: Detached\n    required: true\n",
@@ -1847,7 +1873,7 @@ mod tests {
             ),
             [
                 (
-                    DiagnosticId::DetachedSection,
+                    DiagnosticId::SkippedLevel,
                     DiagnosticTarget::Header(HeaderPath(vec!["Detached".into()])),
                 ),
                 (
@@ -1868,28 +1894,30 @@ mod tests {
                 "## Overview\n# Part One\n## Overview\n",
             ),
             [(
-                DiagnosticId::DetachedSection,
+                DiagnosticId::SkippedLevel,
                 DiagnosticTarget::Header(HeaderPath(vec!["Overview".into()])),
             )]
         );
     }
 
     #[test]
-    fn a_detached_subtree_is_reported_once_at_its_root() {
+    fn an_unadmitted_subtree_is_reported_once_at_its_root() {
         // A header that should not be there cannot meaningfully be missing a
-        // child, so nothing below the detached root is validated.
+        // child, so nothing below the unadmitted root is bound; the skip walk
+        // still descends, and finds `Surprise` one level under `X`, which is
+        // no skip at all.
         assert_eq!(
             ids_and_targets(
                 "version: 1\nsections:\n  - match: X\n    repeat: 0..n\n    strict: true\n    sections:\n      - match: Deep\n        required: true\n",
                 "## X\n### Surprise\n# Title\n",
             ),
             [(
-                DiagnosticId::DetachedSection,
+                DiagnosticId::SkippedLevel,
                 DiagnosticTarget::Header(HeaderPath(vec!["X".into()])),
             )]
         );
 
-        // Detached *siblings* are independent misplacements with separate
+        // Stray *siblings* are independent misplacements with separate
         // fixes, so they stay one diagnostic each.
         assert_eq!(
             ids_and_targets(
@@ -1898,11 +1926,11 @@ mod tests {
             ),
             [
                 (
-                    DiagnosticId::DetachedSection,
+                    DiagnosticId::SkippedLevel,
                     DiagnosticTarget::Header(HeaderPath(vec!["A".into()])),
                 ),
                 (
-                    DiagnosticId::DetachedSection,
+                    DiagnosticId::SkippedLevel,
                     DiagnosticTarget::Header(HeaderPath(vec!["B".into()])),
                 ),
             ]
@@ -1910,39 +1938,40 @@ mod tests {
     }
 
     #[test]
-    fn headers_deeper_than_h2_with_nothing_above_them_are_detached() {
+    fn orphan_headers_skip_against_the_virtual_root() {
         let schema = "version: 1\nsections:\n  - match: Sec\n    repeat: 0..n\n";
 
-        // `skipped-level` cannot catch these: it compares a header with its
-        // parent, and an orphan has none.
+        // An orphan has no parent header; the virtual document root is what
+        // it skips against — level 0 when the document has an `h1`.
         assert_eq!(
             ids_and_targets(schema, "### Orphan\n# Title\n## Sec\n"),
             [(
-                DiagnosticId::DetachedSection,
+                DiagnosticId::SkippedLevel,
                 DiagnosticTarget::Header(HeaderPath(vec!["Orphan".into()])),
             )]
         );
 
-        // With no `h1`, the root scope is the document's `h2`s, so a header
-        // above the first of them is outside the schema just the same.
+        // With no `h1`, the sugar root stands in at level 1 and the `h2`s
+        // bind directly, so a deeper orphan skips just the same.
         assert_eq!(
             ids_and_targets(schema, "### Orphan\n## Sec\n"),
             [(
-                DiagnosticId::DetachedSection,
+                DiagnosticId::SkippedLevel,
                 DiagnosticTarget::Header(HeaderPath(vec!["Orphan".into()])),
             )]
         );
 
-        // A document with no spine at all is entirely unreachable.
+        // A document of nothing but orphans reports each top-level one; the
+        // `h4` one level under its `h3` parent is no skip of its own.
         assert_eq!(
             ids_and_targets(schema, "### One\n#### Two\n### Three\n"),
             [
                 (
-                    DiagnosticId::DetachedSection,
+                    DiagnosticId::SkippedLevel,
                     DiagnosticTarget::Header(HeaderPath(vec!["One".into()])),
                 ),
                 (
-                    DiagnosticId::DetachedSection,
+                    DiagnosticId::SkippedLevel,
                     DiagnosticTarget::Header(HeaderPath(vec!["Three".into()])),
                 ),
             ]
@@ -1950,10 +1979,10 @@ mod tests {
     }
 
     #[test]
-    fn reachability_leaves_unmatched_headers_to_strict_alone() {
-        // Structural reachability is not a second gate on rule matching: a
-        // reachable header that matches no rule is the business of `strict`,
-        // which stays opt-in.
+    fn level_admission_leaves_unmatched_headers_to_strict_alone() {
+        // Structural admission is not a second gate on rule matching: a
+        // bound scope's header that matches no rule is the business of
+        // `strict`, which stays opt-in.
         let open = "version: 1\nsections:\n  - match: Known\n    repeat: 0..n\n";
         assert_eq!(
             ids_and_targets(open, "# Title\n## Known\n## Unmatched\n### Child\n"),
@@ -1977,8 +2006,118 @@ mod tests {
     }
 
     #[test]
+    fn allow_skipped_levels_admits_top_level_headers_into_the_root_scope() {
+        // General form, virtual root at level 0: an `h2` at the top skips a
+        // level. With the option off it is reported and takes part in
+        // nothing; with it on it binds into the outline scope like any
+        // skipped child of a bound header, and can satisfy an h1 rule.
+        let strict_levels = "version: 1\noutline:\n  - match: Stray\n    required: true\n";
+        assert_eq!(
+            ids_and_targets(strict_levels, "## Stray\n"),
+            [
+                (
+                    DiagnosticId::SkippedLevel,
+                    DiagnosticTarget::Header(HeaderPath(vec!["Stray".into()])),
+                ),
+                (
+                    DiagnosticId::MissingSection,
+                    DiagnosticTarget::MissingHeader {
+                        parent: HeaderPath::default(),
+                        matcher: "Stray".into(),
+                    },
+                ),
+            ]
+        );
+        let lax_levels = "version: 1\noptions:\n  allow_skipped_levels: true\n\
+                          outline:\n  - match: Stray\n    required: true\n";
+        assert_eq!(ids_and_targets(lax_levels, "## Stray\n"), []);
+
+        // Sugar's headless scope stands in at level 1, one level down: a
+        // top-level `h3` is the skip there, and admission works the same.
+        let sugar = "version: 1\nsections:\n  - match: Deep\n    required: true\n";
+        assert_eq!(
+            ids_and_targets(sugar, "### Deep\n"),
+            [
+                (
+                    DiagnosticId::SkippedLevel,
+                    DiagnosticTarget::Header(HeaderPath(vec!["Deep".into()])),
+                ),
+                (
+                    DiagnosticId::MissingSection,
+                    DiagnosticTarget::MissingHeader {
+                        parent: HeaderPath::default(),
+                        matcher: "Deep".into(),
+                    },
+                ),
+            ]
+        );
+        let lax_sugar = "version: 1\noptions:\n  allow_skipped_levels: true\n\
+                         sections:\n  - match: Deep\n    required: true\n";
+        assert_eq!(ids_and_targets(lax_sugar, "### Deep\n"), []);
+    }
+
+    #[test]
+    fn title_null_denies_h1_and_binds_top_level_h2s() {
+        let schema =
+            "version: 1\ntitle: null\nsections:\n  - match: Overview\n    required: true\n";
+
+        // The declared shape: no h1, the sections scope is the document's
+        // own top-level h2s.
+        assert_eq!(ids_and_targets(schema, "## Overview\n"), []);
+        assert_eq!(
+            ids_and_targets(schema, "## Wrong\n"),
+            [(
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "Overview".into(),
+                },
+            )]
+        );
+
+        // A present h1 is rejected wholesale at the title node, its subtree
+        // validated no further — like any header a deny rule matches. The
+        // top-level h2 before it still binds.
+        let loaded = load_schema(schema).expect("test schema is valid");
+        let document = parse_markdown(
+            "## Overview\n# Surprise\n## Hidden\n",
+            MarkdownOptions::default(),
+        );
+        let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].id, DiagnosticId::NotAllowed);
+        assert_eq!(
+            diagnostics[0].target,
+            DiagnosticTarget::Header(HeaderPath(vec!["Surprise".into()]))
+        );
+        assert_eq!(diagnostics[0].schema_node, Some(SchemaNode::Title));
+        assert_eq!(
+            diagnostics[0].message,
+            "the schema declares a document with no title"
+        );
+    }
+
+    #[test]
+    fn a_general_form_h1_that_matches_no_rule_is_an_open_scope_header() {
+        // No bespoke wrong-title verdict in the general form: an unmatched h1
+        // is simply not this schema's business unless a rule or `strict`
+        // makes it so, and the required rule reports its own absence.
+        let schema = "version: 1\noutline:\n  - match: \"Guide *\"\n    required: true\n";
+        assert_eq!(
+            ids_and_targets(schema, "# Handbook\n## Anything\n"),
+            [(
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "Guide *".into(),
+                },
+            )]
+        );
+    }
+
+    #[test]
     fn a_declared_title_still_owns_the_surplus_title_diagnostic() {
-        let titled = spine_diagnostics(
+        let titled = surplus_diagnostics(
             "version: 1\ntitle: Project\nsections:\n  - match: Item\n    repeat: 0..n\n",
             "# Project\n# Project\n## Item\n",
         );
@@ -1989,7 +2128,7 @@ mod tests {
 
         // Without `title:` the identical document gets the structural wording,
         // because nothing in the schema names the `h1`.
-        let untitled = spine_diagnostics(
+        let untitled = surplus_diagnostics(
             "version: 1\nsections:\n  - match: Item\n    repeat: 0..n\n",
             "# Project\n# Project\n## Item\n",
         );
@@ -2002,7 +2141,7 @@ mod tests {
 
     #[test]
     fn a_surplus_header_carries_its_own_inline_suppression() {
-        assert!(spine_diagnostics(
+        assert!(surplus_diagnostics(
             "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n",
             "# One\n## Overview\n<!-- outlint-disable too-many-sections -->\n# Two\n",
         )

@@ -1,0 +1,12 @@
+{
+  "in-order.md": [],
+  "inverted.md": [
+    { "id": "ordered", "target": { "kind": "document" } }
+  ],
+  "mixed-children.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": ["Guide"], "matcher": "Overview" }
+    }
+  ]
+}
