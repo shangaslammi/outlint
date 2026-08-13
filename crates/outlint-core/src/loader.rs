@@ -28,11 +28,11 @@ use crate::{
     AtLeastTwo, ByteOffset, CanonicalFloat, CanonicalInteger, Cardinality, Constraint,
     ConstraintIndex, ConstraintPath, ExactText, FrontmatterKey, FrontmatterPolicy, FrontmatterRef,
     FrontmatterScalar, GlobPattern, InvalidSchema, JsonSchemaResourceContents,
-    LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, Matcher, NonEmpty, Options, Proposition,
-    RefAnchor, RegexPattern, RelatedLocation, RuleId, RuleIndex, RuleOutcome, RulePath, RuleRef,
-    Schema, SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
-    SchemaVersion, ScopePath, SectionRule, SourceId, SourceLabel, SourceRange, TextRange,
-    UpperBound,
+    LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, Matcher, NonEmpty, Options,
+    OutlineProvenance, Proposition, RefAnchor, RegexPattern, RelatedLocation, RuleId, RuleIndex,
+    RuleOutcome, RulePath, RuleRef, Schema, SchemaError, SchemaErrorKind, SchemaLocations,
+    SchemaNode, SchemaSource, SchemaSources, SchemaVersion, ScopePath, SectionRule, SourceId,
+    SourceLabel, SourceRange, TextRange, UpperBound,
 };
 
 /// The object domain schema documents are validated in: JSON Schema's own.
@@ -449,7 +449,10 @@ struct RawSchema {
     options: RawOptions,
     #[serde(default)]
     frontmatter: Option<RawFrontmatter>,
-    sections: Vec<RawRule>,
+    /// Absent only when `outline` is declared; the shape validation enforces
+    /// exactly one of the two before this structure is built.
+    sections: Option<Vec<RawRule>>,
+    outline: Option<Vec<RawRule>>,
     #[serde(default)]
     constraints: Vec<Value>,
 }
@@ -504,6 +507,7 @@ const DOCUMENT_FIELDS: &[&str] = &[
     "title",
     "options",
     "frontmatter",
+    "outline",
     "sections",
     "constraints",
 ];
@@ -528,6 +532,10 @@ enum RangeKey {
     Rule(RulePath),
     RuleField(RulePath, String),
     Constraint(ConstraintPath),
+    /// An `h1`-level rule in the top-level `outline` list.
+    OutlineRule(RuleIndex),
+    /// One field of an `h1`-level rule in the top-level `outline` list.
+    OutlineRuleField(RuleIndex, String),
 }
 
 #[derive(Default)]
@@ -585,6 +593,16 @@ impl RangeIndex {
             if let Some(sections) = node.as_sequence() {
                 index.collect_rules(sections, &ScopePath(Vec::new()), expansion, char_offsets);
             }
+        } else if let Some(node) = schema_mapping_get(mapping, "outline") {
+            // `outline` and `sections` share the nested-rule key space: an
+            // outline rule's children live in the scope its index names. The
+            // two lists are mutually exclusive, so when both appear the load
+            // is already failing and only the `sections` forest — the one the
+            // legacy validation errors point into — keeps its ranges.
+            let expansion = subtree_expansion(node, expansion);
+            if let Some(entries) = node.as_sequence() {
+                index.collect_outline(entries, expansion, char_offsets);
+            }
         }
         if let Some(node) = schema_mapping_get(mapping, "constraints") {
             let expansion = subtree_expansion(node, expansion);
@@ -630,6 +648,45 @@ impl RangeIndex {
             }
             let mut child_scope = scope.clone();
             child_scope.0.push(RuleIndex(index));
+            if let Some(node) = schema_mapping_get(mapping, "sections") {
+                let expansion = subtree_expansion(node, expansion);
+                if let Some(children) = node.as_sequence() {
+                    self.collect_rules(children, &child_scope, expansion, char_offsets);
+                }
+            }
+            if let Some(node) = schema_mapping_get(mapping, "constraints") {
+                let expansion = subtree_expansion(node, expansion);
+                if let Some(constraints) = node.as_sequence() {
+                    self.collect_constraints(constraints, &child_scope, expansion, char_offsets);
+                }
+            }
+        }
+    }
+
+    fn collect_outline(
+        &mut self,
+        entries: &[SchemaYamlNode],
+        expansion: Option<(usize, usize)>,
+        char_offsets: &[usize],
+    ) {
+        for (index, node) in entries.iter().enumerate() {
+            self.ranges.insert(
+                RangeKey::OutlineRule(RuleIndex(index)),
+                node_range(node, expansion, char_offsets),
+            );
+            let expansion = subtree_expansion(node, expansion);
+            let Some(mapping) = node.as_mapping() else {
+                continue;
+            };
+            for &field in RULE_FIELDS {
+                if let Some(value) = schema_mapping_get(mapping, field) {
+                    self.ranges.insert(
+                        RangeKey::OutlineRuleField(RuleIndex(index), field.into()),
+                        node_range(value, expansion, char_offsets),
+                    );
+                }
+            }
+            let child_scope = ScopePath(vec![RuleIndex(index)]);
             if let Some(node) = schema_mapping_get(mapping, "sections") {
                 let expansion = subtree_expansion(node, expansion);
                 if let Some(children) = node.as_sequence() {
@@ -1312,6 +1369,15 @@ struct Loader {
     nodes: BTreeMap<SchemaNode, SourceRange>,
     raw_constraints: BTreeMap<ScopePath, Vec<Value>>,
     external_schema: Option<PreparedExternalSchema>,
+    /// Whether the document declares the general `outline:` form; gates the
+    /// `$.` reference anchor, whose outline meaning is not yet decided here.
+    outline_general: bool,
+    /// When a single-rule `outline` is normalized into the legacy root
+    /// scope, the rule's child forest is built at the semantic root scope
+    /// while its source ranges were collected under the rule's own index.
+    /// This is that index, prepended to every rule and constraint scope on
+    /// range lookup so semantic nodes anchor at their real spellings.
+    outline_scope: Option<RuleIndex>,
 }
 
 impl Loader {
@@ -1384,6 +1450,8 @@ impl Loader {
             nodes: BTreeMap::new(),
             raw_constraints: BTreeMap::new(),
             external_schema,
+            outline_general: false,
+            outline_scope: None,
         }
     }
 
@@ -1417,6 +1485,12 @@ impl Loader {
         let frontmatter_declared = value
             .as_object()
             .is_some_and(|mapping| mapping.contains_key("frontmatter"));
+        // Serde folds `title: null` and an absent `title` into the same
+        // `None`, but they declare different things: null is an explicit "no
+        // h1", absence is the bare-sections sugar.
+        let title_null = value
+            .as_object()
+            .is_some_and(|mapping| matches!(mapping.get("title"), Some(Value::Null)));
         let raw: RawSchema = match serde_json::from_value(value) {
             Ok(raw) => raw,
             Err(error) => {
@@ -1445,16 +1519,39 @@ impl Loader {
 
         let match_case = raw.options.match_case.unwrap_or(false);
         let options = Self::build_options(&raw.options);
-        let title = raw.title.as_deref().and_then(|matcher| {
-            let range = self.range(RangeKey::DocumentField("title".into()));
-            self.nodes.insert(SchemaNode::Title, range);
-            self.build_matcher(matcher, match_case, range)
-        });
-
         let root_scope = ScopePath(Vec::new());
-        self.raw_constraints
-            .insert(root_scope.clone(), raw.constraints);
-        let sections = self.build_scope(raw.sections, &root_scope, match_case);
+        let (title, sections, outline_provenance) = if let Some(entries) = raw.outline {
+            self.outline_general = true;
+            let (title, sections) =
+                self.build_outline(entries, &raw.constraints, &root_scope, match_case);
+            (title, sections, OutlineProvenance::Outline)
+        } else {
+            let outline_provenance = if title_null {
+                OutlineProvenance::NoTitle
+            } else if raw.title.is_some() {
+                OutlineProvenance::Title
+            } else {
+                OutlineProvenance::BareSections
+            };
+            let title = raw.title.as_deref().and_then(|matcher| {
+                let range = self.range(RangeKey::DocumentField("title".into()));
+                self.nodes.insert(SchemaNode::Title, range);
+                self.build_matcher(matcher, match_case, range)
+            });
+            if title_null {
+                let range = self.range(RangeKey::DocumentField("title".into()));
+                self.nodes.insert(SchemaNode::Title, range);
+            }
+            self.raw_constraints
+                .insert(root_scope.clone(), raw.constraints);
+            let sections = self.build_scope(
+                raw.sections
+                    .expect("the shape validation requires `sections` without `outline`"),
+                &root_scope,
+                match_case,
+            );
+            (title, sections, outline_provenance)
+        };
 
         let (Some(version), Some(frontmatter), Some(sections)) = (version, frontmatter, sections)
         else {
@@ -1468,29 +1565,24 @@ impl Loader {
             frontmatter,
             sections,
             constraints: Vec::new(),
+            outline_provenance,
         };
 
         let mut normalized = BTreeMap::new();
         for (scope, constraints) in std::mem::take(&mut self.raw_constraints) {
             let mut built = Vec::with_capacity(constraints.len());
             for (index, constraint) in constraints.into_iter().enumerate() {
+                let range = self.range(RangeKey::Constraint(ConstraintPath {
+                    scope: scope.clone(),
+                    index: ConstraintIndex(index),
+                }));
                 self.nodes.insert(
                     SchemaNode::Constraint(ConstraintPath {
                         scope: scope.clone(),
                         index: ConstraintIndex(index),
                     }),
-                    self.ranges.get(
-                        &RangeKey::Constraint(ConstraintPath {
-                            scope: scope.clone(),
-                            index: ConstraintIndex(index),
-                        }),
-                        self.document_range,
-                    ),
+                    range,
                 );
-                let range = self.range(RangeKey::Constraint(ConstraintPath {
-                    scope: scope.clone(),
-                    index: ConstraintIndex(index),
-                }));
                 if let Some(constraint) = self.build_constraint(&schema, &scope, constraint, range)
                 {
                     built.push(constraint);
@@ -1525,7 +1617,12 @@ impl Loader {
         };
         self.validate_known_fields(mapping, DOCUMENT_FIELDS, self.document_range);
         self.validate_required_field(mapping, "version", self.document_range);
-        self.validate_required_field(mapping, "sections", self.document_range);
+        let outline_conflict = if mapping.contains_key("outline") {
+            self.validate_outline_exclusivity(mapping)
+        } else {
+            self.validate_required_field(mapping, "sections", self.document_range);
+            false
+        };
 
         if let Some(value) = mapping.get("version") {
             if !is_yaml_integer(value) {
@@ -1536,11 +1633,20 @@ impl Loader {
             }
         }
         if let Some(value) = mapping.get("title") {
-            if !matches!(value, Value::String(_)) {
+            if !matches!(value, Value::String(_) | Value::Null) {
                 self.shape_error_at(
                     self.range(RangeKey::DocumentField("title".into())),
-                    "title must be a string and cannot be null",
+                    "title must be a string or null",
                 );
+            }
+        }
+        if let Some(value) = mapping.get("outline") {
+            // On a conflict the outline forest holds no collected ranges
+            // (`sections` keeps the shared nested-rule key space), so its
+            // shape is left to the reload after the conflict is resolved.
+            if !outline_conflict {
+                let range = self.range(RangeKey::DocumentField("outline".into()));
+                self.validate_outline_shape(value, range);
             }
         }
         if let Some(value) = mapping.get("options") {
@@ -1731,6 +1837,91 @@ impl Loader {
         }
     }
 
+    /// Rejects `outline` combined with either half of its sugar spelling.
+    ///
+    /// `title` + `sections` is defined as sugar for a single-rule `outline`,
+    /// so a document declaring both forms has said the same thing twice and
+    /// possibly differently. The error anchors at the second-declared key —
+    /// the one a reader meets as the contradiction — with the first attached.
+    fn validate_outline_exclusivity(&mut self, mapping: &JsonMap) -> bool {
+        let outline_range = self.range(RangeKey::DocumentField("outline".into()));
+        let mut conflict = false;
+        for other in ["title", "sections"] {
+            if !mapping.contains_key(other) {
+                continue;
+            }
+            conflict = true;
+            let other_range = self.range(RangeKey::DocumentField(other.into()));
+            let outline_first = outline_range.range.start <= other_range.range.start;
+            let (anchor, anchor_name, first, first_name) = if outline_first {
+                (other_range, other, outline_range, "outline")
+            } else {
+                (outline_range, "outline", other_range, other)
+            };
+            self.error_with_related_at(
+                SchemaErrorKind::ConflictingOutline,
+                anchor,
+                format!("`{anchor_name}` cannot be declared together with `{first_name}`"),
+                vec![RelatedLocation {
+                    range: first,
+                    message: format!("`{first_name}` declared here"),
+                }],
+            );
+        }
+        conflict
+    }
+
+    fn validate_outline_shape(&mut self, value: &Value, range: SourceRange) {
+        let Some(entries) = value.as_array() else {
+            self.shape_error_at(range, "outline must be a sequence and cannot be null");
+            return;
+        };
+        for (index, value) in entries.iter().enumerate() {
+            let rule_range = self.range(RangeKey::OutlineRule(RuleIndex(index)));
+            let Some(mapping) = value.as_object() else {
+                self.shape_error_at(rule_range, "each outline rule must be a mapping");
+                continue;
+            };
+            self.validate_known_fields(mapping, RULE_FIELDS, rule_range);
+            self.validate_required_field(mapping, "match", rule_range);
+            for field in ["id", "match", "repeat"] {
+                if let Some(value) = mapping.get(field) {
+                    if !matches!(value, Value::String(_)) {
+                        self.shape_error_at(
+                            self.range(RangeKey::OutlineRuleField(RuleIndex(index), field.into())),
+                            format!("rule `{field}` must be a string and cannot be null"),
+                        );
+                    }
+                }
+            }
+            for field in ["allow", "required", "strict"] {
+                if let Some(value) = mapping.get(field) {
+                    if !matches!(value, Value::Bool(_)) {
+                        self.shape_error_at(
+                            self.range(RangeKey::OutlineRuleField(RuleIndex(index), field.into())),
+                            format!("rule `{field}` must be a bool and cannot be null"),
+                        );
+                    }
+                }
+            }
+            let child_scope = ScopePath(vec![RuleIndex(index)]);
+            if let Some(children) = mapping.get("sections") {
+                let range = self.range(RangeKey::OutlineRuleField(
+                    RuleIndex(index),
+                    "sections".into(),
+                ));
+                self.validate_rules_shape(children, &child_scope, range);
+            }
+            if let Some(constraints) = mapping.get("constraints") {
+                let range = self.range(RangeKey::OutlineRuleField(
+                    RuleIndex(index),
+                    "constraints".into(),
+                ));
+                self.validate_constraints_shape(constraints, &child_scope, range);
+            }
+        }
+    }
+
     fn validate_rules_shape(&mut self, value: &Value, scope: &ScopePath, range: SourceRange) {
         let Some(rules) = value.as_array() else {
             self.shape_error_at(range, "sections must be a sequence and cannot be null");
@@ -1884,6 +2075,93 @@ impl Loader {
         }
     }
 
+    /// Normalizes the general `outline:` form into the legacy title-plus-root
+    /// pair the validator consumes today.
+    ///
+    /// The normalization is exact only for the shape the sugar produces — a
+    /// single `required: true` rule with no `id` and no `strict`, in a
+    /// document without top-level constraints. Everything the legacy pair
+    /// cannot carry is refused with a load-time "not supported yet" error
+    /// rather than validated under silently different semantics; those
+    /// refusals lift when the validator consumes `h1`-level rules directly.
+    fn build_outline(
+        &mut self,
+        entries: Vec<RawRule>,
+        document_constraints: &[Value],
+        root_scope: &ScopePath,
+        match_case: bool,
+    ) -> (Option<Matcher>, Option<Vec<SectionRule>>) {
+        let outline_range = self.range(RangeKey::DocumentField("outline".into()));
+        if entries.len() != 1 {
+            self.shape_error_at(
+                outline_range,
+                format!(
+                    "an outline of {} rules is not supported yet; declare exactly one required rule",
+                    entries.len()
+                ),
+            );
+            return (None, None);
+        }
+        let entry = entries.into_iter().next().expect("one entry was counted");
+        if !document_constraints.is_empty() {
+            self.shape_error_at(
+                self.range(RangeKey::DocumentField("constraints".into())),
+                "top-level constraints beside `outline` attach to the h1 scope, \
+                 which is not supported yet; declare them on the outline rule",
+            );
+        }
+        if entry.id.is_some() {
+            self.shape_error_at(
+                self.range(RangeKey::OutlineRuleField(RuleIndex(0), "id".into())),
+                "an `id` on an outline rule is not supported yet",
+            );
+        }
+        if entry.strict {
+            self.shape_error_at(
+                self.range(RangeKey::OutlineRuleField(RuleIndex(0), "strict".into())),
+                "`strict` on an outline rule is not supported yet",
+            );
+        }
+        let match_range = self.range(RangeKey::OutlineRuleField(RuleIndex(0), "match".into()));
+        let title = self.build_matcher(&entry.matcher, match_case, match_range);
+        let cardinality_field = if entry.repeat.is_some() {
+            "repeat"
+        } else if entry.required.is_some() {
+            "required"
+        } else {
+            "allow"
+        };
+        let outcome_range = self.range(RangeKey::OutlineRuleField(
+            RuleIndex(0),
+            cardinality_field.into(),
+        ));
+        let outcome = self.build_outcome(
+            entry.allow,
+            entry.required,
+            entry.repeat.as_deref(),
+            outcome_range,
+        );
+        if let Some(outcome) = outcome {
+            let exactly_one = RuleOutcome::Allow(Cardinality {
+                min: 1,
+                max: UpperBound::Bounded(1),
+            });
+            if outcome != exactly_one {
+                self.shape_error_at(
+                    outcome_range,
+                    "an outline rule must be `required: true` for now; \
+                     other cardinalities land with the validator rework",
+                );
+            }
+        }
+        self.nodes.insert(SchemaNode::Title, match_range);
+        self.outline_scope = Some(RuleIndex(0));
+        self.raw_constraints
+            .insert(root_scope.clone(), entry.constraints);
+        let sections = self.build_scope(entry.sections, root_scope, match_case);
+        (title, sections)
+    }
+
     fn build_options(raw: &RawOptions) -> Options {
         Options {
             match_case: raw.match_case.unwrap_or(false),
@@ -1906,9 +2184,7 @@ impl Loader {
                 scope: scope.clone(),
                 index: RuleIndex(index),
             };
-            let rule_range = self
-                .ranges
-                .get(&RangeKey::Rule(rule_path.clone()), self.document_range);
+            let rule_range = self.range(RangeKey::Rule(rule_path.clone()));
             self.nodes
                 .insert(SchemaNode::Rule(rule_path.clone()), rule_range);
             let mut child_scope = scope.clone();
@@ -1971,10 +2247,10 @@ impl Loader {
                 };
                 self.error_with_related_at(
                     SchemaErrorKind::DuplicateId,
-                    self.ranges.rule_id(&duplicate_path, self.document_range),
+                    self.rule_id_range(&duplicate_path),
                     format!("duplicate rule id `{}` in one scope", id.0),
                     vec![RelatedLocation {
-                        range: self.ranges.rule_id(&first_path, self.document_range),
+                        range: self.rule_id_range(&first_path),
                         message: format!("first declared by sibling rule {first_index}"),
                     }],
                 );
@@ -2397,6 +2673,16 @@ impl Loader {
             );
             return None;
         };
+        if self.outline_general && reference.anchor == RefAnchor::SchemaRoot {
+            // In the general form `$` will name the h1 scope, one level above
+            // what the legacy model resolves it against; refusing it now
+            // keeps a later meaning change from silently rebinding paths.
+            self.shape_error_at(
+                range,
+                format!("`$.` refs in an `outline` schema are not supported yet (`{source}`)"),
+            );
+            return None;
+        }
         let Some(resolved) = resolve_ref(schema, scope, &reference) else {
             self.error_at(
                 SchemaErrorKind::UnresolvedRef,
@@ -2435,7 +2721,39 @@ impl Loader {
     }
 
     fn range(&self, key: RangeKey) -> SourceRange {
-        self.ranges.get(&key, self.document_range)
+        self.ranges.get(&self.source_key(key), self.document_range)
+    }
+
+    /// Maps a semantic range key to the key its spelling was collected under.
+    ///
+    /// The two differ only while a single-rule `outline` is being normalized
+    /// into the legacy root scope: the semantic root is then the outline
+    /// rule's child scope, so its index is prepended to every rule and
+    /// constraint scope.
+    fn source_key(&self, key: RangeKey) -> RangeKey {
+        let Some(prefix) = self.outline_scope else {
+            return key;
+        };
+        match key {
+            RangeKey::Rule(path) => RangeKey::Rule(prefix_rule_path(prefix, path)),
+            RangeKey::RuleField(path, field) => {
+                RangeKey::RuleField(prefix_rule_path(prefix, path), field)
+            }
+            RangeKey::Constraint(mut path) => {
+                path.scope.0.insert(0, prefix);
+                RangeKey::Constraint(path)
+            }
+            other => other,
+        }
+    }
+
+    /// The anchor of a rule's identity: its `id` spelling, else its `match`.
+    fn rule_id_range(&self, path: &RulePath) -> SourceRange {
+        let path = match self.source_key(RangeKey::Rule(path.clone())) {
+            RangeKey::Rule(path) => path,
+            _ => unreachable!("a rule key maps to a rule key"),
+        };
+        self.ranges.rule_id(&path, self.document_range)
     }
 
     fn shape_error_at(&mut self, range: SourceRange, message: impl Into<String>) {
@@ -2623,6 +2941,12 @@ fn regex_body(source: &str) -> Option<String> {
         }
     }
     Some(result)
+}
+
+/// Prepends an outline rule's index to a rule path's scope.
+fn prefix_rule_path(prefix: RuleIndex, mut path: RulePath) -> RulePath {
+    path.scope.0.insert(0, prefix);
+    path
 }
 
 fn parse_repeat(source: &str) -> Option<Cardinality> {
@@ -3433,6 +3757,8 @@ sections:
 
     #[test]
     fn rejects_every_explicit_null_typed_field_and_collects_them() {
+        // `title: null` is the one legal null: it declares a document with no
+        // h1, so only the four other nulls are rejected.
         let source = r#"version: 1
 title: null
 options:
@@ -3445,7 +3771,7 @@ sections:
 "#;
         let invalid = invalid(source);
         let errors = invalid.errors.iter().collect::<Vec<_>>();
-        assert_eq!(errors.len(), 5);
+        assert_eq!(errors.len(), 4);
         assert!(errors
             .iter()
             .all(|error| error.kind == SchemaErrorKind::InvalidDocumentShape
@@ -3458,8 +3784,267 @@ sections:
         let expected = source
             .match_indices("null")
             .map(|(offset, _)| offset)
+            .skip(1)
             .collect::<Vec<_>>();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn title_null_declares_a_document_without_h1() {
+        let source = "version: 1\ntitle: null\nsections:\n  - match: Overview\n";
+        let loaded = load_schema(source).expect("title: null loads");
+        assert_eq!(loaded.schema.title, None);
+        assert_eq!(loaded.schema.outline_provenance, OutlineProvenance::NoTitle);
+        assert_eq!(
+            source_slice(
+                source,
+                *loaded
+                    .locations
+                    .nodes
+                    .get(&SchemaNode::Title)
+                    .expect("title: null anchors the title node")
+            ),
+            "null"
+        );
+    }
+
+    #[test]
+    fn sugar_forms_carry_their_provenance() {
+        let titled = valid("version: 1\ntitle: Doc\nsections: []\n");
+        assert_eq!(titled.outline_provenance, OutlineProvenance::Title);
+        let bare = valid("version: 1\nsections: []\n");
+        assert_eq!(bare.outline_provenance, OutlineProvenance::BareSections);
+    }
+
+    #[test]
+    fn outline_with_one_required_rule_is_normalized_into_title_and_sections() {
+        let source = r#"version: 1
+outline:
+  - match: Part
+    required: true
+    sections:
+      - match: Overview
+        required: true
+"#;
+        let loaded = load_schema(source).expect("a single-rule outline loads");
+        let schema = &loaded.schema;
+        assert_eq!(schema.outline_provenance, OutlineProvenance::Outline);
+        assert_eq!(schema.title, Some(Matcher::Exact(ExactText("Part".into()))));
+        assert_eq!(schema.sections.len(), 1);
+        assert_eq!(
+            schema.sections[0].matcher,
+            Matcher::Exact(ExactText("Overview".into()))
+        );
+        // The title anchors at the outline rule's `match` spelling, and the
+        // rule's children anchor as the root scope's rules.
+        assert_eq!(
+            source_slice(
+                source,
+                *loaded.locations.nodes.get(&SchemaNode::Title).unwrap()
+            ),
+            "Part"
+        );
+        let root_rule = RulePath {
+            scope: ScopePath(Vec::new()),
+            index: RuleIndex(0),
+        };
+        assert_eq!(
+            source_slice(
+                source,
+                *loaded
+                    .locations
+                    .nodes
+                    .get(&SchemaNode::Rule(root_rule))
+                    .expect("the outline rule's child is the first root rule")
+            ),
+            "match: Overview\n        required: true\n"
+        );
+    }
+
+    #[test]
+    fn sugar_and_outline_forms_parse_to_the_same_model() {
+        let sugar = valid(
+            r#"version: 1
+title: "Doc *"
+sections:
+  - match: Overview
+    required: true
+    sections:
+      - match: Details
+  - match: Second
+constraints:
+  - any_of: [overview, second]
+"#,
+        );
+        let general = valid(
+            r#"version: 1
+outline:
+  - match: "Doc *"
+    required: true
+    sections:
+      - match: Overview
+        required: true
+        sections:
+          - match: Details
+      - match: Second
+    constraints:
+      - any_of: [overview, second]
+"#,
+        );
+        assert_eq!(sugar.outline_provenance, OutlineProvenance::Title);
+        assert_eq!(general.outline_provenance, OutlineProvenance::Outline);
+        let mut general_as_sugar = general;
+        general_as_sugar.outline_provenance = OutlineProvenance::Title;
+        assert_eq!(sugar, general_as_sugar);
+    }
+
+    #[test]
+    fn outline_with_more_than_one_rule_is_a_load_time_not_yet_error() {
+        let invalid = invalid(
+            r#"version: 1
+outline:
+  - match: "Part *"
+    required: true
+  - match: Appendix
+"#,
+        );
+        let errors = invalid.errors.iter().collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, SchemaErrorKind::InvalidDocumentShape);
+        assert_eq!(
+            errors[0].message,
+            "an outline of 2 rules is not supported yet; declare exactly one required rule"
+        );
+    }
+
+    #[test]
+    fn outline_conflicts_with_title_at_the_second_declared_key() {
+        let source = "version: 1\ntitle: Doc\noutline:\n  - match: Doc\n    required: true\n";
+        let invalid = invalid(source);
+        let errors = invalid.errors.iter().collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        let error = errors[0];
+        assert_eq!(error.kind, SchemaErrorKind::ConflictingOutline);
+        assert_eq!(
+            error.message,
+            "`outline` cannot be declared together with `title`"
+        );
+        assert_eq!(
+            source_slice(source, error.range),
+            "- match: Doc\n    required: true\n"
+        );
+        assert_eq!(error.related.len(), 1);
+        assert_eq!(source_slice(source, error.related[0].range), "Doc");
+        assert_eq!(error.related[0].message, "`title` declared here");
+    }
+
+    #[test]
+    fn outline_conflicts_with_sections_anchoring_whichever_comes_second() {
+        // `outline` first: the error anchors at `sections`.
+        let source = "version: 1\noutline:\n  - match: Doc\n    required: true\nsections: []\n";
+        let invalid = invalid(source);
+        let errors = invalid.errors.iter().collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        let error = errors[0];
+        assert_eq!(error.kind, SchemaErrorKind::ConflictingOutline);
+        assert_eq!(
+            error.message,
+            "`sections` cannot be declared together with `outline`"
+        );
+        assert_eq!(source_slice(source, error.range), "[]");
+        assert_eq!(error.related[0].message, "`outline` declared here");
+    }
+
+    #[test]
+    fn unsupported_outline_shapes_are_refused_not_misread() {
+        // Everything the legacy title-plus-root pair cannot carry is a
+        // load-time refusal until the validator consumes h1 rules directly.
+        for (source, expected) in [
+            (
+                "version: 1\noutline:\n  - match: Doc\n",
+                "an outline rule must be `required: true` for now; \
+                 other cardinalities land with the validator rework",
+            ),
+            (
+                "version: 1\noutline:\n  - match: Doc\n    repeat: \"1..2\"\n",
+                "an outline rule must be `required: true` for now; \
+                 other cardinalities land with the validator rework",
+            ),
+            (
+                "version: 1\noutline:\n  - id: doc\n    match: Doc\n    required: true\n",
+                "an `id` on an outline rule is not supported yet",
+            ),
+            (
+                "version: 1\noutline:\n  - match: Doc\n    required: true\n    strict: true\n",
+                "`strict` on an outline rule is not supported yet",
+            ),
+            (
+                "version: 1\noutline:\n  - match: Doc\n    required: true\n\
+                 constraints:\n  - any_of: [a, b]\n",
+                "top-level constraints beside `outline` attach to the h1 scope, \
+                 which is not supported yet; declare them on the outline rule",
+            ),
+            (
+                "version: 1\noutline:\n  - match: Doc\n    required: true\n    sections:\n\
+                 \x20     - match: A\n      - match: B\n    constraints:\n\
+                 \x20     - any_of: [\"$.a\", b]\n",
+                "`$.` refs in an `outline` schema are not supported yet (`$.a`)",
+            ),
+        ] {
+            let invalid = invalid(source);
+            assert!(
+                invalid.errors.iter().any(|error| error.message == expected),
+                "expected `{expected}` for:\n{source}\ngot: {:#?}",
+                invalid.errors
+            );
+        }
+    }
+
+    #[test]
+    fn outline_repeat_of_exactly_one_is_the_required_sugar() {
+        let schema = valid("version: 1\noutline:\n  - match: Doc\n    repeat: \"1..1\"\n");
+        assert_eq!(schema.title, Some(Matcher::Exact(ExactText("Doc".into()))));
+    }
+
+    #[test]
+    fn errors_inside_an_outline_rule_anchor_at_their_own_spellings() {
+        let source = r#"version: 1
+outline:
+  - match: Doc
+    required: true
+    sections:
+      - match: "/(/"
+"#;
+        let invalid = invalid(source);
+        let regex = invalid
+            .errors
+            .iter()
+            .find(|error| error.kind == SchemaErrorKind::InvalidMatcher)
+            .expect("the child rule's regex is invalid");
+        assert_eq!(source_slice(source, regex.range), "\"/(/\"");
+    }
+
+    #[test]
+    fn constraints_on_an_outline_rule_anchor_at_their_own_spellings() {
+        let source = r#"version: 1
+outline:
+  - match: Doc
+    required: true
+    sections:
+      - match: Overview
+    constraints:
+      - one_of: [missing, alike]
+"#;
+        let invalid = invalid(source);
+        let unresolved = invalid
+            .errors
+            .iter()
+            .find(|error| error.kind == SchemaErrorKind::UnresolvedRef)
+            .expect("the constraint refs do not resolve");
+        assert_eq!(
+            source_slice(source, unresolved.range),
+            "one_of: [missing, alike]\n"
+        );
     }
 
     #[test]

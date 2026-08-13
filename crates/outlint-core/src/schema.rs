@@ -25,6 +25,34 @@ pub struct Schema {
     pub sections: Vec<SectionRule>,
     /// Presence and ordering constraints attached to the root scope.
     pub constraints: Vec<Constraint>,
+    /// How the source document declared its `h1` level.
+    pub outline_provenance: OutlineProvenance,
+}
+
+/// The surface form a schema used to declare its `h1` level.
+///
+/// The loader normalizes every form into [`Schema::title`] plus
+/// [`Schema::sections`], which is all the current validator reads. The
+/// provenance records which spelling produced that pair, so the validator can
+/// later keep `missing-title` anchored at [`SchemaNode::Title`] for the sugar
+/// forms while giving `outline:` and `title: null` their own semantics.
+///
+/// [`SchemaNode::Title`]: crate::SchemaNode::Title
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutlineProvenance {
+    /// `title: <matcher>` with `sections:` — sugar for a single required
+    /// `h1` rule whose child rules are the top-level `sections` list.
+    Title,
+    /// `sections:` without `title:` — under the adopted strict reading this
+    /// implies `title: "*"`, but the current validator's title-absent
+    /// verdicts are preserved until the validator consumes the provenance.
+    BareSections,
+    /// `title: null` — the document is declared to have no `h1`. The
+    /// enforcing semantics land with the validator swap; until then the
+    /// current title-absent behavior applies.
+    NoTitle,
+    /// The general `outline:` form, normalized into `title` + `sections`.
+    Outline,
 }
 
 /// The document's normalized frontmatter policy.

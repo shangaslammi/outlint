@@ -255,6 +255,8 @@ pub enum SchemaErrorKind {
     ConflictingCardinality,
     /// The frontmatter policy both requires and forbids frontmatter.
     ConflictingFrontmatter,
+    /// A schema declares `outline` together with `title` or `sections`.
+    ConflictingOutline,
     /// A frontmatter JSON Schema is malformed or uses an unsupported dialect.
     InvalidFrontmatterSchema,
 }
@@ -276,6 +278,7 @@ impl SchemaErrorKind {
             Self::OrderedScopeMismatch => "ordered-scope-mismatch",
             Self::ConflictingCardinality => "conflicting-cardinality",
             Self::ConflictingFrontmatter => "conflicting-frontmatter",
+            Self::ConflictingOutline => "conflicting-outline",
             Self::InvalidFrontmatterSchema => "invalid-frontmatter-schema",
         }
     }
@@ -313,6 +316,7 @@ mod tests {
                 SchemaErrorKind::ConflictingFrontmatter,
                 "conflicting-frontmatter",
             ),
+            (SchemaErrorKind::ConflictingOutline, "conflicting-outline"),
             (
                 SchemaErrorKind::InvalidFrontmatterSchema,
                 "invalid-frontmatter-schema",

@@ -1,0 +1,21 @@
+{
+  "pass.md": [],
+  "missing-title.md": [
+    {
+      "id": "missing-title",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Guide *" }
+    }
+  ],
+  "wrong-title.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Handbook"] }
+    }
+  ],
+  "missing-section.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Overview" }
+    }
+  ]
+}
