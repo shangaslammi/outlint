@@ -45,48 +45,48 @@ stripping, by contrast, always applies to diagnostic text —
 `options.strip_inline_markup` gates only the text used for matching, so
 `## **Foo** [bar](x)` reports as `Foo bar` under either setting.
 
-1.4. A document has at most one h1. If an h1 exists, the **root scope** is
-its h2 children; otherwise it is the document's h2s. A header outside the h1
-and everything below it — or, when there is no h1, outside the document's h2s
-and everything below them — is `detached-section` and takes part in no rule.
-The root scope is what the schema's top-level `sections` list describes.
-`title`, if specified, is the rule for every h1: a document with no h1 is
-diagnostic `missing-title`, and an h1 whose text does not match the `title`
-matcher is `not-allowed`.
+1.4. The section tree is rooted in a **document root**: a virtual level-0
+section that owns the entire document and whose children are the document's
+top-level headers. The root is not a header — it has no text for a matcher
+to see and no diagnostics of its own — but it is a parent like any other:
+the schema's top-level rules (§2) are the rule list of its scope, and every
+mechanism of §3 applies there exactly as it does one level down. Nothing is
+implicitly outside the schema, because there is no outside: every header is
+some parent's child, and what its parent's scope has to say about it is
+decided by the ordinary machinery — matching, cardinality, open versus
+closed scopes — not by a separate reachability notion.
 
-**Reachability.** The schema describes the totality of the document: no part
-of it is implicitly outside the schema. Two structural diagnostics say so.
-They are enforced for every schema, independently of any rule and of whether
-`title` is declared, and each covers a case the other does not:
-
-- A surplus h1 is one `too-many-sections` per document, on the second h1 in
-  document order — that is where the spine forks, and further h1s name the
-  same fork. It withdraws nothing: the h2s under a surplus h1 remain in the
-  root scope.
-- A header that is neither the h1 nor anywhere below it is
-  `detached-section`; when there is no h1, so is a header that is neither an
-  h2 nor anywhere below one. The *reachable* set is therefore the h1's whole
-  subtree, which is wider than the root scope: an h3 directly under the h1 is
-  reachable even though it is in no scope, and it is §1.5, not this rule,
-  that has anything to say about it. The *detached* set, given at most one
-  h1, is exactly: any header preceding the h1, at any level; or, when there
-  is no h1, any header below h2 with no h2 ancestor. It is reported once per detached
-  **subtree root** — a header under a detached one is misplaced only as a
-  consequence of its ancestor, and moving that ancestor onto the spine takes
-  the subtree with it, whereas detached siblings are separate misplacements
-  with separate fixes. A detached header takes part in no rule: it matches
-  none, counts toward no cardinality, and satisfies no constraint ref.
-  Neither does anything below it, which is why the subtree yields the one
-  diagnostic and no cascade of complaints about its descendants.
-
-A document with no h1 at all conforms. Reachability governs which headers the
-rules see; it is not itself a rule, so §1.5 still applies inside a detached
-subtree, and a *reachable* header that matches no rule remains the business
-of `strict` (§3.4).
+Which diagnostics the h1 level produces therefore depends only on how the
+schema declares it (§2). Under the general `outline` form, h1s are matched
+by ordinary rules and report as any section does. Under the `title` sugar
+with a matcher spelled or implied (§2), a document with no h1 is
+`missing-title`; an h1 whose text the `title` matcher rejects is
+`not-allowed` at the title node; and a surplus h1 is one
+`too-many-sections`, on the second h1 in document order — the first header
+in excess of the sugar's exactly-one bound (§3.5). A surplus h1 withdraws
+nothing: its subtree is still validated against the same rule's child
+scope, each h1 binding its own instance (§3.1).
 
 1.5. If `options.allow_skipped_levels` is false (default), a header whose
 level exceeds its parent's level by more than 1 is a structural error
-(diagnostic `skipped-level`), independent of any rules.
+(diagnostic `skipped-level`), independent of any rules. The document root is
+level 0, so a top-level h2 skips a level against the root exactly as an h4
+directly under an h2 does. A skipping header takes part in no rule — it
+matches none, counts toward no cardinality, and satisfies no constraint
+ref — and neither does anything below it; §1.5 itself still applies inside
+the subtree, so a header that skips relative to a skipping parent is
+reported in its own right, but a well-nested descendant yields no cascade of
+complaints about a misplacement that is entirely its ancestor's.
+
+If the option is true, the skip is admitted: the header becomes an ordinary
+member of the enclosing scope and is matched against that scope's rules
+like any sibling. One qualification: only h1s count for the `title`. Under
+the sugar (§2), an admitted top-level h2 — which can only precede the first
+h1 — never binds the title rule; it binds into the `sections` scope, merged
+ahead of the first h1's own children, under ordinary matching. The general
+form has no title slot to protect: an admitted top-level header is matched
+against the `outline` rules directly, which is nothing more than scope
+admission meaning rule matching, as it does in every nested scope.
 
 1.6. **Frontmatter.** A YAML block delimited by `---` lines starting at the
 very first line of the file is the document's frontmatter. It is not part of
@@ -136,19 +136,79 @@ its text is written at.
 
 ## 2. Schema format
 
-A schema is a YAML (or JSON) document:
+A schema is a YAML (or JSON) document with one of two top-level shapes. The
+**general form** declares `outline`, a list of rule objects (§2.1) for the
+document's h1 headers:
 
 ```yaml
 version: 1                # required, integer, currently 1
-title: <matcher>          # optional; rule for the h1 header
 options:                  # optional, see §7
   match_case: false
   strip_inline_markup: true
   allow_skipped_levels: false
 frontmatter: <frontmatter-object>  # optional, see §2.3
-sections: [<rule>, ...]   # rules for h2 headers
+outline: [<rule>, ...]    # rules for h1 headers
 constraints: [<constraint>, ...]   # optional, see §5
 ```
+
+`outline` is not a special construct: it is the rule list of the document
+root's scope (§1.4, §3.1), so everything a rule can say one level down —
+cardinality, `allow: false`, nested `sections`, child `constraints` — it
+can say about h1s, with the same meaning. It is named `outline` rather than
+`sections` so that the general form and the sugar below are syntactically
+disjoint: which shape a schema has is decided by which key it spells. An
+empty `outline: []` is schema error `invalid-document-shape` rather than a
+legal degenerate case, because an empty open scope would accept every
+document while appearing to constrain it; a document with no h1s at all is
+declared with `title: null` (below), which says what it means.
+
+The **sugar form** serves the common document with exactly one h1 — a
+title:
+
+```yaml
+version: 1
+title: <matcher>          # optional; or null — the document has no h1
+options: ...
+frontmatter: ...
+sections: [<rule>, ...]   # rules for h2 headers
+constraints: [<constraint>, ...]
+```
+
+`title:` plus `sections:` is permanent sugar for one required h1 rule:
+
+```yaml
+title: <matcher>          #     outline:
+sections: [<rule>, ...]   #  ≡    - match: <matcher>
+                          #       required: true
+                          #       sections: [<rule>, ...]
+```
+
+— exactly one h1, matching `<matcher>`, whose h2 children `sections`
+describes. The sugar is not transitional: it spares every single-title
+schema the boilerplate rule and a level of indentation forever, and it
+declares intent — `title:` says the document is the kind that has one.
+
+`sections` without `title` implies `title: "*"`: still exactly one h1, of
+any text. Bare `sections` is not a way to opt out of having a title — a
+document that loses its `# Title` must not silently keep passing — and a
+document with genuinely no h1 says so with `title: null`. Under
+`title: null` the document MUST have no h1: a present h1 is `not-allowed`,
+at the title node, and its subtree is validated no further, like any header
+a deny rule matches; `sections` then describes the document's own top-level
+h2s.
+
+The two forms are mutually exclusive: declaring `outline` together with
+`title` or `sections` is schema error `conflicting-outline`, anchored at
+whichever of the conflicting keys is declared second — the first key
+established the schema's shape, and the later one contradicts it.
+
+**Title diagnostics.** The desugared title rule is an ordinary rule, but
+its diagnostics keep the title vocabulary, because the author spelled (or
+implied) a title, not a rule: a missing h1 is `missing-title` rather than
+`missing-section`, a surplus h1 reads as a surplus title (§1.4), and both
+are attributed to the title schema node. When the title is implied by bare
+`sections`, there is no `title` key to attribute them to, so they are
+anchored on the `sections` entry — the spelling that implied the rule.
 
 A schema document is read as YAML on the same terms as frontmatter, so an
 implementation MAY refuse one nesting deeper than the limit of §1.6, and the
@@ -171,6 +231,11 @@ than the six header levels of §1.2 can address.
   sections: [<rule>...]   # optional; rules for this section's children (one level deeper)
   constraints: [...]      # optional; scoped to this rule's children (§5)
 ```
+
+The same rule object serves at two levels: as an entry of `outline`, where
+`match` tests an h1 and `sections` describes its h2s, and as an entry of any
+`sections` list, one level deeper each time. Nothing in the object is
+level-specific.
 
 Cardinality resolution (count of sibling headers matched by this rule within
 one parent scope):
@@ -279,10 +344,15 @@ Schema.
 ## 3. Matching semantics
 
 3.1. **Scope.** Validation proceeds per scope. A scope is (parent section,
-its list of child headers, the schema `sections` list attached to the
-parent's matched rule). The outermost scope is the root scope (§1.4) paired
-with the schema's top-level `sections`; a detached header is in no scope at
-all, so §3.2 through §3.6 never see it.
+its list of child headers, the rule list attached to the parent's matched
+rule). The outermost scope is the document root (§1.4) paired with the
+schema's `outline` rules — under the sugar, with the one rule that `title`
+and `sections` desugar to (§2). Scopes are bound per parent at every level,
+the h1 level included: two h1s matched by the same rule open two separate
+child scopes, so a nested rule's cardinality and a nested constraint hold
+within each h1 on its own and are never pooled across ancestors. A skipping
+subtree under the default of §1.5 is in no scope, so §3.2 through §3.6
+never see it.
 
 3.2. **First match wins.** For each child header, in document order, the
 rules in the `sections` list are tried in list order; the first rule whose
@@ -303,7 +373,10 @@ catch-alls; a trailing `match: "*"` acts as a default.
 headers pass. A scope is **closed** if its parent rule has `strict: true`.
 `strict: true` is exactly equivalent to appending
 `{ match: "*", allow: false }` to the `sections` list; if both are present
-the explicit rule is redundant but legal.
+the explicit rule is redundant but legal. The document root has no rule of
+its own to carry `strict`, so the outermost scope is closed by writing the
+expansion itself: a trailing `{ match: "*", allow: false }` at the end of
+`outline`.
 
 3.5. **Cardinality check.** After all children of a scope are matched, for
 each rule: if match count < min → `missing-section` when the count is zero,
@@ -362,8 +435,13 @@ never contain `.`, so dotted strings are unambiguous).
   search; failure to resolve is `unresolved-ref`.
 - Path: the first segment resolves as above; each subsequent segment
   resolves within the previous rule's `sections`.
-- **Absolute path:** leading `$.` anchors resolution at the schema root
-  scope. `$` alone is not a ref.
+- **Absolute path:** leading `$.` anchors resolution at the schema's
+  outermost rule list: the `outline` rules in the general form, the
+  `sections` list under the sugar. The sugar's synthesized title rule has
+  no id and adds no segment, so a sugar schema's absolute refs name what
+  they always have, while the general form spells the extra level —
+  `$.part.overview` where the sugar writes `$.overview`. `$` alone is not
+  a ref.
 
 **Truth value of a ref** (used by constraints): a ref is *satisfied* iff at
 least one concrete header exists that is matched along the full rule path —
@@ -447,6 +525,15 @@ non-final segment of an `ordered` ref's path MUST resolve to a rule with
 effective max ≤ 1 — ordering through repeated ancestors is not defined in
 v1 and is schema error `ordered-scope-mismatch`.
 
+That rule needs no special case at the h1 level. A root `ordered` over
+`outline` rules orders the parts of a document, and a listed rule may
+itself repeat — `last(A) < first(B)` says what that means — but a ref
+descending *through* a repeatable h1 rule is `ordered-scope-mismatch` like
+any repeated ancestor, because "before" has no single meaning across many
+instances of a part. An `ordered` inside one h1 rule's `constraints` binds
+per instance (§3.1): it compares occurrences within each h1's own scope
+and never reaches across two h1s.
+
 5.2. `then` in `requires` and `then_not` in `conflicts` MAY be a list of
 refs, meaning conjunction: all must be (un)satisfied. `if` is a single ref.
 
@@ -495,8 +582,10 @@ the two-level path `A`, `B`. Human-readable output MAY join the segments for
 legibility, accepting that ambiguity.
 
 `missing_header.parent` is the header path of the scope that should have
-contained the section, and is empty when no header encloses it: the root
-scope, or the title, which sits *above* the root scope. Its `matcher` is the
+contained the section, and is empty when no header does: the document
+root's own scope — where the missing section is an h1, the title included —
+or the sugar's single-h1 document voice (§6.2), which reports the lone
+h1's `sections` scope as the document's. Its `matcher` is the
 **matcher label** of the unsatisfied schema matcher, which is schema text and
 need not occur anywhere in the document. The label depends on the matcher
 form (§2.2): Exact — the string verbatim; Glob — the glob pattern source
@@ -526,13 +615,13 @@ whatever that fallback names.
 
 | Diagnostic | Target | Source anchor |
 |---|---|---|
-| `skipped-level`, `not-allowed`, `unexpected-section`, `detached-section` | `header` of the offending header | that header's line |
+| `skipped-level`, `not-allowed`, `unexpected-section` | `header` of the offending header | that header's line |
 | `too-many-sections` | `header` of the first header in excess of the bound | that header's line |
-| `missing-section`, `too-few-sections` | `missing_header`: `parent` is the enclosing scope's path, `matcher` the unsatisfied rule's label | the parent section's header line; line 1 at the root scope |
-| `missing-title` | `missing_header` with empty `parent` and the `title` matcher's label | line 1 |
+| `missing-section`, `too-few-sections` | `missing_header`: `parent` is the enclosing scope's path, `matcher` the unsatisfied rule's label | the parent section's header line; line 1 when `parent` is empty |
+| `missing-title` | `missing_header` with empty `parent` and the label of the `title` matcher, spelled or implied (§2) | line 1 |
 | `missing-frontmatter`, `forbidden-frontmatter`, `invalid-frontmatter` | `frontmatter` | the block's first line, or line 1 when absent |
 | `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and a fallback anchor (below) whenever the entry's position is unavailable |
-| constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, which is attached to the schema root and so has no parent header | the parent section's header line; line 1 at the root scope |
+| constraint keywords | `header` of the scope's parent section; `document` for a constraint whose scope is the document root's, which has no parent header, and under the sugar's single-h1 voice (below) | the parent section's header line; line 1 for a `document` target |
 
 An entry's position is unavailable in one case: a literal or folded block
 scalar with no content line. A position-tracking parser marks a scalar at the
@@ -586,15 +675,27 @@ that is itself an opening quote; only the scalar's style, reported alongside
 its position, tells a scalar that spells its breaks from one whose indicator
 merely kept them.
 
+**The sugar's document voice.** Under the sugar with a lone h1, diagnostics
+from the `sections` scope speak as if its rules bound the document itself:
+cardinality misses carry an empty `parent` and anchor at line 1, and a
+root-declared constraint violation targets the document. The author wrote
+"the document has an Overview", and the report should not read "the title
+lacks one". When more than one h1 binds the title rule, that voice would
+emit indistinguishable duplicates, so each diagnostic instead names its
+owner: cardinality misses carry the owning h1's path as `parent` and anchor
+at its header line, and a constraint violation targets and anchors on the
+h1. The general form has no document voice to keep: an h1 rule's child
+scope reports like any nested scope, with the h1 as parent.
+
 Constraint diagnostics additionally list the concrete headers involved, if
 any, each by its own header path (§5.3). Which diagnostics the `title`
-matcher and reachability produce is defined in §1.4.
+rule produces, and in what voice, is defined in §1.4 and §2.
 
 ### 6.3 Reserved ids
 
 Diagnostic ids: `skipped-level`, `not-allowed`, `unexpected-section`,
 `missing-section`, `too-few-sections`, `too-many-sections`,
-`detached-section`, `missing-title`, `missing-frontmatter`,
+`missing-title`, `missing-frontmatter`,
 `forbidden-frontmatter`, `invalid-frontmatter`, `frontmatter-schema`, plus
 the constraint keywords `one_of`, `any_of`, `at_most_one`, `all_or_none`,
 `requires`, `conflicts`, `ordered`.
@@ -602,7 +703,7 @@ the constraint keywords `one_of`, `any_of`, `at_most_one`, `all_or_none`,
 Schema errors: `syntax`, `invalid-document-shape`, `unsupported-version`,
 `duplicate-id`, `unresolved-ref`, `forbidden-ref`, `duplicate-ref`,
 `reserved-id`, `invalid-matcher`, `invalid-repeat`,
-`ordered-scope-mismatch`, `conflicting-cardinality`,
+`ordered-scope-mismatch`, `conflicting-cardinality`, `conflicting-outline`,
 `conflicting-frontmatter`, `invalid-frontmatter-schema`. These are load-time
 failures reported against the schema document and share the stability
 contract of the diagnostic ids above.
@@ -632,8 +733,15 @@ errors are load-time failures and are never suppressible.
 ```
 load_schema:
   parse YAML; check version
+  settle the top-level shape (§2):
+    outline beside title/sections -> conflicting-outline
+    empty outline -> invalid-document-shape
+    desugar title/sections to one required outline rule
+      (bare sections implies title "*"; title null becomes a deny-all
+       h1 rule), remembering the sugar for diagnostic voice (§6.2)
   load frontmatter.schema if given; compile JSON Schema (dialect per $schema)
-  walk rules: validate matchers (incl. regex dialect), repeat grammar,
+  walk rules (outline and every nested sections):
+              validate matchers (incl. regex dialect), repeat grammar,
               assign auto-ids, check per-scope id uniqueness,
               reject reserved id "fm"
   resolve every constraint ref (dotted rule path or fm.*):
@@ -642,13 +750,14 @@ load_schema:
     through rules with max > 1
 
 validate(doc):
-  split frontmatter (§1.6); parse markdown -> header tree
-                            (ignore code fences; normalize setext)
+  split frontmatter (§1.6); parse markdown -> header tree under the
+    virtual level-0 document root (§1.4)
+    (ignore code fences; normalize setext)
   check frontmatter presence vs required/allow; if present and schema
     compiled, run JSON Schema validation -> frontmatter-schema diagnostics
-  check title (if declared), reachability (§1.4 -> too-many-sections,
-    detached-section), and skipped levels
-  visit(scope = the root scope (§1.4), rules = schema.sections, constraints):
+  check skipped levels (§1.5)
+  visit(scope = the document root's children, rules = schema.outline,
+        constraints = schema.constraints):
     for each header in document order:
       rule := first rule in list whose matcher matches header.text
       if rule is None: report unexpected-section if scope closed; skip subtree
@@ -664,7 +773,7 @@ Complexity: O(H × R) matcher tests, H = headers, R = max sibling rule count.
 
 ---
 
-## 9. Complete example
+## 9. Complete examples
 
 ```yaml
 version: 1
@@ -709,12 +818,12 @@ sections:
   - match: "Roadmap"             # auto-id: roadmap
     required: false
   - match: "*"
-    allow: false                 # closed root scope
+    allow: false                 # closes the scope: no other h2 allowed
 
 constraints:
   - one_of: [changelog, history]
-  - requires: { if: deployment, then: [deployment, rollback-plan] }
-  - requires: { if: [api, errors], then: overview }
+  - requires: { if: deployment, then: deployment.rollback-plan }
+  - requires: { if: api.errors, then: overview }
   - conflicts: { if: deprecated, then_not: roadmap }
   - ordered: [overview, api, deployment]
   - requires: { if: fm.status=deprecated, then: deprecated }
@@ -730,10 +839,40 @@ declares a `rollout` key; `## Deprecated` and `## Roadmap` never co-occur;
 if frontmatter says `status: deprecated` a `## Deprecated` section exists;
 Overview precedes any API section, which precede Deployment.
 
+The same machinery one level up — a multi-part handbook, written in the
+general form because it has several h1s:
+
+```yaml
+version: 1
+outline:
+  - id: intro
+    match: "Introduction"
+    required: true
+  - id: part
+    match: "Part *"
+    repeat: "1..n"
+    sections:
+      - match: "Overview"        # per part: each h1 binds its own scope
+        required: true
+      - match: "*"
+  - match: "*"
+    allow: false                 # closes the outline (§3.4)
+constraints:
+  - ordered: [intro, part]
+```
+
+Every `# Part …` must contain its own `## Overview` — two parts, two
+obligations, never pooled across parts — the introduction precedes every
+part, and no other h1 exists.
+
 ---
 
 ## 10. Authoring guidance (non-normative)
 
+- Prefer the sugar. `title:` + `sections:` says at a glance that the
+  document is a single-title one; reach for `outline:` only when the
+  document genuinely has several h1s. No h1 at all is `title: null` — not
+  an empty outline, and not bare `sections`, which implies a title.
 - Prefer explicit `id` on any rule referenced by constraints; rely on
   auto-ids only for throwaway exact matchers. Renaming a header text changes
   its auto-id and breaks refs (loudly, at load time).

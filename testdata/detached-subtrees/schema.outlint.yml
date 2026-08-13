@@ -1,10 +1,11 @@
 version: 1
-# Every header must be reachable from the document's spine. `Overview` closes
-# its child scope and requires `Goals`, so a detached `Overview` would, if it
-# were pooled into the root scope, drag in a whole cascade: a surplus match,
-# an unexpected child, and a missing one. It is detached, so none of that is
-# reported — one diagnostic per detached subtree root, and nothing about its
-# descendants.
+# A skipping header takes part in no rule, and neither does anything below
+# it. `Overview` closes its child scope and requires `Goals`, so if the
+# stray top-level `Overview` were matched it would drag in a whole cascade:
+# a surplus match, an unexpected child, a missing `Goals`. Instead it is one
+# `skipped-level` against the virtual document root, and its well-nested
+# `Surprise` child adds nothing — that header's misplacement is entirely its
+# ancestor's. The `h1`'s own subtree still has to satisfy everything.
 sections:
   - match: "Overview"
     required: true

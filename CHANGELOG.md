@@ -26,7 +26,10 @@ feature set of the `0.1.0` workspace.
   or its permanent sugar: a `title` matcher with a `sections` list for the
   common single-`h1` document, `title: null` for a document with no `h1` at
   all, and bare `sections` without `title`, which implies `title: "*"` —
-  exactly one `h1` of any text. Exact, glob, anchored-regex (RE2 dialect),
+  exactly one `h1` of any text. The two forms are mutually exclusive
+  (schema error `conflicting-outline`, anchored at the later-declared key),
+  and an empty `outline: []` is refused toward `title: null`, which says
+  what it means. Exact, glob, anchored-regex (RE2 dialect),
   and `*` matchers with first-match-wins resolution; `required` /
   `repeat: "min..max"` cardinality; `strict` scopes and `allow: false`
   denials; explicit and derived rule `id`s with dotted reference paths.

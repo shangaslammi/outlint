@@ -171,6 +171,25 @@ The pieces:
   `fm.key=value` for typed scalar equality, dotted paths for nested
   mappings — e.g. `requires: { if: fm.status=deprecated, then: migration }`.
 
+A document with several `h1` parts drops the `title:` sugar for the general
+form: `outline:` is a list of the same rule objects, one level up,
+describing the `h1`s themselves. Every scope binds per parent, so each part
+carries its own obligations:
+
+```yaml
+version: 1
+outline:
+  - match: "Part *"
+    repeat: "1..n"
+    sections:
+      - match: "Overview"      # required in every part separately
+        required: true
+```
+
+`title: <matcher>` + `sections:` is exactly `outline:` with one required
+rule; bare `sections:` implies `title: "*"`; and `title: null` declares a
+document with no `h1` at all.
+
 Schema mistakes are diagnostics too, with their own stable ids
 (`duplicate-id`, `unresolved-ref`, `invalid-matcher`, `invalid-repeat`,
 `ordered-scope-mismatch`, …).

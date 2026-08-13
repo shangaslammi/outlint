@@ -1,10 +1,11 @@
 version: 1
-# No `title:` is declared, so nothing in this schema mentions `h1` at all.
-# The single top-level spine is structural rather than opt-in: a schema has
-# one top-level `sections` list, and the flat root scope it describes only has
-# one meaning when every `h2` shares one ancestor chain. Half of that is
-# bounding the document to one `h1`, which is what these documents exercise;
-# `detached-sections/` covers the other half.
+# No `title:` is declared, so `sections` implies `title: "*"`: exactly one
+# `h1`, of any text — a document that loses its `# Title` must not silently
+# keep passing. A headless document is `missing-title`, anchored on the
+# `sections` entry that implied the rule; a second `h1` is one
+# `too-many-sections` on the second in document order, and further `h1`s name
+# the same surplus (`three-parts.md` pins that it stays one diagnostic). A
+# document with genuinely many parts declares them with `outline:` instead.
 sections:
   - match: "Overview"
     repeat: "0..n"
