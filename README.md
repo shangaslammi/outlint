@@ -166,9 +166,10 @@ The pieces:
   the schema root or inside any rule's scope.
 - **Frontmatter.** outlint checks presence (`required`, `allow`) and
   delegates value validation to a JSON Schema, given inline or as a path
-  relative to the schema file. Note that `fm.` propositions in constraints
-  are accepted by the loader but are **not evaluated yet**: a constraint
-  depending on one is never satisfied.
+  relative to the schema file. Constraints can reference frontmatter with
+  `fm.` propositions — `fm.key` for presence of a non-null value,
+  `fm.key=value` for typed scalar equality, dotted paths for nested
+  mappings — e.g. `requires: { if: fm.status=deprecated, then: migration }`.
 
 Schema mistakes are diagnostics too, with their own stable ids
 (`duplicate-id`, `unresolved-ref`, `invalid-matcher`, `invalid-repeat`,
@@ -279,9 +280,7 @@ The full CLI contract is [`spec/cli.md`](spec/cli.md).
 
 outlint is at version 0.1.0. It implements Outlint Schema Specification v1
 and the CLI contract in [`spec/cli.md`](spec/cli.md), and the shared
-conformance corpus in `testdata/` runs in CI. One documented gap remains:
-`fm.` propositions in constraints are parsed and validated but not yet
-evaluated.
+conformance corpus in `testdata/` runs in CI.
 
 This is a 0.x release: expect breaking changes to the schema language, the
 diagnostic set, the JSON shape, and the library API before 1.0. Where an

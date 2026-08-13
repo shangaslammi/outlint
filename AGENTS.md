@@ -33,7 +33,7 @@ invent, rename, or repurpose one without a spec change.
 
 ## Current state
 
-Feature-complete against the spec for a first release, one known gap. The
+Feature-complete against the spec for a first release. The
 pipeline in `outlint-core`: `load_schema` / `load_schema_with_resources`
 (`loader.rs`) turn schema text into a normalized `Schema` or an
 `InvalidSchema` carrying positioned `SchemaError`s; `parse_markdown`
@@ -50,10 +50,13 @@ Frontmatter is implemented: the delimited block parses into
 `DocumentFrontmatter` with per-key anchors, and a schema's `frontmatter`
 policy (optional/required/forbidden) may attach a JSON Schema — inline or
 linked from a file — enforced via the `jsonschema` crate, with
-`json_pointer` and line ranges on the resulting diagnostics. Known gap:
-the loader accepts `fm.` propositions but the validator's
-`frontmatter_satisfied` is a stub that always answers false; see README
-"Known gaps" before touching it.
+`json_pointer` and line ranges on the resulting diagnostics. `fm.`
+propositions in constraints are evaluated by the validator's
+`frontmatter_satisfied` against the parsed frontmatter mapping: presence
+of a non-null value for `fm.key`, typed scalar equality for `fm.key=value`
+(both sides resolve through the loader's `parse_frontmatter_scalar`, so
+the YAML core schema types agree), honouring `options.match_case` for
+string comparison.
 
 The CLI has two subcommands: `outlint check <FILE>...` (nearest
 `.outlint.yml` discovered per file unless `--schema` is given; `-` reads

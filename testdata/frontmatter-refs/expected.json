@@ -1,0 +1,16 @@
+{
+  "pass-inert.md": [],
+  "pass-satisfied.md": [],
+  "fail-missing-migration.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "fail-semver.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ]
+}
