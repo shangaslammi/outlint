@@ -211,11 +211,13 @@ Run:
     cargo test --workspace
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy with `--all-targets`,
-and the tests on stable, plus `cargo check --workspace --all-targets` on
-the 1.86 MSRV. The doc build above is not in CI; the list above is the
-standard, and if a check here starts catching things CI misses, add it
-to CI.
+CI (`.github/workflows/ci.yml`) runs every check above with `--locked`:
+the tests on stable across Linux, macOS, and Windows, fmt and clippy on
+Linux, the doc build with `RUSTDOCFLAGS="-D warnings"`, and the full test
+suite on the 1.86 MSRV. It additionally runs `cargo deny check` against
+the committed `deny.toml` (advisories, licenses, bans, sources) — run it
+locally only when touching dependencies. If a check here starts catching
+things CI misses, add it to CI.
 
 `--all-features` is omitted deliberately — no crate defines features.
 
