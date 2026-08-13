@@ -1,0 +1,9 @@
+{
+  "pass.md": [],
+  "fail.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Title", "Forbidden"] }
+    }
+  ]
+}
