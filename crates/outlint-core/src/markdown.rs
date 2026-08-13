@@ -2610,6 +2610,66 @@ mod tests {
     }
 
     #[test]
+    fn chained_alias_expansions_anchor_at_the_outermost_alias_site() {
+        // A copy can hold a copy: `mid`'s value already carries the `*l`
+        // expansion inside it when `*m` splices the whole thing in again. The
+        // conversion threads the enclosing expansion down through the walk,
+        // and the outer site wins — the pointer names an entry of `outer`, so
+        // the `*m` that put it there is where a reader is sent, not the `*l`
+        // spelled inside a different entry's definition. Inner-wins would pass
+        // every single-level alias test, which is why the chain is pinned
+        // here, at exact positions.
+        let source = concat!(
+            "---\n",         // 1
+            "leaf: &l\n",    // 2
+            "  bad: nope\n", // 3
+            "mid: &m\n",     // 4
+            "  inner: *l\n", // 5   `*l` at column 10
+            "outer: *m\n",   // 6   `*m` at column 8
+            "---\n",
+            "# Title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        let anchor = |pointer: &str| {
+            anchors
+                .get(pointer)
+                .map(|anchor| (anchor.line, anchor.column))
+        };
+        assert_eq!(anchor("/outer"), Some((6, 1)));
+        assert_eq!(anchor("/outer/inner"), Some((6, 8)));
+        // The deep entry anchors at the `*m` site, not at the `*l` on line 5.
+        assert_eq!(anchor("/outer/inner/bad"), Some((6, 8)));
+
+        // The flow spelling of the same chain: `b`'s sequence holds the `*p`
+        // expansion, and `*q` copies it whole.
+        let source = concat!(
+            "---\n",         // 1
+            "a: &p [bad]\n", // 2
+            "b: &q [*p]\n",  // 3   `*p` at column 8
+            "c: *q\n",       // 4   `*q` at column 4
+            "---\n",
+            "# Title\n",
+        );
+        let document = parse_markdown(source, MarkdownOptions::default());
+        let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
+            panic!("expected parsed frontmatter: {document:?}")
+        };
+        let anchor = |pointer: &str| {
+            anchors
+                .get(pointer)
+                .map(|anchor| (anchor.line, anchor.column))
+        };
+        assert_eq!(anchor("/c"), Some((4, 1)));
+        assert_eq!(anchor("/c/0"), Some((4, 4)));
+        // The element inside both copies anchors at the `*q` site, not at the
+        // `*p` inside entry `b`.
+        assert_eq!(anchor("/c/0/0"), Some((4, 4)));
+    }
+
+    #[test]
     fn positions_invalid_or_unclosed_frontmatter() {
         let scalar = parse_markdown("---\nvalue\n---\n# Title\n", MarkdownOptions::default());
         let DocumentFrontmatter::Invalid { location, .. } = scalar.frontmatter else {
@@ -2698,8 +2758,8 @@ mod tests {
     #[test]
     fn a_merge_key_is_an_ordinary_frontmatter_entry() {
         // YAML's `<<` merge key is a convention of the failsafe schema's
-        // optional merge type, not of the core schema, and neither parser this
-        // module reads applies it. A frontmatter JSON Schema therefore sees a
+        // optional merge type, not of the core schema, and the reader this
+        // module uses does not apply it. A frontmatter JSON Schema therefore sees a
         // literal `<<` member holding the mapping that was supposed to be
         // merged in. Pinned rather than fixed: honoring merges would change
         // which documents validate, so it needs a specification first, and this
@@ -2716,8 +2776,8 @@ mod tests {
             serde_json::json!({ "<<": { "a": 1 }, "b": 2 }),
         );
 
-        // The same holds without an alias, which takes the other parser: the
-        // key keeps its spelling and the entry keeps an anchor of its own.
+        // The same holds without an alias: the key keeps its spelling and
+        // the entry keeps an anchor of its own.
         let inline = parse_markdown("---\n<<: {a: 1}\nb: 2\n---\n", MarkdownOptions::default());
         let DocumentFrontmatter::Mapping { value, anchors, .. } = inline.frontmatter else {
             panic!("a merge key parses as an ordinary mapping: {inline:?}")
@@ -2849,7 +2909,7 @@ mod tests {
 
     #[test]
     fn frontmatter_nesting_is_bounded() {
-        // One level under the limit, both tree parsers still build the value.
+        // One level under the limit, the reader still builds the value.
         let levels = MAX_YAML_DEPTH - 1;
         let document = parse_markdown(
             &deeply_nested_frontmatter(levels, false),
@@ -2877,7 +2937,7 @@ mod tests {
         assert!(!anchors.is_empty() && !tagged_anchors.is_empty());
 
         // One level over it, and at a depth that overran the stack before the
-        // scan was asked, neither parser is handed the block at all.
+        // scan was asked, the reader is not handed the block at all.
         for levels in [MAX_YAML_DEPTH, 30_000] {
             for tagged in [false, true] {
                 let source = deeply_nested_frontmatter(levels, tagged);
@@ -2951,6 +3011,23 @@ mod tests {
             node = &node[0];
         }
         assert_eq!(node[0], serde_json::json!(1));
+    }
+
+    #[test]
+    fn alias_spliced_depth_just_past_the_limit_is_a_refusal_not_a_crash() {
+        // The fixtures above overshoot the limit by thousands of levels, so a
+        // build that lost the splice-depth charge does not fail their
+        // assertions — it overruns the stack and aborts the whole test
+        // binary, which points at nothing. This one overshoots by two levels:
+        // shallow enough to build harmlessly were the charge gone, at which
+        // point the block would parse as a mapping and this refusal — the
+        // charge's own message — would be a plain assertion failure naming
+        // the guard that went missing.
+        let source = alias_deepened_frontmatter(MAX_YAML_DEPTH + 2, 1);
+        assert_eq!(
+            expect_invalid_frontmatter(&source),
+            "frontmatter nests YAML beyond its depth limit"
+        );
     }
 
     /// Frontmatter whose every line reaches the line above it through a *key*.
@@ -3174,12 +3251,12 @@ mod tests {
         // neighbouring plain `1` is here so the guard cannot be satisfied by
         // making every untagged scalar a string.
         let entries = "a: \"1\"\nb: 'true'\nc: \"null\"\nd: |\n  1\ne: 1\n";
-        let fallback = expect_frontmatter_mapping(&format!("---\n{entries}f: !!str y\n---\n"));
-        assert_eq!(fallback["a"], serde_json::json!("1"));
-        assert_eq!(fallback["b"], serde_json::json!("true"));
-        assert_eq!(fallback["c"], serde_json::json!("null"));
-        assert_eq!(fallback["d"], serde_json::json!("1\n"));
-        assert_eq!(fallback["e"], serde_json::json!(1));
+        let tagged = expect_frontmatter_mapping(&format!("---\n{entries}f: !!str y\n---\n"));
+        assert_eq!(tagged["a"], serde_json::json!("1"));
+        assert_eq!(tagged["b"], serde_json::json!("true"));
+        assert_eq!(tagged["c"], serde_json::json!("null"));
+        assert_eq!(tagged["d"], serde_json::json!("1\n"));
+        assert_eq!(tagged["e"], serde_json::json!(1));
 
         // The tag on the last entry used to route a block down a separate
         // fallback path, and a document's values were not allowed to depend
@@ -3189,7 +3266,7 @@ mod tests {
         let untagged = expect_frontmatter_mapping(&format!("---\n{entries}---\n"));
         for key in ["a", "b", "c", "d", "e"] {
             assert_eq!(
-                fallback[key], untagged[key],
+                tagged[key], untagged[key],
                 "a tag changed the resolution of {key}"
             );
         }
@@ -3209,10 +3286,19 @@ mod tests {
         // document are refused at its start marker — and the alias in the
         // second is refused with them rather than resolving to a value
         // defined in the first.
+        //
+        // The last two cases carry content whose *parsing* would answer
+        // differently: a refusal that read the second document first would
+        // report `*missing` as an unresolved alias instead of this message,
+        // and would resolve `*x` against the first document's table — the
+        // exact smuggle the refusal exists to keep unreachable. Reporting
+        // this message, at the start marker, is what shows neither was read.
         for (source, position) in [
             ("a: 1\n--- \nb: 2\n", "byte 5 line 2 column 1"),
             ("a: &x 1\n--- \nb: *x\n", "byte 8 line 2 column 1"),
             ("a: 1\n...\nb: 2\n", "byte 9 line 3 column 1"),
+            ("a: &x 1\n...\nb: *missing\n", "byte 12 line 3 column 1"),
+            ("a: &x 1\n...\nb: *x\n", "byte 12 line 3 column 1"),
         ] {
             assert_eq!(
                 exact_frontmatter_mapping(source, NO_MARK),
@@ -3572,7 +3658,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_fallback_preserves_explicit_tag_semantics() {
+    fn explicit_tags_resolve_to_their_declared_types() {
         let document = parse_markdown(
             concat!(
                 "---\n",
@@ -3644,7 +3730,7 @@ mod tests {
 
     #[test]
     fn the_exact_builder_keeps_every_digit_it_was_given() {
-        // §1.6's exactness is what this whole fallback exists for, and under an
+        // §1.6's exactness is what this whole reader exists for, and under an
         // event-driven builder it rests on the event's own text being the
         // lexeme rather than on any parser option. Twenty-five and thirty
         // digits are both past what a `f64` can distinguish, so each value is
@@ -3675,7 +3761,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_limit_fallback_rejects_invalid_standard_tags() {
+    fn standard_tags_with_mismatched_values_are_rejected() {
         for invalid in [
             "bad: !!int 1.0",
             "bad: !!int 01",
@@ -3695,7 +3781,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_limit_fallback_accepts_valid_standard_tags() {
+    fn standard_tags_with_conforming_values_are_accepted() {
         let document = parse_markdown(
             concat!(
                 "---\n",
@@ -3733,7 +3819,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_range_fallback_preserves_huge_and_tiny_exponents() {
+    fn huge_and_tiny_exponents_keep_their_spelling() {
         let document = parse_markdown(
             concat!(
                 "---\n",
@@ -3757,7 +3843,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_range_fallback_rejects_nonfinite_and_malformed_floats() {
+    fn nonfinite_and_malformed_float_tags_are_rejected() {
         for invalid in ["bad: !!float .inf", "bad: !!float 1e", "bad: !!float nope"] {
             let source = format!("---\nhuge: 184467440737095516160\n{invalid}\n---\n");
             let document = parse_markdown(&source, MarkdownOptions::default());
@@ -3796,7 +3882,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_keys_remain_invalid_when_a_tag_uses_the_exact_fallback() {
+    fn duplicate_keys_remain_invalid_beside_a_tag() {
         let document = parse_markdown(
             "---\ntagged: !!str value\nduplicate: one\nduplicate: two\n---\n",
             MarkdownOptions::default(),
