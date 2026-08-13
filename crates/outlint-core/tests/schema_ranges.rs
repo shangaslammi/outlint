@@ -421,7 +421,24 @@ fn file_uri(path: &Path) -> String {
     let display = path
         .to_str()
         .unwrap_or_else(|| panic!("path '{}' is not valid UTF-8", path.display()));
-    let mut uri = String::from("file://");
+    // On Windows, `canonicalize` returns a verbatim path (`\\?\D:\dir\x.json`);
+    // percent-encoding that wholesale yields `file://%5C%5C%3F%5C...`, which no
+    // URI parser accepts. Strip the verbatim prefix and convert separators so
+    // the drive path becomes `file:///D:/dir/x.json`, the form the CLI's
+    // `path_file_uri` produces. On Unix this is the identity.
+    let display = if cfg!(windows) {
+        display
+            .strip_prefix(r"\\?\")
+            .unwrap_or(display)
+            .replace('\\', "/")
+    } else {
+        display.to_owned()
+    };
+    let mut uri = if display.starts_with('/') {
+        String::from("file://")
+    } else {
+        String::from("file:///")
+    };
     for byte in display.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
             uri.push(char::from(byte));
@@ -452,7 +469,21 @@ fn file_uri_path(uri: &str) -> Option<PathBuf> {
             index += 1;
         }
     }
-    String::from_utf8(bytes).ok().map(PathBuf::from)
+    let decoded = String::from_utf8(bytes).ok()?;
+    // A drive path's file URI (`file:///D:/dir/x.json`) decodes to
+    // `/D:/dir/x.json`; the slash before the drive must go or Windows cannot
+    // read the path. Mirrors the CLI's `uri_decoded_path`.
+    if cfg!(windows) {
+        let bytes = decoded.as_bytes();
+        if bytes.first() == Some(&b'/')
+            && bytes.get(1).is_some_and(u8::is_ascii_alphabetic)
+            && bytes.get(2) == Some(&b':')
+            && matches!(bytes.get(3), None | Some(b'/'))
+        {
+            return Some(PathBuf::from(&decoded[1..]));
+        }
+    }
+    Some(PathBuf::from(decoded))
 }
 
 /// The baseline spelling of one [`SchemaNode`].
