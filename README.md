@@ -236,6 +236,15 @@ rejected one value, its `pointer`). The kinds are distinct because their
 text has different provenance — a `missing_header` matcher is schema text
 that may appear nowhere in the document.
 
+**Diagnostic order.** Within each file, both formats emit diagnostics in a
+fixed total order: source line, then byte column, then diagnostic id, then
+`schema_location` as `(path, line, column)` with absent first, then
+`target` — by kind in the order above, then by its members — then
+`message`, with the remaining rendered fields breaking any residual tie so
+no two distinct diagnostics ever compare equal. The order is a pure
+function of the reported diagnostics, never of the order validation
+discovered them in, so identical inputs produce byte-identical output.
+
 **Schemas alone.** `outlint schema check .outlint.yml` runs every
 schema-load-time check without needing a document — useful in CI when the
 schema itself changes.
