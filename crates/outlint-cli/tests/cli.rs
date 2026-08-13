@@ -1366,6 +1366,10 @@ fn frontmatter_reference_details_retain_typed_equality() {
     );
 }
 
+// Windows refuses control characters in filenames (`fs::write` fails with
+// ERROR_INVALID_NAME before outlint runs), so this on-disk fixture can only
+// exist on Unix. The escaping under test is platform-independent.
+#[cfg(unix)]
 #[test]
 fn human_output_escapes_untrusted_control_characters() {
     let directory = TempDir::new("human-escape");
