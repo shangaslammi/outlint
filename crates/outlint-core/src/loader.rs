@@ -2534,6 +2534,75 @@ mod tests {
         }
     }
 
+    /// A schema whose `constraints` entries chain anchors, each wrapping an
+    /// alias to the entry above it in one more sequence.
+    ///
+    /// Every entry is one flow sequence in the source, so the event depth the
+    /// pre-parse scan counts stays at three however many links the chain has,
+    /// while the tree the parser builds reaches `links` levels below the
+    /// `constraints` sequence once the aliases are expanded.
+    fn alias_deepened_schema(links: usize) -> String {
+        let mut source =
+            String::from("version: 1\nsections:\n  - match: Title\nconstraints:\n  - &x0 [1]\n");
+        for line in 1..links {
+            source.push_str(&format!("  - &x{line} [*x{}]\n", line - 1));
+        }
+        source
+    }
+
+    #[test]
+    fn alias_expanded_schema_nesting_is_bounded_only_by_the_parsers_own_limit() {
+        // Depth an alias splices in is depth the pre-parse scan cannot see:
+        // `yaml_nesting_exceeds_limit` counts the levels the source text
+        // opens, and an alias is one event however deep the value it names.
+        // The only guard the schema path has against the expanded tree lives
+        // inside `yaml_serde`, which charges its own recursion limit across
+        // each alias jump while building the value — a guard this crate does
+        // not own, and one that leaves with the dependency when this path
+        // stops parsing through it. The frontmatter path made that trade once
+        // and silently inherited the absence of the same guard (ec565c6, two
+        // commits to recover); this test is what makes the loss loud here.
+        // The 127-link fixture is shallow enough to build harmlessly were the
+        // guard gone, at which point the loader would walk it to a
+        // constraint-shape complaint and the message assertions below would
+        // fail plainly, naming the refusal that went missing.
+        //
+        // The boundary from both sides: at 126 links the expanded tree fills
+        // the parser's limit of 128 exactly (root mapping, `constraints`
+        // sequence, 126 chained levels) and is built — proven by the loader
+        // getting past parsing to reject the entries as constraints — and one
+        // more link flips the outcome to the parser's own refusal, an
+        // ordinary syntax diagnostic anchored where the chain starts, not a
+        // crash.
+        let at_limit = alias_deepened_schema(126);
+        assert!(!crate::markdown::yaml_nesting_exceeds_limit(&at_limit));
+        let built = invalid(&at_limit);
+        assert_eq!(
+            built.errors.first.kind,
+            SchemaErrorKind::InvalidDocumentShape
+        );
+        assert_eq!(
+            built.errors.first.message,
+            "constraint must be a single-key object"
+        );
+
+        for links in [127, 2_000] {
+            let source = alias_deepened_schema(links);
+            assert!(!crate::markdown::yaml_nesting_exceeds_limit(&source));
+            let refused = invalid(&source);
+            assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
+            assert_eq!(
+                refused.errors.first.message,
+                "invalid YAML: recursion limit exceeded at line 5 column 5"
+            );
+            // The reported position is the anchor opening the chain.
+            assert_eq!(source_slice(&source, refused.errors.first.range), "&");
+            // The same parse serves linked-schema discovery, which reports
+            // the refused document as declaring no linked schema.
+            assert_eq!(linked_frontmatter_schema_path(&source), None);
+        }
+    }
+
     #[test]
     fn applies_defaults_and_normalizes_rules() {
         let schema = valid(
