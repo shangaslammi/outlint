@@ -1536,6 +1536,14 @@ impl Loader {
                 let range = self.range(RangeKey::DocumentField("title".into()));
                 self.nodes.insert(SchemaNode::Title, range);
             }
+            if outline_provenance == OutlineProvenance::BareSections {
+                // Bare `sections:` implies `title: "*"`, but there is no
+                // `title:` key to anchor title diagnostics on. The `sections`
+                // key is the spelling that implied the rule, so it carries
+                // the anchor.
+                let range = self.range(RangeKey::DocumentField("sections".into()));
+                self.nodes.insert(SchemaNode::Title, range);
+            }
             let sections = self.build_scope(
                 raw.sections
                     .expect("the shape validation requires `sections` without `outline`"),
@@ -4724,7 +4732,7 @@ sections: []
     }
 
     fn linked_schema_source() -> &'static str {
-        "version: 1\nfrontmatter:\n  schema: root.json\nsections: []\n"
+        "version: 1\nfrontmatter:\n  schema: root.json\ntitle: null\nsections: []\n"
     }
 
     /// Builds a document whose root reference starts a chain of `links` hops,

@@ -44,7 +44,8 @@ use serde_json::Value;
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
-const VALID_SCHEMA: &str = "version: 1\nsections:\n  - match: Required\n    required: true\n";
+const VALID_SCHEMA: &str =
+    "version: 1\ntitle: null\nsections:\n  - match: Required\n    required: true\n";
 
 struct TempDir(PathBuf);
 
@@ -260,7 +261,7 @@ fn frontmatter_schema_messages_preserve_document_number_spellings() {
     let directory = TempDir::new("frontmatter-number-messages");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 1\ntitle: null\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write(
         "frontmatter.schema.json",
@@ -944,7 +945,7 @@ fn linked_schema_refs_use_the_symlink_path_as_their_base() {
     let directory = TempDir::new("linked-frontmatter-symlink-base");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 1\ntitle: null\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write("target/root.json", r#"{"$ref":"defs.json"}"#);
     directory.write("target/defs.json", "false");
@@ -1080,11 +1081,11 @@ fn discovery_uses_the_nearest_schema_for_each_file() {
     let directory = TempDir::new("discovery");
     directory.write(
         ".outlint.yml",
-        "version: 1\nsections:\n  - match: Root\n    required: true\n",
+        "version: 1\ntitle: null\nsections:\n  - match: Root\n    required: true\n",
     );
     directory.write(
         "nested/.outlint.yml",
-        "version: 1\nsections:\n  - match: Nested\n    required: true\n",
+        "version: 1\ntitle: null\nsections:\n  - match: Nested\n    required: true\n",
     );
     directory.write("root.md", "## Root\n");
     directory.write("nested/doc.md", "## Nested\n");
@@ -1277,7 +1278,7 @@ fn constraint_details_are_preserved_in_json_and_human_output() {
     let directory = TempDir::new("constraint-details");
     directory.write(
         "schema.yml",
-        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  - one_of: [a, b]\n",
+        "version: 1\ntitle: null\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  - one_of: [a, b]\n",
     );
     directory.write("doc.md", "## A\n## B\n");
 
@@ -1341,7 +1342,7 @@ fn frontmatter_reference_details_retain_typed_equality() {
     let directory = TempDir::new("frontmatter-reference");
     directory.write(
         "schema.yml",
-        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  - one_of: [fm.status=true, a]\n",
+        "version: 1\ntitle: null\nsections:\n  - id: a\n    match: A\nconstraints:\n  - one_of: [fm.status=true, a]\n",
     );
     directory.write("doc.md", "plain text\n");
 
@@ -1375,7 +1376,7 @@ fn human_output_escapes_untrusted_control_characters() {
     let directory = TempDir::new("human-escape");
     directory.write(
         "schema.yml",
-        "version: 1\nsections:\n  - match: \"Required\\nHeading\"\n    required: true\n",
+        "version: 1\ntitle: null\nsections:\n  - match: \"Required\\nHeading\"\n    required: true\n",
     );
     let document = "evil\u{1b}\n.md";
     directory.write(document, "plain text\n");

@@ -449,11 +449,12 @@ impl<'a> Validator<'a> {
             .any(|pathed| pathed.section.heading.level == HeaderLevel::H1);
         // The document root is a virtual level-0 header enclosing the whole
         // document: outline rules describe its `h1` children the way nested
-        // rules describe any header's children. Sugar keeps its lax handling
-        // of documents with no `h1` by letting the root stand in at level 1 —
-        // the `sections` scope then binds the document's own top-level `h2`s
-        // — and `title: null` declares that shape outright, whatever the
-        // document contains.
+        // rules describe any header's children. When a sugar schema meets a
+        // document with no `h1`, the root stands in at level 1 — the
+        // `sections` scope then binds the document's own top-level `h2`s
+        // (alongside the missing-title the absent `h1` earns) — and
+        // `title: null` declares that shape outright, whatever the document
+        // contains.
         let root_level = match self.schema.outline_provenance {
             OutlineProvenance::Outline => 0,
             OutlineProvenance::NoTitle => 1,
@@ -555,7 +556,9 @@ impl<'a> Validator<'a> {
             // The headless scope: the virtual root stands in at level 1 and
             // the `sections` rules bind the document's top-level `h2`s.
             // One scope instance, so the legacy document voice is unambiguous.
-            if provenance == OutlineProvenance::Title {
+            // Bare `sections:` implies `title: "*"`, so a headless document
+            // is missing its title there exactly as under a spelled title.
+            if provenance != OutlineProvenance::NoTitle {
                 self.emit(
                     Diagnostic {
                         id: DiagnosticId::MissingTitle,
@@ -611,9 +614,9 @@ impl<'a> Validator<'a> {
         let mut admitted_strays = Vec::new();
         for pathed in &admitted {
             if pathed.section.heading.level == HeaderLevel::H1 {
-                if provenance == OutlineProvenance::Title
-                    && !prepared.matcher.matches(&pathed.section.heading.text)
-                {
+                // Only a spelled title matcher can miss: the bare-sections
+                // any-text matcher accepts every `h1`.
+                if !prepared.matcher.matches(&pathed.section.heading.text) {
                     self.emit_present(
                         DiagnosticId::NotAllowed,
                         pathed.path.clone(),
@@ -636,26 +639,18 @@ impl<'a> Validator<'a> {
         }
         // One diagnostic per document, anchored on the second occurrence in
         // document order: that is where the bound breaks, and further surplus
-        // says nothing new. The `h1` is the title only when the schema
-        // declares one, and only then is there a schema node to blame.
+        // says nothing new. Every `h1` is the title — spelled or implied —
+        // so the title node takes the blame either way.
         if let Some(excess) = occurrences.get(1) {
-            let (schema_node, message) = if provenance == OutlineProvenance::Title {
-                (
-                    Some(SchemaNode::Title),
-                    "the document has more than one title",
-                )
-            } else {
-                (None, "the document has more than one h1 header")
-            };
             self.emit(
                 Diagnostic {
                     id: DiagnosticId::TooManySections,
                     target: DiagnosticTarget::Header(excess.path.clone()),
                     location: heading_location(&excess.section.heading.location),
-                    schema_node,
+                    schema_node: Some(SchemaNode::Title),
                     involved_headers: Vec::new(),
                     references: Vec::new(),
-                    message: message.to_owned(),
+                    message: "the document has more than one title".to_owned(),
                 },
                 Some(&excess.section.heading),
                 true,
@@ -1718,8 +1713,9 @@ mod tests {
 
     #[test]
     fn diagnostics_retain_normative_document_and_schema_anchors() {
-        let loaded = load_schema("version: 1\nsections:\n  - match: Item\n    repeat: 2..2\n")
-            .expect("test schema is valid");
+        let loaded =
+            load_schema("version: 1\ntitle: null\nsections:\n  - match: Item\n    repeat: 2..2\n")
+                .expect("test schema is valid");
         let document = parse_markdown("## Item\n## Item\n## Item\n", MarkdownOptions::default());
         let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
 
@@ -1803,8 +1799,8 @@ mod tests {
 
         // One `h1` above any number of root sections is the intended shape.
         assert!(surplus_diagnostics(schema, "# One\n## Overview\n## Overview\n").is_empty());
-        // No `h1` at all is fine under sugar: the `sections` scope then binds
-        // the document's own top-level `h2`s.
+        // No `h1` misses the implied title, but that is not a surplus: the
+        // `sections` scope still binds the document's own top-level `h2`s.
         assert!(surplus_diagnostics(schema, "## Overview\n").is_empty());
 
         let two = surplus_diagnostics(schema, "# One\n## Overview\n# Two\n## Overview\n");
@@ -1816,8 +1812,9 @@ mod tests {
             DiagnosticTarget::Header(HeaderPath(vec!["Two".into()]))
         );
         assert_eq!(diagnostic.location.line, 3);
-        // Nothing in the schema names `h1`, so there is no node to blame.
-        assert_eq!(diagnostic.schema_node, None);
+        // Bare `sections:` implies `title: "*"`, so the implied title takes
+        // the blame even though no `title:` key is spelled.
+        assert_eq!(diagnostic.schema_node, Some(SchemaNode::Title));
 
         // Surplus beyond the second header says nothing new.
         let three = surplus_diagnostics(schema, "# One\n# Two\n# Three\n## Overview\n");
@@ -1990,10 +1987,11 @@ mod tests {
             )]
         );
 
-        // With no `h1`, the sugar root stands in at level 1 and the `h2`s
+        // With `title: null` the root stands in at level 1 and the `h2`s
         // bind directly, so a deeper orphan skips just the same.
+        let headless = "version: 1\ntitle: null\nsections:\n  - match: Sec\n    repeat: 0..n\n";
         assert_eq!(
-            ids_and_targets(schema, "### Orphan\n## Sec\n"),
+            ids_and_targets(headless, "### Orphan\n## Sec\n"),
             [(
                 DiagnosticId::SkippedLevel,
                 DiagnosticTarget::Header(HeaderPath(vec!["Orphan".into()])),
@@ -2003,7 +2001,7 @@ mod tests {
         // A document of nothing but orphans reports each top-level one; the
         // `h4` one level under its `h3` parent is no skip of its own.
         assert_eq!(
-            ids_and_targets(schema, "### One\n#### Two\n### Three\n"),
+            ids_and_targets(headless, "### One\n#### Two\n### Three\n"),
             [
                 (
                     DiagnosticId::SkippedLevel,
@@ -2027,7 +2025,12 @@ mod tests {
             ids_and_targets(open, "# Title\n## Known\n## Unmatched\n### Child\n"),
             []
         );
-        assert_eq!(ids_and_targets(open, "## Known\n## Unmatched\n"), []);
+        let open_headless =
+            "version: 1\ntitle: null\nsections:\n  - match: Known\n    repeat: 0..n\n";
+        assert_eq!(
+            ids_and_targets(open_headless, "## Known\n## Unmatched\n"),
+            []
+        );
 
         let closed =
             "version: 1\nsections:\n  - match: Known\n    repeat: 0..n\n    strict: true\n";
@@ -2073,7 +2076,7 @@ mod tests {
 
         // Sugar's headless scope stands in at level 1, one level down: a
         // top-level `h3` is the skip there, and admission works the same.
-        let sugar = "version: 1\nsections:\n  - match: Deep\n    required: true\n";
+        let sugar = "version: 1\ntitle: null\nsections:\n  - match: Deep\n    required: true\n";
         assert_eq!(
             ids_and_targets(sugar, "### Deep\n"),
             [
@@ -2091,7 +2094,7 @@ mod tests {
             ]
         );
         let lax_sugar = "version: 1\noptions:\n  allow_skipped_levels: true\n\
-                         sections:\n  - match: Deep\n    required: true\n";
+                         title: null\nsections:\n  - match: Deep\n    required: true\n";
         assert_eq!(ids_and_targets(lax_sugar, "### Deep\n"), []);
     }
 
@@ -2134,6 +2137,52 @@ mod tests {
             diagnostics[0].message,
             "the schema declares a document with no title"
         );
+    }
+
+    #[test]
+    fn bare_sections_implies_a_required_title() {
+        // `sections:` without `title:` means `title: "*"`: exactly one `h1`,
+        // any text. A document that loses its `# Title` no longer passes
+        // silently.
+        let bare = "version: 1\nsections:\n  - match: Overview\n    required: true\n";
+        let loaded = load_schema(bare).expect("test schema is valid");
+        let document = parse_markdown("## Overview\n", MarkdownOptions::default());
+        let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = diagnostics.first().expect("one diagnostic was asserted");
+        assert_eq!(diagnostic.id, DiagnosticId::MissingTitle);
+        assert_eq!(diagnostic.message, "the document has no required title");
+        assert_eq!(diagnostic.location, root_location());
+        assert_eq!(
+            diagnostic.target,
+            DiagnosticTarget::MissingHeader {
+                parent: HeaderPath::default(),
+                matcher: "*".into(),
+            }
+        );
+        // With no `title:` key to blame, the title node anchors on the
+        // `sections` entry — the spelling that implied the rule.
+        assert_eq!(diagnostic.schema_node, Some(SchemaNode::Title));
+        let anchor = loaded
+            .locations
+            .nodes
+            .get(&SchemaNode::Title)
+            .expect("bare sections records a title anchor");
+        let spelled = &bare[anchor.range.start.0..anchor.range.end.0];
+        assert_eq!(spelled, "- match: Overview\n    required: true\n");
+
+        // A single `h1` — any text — satisfies the implied title, and the
+        // same headless document under `title: null` is declared conformant.
+        assert_eq!(ids_and_targets(bare, "# Anything\n## Overview\n"), []);
+        let null = "version: 1\ntitle: null\nsections:\n  - match: Overview\n    required: true\n";
+        assert_eq!(ids_and_targets(null, "## Overview\n"), []);
+
+        // The strictness is sugar business: the general form has no title
+        // slot, so a zero-`h1` document under `outline:` misses nothing.
+        let general = "version: 1\noptions:\n  allow_skipped_levels: true\n\
+                       outline:\n  - match: Part\n    repeat: \"0..n\"\n\
+                       \x20   sections:\n      - match: Overview\n        required: true\n";
+        assert_eq!(ids_and_targets(general, ""), []);
     }
 
     #[test]
@@ -2268,7 +2317,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_title_still_owns_the_surplus_title_diagnostic() {
+    fn surplus_titles_blame_the_spelled_or_implied_title() {
         let titled = surplus_diagnostics(
             "version: 1\ntitle: Project\nsections:\n  - match: Item\n    repeat: 0..n\n",
             "# Project\n# Project\n## Item\n",
@@ -2278,17 +2327,16 @@ mod tests {
         assert_eq!(diagnostic.schema_node, Some(SchemaNode::Title));
         assert_eq!(diagnostic.message, "the document has more than one title");
 
-        // Without `title:` the identical document gets the structural wording,
-        // because nothing in the schema names the `h1`.
+        // Without `title:` the identical document reads the same way: bare
+        // `sections:` implies `title: "*"`, so the surplus `h1` is a surplus
+        // title there too, blamed on the implied title node.
         let untitled = surplus_diagnostics(
             "version: 1\nsections:\n  - match: Item\n    repeat: 0..n\n",
             "# Project\n# Project\n## Item\n",
         );
         assert_eq!(untitled.len(), 1);
-        assert_eq!(
-            untitled[0].message,
-            "the document has more than one h1 header"
-        );
+        assert_eq!(untitled[0].schema_node, Some(SchemaNode::Title));
+        assert_eq!(untitled[0].message, "the document has more than one title");
     }
 
     #[test]
@@ -2403,7 +2451,7 @@ mod tests {
 
     #[test]
     fn frontmatter_schema_messages_quote_document_number_spellings() {
-        let mut schema = load_schema("version: 1\nsections: []\n")
+        let mut schema = load_schema("version: 1\ntitle: null\nsections: []\n")
             .expect("test schema is valid")
             .schema;
         schema.frontmatter = FrontmatterPolicy::Optional {
@@ -2476,9 +2524,10 @@ mod tests {
 
     #[test]
     fn reports_invalid_and_forbidden_frontmatter_without_schema_execution() {
-        let schema = load_schema("version: 1\nfrontmatter: { allow: false }\nsections: []\n")
-            .expect("test schema is valid")
-            .schema;
+        let schema =
+            load_schema("version: 1\nfrontmatter: { allow: false }\ntitle: null\nsections: []\n")
+                .expect("test schema is valid")
+                .schema;
         let document = parse_markdown("---\n- item\n---\n", MarkdownOptions::default());
         let ids = validate(&schema, &document)
             .expect("schema prepares")
@@ -2501,13 +2550,13 @@ mod tests {
             root: serde_json::Value::Bool(false),
             resources: std::collections::BTreeMap::new(),
         };
-        let mut schema = load_schema("version: 1\nsections: []\n")
+        let mut schema = load_schema("version: 1\ntitle: null\nsections: []\n")
             .expect("test schema is valid")
             .schema;
         schema.frontmatter = FrontmatterPolicy::Optional {
             schema: Some(json_schema.clone()),
         };
-        let absent = parse_markdown("# Title\n", MarkdownOptions::default());
+        let absent = parse_markdown("## Title\n", MarkdownOptions::default());
         assert!(validate(&schema, &absent)
             .expect("schema prepares")
             .is_empty());
@@ -2551,7 +2600,7 @@ mod tests {
         // would refuse graphs the compiler handles comfortably.
         let document = parse_markdown("---\nstatus: draft\n---\n", MarkdownOptions::default());
 
-        let mut schema = load_schema("version: 1\nsections: []\n")
+        let mut schema = load_schema("version: 1\ntitle: null\nsections: []\n")
             .expect("test schema is valid")
             .schema;
         schema.frontmatter = FrontmatterPolicy::Optional {

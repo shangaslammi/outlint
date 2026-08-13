@@ -1,4 +1,5 @@
 version: 1
+title: null
 frontmatter:
   schema: resources/frontmatter.schema.json
 sections: []
