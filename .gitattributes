@@ -1,0 +1,4 @@
+# The conformance corpus and test goldens compare byte-exact positions, so
+# no file may be rewritten at checkout: disable end-of-line conversion
+# everywhere (files are committed with LF and must arrive as LF on Windows).
+* -text
