@@ -3186,6 +3186,31 @@ mod tests {
     }
 
     #[test]
+    fn a_standard_tag_on_a_schema_collection_must_name_the_collection_kind() {
+        // This verdict changed in the saphyr port: the serde-era engine
+        // ignored a mismatched standard tag on a schema collection, so
+        // `sections: !!map` over a block sequence loaded as if untagged. The
+        // shared container-tag check now refuses the mismatch — the same rule
+        // the frontmatter path applies — and this test records the new
+        // behaviour deliberately. A tag that names the collection's own kind
+        // keeps loading on both engines.
+        let schema = valid("version: 1\nsections: !!seq\n  - match: A\n");
+        assert_eq!(schema.sections.len(), 1);
+
+        let source = "version: 1\nsections: !!map\n  - match: A\n";
+        let refused = invalid(source);
+        assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
+        assert_eq!(
+            refused.errors.first.message,
+            "invalid YAML: invalid tag for a YAML seq"
+        );
+        // The refusal anchors where the sequence starts: the first entry's
+        // `-` at 3:3.
+        assert_eq!(source_slice(source, refused.errors.first.range), "-");
+        assert_eq!(refused.errors.first.range.range.start, ByteOffset(29));
+    }
+
+    #[test]
     fn an_oversized_version_is_a_shape_error_at_the_value() {
         // The engine preserves a number's exact spelling, so an integer of any
         // magnitude parses; one that does not fit the schema's own 64-bit

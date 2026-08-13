@@ -50,6 +50,12 @@ feature set of the `0.1.0` workspace.
   bounded in turn by how many `$ref` and `$dynamicRef` keywords it declares in
   all, counted across its documents rather than within each, because a chain of
   references costs a stack frame per link however shallowly its documents nest.
+- **YAML tag handling.** In a schema file as in a frontmatter block, a
+  core-schema tag is honoured when it names its node's own kind and refused
+  when it does not — `sections: !!map` over a block sequence is an error — and
+  a tag outside the yaml.org namespace is refused anywhere, including on the
+  document root. A schema file, like a frontmatter block, may begin with a
+  byte-order mark.
 - **Core library** (`outlint-core`): a pure, IO-free schema loader, Markdown
   outline parser, and validator. Schema loading collects every error rather
   than stopping at the first, and never returns a partial schema.
