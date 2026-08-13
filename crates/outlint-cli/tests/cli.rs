@@ -394,8 +394,8 @@ fn frontmatter_schema_diagnostics_anchor_to_the_failing_entry() {
 }
 
 #[test]
-fn frontmatter_schema_anchors_fall_back_to_the_block_without_markers() {
-    let directory = TempDir::new("frontmatter-anchors-fallback");
+fn frontmatter_schema_anchors_reach_entries_beside_tags() {
+    let directory = TempDir::new("frontmatter-anchors-tagged");
     directory.write(
         "schema.yml",
         "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
@@ -404,7 +404,9 @@ fn frontmatter_schema_anchors_fall_back_to_the_block_without_markers() {
         "frontmatter.schema.json",
         r#"{"type":"object","properties":{"count":{"type":"integer"}}}"#,
     );
-    // An explicit tag forces the parse path that carries no positions.
+    // An explicit tag used to force a parse path that carried no positions,
+    // anchoring every diagnostic of the block at its first line. One spanned
+    // reader keeps the entry's own position beside it.
     directory.write(
         "document.md",
         "---\nignored: !!str 5\ncount: nope\n---\n\n# Document\n",
@@ -428,7 +430,7 @@ fn frontmatter_schema_anchors_fall_back_to_the_block_without_markers() {
     assert_eq!(diagnostic["target"]["pointer"], "/count");
     assert_eq!(
         diagnostic["location"],
-        serde_json::json!({"line": 1, "column": 1})
+        serde_json::json!({"line": 3, "column": 1})
     );
 }
 
