@@ -1,6 +1,8 @@
 # Outlint Schema — Specification v1
 
-Status: Draft. Normative keywords MUST / MUST NOT / SHOULD / MAY per RFC 2119.
+Status: Normative for the 0.1.0 reference implementation in this
+repository; may change before 1.0. Normative keywords MUST / MUST NOT /
+SHOULD / MAY per RFC 2119.
 
 Outlint is a declarative schema language for validating the header structure
 (outline) of Markdown documents. A schema constrains which headers may/must

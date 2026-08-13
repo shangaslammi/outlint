@@ -1,7 +1,8 @@
 # Outlint CLI Surface — Initial Version Proposal
 
-Status: Proposed  
-Target: first public CLI release implementing Outlint Schema Specification v1
+Status: Historical design proposal, since implemented with deliberate
+divergences. Where this file and the shipped CLI disagree, the CLI
+(`outlint --help` and `crates/outlint-cli/tests/cli.rs`) is authoritative.
 
 ## 1. Goals
 

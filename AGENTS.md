@@ -3,7 +3,8 @@
 ## Project
 
 Outlint validates the header structure (outline) of Markdown documents
-against a declarative schema. Rust workspace, pre-alpha.
+against a declarative schema. Rust workspace at 0.1.0, unreleased; expect
+breaking changes before 1.0.
 
     crates/outlint-core   schema model, schema loader, validator (library)
     crates/outlint-cli    the `outlint` binary
@@ -17,6 +18,7 @@ against a declarative schema. Rust workspace, pre-alpha.
 document model (§1), schema format (§2), matching semantics (§3), rule
 identifiers and reference paths (§4), constraints (§5), diagnostics (§6),
 options and defaults (§7), and a normative validation algorithm (§8).
+§9 (complete example) and §10 (authoring guidance) are non-normative.
 
 Implement to the spec, not to intuition. Before writing validation,
 matching, or diagnostic code, read the relevant section.
@@ -31,40 +33,59 @@ invent, rename, or repurpose one without a spec change.
 
 ## Current state
 
-Early. `outlint-core` currently contains only the type model:
-`schema.rs` (normalized semantic schema) and `load_result.rs` (loader result
-types and provenance). There is no loader implementation, no Markdown
-parsing, no validator, and no test suite. `crates/outlint-cli/src/main.rs`
-parses argv and `run_check` is a stub.
+Feature-complete against the spec for a first release, one known gap. The
+pipeline in `outlint-core`: `load_schema` / `load_schema_with_resources`
+(`loader.rs`) turn schema text into a normalized `Schema` or an
+`InvalidSchema` carrying positioned `SchemaError`s; `parse_markdown`
+(`markdown.rs`) turns document text into a `Document` (section tree,
+frontmatter, suppressions); `validate` / `PreparedValidator`
+(`validator.rs`) map a `Schema` plus a `Document` to `Vec<Diagnostic>`.
+`matcher.rs` and `case_fold.rs` are private helpers.
+
+All YAML — schema files and frontmatter alike — goes through one
+saphyr-parser event reader. Its input limits (nesting depth, node budget,
+alias-expansion bound) live in `markdown.rs` and the loader shares them.
+
+Frontmatter is implemented: the delimited block parses into
+`DocumentFrontmatter` with per-key anchors, and a schema's `frontmatter`
+policy (optional/required/forbidden) may attach a JSON Schema — inline or
+linked from a file — enforced via the `jsonschema` crate, with
+`json_pointer` and line ranges on the resulting diagnostics. Known gap:
+the loader accepts `fm.` propositions but the validator's
+`frontmatter_satisfied` is a stub that always answers false; see README
+"Known gaps" before touching it.
+
+The CLI has two subcommands: `outlint check <FILE>...` (nearest
+`.outlint.yml` discovered per file unless `--schema` is given; `-` reads
+stdin and requires `--schema`) and `outlint schema check <SCHEMA>...`.
+Both take `--format human|json` and `--color auto|always|never`. Exit
+codes: 0 clean, 1 diagnostics, 2 usage or operational error. The CLI's
+JSON output is the full diagnostic shape; the conformance corpus's
+`expected.json` records only portable `{id, target}` entries. The two
+diverge deliberately — do not "align" them.
+
+MSRV is declared: `rust-version = "1.86"` in `[workspace.package]`, with
+a pinned CI job running `cargo check --workspace --all-targets` on it.
+
+Test surface: unit tests sit next to the code in `loader.rs`,
+`markdown.rs`, and `validator.rs`, including property tests over header
+parsing and YAML/matcher normalization; `crates/outlint-core/tests/`
+holds the public-API check and committed schema-range baselines
+(`schema_ranges/`); `crates/outlint-cli/tests/` holds end-to-end CLI
+tests (`cli.rs`) and the conformance runner (`conformance.rs`), which
+shells out to the built binary with `--format json` and compares
+order-insensitively against each `testdata/*/expected.json`.
 
 Absent by design, do not add speculatively:
 
-- Frontmatter support (spec §2.3, §4.6) — model it when it is implemented.
 - Error/reporting frameworks (`thiserror`, `anyhow`, `miette`). Errors are
   plain data structs carrying ranges; the CLI formats them.
 - Async, threading, and parallel file checking.
-- Config discovery, caching, incremental checking, LSP.
+- Config files, caching, incremental checking, LSP. The CLI's
+  nearest-schema discovery is the only lookup that exists.
 
-Missing and to be specified before the code needing it is written:
-
-- **CLI contract.** Exit codes and output shapes are user-visible but only
-  live in a comment in `main.rs`: 0 = clean, 1 = violations, 2 = usage or
-  load error. `--schema <file>` and `--format json` are accepted per the
-  README. The human and JSON diagnostic formats are unspecified. Specify
-  the JSON shape in `spec/` before implementing `--format json`; make it
-  match `testdata/*/expected.json`.
-- **Test harness.** `testdata/basic-required/` establishes the fixture
-  layout: `schema.outlint.yml` plus `pass.md` / `fail.md`, with
-  `expected.json` mapping each Markdown file to its expected violations
-  (`{ "id", "path" }`). Nothing reads it yet. The first validator work
-  must land the runner that walks `testdata/*/` and asserts against
-  `expected.json`, and new behavior adds fixture directories there.
-- **MSRV.** No `rust-version` is declared and CI builds on `stable`. If
-  you need a recently stabilized feature, either avoid it or set
-  `rust-version` in `[workspace.package]` and pin a CI job to it.
-- **Public API surface.** `lib.rs` re-exports both modules with globs.
-  That is acceptable while the crate is pre-alpha and the model is the
-  only content; revisit before publishing, and keep the modules private.
+`lib.rs` re-exports its modules with globs. Acceptable pre-1.0; revisit
+before stabilizing, and keep the modules themselves private.
 
 ## Pure core, thin IO shell
 
@@ -74,10 +95,13 @@ IO, the clock, the environment, the filesystem, process exit, and anything
 else non-deterministic to the outermost edge, where it does nothing but
 fetch inputs, call a pure function, and act on what comes back.
 
-`loader.rs` is the pattern to copy. `load_schema(&str) -> LoadSchemaResult`
-is total and pure — it is the whole loader. `load_schema_file(&Path)` is
-four lines: build a label, read the file, delegate. Nothing between those
-two layers. New subsystems follow the same split:
+`loader.rs` is the pattern to copy. `load_schema` and
+`load_schema_with_resources` are total and pure: they consume schema text
+plus any already-loaded JSON Schema resources. The filesystem side is
+`crates/outlint-cli/src/schema_loading.rs`, which walks the `$ref` graph
+of a linked frontmatter schema and preloads its resources before calling
+core — real, load-bearing IO code, and it stays in the CLI, never in
+core. New subsystems follow the same split:
 
 - Markdown scanning takes source text, not a path.
 - Validation takes a `Schema` and a parsed document, not a directory to
@@ -163,18 +187,20 @@ unless a user has asked to build without it.
 
 ## Tests
 
-Behavior changes require tests. The crate has none yet, so the first
-behavioral commit establishes them rather than deferring.
+Behavior changes require tests. The suites listed under "Current state"
+exist; extend them rather than inventing a parallel harness.
 
-- Conformance behavior belongs in `testdata/` fixtures, driven by the
-  shared runner — that corpus is meant to be reusable by non-Rust
-  implementations, so it must not depend on Rust-side details.
+- Conformance behavior belongs in `testdata/` fixtures, driven by
+  `crates/outlint-cli/tests/conformance.rs` — that corpus is meant to be
+  reusable by non-Rust implementations, so it must not depend on
+  Rust-side details.
 - Loader and matcher invariants belong in unit tests next to the code.
 - Do not weaken or delete a test to make it pass. If a fixture's
   `expected.json` is genuinely wrong, fix it against the spec and say why.
 
-Matching and Markdown scanning parse untrusted input; property tests over
-matcher normalization and header parsing are worth their cost there.
+Matching and Markdown scanning parse untrusted input; the property tests
+in `loader.rs` and `markdown.rs` cover them — extend those when touching
+either parser.
 
 ## Before completion
 
@@ -185,9 +211,11 @@ Run:
     cargo test --workspace
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
-CI (`.github/workflows/ci.yml`) currently runs a subset: fmt, clippy
-without `--all-targets`, and tests. The list above is the standard; if a
-check here starts catching things CI misses, add it to CI.
+CI (`.github/workflows/ci.yml`) runs fmt, clippy with `--all-targets`,
+and the tests on stable, plus `cargo check --workspace --all-targets` on
+the 1.86 MSRV. The doc build above is not in CI; the list above is the
+standard, and if a check here starts catching things CI misses, add it
+to CI.
 
 `--all-features` is omitted deliberately — no crate defines features.
 
