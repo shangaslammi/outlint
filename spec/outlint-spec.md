@@ -532,21 +532,28 @@ whatever that fallback names.
 | `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and a fallback anchor (below) whenever the entry's position is unavailable |
 | constraint keywords | `header` of the scope's parent section; `document` for a root-scope constraint, which is attached to the schema root and so has no parent header | the parent section's header line; line 1 at the root scope |
 
-An entry's position is unavailable in two cases. The first is an entry with no
-first character of its own for a parser to report a position at: an entry
-whose text, once YAML has resolved its spelling, holds no character other than
-a line break. The rule is about the resolved text and not about the spelling.
-A sequence element written as `-` with nothing after it resolves to the null
-value and has no text at all; a block scalar with no content line, such as
-`- >-`, `- |`, or `- |+` over blank lines alone, has a spelling of several
-characters but resolves to the empty string or to whatever breaks its chomping
-indicator keeps. Neither has a first character of its own text. A mapping
-member is named by its key, which is written ahead of its value and so has
-text in the usual `key: value` spelling, but YAML's explicit-key syntax admits
-a textless key — a `? >-` line, whose member takes the empty key — and such a
-member has none either, by the same rule. What costs an entry its own position
-is resolving to no text, not resolving to no value: `- null` and `- ~` resolve
-to null but are spelled out, and anchor at that spelling.
+An entry's position is unavailable in one case: a literal or folded block
+scalar with no content line. A position-tracking parser marks a scalar at the
+first character of its text, and such a scalar — `- >-`, `- |`, or `- |+`
+over blank lines alone — has a spelling of several characters but resolves to
+the empty string or to whatever breaks its chomping indicator keeps, no
+character of which stands in the source to be marked at, so the position
+reported for it is the next token's, which belongs to a later entry. A
+mapping member is named by its key, which is written ahead of its value and
+so has text in the usual `key: value` spelling, but YAML's explicit-key
+syntax admits the same spelling as a key — a `? >-` line, whose member takes
+the empty key — and such a member has no position either, by the same rule.
+Every other entry has a place of its own for a parser to report. A sequence
+element written as `-` with nothing after it resolves to the null value and
+has no text at all, yet its dash is spelled in the source, and the element
+anchors one column past that dash, at the very place its value would have
+been written; a quoted scalar owns its opening quote however empty its text,
+so `""`, `''`, and `"\n"` anchor at that quote; and `- null` and `- ~`
+resolve to null but are spelled out, and anchor at that spelling. What costs
+an entry its own position is thus neither resolving to no value nor even
+resolving to no text, but being spelled as a block scalar whose resolved text
+holds no character other than a line break — the one spelling whose reported
+position always belongs to another entry.
 
 Such an entry MUST NOT be anchored to a neighbouring entry's text. That is the
 requirement; where it is anchored instead is left open, because the position a
@@ -557,30 +564,25 @@ guarantees. An implementation MAY instead anchor the entry to the nearest
 enclosing entry that has a position of its own — `/list/0` to `/list`, and
 `/list` to the block — which names the entry containing the failure rather
 than the whole of the frontmatter. `pointer` names the entry exactly under
-any of these choices.
+any of these choices. The same choices decide a pointer into an alias
+expansion — an alias resolves to a copy of the value it names, and the
+positions a parser reports inside the copy are the definition's, text no
+entry of the copy owns — and the nearest enclosing spelling such an entry has
+of its own is the alias that spliced the copy in, the outermost alias when
+expansions nest, since everything within the outer copy is itself copied.
 
-A quoted scalar whose text is only line breaks — `""`, `''`, and `"\n"` alike
-— resolves to such a text as well and so falls under that first case, as a
-consequence of the rule above rather than as a rule of its own. It is the one
-entry the rule treats more coarsely than it must, since a quoted scalar's
-opening quote is a character of its own that a parser can report a position
-at. An implementation whose position-tracking parser reports each scalar's
-style alongside its position SHOULD therefore anchor such an entry at that
-opening quote instead: a quoted scalar always has its opening quote in the
-source, so its reported position is never borrowed from a later entry, while a
-plain, literal, or folded scalar resolving to line breaks alone always is. An
-implementation whose parser does not expose the style has no sound test to
-hand — the resolved text is the same either way, and reading the source at the
-reported position does not settle it, since a textless element followed by a
-quoted string borrows a position that is itself an opening quote — and it MUST
-then fall back as above rather than take the reported position, a coarse but
-correct anchor being preferred to a precise one that may name another entry's
-text.
-
-The second case is a document whose frontmatter is parsed without positions at
-all, which an implementation MAY do for YAML constructs its position-tracking
-parser does not model, notably tags and aliases; every entry of such a
-document anchors to the block.
+The case is drawn by the entry's spelling read beside its resolved text, and
+not by the text alone, because the text alone cannot tell the entries apart:
+a quoted scalar whose text is only line breaks — `""`, `''`, and `"\n"` alike
+— resolves exactly as an empty block scalar does, yet its opening quote
+stands in the source, so its reported position is never borrowed, and its
+anchor at that quote is a consequence of every entry with a first character
+of its own anchoring there rather than an exception made for quotes. Nor
+could reading the source at the reported position stand in for the style,
+since a textless block scalar followed by a quoted string borrows a position
+that is itself an opening quote; only the scalar's style, reported alongside
+its position, tells a scalar that spells its breaks from one whose indicator
+merely kept them.
 
 Constraint diagnostics additionally list the concrete headers involved, if
 any, each by its own header path (§5.3). Which diagnostics the `title`
