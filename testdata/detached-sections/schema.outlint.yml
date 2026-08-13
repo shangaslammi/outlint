@@ -1,13 +1,12 @@
 version: 1
-# A document has at most one `h1`. If an `h1` exists, the root scope is its
-# `h2` children; otherwise it is the document's own `h2`s. `required: true`
-# therefore means "exactly one under the `h1`" here. A header outside the `h1`
-# and everything below it — or, with no `h1`, outside the document's `h2`s and
-# everything below them — is `detached-section`, reported on the header itself,
-# and takes part in no rule: it neither satisfies `Overview` nor counts toward
-# its cardinality. Note the reachable set is the `h1`'s whole subtree, wider
-# than the root scope: an `h3` directly under the `h1` is reachable, and it is
-# `skipped-level`, not this rule, that has anything to say about it.
+# The document root is a virtual level-0 section, so a top-level `h2` skips
+# a level against it exactly as an `h4` directly under an `h2` would:
+# `skipped-level` on the header itself, once per skipping sibling. A skipping
+# header takes part in no rule — the pre-`h1` `Overview` here neither
+# satisfies the rule nor counts toward its cardinality, which is why the `h1`
+# that lacks an `Overview` of its own still reports the miss.
+# `allow_skipped_levels` would instead admit such a header into the
+# `sections` scope; these documents keep the default.
 sections:
   - match: "Overview"
     required: true

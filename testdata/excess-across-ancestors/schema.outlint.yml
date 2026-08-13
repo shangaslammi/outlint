@@ -1,13 +1,13 @@
 version: 1
 sections:
-  # The root scope is flat: it pools every `h2` regardless of which `h1`
-  # encloses it, so the occurrence reported as excess is the one at index
-  # `max` in document order, wherever in the tree that lands.
-  #
-  # Several `h1` headers also break the single top-level spine, so both
-  # documents additionally carry one `too-many-sections` on the second `h1`.
-  # That is unavoidable: pooling across ancestors is only observable on a
-  # document that has more than one ancestor chain above the root scope.
+  # Scopes bind per parent: each `h1` counts its own `Note`s and `Step`s.
+  # `spread.md`'s four steps therefore conform — no single ancestor holds
+  # more than two — while `Beta`'s second note exceeds `Beta`'s own `0..1`
+  # budget, with the excess occurrence's path saying which parent. Nothing
+  # is pooled across ancestors. Both documents also carry one
+  # `too-many-sections` on the second `h1`: bare `sections` implies
+  # `title: "*"`, exactly one `h1` — a document with real parts would
+  # declare them with `outline:`.
   - id: notes
     match: "Note *"
     repeat: "0..1"
