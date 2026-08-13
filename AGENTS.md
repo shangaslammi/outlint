@@ -146,14 +146,14 @@ diagnostics model are both plural by design.
 
 ## Dependencies
 
-Current: `serde`, `serde_json`, `yaml_serde` in core; `serde_json` in the
-CLI. `yaml_serde` is The YAML Organization's maintained continuation of
-dtolnay's deprecated `serde_yaml` and keeps its API; if the loader needs
-a different YAML crate, raise it rather than working around it.
+Current in core: `saphyr-parser` (the YAML parser — pure Rust, pinned
+exactly because every `0.0.z` release is a breaking change under Cargo's
+semver rules), `serde`/`serde_json`, `jsonschema`, `regex`,
+`pulldown-cmark`, `casefold`, `num-bigint`, `unicode-normalization`.
+The CLI adds only `serde_json`. YAML is read directly from
+`saphyr-parser` events; if the loader needs a different YAML crate,
+raise it rather than working around it.
 
-Two additions are expected and need no debate when the work reaches them:
-a regex engine for `Matcher::Regex`, and a Markdown parser (or a
-purpose-built ATX header scanner) for the document model in spec §1.
 Anything else, including a CLI argument parser, needs a concrete
 justification — argv handling is hand-rolled today and that is fine at
 this size.
