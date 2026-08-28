@@ -19,8 +19,7 @@ feature set of the `0.1.0` workspace.
 - **Specification.** [`spec/outlint-spec.md`](spec/outlint-spec.md) defines
   Outlint Schema Specification v1: the document model, schema format, matching
   semantics, rule identifiers and reference paths, constraints, diagnostics,
-  options, and a normative validation algorithm.
-  [`spec/cli.md`](spec/cli.md) defines the command-line contract.
+  options, a normative validation algorithm, and the command-line contract.
 - **Schema language.** A top-level `outline:` list of `h1` rules — carrying
   cardinality, `strict`, denial, and child `sections` like any nested rule —
   or its permanent sugar: a `title` matcher with a `sections` list for the
@@ -53,11 +52,11 @@ feature set of the `0.1.0` workspace.
   `skipped-level` once per skipping subtree root unless `allow_skipped_levels`
   admits it into the enclosing scope.
 - **Frontmatter.** Presence checking (`required`, `allow`) plus value
-  validation delegated to a JSON Schema given inline or as a path relative to
-  the schema file, including linked `$ref` resource graphs. A block that does
-  not parse is reported with the YAML parser's own wording and position, and a
-  byte-order mark leading the block is dropped rather than becoming part of the
-  first key. Alias expansion is bounded by a multiple of the block's own size
+  validation delegated to a linked JSON Schema whose path is relative to the
+  Outlint schema file, including linked `$ref` resource graphs. A block that
+  does not parse is reported with the YAML parser's own wording and position,
+  and a byte-order mark leading the block is dropped rather than becoming part
+  of the first key. Alias expansion is bounded by a multiple of the block's own size
   and collection nesting by a fixed depth limit, which the value an alias
   expands to counts against exactly as the written text does. A linked graph is
   bounded in turn by how many `$ref` and `$dynamicRef` keywords it declares in
@@ -87,6 +86,8 @@ feature set of the `0.1.0` workspace.
 
 ### Known gaps
 
+- Inline frontmatter JSON Schemas are planned for a future release; `0.1.0`
+  requires a linked JSON file.
 - `npm/` distribution packaging exists but is not functional.
 - No pre-built binaries are published; `cargo install outlint` builds from
   source.

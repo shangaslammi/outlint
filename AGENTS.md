@@ -17,8 +17,9 @@ breaking changes before 1.0.
 `spec/outlint-spec.md` defines the language and the observable behavior:
 document model (§1), schema format (§2), matching semantics (§3), rule
 identifiers and reference paths (§4), constraints (§5), diagnostics (§6),
-options and defaults (§7), and a normative validation algorithm (§8).
-§9 (complete example) and §10 (authoring guidance) are non-normative.
+options and defaults (§7), a normative validation algorithm (§8), and the
+command-line contract (§11). §9 (complete example) and §10 (authoring
+guidance) are non-normative.
 
 Implement to the spec, not to intuition. Before writing validation,
 matching, or diagnostic code, read the relevant section.
@@ -48,8 +49,8 @@ alias-expansion bound) live in `markdown.rs` and the loader shares them.
 
 Frontmatter is implemented: the delimited block parses into
 `DocumentFrontmatter` with per-key anchors, and a schema's `frontmatter`
-policy (optional/required/forbidden) may attach a JSON Schema — inline or
-linked from a file — enforced via the `jsonschema` crate, with
+policy (optional/required/forbidden) may attach a JSON Schema linked from a
+file — enforced via the `jsonschema` crate, with
 `json_pointer` and line ranges on the resulting diagnostics. `fm.`
 propositions in constraints are evaluated by the validator's
 `frontmatter_satisfied` against the parsed frontmatter mapping: presence

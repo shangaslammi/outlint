@@ -1794,7 +1794,7 @@ impl Loader {
                 self.error_at(
                     SchemaErrorKind::InvalidFrontmatterSchema,
                     self.range(RangeKey::FrontmatterField("schema".into())),
-                    "inline frontmatter JSON Schema is not implemented yet; use a linked JSON file",
+                    "inline frontmatter JSON Schema is planned for a future release; use a linked JSON file in V1",
                 );
                 return None;
             }

@@ -15,9 +15,9 @@ wrong on the first attempt. Read these before writing code.
 
 ### 1. The specification is normative
 
-[`spec/outlint-spec.md`](spec/outlint-spec.md) defines the schema language and
-the observable behavior; [`spec/cli.md`](spec/cli.md) defines the command-line
-contract. The implementation is not the reference — where the two disagree,
+[`spec/outlint-spec.md`](spec/outlint-spec.md) defines the schema language,
+observable validation behavior, and command-line contract. The implementation
+is not the reference — where the two disagree,
 **the specification is right and the code is the bug**.
 
 Consequences:
@@ -31,7 +31,7 @@ Consequences:
 - Diagnostic ids and schema-error ids (specification §6) are a public
   contract. Do not invent, rename, or repurpose one without a specification
   change. The same applies to the JSON output shape and exit codes
-  (`spec/cli.md`).
+  (specification §11).
 
 A pure refactor, a docs fix, or a bug fix that makes the code match what the
 specification already says needs no specification change.
@@ -44,12 +44,12 @@ in [`testdata/README.md`](testdata/README.md) and it is binding:
 
 - Each child directory is one fixture: a `schema.outlint.yml`, one or more
   `*.md` documents, an `expected.json` mapping **every and only** the Markdown
-  files in that directory to their ordered list of expected diagnostics, and
+  files in that directory to their expected diagnostic multiset, and
   optionally JSON Schema resources for `frontmatter.schema`.
-- Each expected diagnostic is `{ "id": ..., "path": ... }` — the public
-  diagnostic id and the case-preserving visible header path joined with
-  ` > ` (the empty string for document-root diagnostics).
-- Diagnostic **order is observable** and must match validator output.
+- Each expected diagnostic is `{ "id": ..., "target": ... }` — the public
+  diagnostic id and the tagged target shape specified in §6.1.
+- Diagnostic order is deliberately ignored; multiplicity is significant. The
+  reference CLI's presentation order is a separate §11.4 contract.
 - Fixtures must not depend on Rust-specific APIs, source locations, or a flat
   resource layout. The Rust runner (`crates/outlint-cli/tests/conformance.rs`)
   discovers directories automatically; adding a fixture requires no code

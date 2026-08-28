@@ -12,6 +12,9 @@ Conventions: schema files are named `.outlint.yml` (project default) or
 `*.outlint.yml`; the reference CLI is `outlint` (e.g.
 `outlint check README.md --schema docs.outlint.yml`).
 
+Sections 1 through 8 and Section 11 are normative. Sections 9 and 10 are
+non-normative examples and guidance.
+
 ---
 
 ## 1. Document model
@@ -292,27 +295,27 @@ the body is written `\/`; no other delimiter escaping exists. Inline flags
 frontmatter:
   required: <bool>          # default false; true = frontmatter block must exist
   allow: <bool>             # default true; false = frontmatter block is forbidden
-  schema: <path-or-object>  # optional JSON Schema for the frontmatter mapping
+  schema: <path>            # optional JSON Schema for the frontmatter mapping
 ```
 
 `required: true` with `allow: false` is a schema error
 `conflicting-frontmatter`.
 
 **Delegated validation.** Outlint does NOT define a value-validation
-language for frontmatter. If `schema` is given, it is a JSON Schema, either
-inline as a YAML mapping or a path relative to the outlint schema file. The
-dialect is selected by the JSON Schema's own `$schema` keyword; absent
-`$schema`, the dialect is draft 2020-12. An external schema path MUST name a
-UTF-8 JSON document whose root is an object or boolean. Implementations MUST
-support draft 2020-12 and MAY support earlier drafts; an unsupported `$schema`
-is schema error `invalid-frontmatter-schema`. `$ref` resolution: for an
-external schema file the base URI is its lexical path as reached from the
-Outlint schema, before resolving filesystem symlinks; for an inline schema it
-is the Outlint schema file's location. V1 resolves local file and fragment
+language for frontmatter. If `schema` is given, it is the path of a JSON
+Schema relative to the Outlint schema file. Inline JSON Schemas are planned
+for a future version but are not supported in V1; an inline mapping is schema
+error `invalid-frontmatter-schema`. The dialect is selected by the JSON
+Schema's own `$schema` keyword; absent `$schema`, the dialect is draft 2020-12.
+The path MUST name a UTF-8 JSON document whose root is an object or boolean.
+Implementations MUST support draft 2020-12 and MAY support earlier drafts; an
+unsupported `$schema` is schema error `invalid-frontmatter-schema`. The base
+URI is the JSON Schema's lexical path as reached from the Outlint schema,
+before resolving filesystem symlinks. V1 resolves local file and fragment
 `$ref`s, including cycles within or between files. Network retrieval is not
 performed; a remote `$ref` is schema error `invalid-frontmatter-schema`. An
-unreadable, invalid-UTF-8, or invalid-JSON
-external schema is also `invalid-frontmatter-schema`. The parsed frontmatter
+unreadable, invalid-UTF-8, or invalid-JSON schema is also
+`invalid-frontmatter-schema`. The parsed frontmatter
 mapping is validated against it; each JSON Schema error is reported as one
 diagnostic `frontmatter-schema` carrying the JSON Pointer of the failing
 location and the validator's message. Absent frontmatter with
@@ -889,3 +892,191 @@ part, and no other h1 exists.
   Schema); use `fm.` refs only to couple frontmatter to outline structure.
   If a rule doesn't mention a section, it doesn't belong in an outlint
   constraint.
+
+---
+
+## 11. Command-line interface
+
+This section defines the observable contract of the `outlint` command. It
+does not prescribe help-text layout, human-diagnostic wording, or other
+presentation details.
+
+### 11.1 Commands and arguments
+
+The V1 command surface is:
+
+```text
+outlint check <FILE>... [--schema <SCHEMA>] [--format human|json]
+              [--color auto|always|never]
+outlint schema check <SCHEMA>... [--format human|json]
+                     [--color auto|always|never]
+outlint --help
+outlint --version
+outlint check --help
+outlint schema check --help
+```
+
+`-s` is an alias for `--schema`, and `-h` is an alias for a validation
+command's `--help`. At the top level, `-h` aliases `--help` and `-V` aliases
+`--version`. `--schema` MAY occur at most once. `--format` defaults to
+`human`; `--color` defaults to `auto`. An option that takes a value consumes
+the following argument. The argument `--` ends option parsing, so all later
+arguments are input paths even when they begin with `-`.
+
+At least one input path is required by each validation command. Directories
+are not expanded or traversed and are operational errors. Command-line
+arguments MUST be valid UTF-8. Input files MUST contain valid UTF-8; one
+leading UTF-8 byte-order mark is ignored. Invalid arguments are usage errors;
+an unreadable input, a directory input, and invalid input encoding are
+operational errors.
+
+`outlint --version` writes one line containing `outlint ` followed by the
+package version. A help request writes the applicable help and succeeds. The
+CLI MUST NOT prompt interactively.
+
+### 11.2 Document checking and schema selection
+
+`outlint check` validates each named Markdown document. With
+`--schema <SCHEMA>`, that schema is used for every document and automatic
+discovery is disabled. Without `--schema`, discovery is performed separately
+for every document: beginning in the directory containing the document,
+Outlint searches each ancestor directory for `.outlint.yml`; the nearest
+existing file wins. No other filename participates in implicit discovery. If
+no schema is found, that document has an operational error.
+
+The path `-` names standard input. It is explicit input, never an implicit
+fallback when no files are supplied, and requires `--schema` because it has
+no directory from which to discover a schema.
+
+A schema is fully loaded and checked before a dependent document is
+validated. This includes loading and compiling the linked frontmatter JSON
+Schema graph described in Section 2.3. An invalid schema is reported as a
+schema result; no dependent document is validated against a partial schema.
+When automatic discovery makes multiple documents depend on the same invalid
+schema path, its errors are reported once, at the position of the first
+dependent input. Other independent inputs are still processed.
+
+`outlint schema check` performs all schema-load-time checks on each named
+schema without requiring a Markdown document.
+
+### 11.3 Formats, streams, and JSON data
+
+Validation results are written to standard output in the selected format.
+Human output is quiet when no diagnostics exist. `--color always` enables
+ANSI color in human output, `--color never` disables it, and `--color auto`
+enables it only when standard output is an interactive terminal. JSON output
+MUST NOT contain ANSI escapes regardless of `--color`.
+
+Human output MUST escape control characters originating in input paths,
+documents, schemas, or delegated validator messages so that an untrusted value
+cannot create another physical diagnostic line or emit terminal control
+sequences. ANSI escapes MAY be introduced only by the formatter when color is
+enabled.
+
+Usage and operational errors are written to standard error. Schema errors
+are validation output, both for `schema check` and when encountered while
+checking a document, and therefore use the selected format on standard
+output.
+
+`--format json` writes one JSON object for the invocation. Its shape is:
+
+```json
+{
+  "version": 2,
+  "results": [
+    {
+      "kind": "document",
+      "path": "README.md",
+      "schema": ".outlint.yml",
+      "diagnostics": []
+    }
+  ],
+  "summary": {
+    "files": 1,
+    "documents": 1,
+    "schemas": 0,
+    "diagnostics": 0
+  }
+}
+```
+
+Each result has `kind` (`document` or `schema`), `path`, `schema`, and a
+`diagnostics` array. A document result names its input path and selected
+schema. A schema result uses the schema path for both `path` and `schema`.
+Operationally unreadable inputs do not produce results. `summary.files` is
+the number of results; the other counts partition those results by kind and
+count their diagnostics.
+
+Each diagnostic object has `id`, `message`, and `location` with one-based
+`line` and byte `column`. Document diagnostics also have the tagged `target`
+defined by Section 6.1. The following members are present when the
+corresponding semantic data exists and omitted otherwise:
+
+- `schema_node`, using the `kind` spellings `title`, `frontmatter`,
+  `frontmatter_schema_declaration`, `frontmatter_schema_document`, `rule`, or
+  `constraint`; rule and constraint nodes also have zero-based `scope` rule
+  indices and `index`;
+- `schema_location`, with `path`, one-based `line`, and one-based byte
+  `column`;
+- `involved_headers`, whose entries have a `header_path` string array and a
+  one-based `location`;
+- `references`, whose entries distinguish `rule` from `frontmatter` refs.
+
+A rule reference has `anchor` (`current_scope` or `schema_root`), a `path`
+array, and a `matcher`. Matchers have `kind` (`exact`, `glob`, `regex`, or
+`any`); the first three also have `value`. A frontmatter reference has a
+`path` array and, for equality, an `equals` object. Its `type` is `null`,
+`boolean`, `integer`, `float`, or `string`; integer and float values are
+canonical strings, while the other values use their corresponding JSON
+types.
+
+### 11.4 Ordering
+
+Result objects preserve input argument order. When one invalid schema
+replaces multiple dependent document results as described in Section 11.2,
+the schema result occupies the first dependent document's position.
+
+Within one result, both output formats order diagnostics by the following
+total key, most significant component first:
+
+1. source line and byte column;
+2. diagnostic id;
+3. schema location as path, line, and column, with absence first;
+4. target, with absence first, then by the Section 6.1 variant order and the
+   variant's members in declaration order;
+5. message;
+6. schema node, involved headers, references, and source path.
+
+Strings compare lexicographically by their UTF-8 bytes. Sequence fields
+compare lexicographically. Optional values compare with absence first;
+structured values compare by their variants in the order listed in Sections
+6.1 and 11.3, then by members in declaration order. This order is a function
+of rendered diagnostic data and MUST NOT depend on validator traversal or
+discovery order.
+
+### 11.5 Exit status
+
+The command uses three exit statuses:
+
+| Code | Meaning |
+| ---: | --- |
+| `0` | Every checked document and schema is valid. |
+| `1` | Validation completed and emitted at least one document diagnostic or schema error. |
+| `2` | A usage or operational error prevented normal validation. |
+
+When validation diagnostics and an operational error occur in the same
+invocation, status 2 takes precedence. Inputs are preflighted independently
+of schema validity, so an invalid explicit schema can be reported together
+with document read errors; dependent documents are not partially validated.
+
+### 11.6 Side effects and resource retrieval
+
+The V1 CLI validates only. It MUST NOT rewrite Markdown or schema files,
+insert or normalize headings in source, generate suppressions, or modify
+frontmatter. Setext normalization in Section 1.3 is an internal parsing step,
+not a source edit.
+
+The CLI MUST NOT perform implicit network access. In particular, linked JSON
+Schema resources are loaded only from local files; remote references are
+refused as specified in Section 2.3. Adding remote retrieval requires an
+explicitly specified access, trust, and caching policy.

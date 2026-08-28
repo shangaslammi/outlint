@@ -89,24 +89,96 @@ outlint schema check .outlint.yml
 
 ## Commands and options
 
+Run `outlint --help` for the command summary, or the help option on either
+validation command for its complete flags:
+
 ```text
-outlint check <FILE>...          Validate Markdown documents
-outlint schema check <SCHEMA>... Validate Outlint schema files
-outlint --help | --version
+Usage: outlint <command> [options]
+
+Commands:
+  check          Validate Markdown documents
+  schema check   Validate Outlint schema files
+
+Options:
+  -h, --help     Show help
+  -V, --version  Show version
 ```
 
-Options for both validation commands:
+`outlint check --help`:
 
 ```text
+Usage: outlint check <FILE>... [options]
+
+Validate individual Markdown files. Without --schema, the nearest .outlint.yml
+is discovered separately for each file. Standard input (-) requires --schema.
+
+Options:
+  -s, --schema <SCHEMA>       Use one schema for every input
       --format human|json     Select output format (default: human)
       --color auto|always|never
                               Control human-output color (default: auto)
   -h, --help                  Show help
+
+Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.
 ```
 
-`check` additionally accepts `-s, --schema <SCHEMA>` to use one schema for
-every input. It reads standard input when the file is `-`; that requires an
-explicit `--schema`. A bare `--` ends option parsing.
+`outlint schema check --help`:
+
+```text
+Usage: outlint schema check <SCHEMA>... [options]
+
+Validate schema syntax, normalization, ids, matchers, cardinalities, constraints,
+and all other schema-load-time checks.
+
+Options:
+      --format human|json     Select output format (default: human)
+      --color auto|always|never
+                              Control human-output color (default: auto)
+  -h, --help                  Show help
+
+Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.
+```
+
+`outlint --version` (or `-V`) prints the package version. The version option
+is top-level; the validation subcommands accept `--help` but not `--version`.
+
+### Input and schema selection
+
+`outlint check` accepts one or more individual Markdown file paths. Without
+`--schema`, it searches upward from each file for the nearest `.outlint.yml`,
+so files in one invocation may use different schemas. Other schema filenames
+are never discovered automatically. `-s, --schema <SCHEMA>` selects one
+schema for every input and disables discovery.
+
+The file path `-` reads standard input and requires an explicit `--schema`.
+Outlint never reads stdin merely because no file was supplied. Directories
+are not traversed; expand them with your shell or `find`.
+
+`outlint schema check` accepts one or more schema paths and performs all
+load-time checks, including linked frontmatter JSON Schema loading, without
+checking a Markdown document.
+
+Both commands require UTF-8 input. A leading UTF-8 byte-order mark is
+accepted. The argument `--` ends option parsing, allowing a later path to
+begin with `-`.
+
+### Output options
+
+`--format human|json` selects line-oriented human diagnostics or one
+versioned JSON object for the invocation. Human output is the default and is
+quiet on success. JSON is always written without ANSI escapes.
+
+`--color auto|always|never` controls ANSI color in human output. `auto`, the
+default, enables it only when standard output is a terminal; `always` forces
+it and `never` disables it. This option does not add color to JSON.
+
+Results follow input order. Within a result, diagnostics have a fixed total
+order beginning with source line, byte column, diagnostic id, schema
+location, and target. See specification Section 11.4 for the complete key.
+
+Validation output goes to stdout. Usage errors and failures to read or locate
+inputs go to stderr. If both diagnostics and an operational error occur,
+Outlint reports both and exits with status 2.
 
 ## Exit codes
 
@@ -120,8 +192,10 @@ explicit `--schema`. A bare `--` ends option parsing.
 
 - [`outlint-core`](https://crates.io/crates/outlint-core) — the pure,
   IO-free library this tool is built on.
-- [`spec/cli.md`](https://github.com/shangaslammi/outlint/blob/main/spec/cli.md)
-  — the normative CLI contract.
+- [Outlint specification, Section 11](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md#11-command-line-interface)
+  — the normative behavior contract. This README describes how to use the
+  reference CLI; exact help layout and human wording are presentation, not
+  portable requirements.
 
 ## License
 

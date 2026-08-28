@@ -93,8 +93,8 @@ body:
     attributes:
       label: Does this contradict the specification?
       description: >-
-        Check the behavior against spec/outlint-spec.md and spec/cli.md. The
-        specification is normative — where it and the implementation disagree,
+        Check the behavior against spec/outlint-spec.md, including §11 for the
+        CLI. The specification is normative — where it and the implementation disagree,
         the implementation is the bug. If the specification is silent or
         ambiguous, say so; that is a specification bug worth fixing too.
       options:

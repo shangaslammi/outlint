@@ -8,9 +8,9 @@ contact_links:
   - name: The specification
     url: https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md
     about: >-
-      The schema language and observable behavior are defined here, and in
-      spec/cli.md for the command line. Read the relevant section before
-      filing — the specification is normative.
+      The schema language and observable behavior, including the command-line
+      contract in §11, are defined here. Read the relevant section before filing
+      — the specification is normative.
   - name: Contributing guide
     url: https://github.com/shangaslammi/outlint/blob/main/CONTRIBUTING.md
     about: >-

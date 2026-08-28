@@ -26,11 +26,12 @@ where the two disagree, the specification wins.
 - **Cross-section logic** — `one_of`, `any_of`, `at_most_one`,
   `all_or_none`, `requires`, `conflicts`, and `ordered` constraints over
   rules addressed by id.
-- **YAML frontmatter** — presence policy and delegated JSON Schema
-  validation (draft 2020-12) of the frontmatter mapping, plus `fm.`
+- **YAML frontmatter** — presence policy and delegated validation of the
+  frontmatter mapping against a linked JSON Schema (draft 2020-12); inline
+  schemas are planned for a future release. Frontmatter also supports `fm.`
   propositions in constraints: `fm.key` presence and `fm.key=value` typed
-  scalar equality under the YAML core schema, with dotted paths into
-  nested mappings.
+  scalar equality under the YAML core schema, with dotted paths into nested
+  mappings.
 
 Diagnostics carry stable ids (`missing-section`, `unexpected-section`,
 `ordered`, `frontmatter-schema`, …) plus document and schema-side source
@@ -103,8 +104,8 @@ Schema file, read the reference graph yourself and hand it to
 
 - [`outlint`](https://crates.io/crates/outlint) — the command-line tool
   built on this crate.
-- [`spec/cli.md`](https://github.com/shangaslammi/outlint/blob/main/spec/cli.md)
-  — the CLI contract.
+- [Outlint specification](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md)
+  — the schema, validation, diagnostic, and CLI contracts.
 
 ## MSRV
 

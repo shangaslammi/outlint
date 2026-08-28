@@ -35,8 +35,8 @@ Helpful things to include, roughly in order of usefulness:
   commit;
 - what happens (crash, hang, unbounded memory, unexpected file access) and
   what you expected;
-- whether the behavior contradicts [`spec/outlint-spec.md`](spec/outlint-spec.md)
-  or [`spec/cli.md`](spec/cli.md), if you know.
+- whether the behavior contradicts [`spec/outlint-spec.md`](spec/outlint-spec.md),
+  including its command-line contract in §11, if you know.
 
 ### What to expect
 
@@ -59,8 +59,8 @@ maintainer the date you intend to publish.
 
 outlint is an offline command-line linter and library. It reads files, writes
 diagnostics to stdout/stderr, and exits. It **never modifies the documents it
-checks** ([`spec/cli.md`](spec/cli.md) §15) and performs no implicit network
-access ([`spec/cli.md`](spec/cli.md) §16). JSON Schema `$ref` resolution is
+checks** ([`spec/outlint-spec.md`](spec/outlint-spec.md) §11.6) and performs no
+implicit network access (also §11.6). JSON Schema `$ref` resolution is
 file-local only: remote retrieval is refused and a remote `$ref` is reported as
 the schema error `invalid-frontmatter-schema`
 ([`spec/outlint-spec.md`](spec/outlint-spec.md) §2.3).

@@ -165,8 +165,9 @@ The pieces:
   `requires`, `conflicts`, and `ordered` relate rules addressed by id, at
   the schema root or inside any rule's scope.
 - **Frontmatter.** outlint checks presence (`required`, `allow`) and
-  delegates value validation to a JSON Schema, given inline or as a path
-  relative to the schema file. Constraints can reference frontmatter with
+  delegates value validation to a linked JSON Schema whose path is relative
+  to the Outlint schema file. Inline JSON Schemas are planned for a future
+  release. Constraints can reference frontmatter with
   `fm.` propositions — `fm.key` for presence of a non-null value,
   `fm.key=value` for typed scalar equality, dotted paths for nested
   mappings — e.g. `requires: { if: fm.status=deprecated, then: migration }`.
@@ -290,7 +291,10 @@ case $? in
 esac
 ```
 
-The full CLI contract is [`spec/cli.md`](spec/cli.md).
+The normative CLI behavior is specified in
+[`spec/outlint-spec.md` §11](spec/outlint-spec.md#11-command-line-interface).
+The [CLI crate README](crates/outlint-cli/README.md) is the user guide,
+including the complete `--help` surface.
 
 ## Layout
 
@@ -298,17 +302,17 @@ The full CLI contract is [`spec/cli.md`](spec/cli.md).
   library ([README](crates/outlint-core/README.md))
 - `crates/outlint-cli` — the `outlint` command-line tool
   ([README](crates/outlint-cli/README.md))
-- `spec/` — the specification (normative):
-  [`outlint-spec.md`](spec/outlint-spec.md), [`cli.md`](spec/cli.md)
+- `spec/` — the normative
+  [Outlint specification](spec/outlint-spec.md)
 - `testdata/` — conformance corpus shared by all implementations
   ([README](testdata/README.md))
 - `npm/` — npm distribution packaging (not functional yet)
 
 ## Status and stability
 
-outlint is at version 0.1.0. It implements Outlint Schema Specification v1
-and the CLI contract in [`spec/cli.md`](spec/cli.md), and the shared
-conformance corpus in `testdata/` runs in CI.
+outlint is at version 0.1.0. It implements Outlint Schema Specification v1,
+including its command-line contract in §11, and the shared conformance corpus
+in `testdata/` runs in CI.
 
 This is a 0.x release: expect breaking changes to the schema language, the
 diagnostic set, the JSON shape, and the library API before 1.0. Where an

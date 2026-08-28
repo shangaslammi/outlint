@@ -1,36 +1,33 @@
 //! CLI surface regression tests.
 //!
-//! **These tests pin the implementation, not a specification.** They were written
-//! against `spec/cli.md`, which is *not* normative: it was a draft of the CLI
-//! surface shape, written as instructions for the agent that built the first CLI
-//! spike. Its output examples carry no authority. `AGENTS.md` is correct to list
-//! only `spec/outlint-spec.md` as normative.
+//! **This suite mixes contract tests and presentation regression tests.** The
+//! command grammar, discovery, stdin, streams, JSON data model, ordering, exit
+//! status, no-mutation rule, and offline behavior are normative in
+//! `spec/outlint-spec.md` §11. Exact message wording, help layout, and other
+//! human presentation remain implementation details.
 //!
 //! Two consequences worth knowing before you change anything here:
 //!
-//! - A failure in this file is a **regression signal**, not evidence of a spec
-//!   violation. Do not "fix" the implementation to match an assertion here on the
-//!   assumption that the assertion encodes a requirement — check
-//!   `spec/outlint-spec.md` first, and if it is silent, the behavior is undecided
-//!   and the decision belongs in the spec.
+//! - A failure in this file is always a **regression signal**, but is evidence of
+//!   a specification violation only when the asserted behavior is stated in the
+//!   specification. Check §11 before treating a presentation assertion as a
+//!   portable requirement.
 //! - Conversely, do not treat a passing test here as proof that behavior is
 //!   specified. Much of what these tests assert is incidental: exact wording of
-//!   messages, presentational diagnostic ordering, help-text layout.
+//!   messages, punctuation and escaping choices, and help-text layout.
 //!
 //! Ordering in particular: the conformance corpus (`testdata/`) deliberately does
-//! **not** constrain diagnostic order — it compares as a multiset, because
-//! ordering is an implementation detail no independent implementation should have
-//! to reproduce. Any ordering asserted in this file is CLI presentation only
-//! (`sort_diagnostics`), and is not a portable guarantee.
+//! **not** constrain validator order — its format is shared by independent
+//! implementations. The reference CLI nevertheless promises its own total
+//! presentation order in §11.4; assertions of that order belong to the CLI
+//! contract, not the corpus.
 //!
 //! TODO(cleanup): this suite needs a pass to separate the two kinds of assertion
-//! it currently mixes — genuine behavioral contracts (exit codes, no implicit
-//! mutation, no network retrieval, stdin handling, option parsing) from
-//! implementation detail (message wording, output ordering, formatting). The
-//! former should be stated in `spec/outlint-spec.md` and tested against it; the
-//! latter should be visibly marked as incidental so a deliberate change to
-//! presentation does not read as a contract break. Until that pass happens,
-//! expect this file to over-constrain the implementation.
+//! it currently mixes — normative behavioral contracts from implementation
+//! detail (message wording, help layout, and formatting). Contract tests should
+//! cite §11; incidental assertions should be visibly marked so a deliberate
+//! change to presentation does not read as a contract break. Until that pass
+//! happens, expect this file to over-constrain the implementation.
 
 use std::{
     fs,

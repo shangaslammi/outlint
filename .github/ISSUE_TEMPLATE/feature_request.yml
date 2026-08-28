@@ -6,11 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        outlint is specification-first: the schema language and the CLI
-        contract live in
-        [`spec/outlint-spec.md`](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md)
-        and
-        [`spec/cli.md`](https://github.com/shangaslammi/outlint/blob/main/spec/cli.md),
+        outlint is specification-first: the schema language and CLI contract
+        live in
+        [`spec/outlint-spec.md`](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md),
         and a behavior change is a specification change first and code second.
         So the useful shape of a feature request is a proposed edit to the
         specification, not just a wish.
