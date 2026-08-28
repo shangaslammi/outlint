@@ -42,6 +42,27 @@ type JsonMap = serde_json::Map<String, Value>;
 ///
 /// The returned model contains only normalized values. Errors are accumulated
 /// where later checks do not depend on an earlier invalid value.
+///
+/// # Example
+///
+/// ```
+/// use outlint_core::{load_schema, Matcher};
+///
+/// let loaded = load_schema(
+///     r#"
+/// version: 1
+/// title: null
+/// sections:
+///   - match: Overview
+/// "#,
+/// )?;
+///
+/// assert!(matches!(
+///     loaded.schema.outline[0].sections[0].matcher,
+///     Matcher::Exact(_)
+/// ));
+/// # Ok::<(), outlint_core::InvalidSchema>(())
+/// ```
 pub fn load_schema(source: &str) -> LoadSchemaResult {
     load_schema_with_label(source, None)
 }

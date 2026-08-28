@@ -115,12 +115,21 @@ pub enum OutlineProvenance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrontmatterPolicy {
     /// Frontmatter may be absent; validate it against `schema` when present.
-    Optional { schema: Option<FrontmatterSchema> },
+    Optional {
+        /// Linked JSON Schema to apply when frontmatter is present.
+        schema: Option<FrontmatterSchema>,
+    },
     /// Frontmatter must be present and is validated against `schema`.
-    Required { schema: Option<FrontmatterSchema> },
+    Required {
+        /// Linked JSON Schema to apply to the required frontmatter mapping.
+        schema: Option<FrontmatterSchema>,
+    },
     /// Frontmatter must not be present; validate it against `schema` if it is
     /// nevertheless present.
-    Forbidden { schema: Option<FrontmatterSchema> },
+    Forbidden {
+        /// Linked JSON Schema to apply if forbidden frontmatter is present.
+        schema: Option<FrontmatterSchema>,
+    },
 }
 
 /// An opaque, normalized JSON Schema resource graph.
@@ -139,6 +148,7 @@ pub struct FrontmatterSchema {
 /// A supported version of the Outlint schema language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SchemaVersion {
+    /// Version 1 of the schema language.
     V1,
 }
 
@@ -160,11 +170,17 @@ pub struct Options {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum HeaderLevel {
+    /// A level-one heading (`#`).
     H1 = 1,
+    /// A level-two heading (`##`).
     H2 = 2,
+    /// A level-three heading (`###`).
     H3 = 3,
+    /// A level-four heading (`####`).
     H4 = 4,
+    /// A level-five heading (`#####`).
     H5 = 5,
+    /// A level-six heading (`######`).
     H6 = 6,
 }
 
@@ -210,21 +226,27 @@ pub struct SectionRule {
 /// `allow: false` and `required`/`repeat` unrepresentable here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleOutcome {
+    /// Matching headings are accepted subject to the carried cardinality.
     Allow(Cardinality),
+    /// Matching headings are rejected, so no cardinality applies.
     Deny,
 }
 
 /// The permitted number of sibling headers matched by one rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Cardinality {
+    /// Inclusive minimum number of matching sibling headings.
     pub min: u32,
+    /// Inclusive maximum number of matching sibling headings.
     pub max: UpperBound,
 }
 
 /// The inclusive upper bound of a rule's cardinality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UpperBound {
+    /// At most the carried number of headings may match.
     Bounded(u32),
+    /// Any number of headings may match.
     Unbounded,
 }
 
@@ -274,12 +296,16 @@ pub enum Constraint {
     AllOrNone(AtLeastTwo<Proposition>),
     /// If `condition` is satisfied, every `consequence` must be satisfied.
     Requires {
+        /// Proposition that activates the requirement.
         condition: Proposition,
+        /// Propositions required whenever the condition is satisfied.
         consequences: NonEmpty<Proposition>,
     },
     /// If `condition` is satisfied, every `exclusion` must be unsatisfied.
     Conflicts {
+        /// Proposition that activates the conflict.
         condition: Proposition,
+        /// Propositions forbidden whenever the condition is satisfied.
         exclusions: NonEmpty<Proposition>,
     },
     /// Every occurrence of each satisfied ref must precede every occurrence of
@@ -322,10 +348,15 @@ pub struct FrontmatterKey(pub String);
 /// equal to `1.0`) without forcing a numeric precision limit on schema input.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FrontmatterScalar {
+    /// YAML's null value.
     Null,
+    /// A YAML boolean.
     Boolean(bool),
+    /// A YAML integer in canonical arbitrary-precision form.
     Integer(CanonicalInteger),
+    /// A YAML floating-point value in canonical arbitrary-precision form.
     Float(CanonicalFloat),
+    /// A YAML string.
     String(String),
 }
 
@@ -361,7 +392,9 @@ pub enum RefAnchor {
 /// A collection statically guaranteed to contain at least one item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NonEmpty<T> {
+    /// The item whose presence establishes the non-empty invariant.
     pub first: T,
+    /// Remaining items in collection order.
     pub rest: Vec<T>,
 }
 
@@ -375,8 +408,11 @@ impl<T> NonEmpty<T> {
 /// A collection statically guaranteed to contain at least two items.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AtLeastTwo<T> {
+    /// First item in collection order.
     pub first: T,
+    /// Second item, whose presence establishes the at-least-two invariant.
     pub second: T,
+    /// Remaining items in collection order.
     pub rest: Vec<T>,
 }
 

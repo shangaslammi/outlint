@@ -189,7 +189,9 @@ pub struct ConstraintIndex(pub usize);
 /// A half-open byte range in [`SchemaSource::text`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TextRange {
+    /// Inclusive byte offset at which the range begins.
     pub start: ByteOffset,
+    /// Exclusive byte offset at which the range ends.
     pub end: ByteOffset,
 }
 
@@ -201,7 +203,9 @@ pub struct ByteOffset(pub usize);
 /// A byte range associated with one source in [`SchemaSources`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceRange {
+    /// Document containing the range.
     pub source: SourceId,
+    /// Half-open byte range within that document's source text.
     pub range: TextRange,
 }
 
@@ -221,7 +225,9 @@ pub struct SchemaError {
 /// A secondary source range attached to a schema error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelatedLocation {
+    /// Secondary source range relevant to the error.
     pub range: SourceRange,
+    /// Explanation of how the secondary location relates to the error.
     pub message: String,
 }
 

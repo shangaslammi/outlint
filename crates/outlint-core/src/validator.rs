@@ -252,6 +252,20 @@ impl PreparedValidator {
 /// Use [`PreparedValidator`] directly when validating multiple documents.
 /// Diagnostic order is deterministic but not a contract; see
 /// [`PreparedValidator::validate`].
+///
+/// # Example
+///
+/// ```
+/// use outlint_core::{load_schema, parse_markdown, validate, MarkdownOptions};
+///
+/// let loaded = load_schema("version: 1\ntitle: '*'\nsections: []\n")?;
+/// let document = parse_markdown("# Guide\n", MarkdownOptions::default());
+/// let diagnostics = validate(&loaded.schema, &document)
+///     .expect("loaded schema matchers compile");
+///
+/// assert!(diagnostics.is_empty());
+/// # Ok::<(), outlint_core::InvalidSchema>(())
+/// ```
 pub fn validate(
     schema: &Schema,
     document: &Document,

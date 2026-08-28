@@ -196,6 +196,20 @@ impl Suppressions {
 ///
 /// The function is total and performs no IO. Malformed or incomplete Markdown
 /// is interpreted according to CommonMark recovery rules.
+///
+/// # Example
+///
+/// ```
+/// use outlint_core::{parse_markdown, HeaderLevel, MarkdownOptions};
+///
+/// let document = parse_markdown(
+///     "# Guide\n\n## Install\n",
+///     MarkdownOptions::default(),
+/// );
+///
+/// assert_eq!(document.sections[0].heading.level, HeaderLevel::H1);
+/// assert_eq!(document.sections[0].children[0].heading.text, "Install");
+/// ```
 pub fn parse_markdown(source: &str, options: MarkdownOptions) -> Document {
     let line_index = LineIndex::new(source);
     let (frontmatter, frontmatter_range) = parse_frontmatter(source, &line_index);

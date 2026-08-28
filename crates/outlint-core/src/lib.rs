@@ -1,7 +1,5 @@
-//! Pure schema loading and Markdown outline modeling for Outlint.
-//!
-//! Filesystem access, diagnostic formatting, and process behavior belong to
-//! the CLI crate; this crate converts source text into normalized values.
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
 mod case_fold;
 mod load_result;

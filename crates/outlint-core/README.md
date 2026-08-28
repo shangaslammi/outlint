@@ -74,6 +74,7 @@ sections:
         let target = match &diagnostic.target {
             DiagnosticTarget::Header(path) => path.display(),
             DiagnosticTarget::MissingHeader { matcher, .. } => format!("expected {matcher}"),
+            DiagnosticTarget::Document => "document".to_owned(),
             DiagnosticTarget::Frontmatter { .. } => "frontmatter".to_owned(),
         };
         println!(
