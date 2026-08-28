@@ -34,8 +34,10 @@ where the two disagree, the specification wins.
   mappings.
 
 Diagnostics carry stable ids (`missing-section`, `unexpected-section`,
-`ordered`, `frontmatter-schema`, …) plus document and schema-side source
-anchors.
+`ordered`, `frontmatter-schema`, …), document source anchors, and structural
+schema-node addresses. Resolve a diagnostic's `schema_node` through
+`loaded.locations.nodes`, then use the resulting `SourceRange::source` to find
+the source text and label in `loaded.sources.documents`.
 
 ## Usage
 
@@ -95,11 +97,34 @@ Output:
 ```
 
 `load_schema` returns `Result<LoadedSchema, InvalidSchema>`; `InvalidSchema`
-carries every schema error together with the source text needed to render
-it. For schemas whose `frontmatter.schema` points at an external JSON
-Schema file, read the reference graph yourself and hand it to
-`load_schema_with_resources`; `linked_frontmatter_schema_path` and
-`json_schema_external_references` tell you which files to read.
+carries every schema error together with the source text needed to render it:
+
+```rust
+use outlint_core::load_schema;
+
+if let Err(invalid) = load_schema("version: 99\n") {
+    for error in invalid.errors.iter() {
+        let source = &invalid.sources.documents[&error.range.source];
+        eprintln!(
+            "{} at bytes {}..{} in {}",
+            error.kind.as_str(),
+            error.range.range.start.0,
+            error.range.range.end.0,
+            source.label.as_ref().map_or("<schema>", |label| &label.0),
+        );
+    }
+}
+```
+
+For schemas whose `frontmatter.schema` points at an external JSON Schema file,
+the caller owns the IO boundary. Use `linked_frontmatter_schema_path` to find
+the root path, assign that file an absolute logical URI, then walk its local
+reference graph with `json_schema_external_references`. The helper returns both
+the lexical `physical_uri` to read and the `$id`-aware `logical_uri` under which
+to register the contents. Ignore same-document references, deduplicate or
+cycle-check reads, record read failures rather than dropping them, and place
+every attempted resource in a `LinkedJsonSchemaInput` passed to
+`load_schema_with_resources`. Core never retrieves remote references.
 
 ## Related
 

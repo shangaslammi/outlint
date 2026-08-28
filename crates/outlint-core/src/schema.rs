@@ -11,6 +11,12 @@ use std::collections::BTreeMap;
 use serde_json::Value as JsonValue;
 
 /// A parsed Outlint schema.
+///
+/// Obtain this value from [`load_schema`](crate::load_schema) or
+/// [`load_schema_with_resources`](crate::load_schema_with_resources). Although
+/// its normalized fields are public for inspection, constructing them directly
+/// can bypass loader-established invariants such as valid references and
+/// compiled matchers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
     /// The schema language version used by this document.

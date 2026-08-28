@@ -170,8 +170,11 @@ pub struct ConstraintPath {
 
 /// A path to a rule-owned child scope.
 ///
-/// The empty path denotes the schema root. Each index selects a rule whose
-/// child scope contains the next index.
+/// Each index selects a rule whose child scope contains the next index. For an
+/// `outline:` schema, the empty path denotes [`Schema::outline`]. For a
+/// `title:` + `sections:` sugar schema, it denotes the synthesized title
+/// rule's child scope — the source's top-level `sections:` list. This preserves
+/// the public addressing of the source form after normalization.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct ScopePath(pub Vec<RuleIndex>);

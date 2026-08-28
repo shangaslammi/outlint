@@ -34,13 +34,13 @@ pub enum DiagnosticId {
     TooManySections,
     /// The schema declares a title but the document has none.
     MissingTitle,
-    /// Reserved for a required frontmatter block that is absent.
+    /// A required frontmatter block is absent.
     MissingFrontmatter,
-    /// Reserved for a present frontmatter block forbidden by the schema.
+    /// A present frontmatter block is forbidden by the schema.
     ForbiddenFrontmatter,
-    /// Reserved for a frontmatter block that is not a YAML mapping.
+    /// A frontmatter block is not a valid YAML mapping.
     InvalidFrontmatter,
-    /// Reserved for a failure from delegated JSON Schema validation.
+    /// A frontmatter value fails its linked JSON Schema.
     FrontmatterSchema,
     /// An `one_of` constraint does not have exactly one satisfied ref.
     OneOf,
@@ -225,6 +225,17 @@ pub struct PreparedValidator {
 
 impl PreparedValidator {
     /// Compiles matchers and the immutable JSON Schema resource registry.
+    ///
+    /// Callers should pass a [`Schema`] produced by the loader. Preparation is
+    /// not a substitute for the loader's semantic checks when a schema has
+    /// been assembled manually from its public fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a matcher or linked JSON Schema cannot be compiled.
+    /// A schema returned by the loader has already passed equivalent checks,
+    /// but preparation retains a defensive failure path rather than assuming
+    /// every caller obtained the value from that boundary.
     pub fn new(schema: &Schema) -> Result<Self, PrepareValidationError> {
         Ok(Self {
             schema: schema.clone(),
