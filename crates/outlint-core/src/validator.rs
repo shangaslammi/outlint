@@ -15,9 +15,11 @@ use crate::{
     OutlineProvenance, Proposition, RefAnchor, RuleIndex, RuleOutcome, RuleRef, Schema, SchemaNode,
     ScopePath, Section, SectionRule, TextRange, UpperBound,
 };
+use std::{error::Error, fmt};
 
 /// A stable identifier from the diagnostic vocabulary in specification §6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DiagnosticId {
     /// A heading is more than one level below its nearest parent.
     SkippedLevel,
@@ -58,6 +60,12 @@ pub enum DiagnosticId {
     Ordered,
 }
 
+impl fmt::Display for DiagnosticId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl DiagnosticId {
     /// Returns the public, suppression-compatible spelling of this id.
     pub const fn as_str(self) -> &'static str {
@@ -96,9 +104,21 @@ impl DiagnosticId {
 pub struct HeaderPath(pub Vec<String>);
 
 impl HeaderPath {
-    /// Produces the portable representation used by the conformance corpus.
-    pub fn display(&self) -> String {
-        self.0.join(" > ")
+    /// Returns the heading texts in ancestor-to-descendant order.
+    pub fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl fmt::Display for HeaderPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, heading) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(" > ")?;
+            }
+            formatter.write_str(heading)?;
+        }
+        Ok(())
     }
 }
 
@@ -184,6 +204,7 @@ pub struct FrontmatterBlock {
 
 /// One validation violation, with both document and schema-side anchors.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Diagnostic {
     /// Stable diagnostic category.
     pub id: DiagnosticId,
@@ -216,6 +237,14 @@ pub struct PrepareValidationError {
     /// Human-readable compilation failure.
     pub message: String,
 }
+
+impl fmt::Display for PrepareValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for PrepareValidationError {}
 
 /// A schema compiled once for validating any number of documents.
 pub struct PreparedValidator {

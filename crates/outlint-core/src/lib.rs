@@ -9,8 +9,31 @@ mod matcher;
 mod schema;
 mod validator;
 
-pub use load_result::*;
-pub use loader::*;
-pub use markdown::*;
-pub use schema::*;
-pub use validator::*;
+pub use load_result::{
+    ByteOffset, ConstraintIndex, ConstraintPath, InvalidSchema, JsonSchemaExternalReference,
+    JsonSchemaResourceContents, JsonSchemaResourceInput, LinkedJsonSchemaInput, LoadSchemaResult,
+    LoadedSchema, RelatedLocation, RuleIndex, RulePath, SchemaError, SchemaErrorKind,
+    SchemaLocations, SchemaNode, SchemaSource, SchemaSources, ScopePath, SourceId, SourceLabel,
+    SourceRange, TextRange,
+};
+pub use loader::{
+    json_schema_external_references, linked_frontmatter_schema_path, load_schema,
+    load_schema_with_label, load_schema_with_resources,
+};
+pub use markdown::{
+    parse_markdown, Document, DocumentFrontmatter, FrontmatterAnchor, FrontmatterAnchors,
+    FrontmatterLocation, Heading, HeadingLocation, MarkdownOptions, Section, SuppressedDiagnostic,
+    Suppressions,
+};
+pub use schema::{
+    AtLeastTwo, CanonicalFloat, CanonicalInteger, Cardinality, Constraint, ExactText,
+    FrontmatterKey, FrontmatterPolicy, FrontmatterRef, FrontmatterScalar, FrontmatterSchema,
+    GlobPattern, HeaderLevel, Matcher, NonEmpty, Options, OutlineProvenance, Proposition,
+    RefAnchor, RegexPattern, RuleId, RuleOutcome, RuleRef, Schema, SchemaVersion, SectionRule,
+    UpperBound,
+};
+pub use validator::{
+    validate, Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticReference, DiagnosticTarget,
+    FrontmatterBlock, FrontmatterLineRange, HeaderPath, InvolvedHeader, PrepareValidationError,
+    PreparedValidator,
+};

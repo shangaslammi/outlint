@@ -18,6 +18,7 @@ use serde_json::Value as JsonValue;
 /// can bypass loader-established invariants such as valid references and
 /// compiled matchers.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Schema {
     /// The schema language version used by this document.
     pub version: SchemaVersion,
@@ -119,6 +120,7 @@ pub enum OutlineProvenance {
 /// `allow: false`; if forbidden frontmatter is nevertheless present, the
 /// validation algorithm still evaluates that schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrontmatterPolicy {
     /// Frontmatter may be absent; validate it against `schema` when present.
     Optional {
@@ -160,6 +162,7 @@ pub enum SchemaVersion {
 
 /// Options controlling Markdown parsing and matcher behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Options {
     /// Whether all matcher forms compare text case-sensitively.
     pub match_case: bool,
@@ -167,6 +170,37 @@ pub struct Options {
     pub strip_inline_markup: bool,
     /// Whether a header may be more than one level below its parent.
     pub allow_skipped_levels: bool,
+}
+
+impl Options {
+    /// Sets case sensitivity for every matcher form.
+    pub const fn with_match_case(mut self, match_case: bool) -> Self {
+        self.match_case = match_case;
+        self
+    }
+
+    /// Sets whether inline Markdown is reduced to visible text for matching.
+    pub const fn with_strip_inline_markup(mut self, strip_inline_markup: bool) -> Self {
+        self.strip_inline_markup = strip_inline_markup;
+        self
+    }
+
+    /// Sets whether headings may skip a level in the document tree.
+    pub const fn with_allow_skipped_levels(mut self, allow_skipped_levels: bool) -> Self {
+        self.allow_skipped_levels = allow_skipped_levels;
+        self
+    }
+}
+
+impl Default for Options {
+    /// Uses the defaults defined by specification §7.
+    fn default() -> Self {
+        Self {
+            match_case: false,
+            strip_inline_markup: true,
+            allow_skipped_levels: false,
+        }
+    }
 }
 
 /// A Markdown ATX header level.
@@ -209,6 +243,7 @@ impl TryFrom<u8> for HeaderLevel {
 
 /// A rule for headers within one scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SectionRule {
     /// The explicit or generated identifier used by constraints.
     ///
@@ -258,6 +293,7 @@ pub enum UpperBound {
 
 /// A normalized header matcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Matcher {
     /// Literal header text equality.
     Exact(ExactText),
@@ -274,23 +310,54 @@ pub enum Matcher {
 #[repr(transparent)]
 pub struct ExactText(pub String);
 
-/// The body of a glob matcher.
+/// The validated body of a glob matcher.
+///
+/// Construction is restricted to the schema loader so callers cannot bypass
+/// normalization and validation. Use [`Self::as_str`] to inspect the value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct GlobPattern(pub String);
+pub struct GlobPattern(pub(crate) String);
 
-/// The body of a regular-expression matcher, without `/` delimiters.
+impl GlobPattern {
+    /// Returns the normalized pattern body.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The validated body of a regular-expression matcher, without `/` delimiters.
+///
+/// Construction is restricted to the schema loader so callers cannot create a
+/// semantic schema containing an invalid regular expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct RegexPattern(pub String);
+pub struct RegexPattern(pub(crate) String);
+
+impl RegexPattern {
+    /// Returns the normalized pattern body.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// A validated rule identifier.
+///
+/// Construction is restricted to the schema loader, which enforces the
+/// identifier grammar and reserved-name rules.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct RuleId(pub String);
+pub struct RuleId(pub(crate) String);
+
+impl RuleId {
+    /// Returns the normalized identifier.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// A cross-section presence or ordering constraint.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Constraint {
     /// Exactly one proposition must be satisfied.
     OneOf(AtLeastTwo<Proposition>),
@@ -345,7 +412,14 @@ pub struct FrontmatterRef {
 /// The loader ensures this is non-empty and contains neither `.` nor `=`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct FrontmatterKey(pub String);
+pub struct FrontmatterKey(pub(crate) String);
+
+impl FrontmatterKey {
+    /// Returns the mapping key as it appeared in the normalized reference.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// A scalar resolved according to the YAML 1.2 core schema.
 ///
@@ -367,14 +441,34 @@ pub enum FrontmatterScalar {
 }
 
 /// The canonical, arbitrary-precision value of a YAML integer scalar.
+///
+/// Construction is restricted to the schema loader, which validates and
+/// canonicalizes the source spelling.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct CanonicalInteger(pub String);
+pub struct CanonicalInteger(pub(crate) String);
+
+impl CanonicalInteger {
+    /// Returns the canonical decimal spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// The canonical, arbitrary-precision value of a YAML float scalar.
+///
+/// Construction is restricted to the schema loader, which validates and
+/// canonicalizes the source spelling.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct CanonicalFloat(pub String);
+pub struct CanonicalFloat(pub(crate) String);
+
+impl CanonicalFloat {
+    /// Returns the canonical decimal spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// A normalized reference to a rule path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

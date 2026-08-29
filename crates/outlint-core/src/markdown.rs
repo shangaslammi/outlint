@@ -47,6 +47,7 @@ pub struct Document {
 
 /// Frontmatter extracted from the first lines of a Markdown document.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DocumentFrontmatter {
     /// The document does not start with a YAML frontmatter delimiter.
     Absent,

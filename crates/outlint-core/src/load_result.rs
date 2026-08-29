@@ -7,7 +7,7 @@
 //! load error in an external frontmatter JSON Schema can name that file rather
 //! than being incorrectly anchored to its path in the primary document.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 
 use crate::schema::{NonEmpty, Schema};
 
@@ -85,6 +85,23 @@ pub struct InvalidSchema {
     /// One or more syntax, shape, or schema-validation errors.
     pub errors: NonEmpty<SchemaError>,
 }
+
+impl fmt::Display for InvalidSchema {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let additional = self.errors.rest.len();
+        write!(formatter, "{}", self.errors.first)?;
+        if additional > 0 {
+            write!(formatter, " (and {additional} more schema error")?;
+            if additional != 1 {
+                formatter.write_str("s")?;
+            }
+            formatter.write_str(")")?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for InvalidSchema {}
 
 /// The available source text and optional display name of a schema document.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +245,14 @@ pub struct SchemaError {
     pub message: String,
 }
 
+impl fmt::Display for SchemaError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.kind, self.message)
+    }
+}
+
+impl Error for SchemaError {}
+
 /// A secondary source range attached to a schema error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelatedLocation {
@@ -239,6 +264,7 @@ pub struct RelatedLocation {
 
 /// Machine-readable categories for schema loading failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SchemaErrorKind {
     /// The input is not syntactically valid YAML or JSON.
     Syntax,
@@ -292,6 +318,12 @@ impl SchemaErrorKind {
             Self::ConflictingOutline => "conflicting-outline",
             Self::InvalidFrontmatterSchema => "invalid-frontmatter-schema",
         }
+    }
+}
+
+impl fmt::Display for SchemaErrorKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 

@@ -75,7 +75,7 @@ sections:
     //    really there from a schema matcher that nothing matched.
     for diagnostic in validator.validate(&document) {
         let target = match &diagnostic.target {
-            DiagnosticTarget::Header(path) => path.display(),
+            DiagnosticTarget::Header(path) => path.to_string(),
             DiagnosticTarget::MissingHeader { matcher, .. } => format!("expected {matcher}"),
             DiagnosticTarget::Document => "document".to_owned(),
             DiagnosticTarget::Frontmatter { .. } => "frontmatter".to_owned(),

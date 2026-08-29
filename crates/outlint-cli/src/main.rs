@@ -385,6 +385,7 @@ enum RenderedMatcher {
     Glob(String),
     Regex(String),
     Any,
+    Unknown,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -747,19 +748,28 @@ fn render_reference(reference: &DiagnosticReference) -> RenderedReference {
 }
 
 fn non_empty_rule_path(reference: &RuleRef) -> Vec<String> {
-    reference.path.iter().map(|id| id.0.clone()).collect()
+    reference
+        .path
+        .iter()
+        .map(|id| id.as_str().to_owned())
+        .collect()
 }
 
 fn non_empty_frontmatter_path(reference: &FrontmatterRef) -> Vec<String> {
-    reference.path.iter().map(|key| key.0.clone()).collect()
+    reference
+        .path
+        .iter()
+        .map(|key| key.as_str().to_owned())
+        .collect()
 }
 
 fn render_matcher(matcher: &Matcher) -> RenderedMatcher {
     match matcher {
         Matcher::Exact(value) => RenderedMatcher::Exact(value.0.clone()),
-        Matcher::Glob(value) => RenderedMatcher::Glob(value.0.clone()),
-        Matcher::Regex(value) => RenderedMatcher::Regex(value.0.clone()),
+        Matcher::Glob(value) => RenderedMatcher::Glob(value.as_str().to_owned()),
+        Matcher::Regex(value) => RenderedMatcher::Regex(value.as_str().to_owned()),
         Matcher::Any => RenderedMatcher::Any,
+        _ => RenderedMatcher::Unknown,
     }
 }
 
@@ -767,8 +777,8 @@ fn render_scalar(scalar: &FrontmatterScalar) -> RenderedScalar {
     match scalar {
         FrontmatterScalar::Null => RenderedScalar::Null,
         FrontmatterScalar::Boolean(value) => RenderedScalar::Boolean(*value),
-        FrontmatterScalar::Integer(value) => RenderedScalar::Integer(value.0.clone()),
-        FrontmatterScalar::Float(value) => RenderedScalar::Float(value.0.clone()),
+        FrontmatterScalar::Integer(value) => RenderedScalar::Integer(value.as_str().to_owned()),
+        FrontmatterScalar::Float(value) => RenderedScalar::Float(value.as_str().to_owned()),
         FrontmatterScalar::String(value) => RenderedScalar::String(value.clone()),
     }
 }
@@ -1107,6 +1117,7 @@ fn human_matcher(matcher: &RenderedMatcher) -> String {
         RenderedMatcher::Glob(value) => format!("glob \"{}\"", escape_human_quoted(value)),
         RenderedMatcher::Regex(value) => format!("regex \"{}\"", escape_human_quoted(value)),
         RenderedMatcher::Any => "any heading".to_owned(),
+        RenderedMatcher::Unknown => "unknown matcher".to_owned(),
     }
 }
 
@@ -1396,6 +1407,7 @@ fn matcher_json(matcher: &RenderedMatcher) -> Value {
         RenderedMatcher::Glob(value) => json!({ "kind": "glob", "value": value }),
         RenderedMatcher::Regex(value) => json!({ "kind": "regex", "value": value }),
         RenderedMatcher::Any => json!({ "kind": "any" }),
+        RenderedMatcher::Unknown => json!({ "kind": "unknown" }),
     }
 }
 
