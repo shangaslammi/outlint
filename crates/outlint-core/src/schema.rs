@@ -122,18 +122,18 @@ pub enum OutlineProvenance {
 pub enum FrontmatterPolicy {
     /// Frontmatter may be absent; validate it against `schema` when present.
     Optional {
-        /// Linked JSON Schema to apply when frontmatter is present.
+        /// JSON Schema to apply when frontmatter is present.
         schema: Option<FrontmatterSchema>,
     },
     /// Frontmatter must be present and is validated against `schema`.
     Required {
-        /// Linked JSON Schema to apply to the required frontmatter mapping.
+        /// JSON Schema to apply to the required frontmatter mapping.
         schema: Option<FrontmatterSchema>,
     },
     /// Frontmatter must not be present; validate it against `schema` if it is
     /// nevertheless present.
     Forbidden {
-        /// Linked JSON Schema to apply if forbidden frontmatter is present.
+        /// JSON Schema to apply if forbidden frontmatter is present.
         schema: Option<FrontmatterSchema>,
     },
 }

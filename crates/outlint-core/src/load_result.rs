@@ -137,12 +137,15 @@ pub enum SchemaNode {
     Title,
     /// The normalized frontmatter policy object.
     Frontmatter,
-    /// The external path in the policy's `schema` field.
-    FrontmatterSchemaDeclaration,
-    /// The parsed external JSON Schema document.
+    /// The policy's `schema` value in the primary Outlint schema source.
     ///
-    /// This points into the external source, while
+    /// This is either the linked schema path or the complete inline mapping.
+    FrontmatterSchemaDeclaration,
+    /// The parsed JSON Schema root document.
+    ///
+    /// For a linked schema this points into the external source while
     /// [`Self::FrontmatterSchemaDeclaration`] remains in the primary source.
+    /// For an inline schema both nodes cover its mapping in the primary source.
     FrontmatterSchemaDocument,
     /// A section rule at a structural path.
     Rule(RulePath),

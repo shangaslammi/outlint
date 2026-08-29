@@ -66,8 +66,11 @@ case frontmatter-field-schema-shape
 
 case frontmatter-field-schema-inline
   source "version: 1\nfrontmatter:\n  schema:\n    type: object\nsections: []\n"
-  verdict invalid
-  error invalid-frontmatter-schema 0:38..51 "type: object\n" "inline frontmatter JSON Schema is planned for a future release; use a linked JSON file in V1"
+  verdict valid
+  node title 0:61..63 "[]"
+  node frontmatter 0:26..51 "schema:\n    type: object\n"
+  node frontmatter-schema-declaration 0:38..51 "type: object\n"
+  node frontmatter-schema-document 0:38..51 "type: object\n"
 
 case frontmatter-field-schema-unpreloaded
   source "version: 1\nfrontmatter:\n  schema: linked.json\nsections: []\n"

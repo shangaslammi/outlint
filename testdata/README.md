@@ -47,7 +47,7 @@ from the two-level path `A`, `B` once joined.
 For `frontmatter`, `line_range` is the one-based inclusive `{start_line,
 end_line}` span of the whole block and is absent only when the document has no
 frontmatter block at all (`missing-frontmatter`). `pointer` is the JSON Pointer
-of the value a linked JSON Schema rejected. Its absence and the empty string
+of the value a JSON Schema rejected. Its absence and the empty string
 are different: `"pointer": ""` is the root pointer, naming the frontmatter
 mapping itself, while no `pointer` member at all means the diagnostic is about
 the block rather than any value in it.

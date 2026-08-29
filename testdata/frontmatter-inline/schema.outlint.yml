@@ -1,0 +1,16 @@
+version: 1
+frontmatter:
+  required: true
+  schema:
+    $ref: "#/$defs/frontmatter"
+    $defs:
+      frontmatter:
+        type: object
+        required: [status]
+        properties:
+          status:
+            $dynamicRef: "#status"
+      status:
+        $dynamicAnchor: status
+        enum: [draft, final]
+sections: []

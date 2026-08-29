@@ -40,7 +40,7 @@ pub enum DiagnosticId {
     ForbiddenFrontmatter,
     /// A frontmatter block is not a valid YAML mapping.
     InvalidFrontmatter,
-    /// A frontmatter value fails its linked JSON Schema.
+    /// A frontmatter value fails its JSON Schema.
     FrontmatterSchema,
     /// An `one_of` constraint does not have exactly one satisfied ref.
     OneOf,
@@ -232,7 +232,7 @@ impl PreparedValidator {
     ///
     /// # Errors
     ///
-    /// Returns an error if a matcher or linked JSON Schema cannot be compiled.
+    /// Returns an error if a matcher or frontmatter JSON Schema cannot be compiled.
     /// A schema returned by the loader has already passed equivalent checks,
     /// but preparation retains a defensive failure path rather than assuming
     /// every caller obtained the value from that boundary.
@@ -311,7 +311,7 @@ fn frontmatter_schema(policy: &FrontmatterPolicy) -> Option<&FrontmatterSchema> 
 fn compile_frontmatter_schema(
     schema: &FrontmatterSchema,
 ) -> Result<jsonschema::Validator, PrepareValidationError> {
-    // This is the second place a linked graph is compiled, and compiling a
+    // This is the second place a frontmatter schema graph is compiled, and compiling a
     // reference chain costs a stack frame per link, so the budget is charged
     // here too rather than trusted to have been charged upstream. Today the
     // loader is the only constructor of a `FrontmatterSchema` and refuses the

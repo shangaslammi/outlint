@@ -295,48 +295,68 @@ the body is written `\/`; no other delimiter escaping exists. Inline flags
 frontmatter:
   required: <bool>          # default false; true = frontmatter block must exist
   allow: <bool>             # default true; false = frontmatter block is forbidden
-  schema: <path>            # optional JSON Schema for the frontmatter mapping
+  schema: <path-or-mapping> # optional JSON Schema for the frontmatter mapping
 ```
 
 `required: true` with `allow: false` is a schema error
 `conflicting-frontmatter`.
 
 **Delegated validation.** Outlint does NOT define a value-validation
-language for frontmatter. If `schema` is given, it is the path of a JSON
-Schema relative to the Outlint schema file. Inline JSON Schemas are planned
-for a future version but are not supported in V1; an inline mapping is schema
-error `invalid-frontmatter-schema`. The dialect is selected by the JSON
-Schema's own `$schema` keyword; absent `$schema`, the dialect is draft 2020-12.
-The path MUST name a UTF-8 JSON document whose root is an object or boolean.
-Implementations MUST support draft 2020-12 and MAY support earlier drafts; an
-unsupported `$schema` is schema error `invalid-frontmatter-schema`. The base
-URI is the JSON Schema's lexical path as reached from the Outlint schema,
-before resolving filesystem symlinks. V1 resolves local file and fragment
-`$ref`s, including cycles within or between files. Network retrieval is not
-performed; a remote `$ref` is schema error `invalid-frontmatter-schema`. An
-unreadable, invalid-UTF-8, or invalid-JSON schema is also
-`invalid-frontmatter-schema`. The parsed frontmatter
-mapping is validated against it; each JSON Schema error is reported as one
+language for frontmatter. If `schema` is given, it is either a path relative
+to the Outlint schema file or an inline YAML mapping interpreted as a JSON
+Schema object. The dialect is selected by the JSON Schema's own `$schema`
+keyword; absent `$schema`, the dialect is draft 2020-12. A path MUST name a
+UTF-8 JSON document whose root is an object or boolean. Implementations MUST
+support draft 2020-12 and MAY support earlier drafts; an unsupported `$schema`
+is schema error `invalid-frontmatter-schema`.
+
+For a linked schema, the base URI is its lexical path as reached from the
+Outlint schema, before resolving filesystem symlinks. V1 resolves local file
+and fragment references, including cycles within or between files. Network
+retrieval is not performed; a remote reference is schema error
+`invalid-frontmatter-schema`. An unreadable, invalid-UTF-8, or invalid-JSON
+linked schema is also `invalid-frontmatter-schema`.
+
+An inline schema is self-contained in V1. Every object member named `$ref` or
+`$dynamicRef` anywhere in the inline mapping is lexically reserved, regardless
+of whether its containing object appears under a recognized JSON Schema
+keyword. Its value MUST be a string beginning with `#`; this permits references
+within the inline schema, including cycles, but not another file or URI. Any
+other value for either reserved member is schema error
+`invalid-frontmatter-schema`. This rule deliberately includes members inside
+`const`, `enum`, property-name maps, unknown keywords, and other data-shaped
+objects: a fragment JSON Pointer can target any such object and thereby make it
+an evaluated schema. The inline schema's base URI is the stable hierarchical
+synthetic URI `https://outlint.invalid/inline/frontmatter.schema.json`; this
+permits a root or nested `$id` to be relative while giving no inline reference
+access to an external resource. The parsed frontmatter mapping is validated
+against it; each JSON Schema error is reported as one
 diagnostic `frontmatter-schema` carrying the JSON Pointer of the failing
 location and the validator's message. Absent frontmatter with
 `required: false` skips `schema` validation entirely.
 
-A reference is resolved by reading the schema it names, so a reference whose
-target holds another reference is read through both, and a chain of them is
-read through all of it at once. That cost is a chain's length and nothing else:
+A reference is resolved by entering the schema location it names, so a target
+that holds another reference enters both, and a chain of them is traversed all
+at once. That cost is a chain's length and nothing else:
 each link may sit at the same nesting as every other, so the depth limits of
 §1.6 and §2 are satisfied however long the chain grows, and it may be spelled
 across as many documents as the graph has. An implementation MAY therefore
-refuse a linked schema graph declaring more references than a fixed limit. The
-limit MUST be at least 64 references counted over the whole graph rather than
-per document, since a chain crosses documents as freely as it stays within one
-and a per-document count would bound nothing. A graph exceeding the limit is
-schema error `invalid-frontmatter-schema`, decided before the graph is
-validated against, so the same graph is refused whether a document is being
-checked or the schema is being checked on its own. Cycles are not what this
-bounds: a reference reached a second time on one path resolves to the schema
-already being read, and cycles within and between files are required above to
-resolve, so an implementation MUST NOT refuse a graph for being cyclic.
+refuse a schema graph containing more reference-shaped members than a fixed
+limit. The count is the number of object members named `$ref` or `$dynamicRef`
+across every document in the graph, including members in data-shaped or
+unreachable objects; the same lexical count used by the inline restriction
+above prevents a fragment pointer from hiding a chain outside recognized
+schema keywords. The limit MUST be at least 64 members counted over the whole
+graph rather than per document; an inline schema has one document, while a
+linked chain crosses documents as freely as it stays within one and a
+per-document count would bound nothing. A graph exceeding the limit is schema
+error `invalid-frontmatter-schema`, decided before the graph is validated
+against, so the same graph is refused whether a document is being checked or
+the schema is being checked on its own. Cycles are not what this bounds: a reference
+reached a second time on one path resolves to the schema already being read,
+and fragment cycles within an inline schema and cycles within or between
+linked files are required above to resolve, so an implementation MUST NOT
+refuse a graph for being cyclic.
 
 Outlint's own frontmatter awareness is limited to presence and equality via
 `fm.` refs in constraints (§4.6). Richer value logic belongs in the JSON
@@ -598,7 +618,7 @@ verbatim (e.g. `Step *`); Regex — the pattern body, with `\/` unescaped to
 For `frontmatter`, `line_range` is the one-based inclusive `{start_line,
 end_line}` span of the whole block, absent exactly when the document has no
 frontmatter block at all (`missing-frontmatter`). `pointer` is the JSON
-Pointer of the value a linked JSON Schema rejected. Its absence and the
+Pointer of the value a JSON Schema rejected. Its absence and the
 empty string differ: `""` is the root pointer, naming the frontmatter
 mapping itself, while no `pointer` member at all means the diagnostic is
 about the block rather than any value in it. An absent optional member MUST
@@ -742,7 +762,9 @@ load_schema:
     desugar title/sections to one required outline rule
       (bare sections implies title "*"; title null becomes a deny-all
        h1 rule), remembering the sugar for diagnostic voice (§6.2)
-  load frontmatter.schema if given; compile JSON Schema (dialect per $schema)
+  load frontmatter.schema if given; for an inline schema reject every
+    $ref/$dynamicRef that is not fragment-only; compile JSON Schema
+    (dialect per $schema)
   walk rules (outline and every nested sections):
               validate matchers (incl. regex dialect), repeat grammar,
               assign auto-ids, check per-scope id uniqueness,

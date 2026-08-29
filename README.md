@@ -171,9 +171,10 @@ The pieces:
   `requires`, `conflicts`, and `ordered` relate rules addressed by id, at
   the schema root or inside any rule's scope.
 - **Frontmatter.** outlint checks presence (`required`, `allow`) and
-  delegates value validation to a linked JSON Schema whose path is relative
-  to the Outlint schema file. Inline JSON Schemas are planned for a future
-  release. Constraints can reference frontmatter with
+  delegates value validation to either a self-contained inline JSON Schema or
+  a linked JSON Schema whose path is relative to the Outlint schema file.
+  Inline schemas may use fragment-only references; linked schemas may use
+  local multi-file reference graphs. Constraints can reference frontmatter with
   `fm.` propositions — `fm.key` for presence of a non-null value,
   `fm.key=value` for typed scalar equality, dotted paths for nested
   mappings — e.g. `requires: { if: fm.status=deprecated, then: migration }`.
@@ -257,7 +258,7 @@ Every diagnostic carries a `target` saying what it is about, tagged by
 `kind`: `header` (a header the document has, as a `path` array),
 `missing_header` (a section the schema requires, as the `parent` path it
 belongs under plus the schema's `matcher` label), `document`, or
-`frontmatter` (with the block's `line_range` and, when a linked JSON Schema
+`frontmatter` (with the block's `line_range` and, when a JSON Schema
 rejected one value, its `pointer`). The kinds are distinct because their
 text has different provenance — a `missing_header` matcher is schema text
 that may appear nowhere in the document.

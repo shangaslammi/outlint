@@ -1525,7 +1525,7 @@ fn schema_check_refuses_a_reference_chain_instead_of_overrunning_the_stack() {
     assert_eq!(diagnostic["id"], "invalid-frontmatter-schema");
     assert_eq!(
         diagnostic["message"],
-        "linked JSON Schema declares more than 128 `$ref` or `$dynamicRef` keywords"
+        "frontmatter JSON Schema declares more than 128 `$ref` or `$dynamicRef` members"
     );
     assert!(
         diagnostic["schema_location"]["path"]
@@ -1565,7 +1565,7 @@ fn checking_a_document_refuses_a_reference_chain_instead_of_overrunning_the_stac
     assert_eq!(diagnostic["id"], "invalid-frontmatter-schema");
     assert_eq!(
         diagnostic["message"],
-        "linked JSON Schema declares more than 128 `$ref` or `$dynamicRef` keywords"
+        "frontmatter JSON Schema declares more than 128 `$ref` or `$dynamicRef` members"
     );
 }
 

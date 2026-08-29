@@ -27,8 +27,9 @@ where the two disagree, the specification wins.
   `all_or_none`, `requires`, `conflicts`, and `ordered` constraints over
   rules addressed by id.
 - **YAML frontmatter** — presence policy and delegated validation of the
-  frontmatter mapping against a linked JSON Schema (draft 2020-12); inline
-  schemas are planned for a future release. Frontmatter also supports `fm.`
+  frontmatter mapping against an inline or linked JSON Schema (draft 2020-12).
+  Inline schemas are self-contained and permit fragment-only references;
+  linked schemas may span local files. Frontmatter also supports `fm.`
   propositions in constraints: `fm.key` presence and `fm.key=value` typed
   scalar equality under the YAML core schema, with dotted paths into nested
   mappings.

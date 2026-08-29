@@ -333,6 +333,101 @@ fn prepare_external_schema_result(
     })
 }
 
+/// Stable hierarchical identity for resolving relative `$id` values inline.
+///
+/// The reserved `.invalid` top-level domain cannot identify a retrievable
+/// resource, and inline reference values are checked before compilation, so
+/// this supplies URI hierarchy without opening an external loading path.
+const INLINE_FRONTMATTER_SCHEMA_URI: &str =
+    "https://outlint.invalid/inline/frontmatter.schema.json";
+
+fn prepare_inline_schema(mapping: JsonMap) -> Result<crate::FrontmatterSchema, NonEmpty<String>> {
+    let root = Value::Object(mapping);
+    let mut errors = invalid_inline_references(&root);
+    // A malformed reference is also rejected by the draft meta-schema, but
+    // the inline contract has a more specific rule and diagnostic. Avoid
+    // reporting both descriptions for the same keyword.
+    if errors.is_empty() {
+        if let Err(message) = validate_json_schema_document(&root) {
+            errors.push(message);
+        }
+    }
+    if json_schema_reference_count(&root) > MAX_JSON_SCHEMA_REFERENCES {
+        errors.push(json_schema_reference_budget_message());
+    }
+    if let Some(errors) = non_empty(errors) {
+        return Err(errors);
+    }
+
+    {
+        let registry = preloaded_json_schema_registry()
+            .add(INLINE_FRONTMATTER_SCHEMA_URI, &root)
+            .and_then(jsonschema::RegistryBuilder::prepare)
+            .map_err(|error| {
+                single_string_error(format!(
+                    "cannot prepare inline frontmatter JSON Schema: {error}"
+                ))
+            })?;
+        jsonschema::draft202012::options()
+            .with_registry(&registry)
+            .with_base_uri(INLINE_FRONTMATTER_SCHEMA_URI.to_owned())
+            .with_retriever(NoExternalRetrieve)
+            .build(&root)
+            .map_err(|error| {
+                single_string_error(format!(
+                    "cannot compile inline frontmatter JSON Schema: {error}"
+                ))
+            })?;
+    }
+
+    Ok(crate::FrontmatterSchema {
+        root_uri: INLINE_FRONTMATTER_SCHEMA_URI.into(),
+        root,
+        resources: BTreeMap::new(),
+    })
+}
+
+fn single_string_error(message: String) -> NonEmpty<String> {
+    NonEmpty {
+        first: message,
+        rest: Vec::new(),
+    }
+}
+
+fn invalid_inline_references(value: &Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    walk_json_objects(value, |object| {
+        for keyword in ["$ref", "$dynamicRef"] {
+            if let Some(child) = object.get(keyword) {
+                match child.as_str() {
+                    Some(reference) if reference.starts_with('#') => {}
+                    Some(reference) => errors.push(format!(
+                        "inline frontmatter JSON Schema `{keyword}` must be fragment-only, found `{reference}`"
+                    )),
+                    None => errors.push(format!(
+                        "inline frontmatter JSON Schema `{keyword}` must be a string beginning with `#`"
+                    )),
+                }
+            }
+        }
+    });
+    errors
+}
+
+fn walk_json_objects(value: &Value, mut visit: impl FnMut(&JsonMap)) {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Object(object) => {
+                visit(object);
+                pending.extend(object.values());
+            }
+            Value::Array(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+}
+
 fn single_external_error(error: PreparedExternalError) -> NonEmpty<PreparedExternalError> {
     NonEmpty {
         first: error,
@@ -340,7 +435,7 @@ fn single_external_error(error: PreparedExternalError) -> NonEmpty<PreparedExter
     }
 }
 
-/// How many reference keywords one linked JSON Schema graph may declare.
+/// How many reference-shaped members one frontmatter schema graph may declare.
 ///
 /// Compiling a reference re-enters the compiler at the target, so a chain of
 /// references costs one stack frame per link however flat the documents that
@@ -355,8 +450,8 @@ fn single_external_error(error: PreparedExternalError) -> NonEmpty<PreparedExter
 /// across resources — and a second implementation of that resolution would
 /// either refuse graphs the compiler handles or, worse, admit ones it cannot.
 /// A count needs no resolution and still bounds the recursion, since a stack
-/// path enters each reference keyword at most once: cycles are cut by the
-/// compiler's own pending-node cache, which is why a self-reference or a
+/// path enters each evaluated reference member at most once: cycles are cut by
+/// the compiler's own pending-node cache, which is why a self-reference or a
 /// mutual pair compiles today rather than overflowing.
 ///
 /// The value is the constant this crate already uses wherever structure has to
@@ -372,51 +467,41 @@ pub(crate) const MAX_JSON_SCHEMA_REFERENCES: usize = 128;
 /// Reports the shared wording for a graph that spends more than the budget.
 pub(crate) fn json_schema_reference_budget_message() -> String {
     format!(
-        "linked JSON Schema declares more than {MAX_JSON_SCHEMA_REFERENCES} \
-         `$ref` or `$dynamicRef` keywords"
+        "frontmatter JSON Schema declares more than {MAX_JSON_SCHEMA_REFERENCES} \
+         `$ref` or `$dynamicRef` members"
     )
 }
 
-/// Counts the `$ref` and `$dynamicRef` keywords one JSON document declares.
+/// Counts reserved `$ref` and `$dynamicRef` members in one JSON document.
 ///
 /// The walk carries an explicit stack rather than recursing, so what it costs
 /// the call stack does not depend on the limit it enforces. A counter that
 /// recursed would be safe only while a limit's worth of its own frames still
 /// fit, which ties the choice of limit to the shape of the check and would
 /// turn a later raise of the limit into the very overflow being refused here.
-/// Those two keywords are the ones whose
+/// Those two member names are the keywords whose
 /// compilation re-enters the compiler under draft 2020-12, the only dialect
 /// [`validate_json_schema_document`] admits, and they are the same pair
 /// [`collect_external_references`] follows.
 ///
-/// Every occurrence of either name is counted, including one used as a
-/// property name or buried in a `const`, which cannot drive the compiler and
-/// so only makes the bound stricter than it needs to be. Distinguishing them
-/// would mean knowing which positions are schemas, which is the resolution
-/// this count exists to avoid.
+/// Every object member with either reserved name counts, including members in
+/// instance-shaped or otherwise unreachable data. A fragment JSON Pointer may
+/// turn any object into an evaluated schema, so limiting the walk to recognized
+/// Draft 2020-12 subresources would leave a hidden reference chain unbounded.
 pub(crate) fn json_schema_reference_count(value: &serde_json::Value) -> usize {
     let mut references = 0usize;
-    let mut pending = vec![value];
-    while let Some(value) = pending.pop() {
-        match value {
-            serde_json::Value::Object(object) => {
-                for (keyword, child) in object {
-                    if matches!(keyword.as_str(), "$ref" | "$dynamicRef") {
-                        references = references.saturating_add(1);
-                    }
-                    pending.push(child);
-                }
-            }
-            serde_json::Value::Array(items) => pending.extend(items),
-            _ => {}
-        }
-    }
+    walk_json_objects(value, |object| {
+        references = references.saturating_add(
+            usize::from(object.contains_key("$ref"))
+                + usize::from(object.contains_key("$dynamicRef")),
+        );
+    });
     references
 }
 
 fn validate_json_schema_document(value: &serde_json::Value) -> Result<(), String> {
     if !value.is_object() && !value.is_boolean() {
-        return Err("linked JSON Schema root must be an object or boolean".into());
+        return Err("frontmatter JSON Schema root must be an object or boolean".into());
     }
     if let Some(dialect) = value.as_object().and_then(|object| object.get("$schema")) {
         let supported = dialect.as_str().is_some_and(|dialect| {
@@ -1811,13 +1896,25 @@ impl Loader {
                     .insert(SchemaNode::FrontmatterSchemaDocument, document_range);
                 Some(schema)
             }
-            Some(RawFrontmatterSchema::Mapping(_mapping)) => {
-                self.error_at(
-                    SchemaErrorKind::InvalidFrontmatterSchema,
-                    self.range(RangeKey::FrontmatterField("schema".into())),
-                    "inline frontmatter JSON Schema is planned for a future release; use a linked JSON file in V1",
-                );
-                return None;
+            Some(RawFrontmatterSchema::Mapping(mapping)) => {
+                let schema_range = self.range(RangeKey::FrontmatterField("schema".into()));
+                self.nodes
+                    .insert(SchemaNode::FrontmatterSchemaDeclaration, schema_range);
+                self.nodes
+                    .insert(SchemaNode::FrontmatterSchemaDocument, schema_range);
+                match prepare_inline_schema(mapping) {
+                    Ok(schema) => Some(schema),
+                    Err(errors) => {
+                        for message in std::iter::once(errors.first).chain(errors.rest) {
+                            self.error_at(
+                                SchemaErrorKind::InvalidFrontmatterSchema,
+                                schema_range,
+                                message,
+                            );
+                        }
+                        return None;
+                    }
+                }
             }
         };
         Some(if required {
@@ -4361,6 +4458,280 @@ sections: []
     }
 
     #[test]
+    fn inline_frontmatter_schema_validates_and_preserves_primary_source_provenance() {
+        let source = r#"version: 1
+frontmatter:
+  schema:
+    type: object
+    required: [status]
+    properties:
+      status: { enum: [draft, final] }
+title: null
+sections: []
+"#;
+        let loaded = load_schema(source).expect("inline JSON Schema is valid");
+        let declaration = loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDeclaration];
+        let document = loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDocument];
+        assert_eq!(declaration, document);
+        assert_eq!(declaration.source, SourceId(0));
+        assert_eq!(
+            &source[declaration.range.start.0..declaration.range.end.0],
+            "type: object\n    required: [status]\n    properties:\n      status: { enum: [draft, final] }\n"
+        );
+
+        let document = crate::parse_markdown(
+            "---\nstatus: review\n---\n",
+            crate::MarkdownOptions::default(),
+        );
+        let diagnostics =
+            crate::validate(&loaded.schema, &document).expect("inline schema compiles again");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
+        let crate::DiagnosticTarget::Frontmatter { block: Some(block) } = &diagnostics[0].target
+        else {
+            panic!("frontmatter schema diagnostic must target its block")
+        };
+        assert_eq!(block.json_pointer.as_deref(), Some("/status"));
+    }
+
+    #[test]
+    fn inline_frontmatter_schema_accepts_fragment_references_and_cycles() {
+        let loaded = inline(
+            r##"{
+                "$ref": "#/$defs/node",
+                "$defs": {
+                    "node": {
+                        "type": "object",
+                        "properties": { "child": { "$ref": "#/$defs/node" } }
+                    }
+                }
+            }"##,
+        )
+        .expect("fragment-only recursive schema is valid");
+        let document = crate::parse_markdown(
+            "---\nchild:\n  child: false\n---\n",
+            crate::MarkdownOptions::default(),
+        );
+        let diagnostics =
+            crate::validate(&loaded.schema, &document).expect("recursive inline schema compiles");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
+
+        let loaded = inline(
+            r##"{
+                "$defs": {
+                    "node": {
+                        "$dynamicAnchor": "node",
+                        "type": "object",
+                        "properties": { "child": { "$dynamicRef": "#node" } }
+                    }
+                },
+                "properties": { "node": { "$ref": "#/$defs/node" } }
+            }"##,
+        )
+        .expect("fragment-only dynamic reference is valid");
+        let document = crate::parse_markdown(
+            "---\nnode:\n  child: false\n---\n",
+            crate::MarkdownOptions::default(),
+        );
+        let diagnostics = crate::validate(&loaded.schema, &document)
+            .expect("dynamic fragment reference validates without retrieval");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
+    }
+
+    #[test]
+    fn inline_frontmatter_schema_reserves_reference_members_in_every_object() {
+        for (root, expected) in [
+            (r#"{"const":{"$ref":"literal"}}"#, "fragment-only"),
+            (r#"{"properties":{"$ref":"literal"}}"#, "fragment-only"),
+            (
+                r#"{"unknown":{"$dynamicRef":17}}"#,
+                "must be a string beginning with `#`",
+            ),
+        ] {
+            let invalid = inline(root).expect_err("reserved member is checked lexically");
+            assert_eq!(invalid.errors.iter().count(), 1);
+            assert_eq!(
+                invalid.errors.first.kind,
+                SchemaErrorKind::InvalidFrontmatterSchema
+            );
+            assert!(invalid.errors.first.message.contains(expected));
+        }
+    }
+
+    #[test]
+    fn inline_reference_walk_covers_every_object_member() {
+        let root = serde_json::json!({
+            "$defs": { "defined": { "$ref": "defined.json" } },
+            "properties": { "property": { "$ref": "property.json" } },
+            "patternProperties": { ".*": { "$ref": "pattern.json" } },
+            "dependentSchemas": { "key": { "$ref": "dependent.json" } },
+            "unevaluatedProperties": { "$ref": "unevaluated-properties.json" },
+            "unevaluatedItems": { "$ref": "unevaluated-items.json" },
+            "if": { "$ref": "if.json" },
+            "then": { "$ref": "then.json" },
+            "else": { "$ref": "else.json" },
+            "const": { "$ref": "literal.json" },
+            "enum": [{ "$dynamicRef": "literal.json" }],
+            "unknown": { "$ref": "unknown.json" }
+        });
+        assert_eq!(invalid_inline_references(&root).len(), 12);
+        assert_eq!(json_schema_reference_count(&root), 12);
+    }
+
+    #[test]
+    fn inline_frontmatter_schema_rejects_pointer_hidden_external_references() {
+        let invalid = inline(
+            r##"{
+                "$ref": "#/const",
+                "const": { "$ref": "https://example.invalid/hidden.json" }
+            }"##,
+        )
+        .expect_err("a pointer-targeted object cannot hide an external reference");
+        assert_eq!(invalid.errors.iter().count(), 1);
+        assert!(invalid.errors.first.message.contains("fragment-only"));
+        assert!(invalid.errors.first.message.contains("hidden.json"));
+    }
+
+    #[test]
+    fn inline_frontmatter_schema_relative_ids_resolve_from_the_synthetic_base() {
+        let root_id = inline(
+            r##"{
+                "$id": "schemas/root.json",
+                "$defs": { "status": { "enum": ["draft", "final"] } },
+                "properties": { "status": { "$ref": "#/$defs/status" } }
+            }"##,
+        )
+        .expect("a root relative id resolves against the hierarchical base");
+        let document = crate::parse_markdown(
+            "---\nstatus: review\n---\n",
+            crate::MarkdownOptions::default(),
+        );
+        assert_eq!(
+            crate::validate(&root_id.schema, &document)
+                .expect("root relative id compiles")
+                .len(),
+            1
+        );
+
+        let nested_id = inline(
+            r##"{
+                "$defs": {
+                    "node": {
+                        "$id": "nested/node.json",
+                        "type": "object",
+                        "properties": { "child": { "$ref": "#" } }
+                    }
+                },
+                "properties": { "node": { "$ref": "#/$defs/node" } }
+            }"##,
+        )
+        .expect("a nested relative id resolves against the hierarchical base");
+        let document = crate::parse_markdown(
+            "---\nnode:\n  child: false\n---\n",
+            crate::MarkdownOptions::default(),
+        );
+        assert_eq!(
+            crate::validate(&nested_id.schema, &document)
+                .expect("nested relative id compiles")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn inline_frontmatter_schema_enforces_the_supported_dialect_and_meta_schema() {
+        inline(
+            r#"{
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object"
+            }"#,
+        )
+        .expect("draft 2020-12 is supported inline");
+
+        for root in [
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#"}"#,
+            r#"{"type":17}"#,
+        ] {
+            let invalid = inline(root).expect_err("unsupported or malformed schema is invalid");
+            assert_eq!(
+                invalid.errors.first.kind,
+                SchemaErrorKind::InvalidFrontmatterSchema
+            );
+            assert_eq!(invalid.errors.first.range.source, SourceId(0));
+        }
+    }
+
+    #[test]
+    fn inline_frontmatter_schema_rejects_non_fragment_references() {
+        for (keyword, reference) in [
+            ("$ref", "defs.json#/$defs/value"),
+            ("$ref", "/schemas/defs.json"),
+            ("$ref", "file:///schemas/defs.json"),
+            ("$ref", "https://example.invalid/schema.json"),
+            ("$dynamicRef", "defs.json#node"),
+        ] {
+            let source = serde_json::json!({ keyword: reference }).to_string();
+            let invalid = inline(&source).expect_err("external inline reference is invalid");
+            assert_eq!(invalid.errors.iter().count(), 1);
+            assert_eq!(
+                invalid.errors.first.kind,
+                SchemaErrorKind::InvalidFrontmatterSchema
+            );
+            assert_eq!(invalid.errors.first.range.source, SourceId(0));
+            assert!(invalid.errors.first.message.contains("fragment-only"));
+            assert!(invalid.errors.first.message.contains(reference));
+            let range = invalid.errors.first.range.range;
+            let primary = &invalid.sources.documents[&SourceId(0)].text;
+            assert_eq!(&primary[range.start.0..range.end.0], source);
+        }
+    }
+
+    #[test]
+    fn inline_frontmatter_schema_rejects_non_string_reference_values() {
+        for value in [serde_json::Value::Null, serde_json::json!(17)] {
+            let source = serde_json::json!({ "$ref": value }).to_string();
+            let invalid = inline(&source).expect_err("reference must be a string");
+            assert_eq!(invalid.errors.iter().count(), 1);
+            assert_eq!(
+                invalid.errors.first.message,
+                "inline frontmatter JSON Schema `$ref` must be a string beginning with `#`"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_frontmatter_schema_uses_the_shared_reference_budget() {
+        let at_budget = hidden_reference_chain(MAX_JSON_SCHEMA_REFERENCES);
+        assert_eq!(
+            json_schema_reference_count(&at_budget),
+            MAX_JSON_SCHEMA_REFERENCES
+        );
+        inline(&at_budget.to_string()).expect("a pointer-hidden chain may spend the whole budget");
+        linked(&at_budget.to_string(), &[])
+            .expect("the linked budget admits the same exact boundary");
+
+        let over_budget = hidden_reference_chain(MAX_JSON_SCHEMA_REFERENCES + 1);
+        let invalid =
+            inline(&over_budget.to_string()).expect_err("one hidden reference more is refused");
+        assert_eq!(invalid.errors.iter().count(), 1);
+        assert_eq!(
+            invalid.errors.first.message,
+            json_schema_reference_budget_message()
+        );
+        assert_eq!(invalid.errors.first.range.source, SourceId(0));
+
+        let linked_invalid = linked(&over_budget.to_string(), &[])
+            .expect_err("linked graphs count pointer-hidden references too");
+        assert_eq!(
+            linked_invalid.errors.first.message,
+            json_schema_reference_budget_message()
+        );
+        assert_eq!(linked_invalid.errors.first.range.source, SourceId(1));
+    }
+
+    #[test]
     fn linked_frontmatter_schema_requires_file_context() {
         let kinds = error_kinds(
             r#"
@@ -4588,7 +4959,7 @@ sections: []
         assert_eq!(errors[1].range.source, SourceId(3));
         assert_eq!(
             errors[1].message,
-            "linked JSON Schema root must be an object or boolean"
+            "frontmatter JSON Schema root must be an object or boolean"
         );
     }
 
@@ -4734,6 +5105,14 @@ sections: []
         )
     }
 
+    fn inline(root: &str) -> LoadSchemaResult {
+        let root: Value = serde_json::from_str(root).expect("test inline schema is valid JSON");
+        load_schema(&format!(
+            "version: 1\nfrontmatter:\n  schema: {}\ntitle: null\nsections: []\n",
+            serde_json::to_string(&root).expect("test inline schema serializes")
+        ))
+    }
+
     fn resource(uri: &str, source: &str) -> crate::JsonSchemaResourceInput {
         crate::JsonSchemaResourceInput {
             uri: uri.into(),
@@ -4771,6 +5150,21 @@ sections: []
             definitions.insert(index.to_string(), serde_json::json!({ "$ref": target }));
         }
         serde_json::json!({ "$ref": "#/$defs/0", "$defs": definitions }).to_string()
+    }
+
+    /// Builds a fragment chain whose schemas are hidden inside instance data.
+    ///
+    /// The root pointer activates the first object in `const`; each object then
+    /// points at the next array element until the final `true` schema. The
+    /// result declares exactly `references` `$ref` members even though only
+    /// the root occupies a keyword position recognized as a subresource.
+    fn hidden_reference_chain(references: usize) -> Value {
+        assert!(references > 0, "a reference chain has a root reference");
+        let mut hidden = (0..references - 1)
+            .map(|index| serde_json::json!({ "$ref": format!("#/const/{}", index + 1) }))
+            .collect::<Vec<_>>();
+        hidden.push(Value::Bool(true));
+        serde_json::json!({ "$ref": "#/const/0", "const": hidden })
     }
 
     #[test]

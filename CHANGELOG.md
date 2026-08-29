@@ -52,14 +52,15 @@ feature set of the `0.1.0` workspace.
   `skipped-level` once per skipping subtree root unless `allow_skipped_levels`
   admits it into the enclosing scope.
 - **Frontmatter.** Presence checking (`required`, `allow`) plus value
-  validation delegated to a linked JSON Schema whose path is relative to the
-  Outlint schema file, including linked `$ref` resource graphs. A block that
+  validation delegated to a self-contained inline JSON Schema or a linked JSON
+  Schema whose path is relative to the Outlint schema file, including linked
+  `$ref` resource graphs. Inline references must be fragment-only. A block that
   does not parse is reported with the YAML parser's own wording and position,
   and a byte-order mark leading the block is dropped rather than becoming part
   of the first key. Alias expansion is bounded by a multiple of the block's own size
   and collection nesting by a fixed depth limit, which the value an alias
   expands to counts against exactly as the written text does. A linked graph is
-  bounded in turn by how many `$ref` and `$dynamicRef` keywords it declares in
+  bounded in turn by how many `$ref` and `$dynamicRef` members it declares in
   all, counted across its documents rather than within each, because a chain of
   references costs a stack frame per link however shallowly its documents nest.
 - **YAML tag handling.** In a schema file as in a frontmatter block, a
@@ -87,10 +88,5 @@ feature set of the `0.1.0` workspace.
   reusable by other implementations.
 - **Dual licensing** under [MIT](LICENSE-MIT) or
   [Apache-2.0](LICENSE-APACHE), and a declared MSRV of Rust 1.86 tested in CI.
-
-### Known gaps
-
-- Inline frontmatter JSON Schemas are planned for a future release; `0.1.0`
-  requires a linked JSON file.
 
 [Unreleased]: https://github.com/shangaslammi/outlint/commits/main/

@@ -49,8 +49,8 @@ alias-expansion bound) live in `markdown.rs` and the loader shares them.
 
 Frontmatter is implemented: the delimited block parses into
 `DocumentFrontmatter` with per-key anchors, and a schema's `frontmatter`
-policy (optional/required/forbidden) may attach a JSON Schema linked from a
-file — enforced via the `jsonschema` crate, with
+policy (optional/required/forbidden) may attach an inline self-contained JSON
+Schema or one linked from a file — enforced via the `jsonschema` crate, with
 `json_pointer` and line ranges on the resulting diagnostics. `fm.`
 propositions in constraints are evaluated by the validator's
 `frontmatter_satisfied` against the parsed frontmatter mapping: presence
