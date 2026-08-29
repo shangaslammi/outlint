@@ -21,8 +21,9 @@ non-normative examples and guidance.
 
 1.1. A Markdown document is parsed into a **section tree**. A header of level
 *n* (`#` × n) opens a section that owns all content until the next header of
-level ≤ *n*. Sections whose headers are level *n+1* within that span are its
-**children**.
+level ≤ *n*. The headers within that span that no other header in the span
+owns are its **children** — normally level *n+1*, or deeper when a level is
+skipped (§1.5).
 
 1.2. Only ATX headers (`#`..`######`) are considered: 1–6 `#` characters at
 the start of a line (up to 3 leading spaces allowed), followed by a space or
@@ -64,7 +65,8 @@ schema declares it (§2). Under the general `outline` form, h1s are matched
 by ordinary rules and report as any section does. Under the `title` sugar
 with a matcher spelled or implied (§2), a document with no h1 is
 `missing-title`; an h1 whose text the `title` matcher rejects is
-`not-allowed` at the title node; and a surplus h1 is one
+`not-allowed` at the title node, its subtree still validated (§2); and a
+surplus h1 is one
 `too-many-sections`, on the second h1 in document order — the first header
 in excess of the sugar's exactly-one bound (§3.5). A surplus h1 withdraws
 nothing: its subtree is still validated against the same rule's child
@@ -74,7 +76,17 @@ scope, each h1 binding its own instance (§3.1).
 level exceeds its parent's level by more than 1 is a structural error
 (diagnostic `skipped-level`), independent of any rules. The document root is
 level 0, so a top-level h2 skips a level against the root exactly as an h4
-directly under an h2 does. A skipping header takes part in no rule — it
+directly under an h2 does — with one exception. Under the sugar (§2), a
+document with no h1 at all is validated with the root standing at level 1:
+its top-level h2s are the children of the `sections` scope, whether the
+schema declared `title: null` or declared a title the document merely lacks
+(which is then `missing-title`, the h2s still validated), and only a
+top-level h3 or deeper skips a level there. This is what makes `title: null`
+usable under the default: a document whose title lives in its frontmatter
+and whose body starts at `##` is exactly the document that declaration
+exists to describe. The general form has no such exception — a top-level h2
+under `outline` skips a level against the level-0 root. A skipping header
+takes part in no rule — it
 matches none, counts toward no cardinality, and satisfies no constraint
 ref — and neither does anything below it; §1.5 itself still applies inside
 the subtree, so a header that skips relative to a skipping parent is
@@ -191,6 +203,18 @@ describes. The sugar is not transitional: it spares every single-title
 schema the boilerplate rule and a level of indentation forever, and it
 declares intent — `title:` says the document is the kind that has one.
 
+The desugared rule is an ordinary rule in every respect but one: its scope
+is closed to h1s. Every h1 occupies the title rule whether or not its text
+matches, so an h1 the matcher rejects is `not-allowed` at the title node
+rather than an unmatched header an open root scope would let pass — and,
+unlike a header a deny rule matches (§3.3), it withdraws nothing: it still
+counts toward the exactly-one bound, so no `missing-title` accompanies it,
+and its subtree is still validated against `sections`. The author asked for
+one titled document; a wrong title is a document whose title is wrong, not
+a document with no title and an unexplained stray tree. Under bare
+`sections` the implied `"*"` accepts every h1, so the case cannot arise
+there.
+
 `sections` without `title` implies `title: "*"`: still exactly one h1, of
 any text. Bare `sections` is not a way to opt out of having a title — a
 document that loses its `# Title` must not silently keep passing — and a
@@ -198,12 +222,19 @@ document with genuinely no h1 says so with `title: null`. Under
 `title: null` the document MUST have no h1: a present h1 is `not-allowed`,
 at the title node, and its subtree is validated no further, like any header
 a deny rule matches; `sections` then describes the document's own top-level
-h2s.
+h2s, the root standing at level 1 (§1.5).
 
 The two forms are mutually exclusive: declaring `outline` together with
 `title` or `sections` is schema error `conflicting-outline`, anchored at
 whichever of the conflicting keys is declared second — the first key
 established the schema's shape, and the later one contradicts it.
+
+Every Outlint mapping — the top level, `options`, `frontmatter`, each rule
+object, each constraint — admits only the keys this specification names for
+it. An unknown key is schema error `invalid-document-shape`, so a misspelled
+`required` cannot silently leave a rule at its `0..n` default. An inline
+`frontmatter.schema` is JSON Schema, not an Outlint mapping, and its unknown
+keywords are that dialect's business.
 
 **Title diagnostics.** The desugared title rule is an ordinary rule, but
 its diagnostics keep the title vocabulary, because the author spelled (or
@@ -249,6 +280,11 @@ one parent scope):
 | `required: true`          | `1..1`             |
 | `required: false`         | `0..1`             |
 | `repeat: "a..b"`          | `a..b`             |
+
+`required: false` is not the default: it narrows the rule to at most one
+occurrence. Write it for a section that may appear once; for a rule whose
+matches may repeat — a pattern matcher, usually — leave `required` out and
+take the `0..n` default (§10).
 
 Specifying both `required` and `repeat` is a schema error
 `conflicting-cardinality`. `allow: false` with `required`/`repeat` is a
@@ -394,12 +430,15 @@ catch-alls; a trailing `match: "*"` acts as a default.
 
 3.4. **Open vs. closed scopes.** A scope is **open** by default: unmatched
 headers pass. A scope is **closed** if its parent rule has `strict: true`.
-`strict: true` is exactly equivalent to appending
-`{ match: "*", allow: false }` to the `sections` list; if both are present
-the explicit rule is redundant but legal. The document root has no rule of
-its own to carry `strict`, so the outermost scope is closed by writing the
-expansion itself: a trailing `{ match: "*", allow: false }` at the end of
-`outline`.
+`strict: true` accepts exactly the documents that appending
+`{ match: "*", allow: false }` to the `sections` list would accept; if both
+are present the explicit rule is redundant but legal. The two differ only in
+what they report: a header no rule matches in a strict scope is
+`unexpected-section` (§3.3), while one the explicit deny rule matches is
+`not-allowed`, attributed to that rule. The document root has no rule of its
+own to carry `strict`, so the outermost scope is closed by writing the deny
+rule itself — a trailing `{ match: "*", allow: false }` at the end of
+`outline` — and a stray h1 there is accordingly `not-allowed`.
 
 3.5. **Cardinality check.** After all children of a scope are matched, for
 each rule: if match count < min → `missing-section` when the count is zero,
@@ -698,8 +737,9 @@ that is itself an opening quote; only the scalar's style, reported alongside
 its position, tells a scalar that spells its breaks from one whose indicator
 merely kept them.
 
-**The sugar's document voice.** Under the sugar with a lone h1, diagnostics
-from the `sections` scope speak as if its rules bound the document itself:
+**The sugar's document voice.** Under the sugar with at most one h1 — a lone
+h1, or none, the root standing at level 1 (§1.5) — diagnostics from the
+`sections` scope speak as if its rules bound the document itself:
 cardinality misses carry an empty `parent` and anchor at line 1, and a
 root-declared constraint violation targets the document. The author wrote
 "the document has an Overview", and the report should not read "the title
@@ -755,13 +795,15 @@ errors are load-time failures and are never suppressible.
 
 ```
 load_schema:
-  parse YAML; check version
+  parse YAML; check version; reject unknown keys (§2)
   settle the top-level shape (§2):
     outline beside title/sections -> conflicting-outline
     empty outline -> invalid-document-shape
-    desugar title/sections to one required outline rule
-      (bare sections implies title "*"; title null becomes a deny-all
-       h1 rule), remembering the sugar for diagnostic voice (§6.2)
+    desugar title/sections to one required outline rule whose scope is
+      closed to h1s (bare sections implies title "*"; title null becomes
+      a deny-all h1 rule; a mismatched h1 is not-allowed yet still
+      occupies the rule), remembering the sugar for diagnostic voice
+      (§6.2)
   load frontmatter.schema if given; for an inline schema reject every
     $ref/$dynamicRef that is not fragment-only; compile JSON Schema
     (dialect per $schema)
@@ -780,7 +822,8 @@ validate(doc):
     (ignore code fences; normalize setext)
   check frontmatter presence vs required/allow; if present and schema
     compiled, run JSON Schema validation -> frontmatter-schema diagnostics
-  check skipped levels (§1.5)
+  check skipped levels (§1.5; under the sugar with no h1 the root
+    stands at level 1)
   visit(scope = the document root's children, rules = schema.outline,
         constraints = schema.constraints):
     for each header in document order:
@@ -979,7 +1022,12 @@ Schema graph described in Section 2.3. An invalid schema is reported as a
 schema result; no dependent document is validated against a partial schema.
 When automatic discovery makes multiple documents depend on the same invalid
 schema path, its errors are reported once, at the position of the first
-dependent input. Other independent inputs are still processed.
+dependent input. Other independent inputs are still processed. The dependent
+documents produce no result of their own — not even an empty one, which
+would read as a pass — so a consumer that needs to know which inputs went
+unchecked must infer it: an input named on the command line that has no
+result was either unreadable (an operational error, exit status 2) or
+skipped behind an invalid schema result. An absent result is never a pass.
 
 `outlint schema check` performs all schema-load-time checks on each named
 schema without requiring a Markdown document.
