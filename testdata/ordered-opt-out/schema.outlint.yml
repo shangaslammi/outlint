@@ -1,0 +1,19 @@
+version: 1
+# `options.ordered_sections` sets every scope's default and a rule's own
+# `ordered` overrides it for that rule's child scope, in either direction:
+# here the root is unordered, `Steps` orders its children, and `Notes`
+# spells the default out again. A nested violation targets the owning header.
+options:
+  ordered_sections: false
+title: "*"
+sections:
+  - match: "Steps"
+    ordered: true
+    sections:
+      - match: "Install"
+      - match: "Configure"
+  - match: "Notes"
+    ordered: false
+    sections:
+      - match: "Install"
+      - match: "Configure"

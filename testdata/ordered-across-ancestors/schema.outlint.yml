@@ -1,16 +1,11 @@
 version: 1
+# The sugar `sections` scope is ordered by default (§3.7) and binds once per
+# enclosing `h1`: occurrences are compared within one instance, so ordering
+# never reaches across ancestors. `inverted.md` fires inside its one part;
+# `across.md` inverts the same pair across two parts and each instance holds
+# only one of the rules, so nothing is out of order — that document reports
+# only the surplus `h1`. Cross-part ordering is the general form's business:
+# `outline-parts-ordered/` orders the parts themselves.
 sections:
-  - id: intro
-    match: "Intro"
-  - id: body
-    match: "Body"
-constraints:
-  # Attached to the sugar `sections` scope, which binds once per enclosing
-  # `h1`: occurrences are compared within one instance, so ordering never
-  # reaches across ancestors here. `inverted.md` fires inside its one part;
-  # `across.md` inverts the same pair across two parts and the constraint
-  # stays vacuously satisfied, since each instance holds only one of the
-  # refs — that document reports only the surplus `h1`. Cross-part ordering
-  # is the general form's business: `outline-parts-ordered/` orders the
-  # parts themselves.
-  - ordered: [intro, body]
+  - match: "Intro"
+  - match: "Body"

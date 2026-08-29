@@ -1,0 +1,12 @@
+{
+  "pass.md": [],
+  "inverted.md": [
+    { "id": "ordered", "target": { "kind": "document" } }
+  ],
+  "straddled.md": [
+    { "id": "ordered", "target": { "kind": "document" } }
+  ],
+  "floating.md": [
+    { "id": "not-allowed", "target": { "kind": "header", "path": ["Title", "Internal"] } }
+  ]
+}

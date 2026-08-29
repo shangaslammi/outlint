@@ -584,6 +584,7 @@ struct RawOptions {
     match_case: Option<bool>,
     strip_inline_markup: Option<bool>,
     allow_skipped_levels: Option<bool>,
+    ordered_sections: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -598,6 +599,7 @@ struct RawRule {
     repeat: Option<String>,
     #[serde(default)]
     strict: bool,
+    ordered: Option<bool>,
     #[serde(default)]
     sections: Vec<RawRule>,
     #[serde(default)]
@@ -617,7 +619,12 @@ const DOCUMENT_FIELDS: &[&str] = &[
     "sections",
     "constraints",
 ];
-const OPTION_FIELDS: &[&str] = &["match_case", "strip_inline_markup", "allow_skipped_levels"];
+const OPTION_FIELDS: &[&str] = &[
+    "match_case",
+    "strip_inline_markup",
+    "allow_skipped_levels",
+    "ordered_sections",
+];
 const FRONTMATTER_FIELDS: &[&str] = &["required", "allow", "schema"];
 const RULE_FIELDS: &[&str] = &[
     "id",
@@ -626,6 +633,7 @@ const RULE_FIELDS: &[&str] = &[
     "required",
     "repeat",
     "strict",
+    "ordered",
     "sections",
     "constraints",
 ];
@@ -1610,8 +1618,9 @@ impl Loader {
 
         let frontmatter = self.build_frontmatter(raw.frontmatter, frontmatter_declared);
 
-        let match_case = raw.options.match_case.unwrap_or(false);
         let options = Self::build_options(&raw.options);
+        let match_case = options.match_case;
+        let ordered_default = options.ordered_sections;
         let root_scope = ScopePath(Vec::new());
         // The empty scope key names what the source's top level spelled: the
         // outline scope for the general form, the `sections` scope for sugar.
@@ -1622,7 +1631,7 @@ impl Loader {
         let (outline, outline_provenance) = if let Some(entries) = raw.outline {
             self.outline_general = true;
             (
-                self.build_outline_scope(entries, &root_scope, match_case),
+                self.build_outline_scope(entries, &root_scope, match_case, ordered_default),
                 OutlineProvenance::Outline,
             )
         } else {
@@ -1655,6 +1664,7 @@ impl Loader {
                     .expect("the shape validation requires `sections` without `outline`"),
                 &root_scope,
                 match_case,
+                ordered_default,
             );
             // The sugar desugars UP into the canonical h1-rule list: one
             // synthesized rule whose matcher is the declared title (any text
@@ -1678,6 +1688,10 @@ impl Loader {
                         })
                     },
                     strict: false,
+                    // The sugar has no rule to carry `ordered`, so its
+                    // `sections` scope follows the option, like the general
+                    // form's outline scope.
+                    ordered: ordered_default,
                     sections,
                     constraints: Vec::new(),
                 }]
@@ -1968,7 +1982,7 @@ impl Loader {
             return;
         };
         self.validate_known_fields(mapping, OPTION_FIELDS, range);
-        for field in ["match_case", "strip_inline_markup", "allow_skipped_levels"] {
+        for field in OPTION_FIELDS.iter().copied() {
             if let Some(value) = mapping.get(field) {
                 if !matches!(value, Value::Bool(_)) {
                     self.shape_error_at(
@@ -2037,7 +2051,7 @@ impl Loader {
                     }
                 }
             }
-            for field in ["allow", "required", "strict"] {
+            for field in ["allow", "required", "strict", "ordered"] {
                 if let Some(value) = mapping.get(field) {
                     if !matches!(value, Value::Bool(_)) {
                         self.shape_error_at(
@@ -2092,7 +2106,7 @@ impl Loader {
                     }
                 }
             }
-            for field in ["allow", "required", "strict"] {
+            for field in ["allow", "required", "strict", "ordered"] {
                 if let Some(value) = mapping.get(field) {
                     if !matches!(value, Value::Bool(_)) {
                         self.shape_error_at(
@@ -2238,6 +2252,7 @@ impl Loader {
         entries: Vec<RawRule>,
         root_scope: &ScopePath,
         match_case: bool,
+        ordered_default: bool,
     ) -> Option<Vec<SectionRule>> {
         if entries.is_empty() {
             self.shape_error_at(
@@ -2247,7 +2262,7 @@ impl Loader {
             );
             return None;
         }
-        self.build_scope(entries, root_scope, match_case)
+        self.build_scope(entries, root_scope, match_case, ordered_default)
     }
 
     fn build_options(raw: &RawOptions) -> Options {
@@ -2255,6 +2270,7 @@ impl Loader {
             match_case: raw.match_case.unwrap_or(false),
             strip_inline_markup: raw.strip_inline_markup.unwrap_or(true),
             allow_skipped_levels: raw.allow_skipped_levels.unwrap_or(false),
+            ordered_sections: raw.ordered_sections.unwrap_or(true),
         }
     }
 
@@ -2263,6 +2279,7 @@ impl Loader {
         rules: Vec<RawRule>,
         scope: &ScopePath,
         match_case: bool,
+        ordered_default: bool,
     ) -> Option<Vec<SectionRule>> {
         let mut semantic = Vec::with_capacity(rules.len());
         let mut semantic_indices = Vec::with_capacity(rules.len());
@@ -2304,7 +2321,8 @@ impl Loader {
                 raw.repeat.as_deref(),
                 outcome_range,
             );
-            let children = self.build_scope(raw.sections, &child_scope, match_case);
+            let children =
+                self.build_scope(raw.sections, &child_scope, match_case, ordered_default);
             match (matcher, outcome, children) {
                 (Some(matcher), Some(outcome), Some(sections)) => {
                     semantic_indices.push(index);
@@ -2313,6 +2331,7 @@ impl Loader {
                         matcher,
                         outcome,
                         strict: raw.strict,
+                        ordered: raw.ordered.unwrap_or(ordered_default),
                         sections,
                         constraints: Vec::new(),
                     });
@@ -2637,6 +2656,7 @@ impl Loader {
         let mut refs = Vec::new();
         let mut identities = HashSet::new();
         let mut parent_scope: Option<Vec<usize>> = None;
+        let mut mixed_scopes = false;
         let mut complete = true;
         for value in values {
             let Some((proposition, identity)) =
@@ -2669,6 +2689,7 @@ impl Loader {
                     range,
                     "all ordered refs must resolve in the same scope",
                 );
+                mixed_scopes = true;
             } else {
                 parent_scope = Some(target_parent);
             }
@@ -2682,6 +2703,25 @@ impl Loader {
             refs.push(rule_ref);
         }
         if !complete {
+            return None;
+        }
+        // An ordered scope already orders every rule in it, so an explicit
+        // `ordered` over that scope is either redundant — the same failure
+        // reported twice — or contradicts the list order, in which case every
+        // document fails one of the two. Neither is what the author meant,
+        // and the fix is the same either way.
+        if !mixed_scopes
+            && parent_scope
+                .as_ref()
+                .is_some_and(|target_scope| scope_is_ordered(schema, target_scope))
+        {
+            self.error_at(
+                SchemaErrorKind::OrderedScopeMismatch,
+                range,
+                "the scope these refs resolve in is already ordered by its rule list; \
+                 remove this constraint, or set `ordered: false` on the rule that owns \
+                 the scope (`options.ordered_sections: false` for the top-level scope)",
+            );
             return None;
         }
         let refs = at_least_two(refs).or_else(|| {
@@ -2931,6 +2971,24 @@ fn resolve_ref(schema: &Schema, scope: &ScopePath, reference: &RuleRef) -> Optio
         denied,
         repeated_non_final,
     })
+}
+
+/// Whether the scope at a structural path binds its rules in document order.
+///
+/// The empty path is the addressed root — the outline scope or the sugar's
+/// `sections` scope — which follows `options.ordered_sections`, as the
+/// synthesized title rule does.
+fn scope_is_ordered(schema: &Schema, structural_scope: &[usize]) -> bool {
+    let mut rules = schema.addressed_root_rules();
+    let mut ordered = schema.options.ordered_sections;
+    for &index in structural_scope {
+        let Some(rule) = rules.get(index) else {
+            return ordered;
+        };
+        ordered = rule.ordered;
+        rules = &rule.sections;
+    }
+    ordered
 }
 
 fn rules_at_scope<'a>(schema: &'a Schema, scope: &ScopePath) -> Option<&'a [SectionRule]> {
@@ -4096,8 +4154,9 @@ outline:
     fn top_level_constraints_beside_outline_attach_to_the_h1_scope() {
         // Their refs resolve among the outline rules themselves.
         let schema = valid(
-            "version: 1\noutline:\n  - id: intro\n    match: Intro\n\
-             \x20 - id: body\n    match: Body\nconstraints:\n  - ordered: [intro, body]\n",
+            "version: 1\noptions:\n  ordered_sections: false\noutline:\n  - id: intro\n\
+             \x20   match: Intro\n  - id: body\n    match: Body\nconstraints:\n\
+             \x20 - ordered: [intro, body]\n",
         );
         assert_eq!(schema.constraints.len(), 1);
         assert!(schema
@@ -4109,8 +4168,8 @@ outline:
         // scope instead — the desugared rule's child scope — leaving the
         // schema-level list empty.
         let sugar = valid(
-            "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
-             constraints:\n  - ordered: [a, b]\n",
+            "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n\
+             \x20   match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [a, b]\n",
         );
         assert!(sugar.constraints.is_empty());
         assert_eq!(sugar.outline[0].constraints.len(), 1);
@@ -4250,6 +4309,8 @@ sections:
     #[test]
     fn successful_node_locations_are_narrower_than_the_document() {
         let source = r#"version: 1
+options:
+  ordered_sections: false
 title: "*"
 sections:
   - match: Overview
@@ -5331,5 +5392,84 @@ constraints:
             let repeated = canonical_float(&canonical);
             prop_assert_eq!(repeated.as_deref(), Some(canonical.as_str()));
         }
+    }
+
+    #[test]
+    fn ordered_resolves_from_the_rule_or_else_the_option() {
+        let schema = valid(
+            "version: 1\nsections:\n  - match: A\n  - match: B\n    ordered: false\n    sections:\n      - match: C\n        ordered: true\n",
+        );
+        assert!(schema.options.ordered_sections);
+        let title = &schema.outline[0];
+        assert!(title.ordered);
+        assert!(title.sections[0].ordered);
+        assert!(!title.sections[1].ordered);
+        assert!(title.sections[1].sections[0].ordered);
+
+        let opted_out = valid(
+            "version: 1\noptions:\n  ordered_sections: false\noutline:\n  - match: A\n  - match: B\n    ordered: true\n",
+        );
+        assert!(!opted_out.options.ordered_sections);
+        assert!(!opted_out.outline[0].ordered);
+        assert!(opted_out.outline[1].ordered);
+    }
+
+    #[test]
+    fn ordered_must_be_a_bool_and_the_option_must_be_known() {
+        let invalid = invalid("version: 1\nsections:\n  - match: A\n    ordered: yes please\n");
+        assert!(invalid
+            .errors
+            .iter()
+            .any(|error| error.kind == SchemaErrorKind::InvalidDocumentShape
+                && error.message == "rule `ordered` must be a bool and cannot be null"));
+        let invalid =
+            self::invalid("version: 1\noptions:\n  ordered: false\nsections:\n  - match: A\n");
+        assert!(invalid
+            .errors
+            .iter()
+            .any(|error| error.kind == SchemaErrorKind::InvalidDocumentShape
+                && error.message == "unknown field `ordered`"));
+    }
+
+    #[test]
+    fn an_explicit_ordered_constraint_over_an_ordered_scope_is_refused() {
+        // Redundant or contradictory, the fix is the same: the message says
+        // which knob to turn.
+        let redundant = "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [a, b]\n";
+        let refused = invalid(redundant);
+        let error = refused
+            .errors
+            .iter()
+            .find(|error| error.kind == SchemaErrorKind::OrderedScopeMismatch)
+            .expect("the ordered scope refuses the constraint");
+        assert!(error.message.contains("already ordered by its rule list"));
+        assert!(error.message.contains("`ordered: false`"));
+        assert_eq!(
+            source_slice(redundant, error.range).trim_end(),
+            "ordered: [a, b]"
+        );
+
+        // The same refs are welcome once the scope is unordered — by the
+        // option at the root, or by the owning rule one level down, whether
+        // reached by bare ids or by a path from the root.
+        valid("version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [b, a]\n");
+        valid("version: 1\nsections:\n  - id: s\n    match: S\n    ordered: false\n    sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\n    constraints:\n      - ordered: [b, a]\n");
+        valid("version: 1\nsections:\n  - id: s\n    match: S\n    required: true\n    ordered: false\n    sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\nconstraints:\n  - ordered: [s.b, s.a]\n");
+        // A path into an ordered nested scope is refused like a bare ref.
+        let nested = invalid("version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: s\n    match: S\n    required: true\n    ordered: true\n    sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\nconstraints:\n  - ordered: [s.a, s.b]\n");
+        assert!(nested
+            .errors
+            .iter()
+            .any(|error| error.kind == SchemaErrorKind::OrderedScopeMismatch));
+        // Mixed scopes are already refused; the redundancy check stays quiet.
+        let mixed = invalid("version: 1\nsections:\n  - id: s\n    match: S\n    required: true\n    sections:\n      - id: a\n        match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [s.a, b]\n");
+        assert_eq!(
+            mixed
+                .errors
+                .iter()
+                .filter(|error| error.kind == SchemaErrorKind::OrderedScopeMismatch)
+                .count(),
+            1
+        );
     }
 }

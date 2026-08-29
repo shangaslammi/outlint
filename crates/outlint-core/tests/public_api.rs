@@ -98,12 +98,15 @@ fn semantic_options_default_to_the_specification_values() {
     assert!(!defaults.match_case);
     assert!(defaults.strip_inline_markup);
     assert!(!defaults.allow_skipped_levels);
+    assert!(defaults.ordered_sections);
 
     let customized = defaults
         .with_match_case(true)
         .with_strip_inline_markup(false)
-        .with_allow_skipped_levels(true);
+        .with_allow_skipped_levels(true)
+        .with_ordered_sections(false);
     assert!(customized.match_case);
     assert!(!customized.strip_inline_markup);
     assert!(customized.allow_skipped_levels);
+    assert!(!customized.ordered_sections);
 }

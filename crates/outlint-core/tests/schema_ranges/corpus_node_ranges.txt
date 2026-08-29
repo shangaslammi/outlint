@@ -10,14 +10,14 @@ constraint-sets rule 0 0:37..80 "id: a\n    match: \"A\"\n    required: false\n 
 constraint-sets rule 1 0:82..125 "id: b\n    match: \"B\"\n    required: false\n  "
 constraint-sets rule 2 0:127..168 "id: c\n    match: \"C\"\n    required: false\n"
 constraint-sets title 0:18..22 "null"
-constraints constraint 0 0:185..202 "one_of: [a, b]\n  "
-constraints constraint 1 0:204..235 "requires: { if: a, then: c }\n  "
-constraints constraint 2 0:237..273 "conflicts: { if: b, then_not: c }\n  "
-constraints constraint 3 0:275..291 "ordered: [a, c]\n"
-constraints rule 0 0:37..80 "id: a\n    match: \"A\"\n    required: false\n  "
-constraints rule 1 0:82..125 "id: b\n    match: \"B\"\n    required: false\n  "
-constraints rule 2 0:127..168 "id: c\n    match: \"C\"\n    required: false\n"
-constraints title 0:18..22 "null"
+constraints constraint 0 0:392..409 "one_of: [a, b]\n  "
+constraints constraint 1 0:411..442 "requires: { if: a, then: c }\n  "
+constraints constraint 2 0:444..480 "conflicts: { if: b, then_not: c }\n  "
+constraints constraint 3 0:482..498 "ordered: [a, c]\n"
+constraints rule 0 0:244..287 "id: a\n    match: \"A\"\n    required: false\n  "
+constraints rule 1 0:289..332 "id: b\n    match: \"B\"\n    required: false\n  "
+constraints rule 2 0:334..375 "id: c\n    match: \"C\"\n    required: false\n"
+constraints title 0:225..229 "null"
 deny-under-title rule 0 0:40..76 "match: \"Forbidden\"\n    allow: false\n"
 deny-under-title title 0:18..25 "\"Title\""
 detached-sections rule 0 0:583..620 "match: \"Overview\"\n    required: true\n"
@@ -29,9 +29,9 @@ duplicate-diagnostics rule 0 0:155..328 "id: banned\n    match: \"Notes\"\n    a
 duplicate-diagnostics rule 1 0:330..386 "id: first-goal\n    match: \"/Goal/\"\n    required:"...
 duplicate-diagnostics rule 2 0:388..443 "id: second-goal\n    match: \"/Goal/\"\n    required"...
 duplicate-diagnostics title 0:18..22 "null"
-excess-across-ancestors rule 0 0:563..614 "id: notes\n    match: \"Note *\"\n    repeat: \"0..1\""...
-excess-across-ancestors rule 1 0:616..665 "id: steps\n    match: \"Step *\"\n    repeat: \"0..2\""...
-excess-across-ancestors title 0:561..665 "- id: notes\n    match: \"Note *\"\n    repeat: \"0.."...
+excess-across-ancestors rule 0 0:743..794 "id: notes\n    match: \"Note *\"\n    repeat: \"0..1\""...
+excess-across-ancestors rule 1 0:796..845 "id: steps\n    match: \"Step *\"\n    repeat: \"0..2\""...
+excess-across-ancestors title 0:741..845 "- id: notes\n    match: \"Note *\"\n    repeat: \"0.."...
 first-match rule 0 0:37..87 "id: broad\n    match: \"API*\"\n    required: false\n"...
 first-match rule 1 0:89..138 "id: denied-api\n    match: \"API\"\n    allow: false"...
 first-match title 0:18..22 "null"
@@ -101,21 +101,30 @@ nested-refs rule 0 0:37..233 "id: group\n    match: \"Group\"\n    required: fal
 nested-refs rule 0.0 0:108..169 "id: child\n        match: \"Child\"\n        require"...
 nested-refs rule 1 0:235..284 "id: other\n    match: \"Other\"\n    required: false"...
 nested-refs title 0:18..22 "null"
-ordered-across-ancestors constraint 0 0:646..669 "ordered: [intro, body]\n"
-ordered-across-ancestors rule 0 0:25..56 "id: intro\n    match: \"Intro\"\n  "
-ordered-across-ancestors rule 1 0:58..85 "id: body\n    match: \"Body\"\n"
-ordered-across-ancestors title 0:23..85 "- id: intro\n    match: \"Intro\"\n  - id: body\n    "...
-ordered-occurrences constraint 0 0:100..116 "ordered: [a, b]\n"
-ordered-occurrences rule 0 0:37..60 "id: a\n    match: \"A\"\n  "
-ordered-occurrences rule 1 0:62..83 "id: b\n    match: \"B\"\n"
-ordered-occurrences title 0:18..22 "null"
+ordered-across-ancestors rule 0 0:542..559 "match: \"Intro\"\n  "
+ordered-across-ancestors rule 1 0:561..575 "match: \"Body\"\n"
+ordered-across-ancestors title 0:540..575 "- match: \"Intro\"\n  - match: \"Body\"\n"
+ordered-by-default rule 0 0:296..335 "match: \"Overview\"\n    required: true\n  "
+ordered-by-default rule 1 0:337..374 "match: \"Usage\"\n    required: false\n  "
+ordered-by-default rule 2 0:376..394 "match: \"API: *\"\n  "
+ordered-by-default rule 3 0:396..431 "match: \"Internal\"\n    allow: false\n"
+ordered-by-default title 0:278..281 "\"*\""
+ordered-occurrences rule 0 0:262..275 "match: \"A\"\n  "
+ordered-occurrences rule 1 0:277..288 "match: \"B\"\n"
+ordered-occurrences title 0:243..247 "null"
+ordered-opt-out rule 0 0:368..469 "match: \"Steps\"\n    ordered: true\n    sections:\n "...
+ordered-opt-out rule 0.0 0:423..446 "match: \"Install\"\n      "
+ordered-opt-out rule 0.1 0:448..469 "match: \"Configure\"\n  "
+ordered-opt-out rule 1 0:471..571 "match: \"Notes\"\n    ordered: false\n    sections:\n"...
+ordered-opt-out rule 1.0 0:527..550 "match: \"Install\"\n      "
+ordered-opt-out rule 1.1 0:552..571 "match: \"Configure\"\n"
+ordered-opt-out title 0:350..353 "\"*\""
 outline-multi-part rule 0 0:286..384 "match: \"Part *\"\n    repeat: \"1..n\"\n    sections:"...
 outline-multi-part rule 0.0 0:343..384 "match: \"Overview\"\n        repeat: \"0..1\"\n"
-outline-parts-ordered constraint 0 0:580..607 "ordered: [guide, appendix]\n"
-outline-parts-ordered rule 0 0:352..465 "id: guide\n    match: \"Guide\"\n    required: true\n"...
-outline-parts-ordered rule 0.0 0:422..465 "match: \"Overview\"\n        required: true\n  "
-outline-parts-ordered rule 1 0:467..563 "id: appendix\n    match: \"Appendix\"\n    repeat: \""...
-outline-parts-ordered rule 1.0 0:543..563 "match: \"References\"\n"
+outline-parts-ordered rule 0 0:283..396 "id: guide\n    match: \"Guide\"\n    required: true\n"...
+outline-parts-ordered rule 0.0 0:353..396 "match: \"Overview\"\n        required: true\n  "
+outline-parts-ordered rule 1 0:398..494 "id: appendix\n    match: \"Appendix\"\n    repeat: \""...
+outline-parts-ordered rule 1.0 0:474..494 "match: \"References\"\n"
 outline-single-rule rule 0 0:24..123 "match: \"Guide *\"\n    required: true\n    sections"...
 outline-single-rule rule 0.0 0:82..123 "match: \"Overview\"\n        required: true\n"
 single-spine rule 0 0:542..579 "match: \"Overview\"\n    repeat: \"0..n\"\n"

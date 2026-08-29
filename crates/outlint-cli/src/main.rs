@@ -980,7 +980,10 @@ fn render_human(results: &[ValidationResult], use_color: bool) -> String {
 
 fn human_headline(diagnostic: &RenderedDiagnostic) -> String {
     let headline = match diagnostic.id.as_str() {
-        "ordered" => "sections are not in the required order",
+        // The constraint form lists its expected order below; the implicit
+        // form (§3.7) carries no references, and its message already names
+        // the pair that broke.
+        "ordered" if !diagnostic.references.is_empty() => "sections are not in the required order",
         "one_of" => "exactly one referenced condition must be satisfied",
         "any_of" => "at least one referenced condition must be satisfied",
         "at_most_one" => "at most one referenced condition may be satisfied",

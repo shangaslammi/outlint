@@ -1,4 +1,9 @@
 version: 1
+# The partial `ordered: [a, c]` below needs an unordered scope: an ordered
+# scope (the default) already orders every rule in it and refuses the
+# constraint as redundant.
+options:
+  ordered_sections: false
 title: null
 sections:
   - id: a

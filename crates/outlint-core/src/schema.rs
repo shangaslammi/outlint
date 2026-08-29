@@ -170,6 +170,9 @@ pub struct Options {
     pub strip_inline_markup: bool,
     /// Whether a header may be more than one level below its parent.
     pub allow_skipped_levels: bool,
+    /// Whether a scope's rules bind in document order unless a rule's own
+    /// `ordered` says otherwise (specification §3.7).
+    pub ordered_sections: bool,
 }
 
 impl Options {
@@ -190,6 +193,12 @@ impl Options {
         self.allow_skipped_levels = allow_skipped_levels;
         self
     }
+
+    /// Sets the default for whether each scope's rules bind in document order.
+    pub const fn with_ordered_sections(mut self, ordered_sections: bool) -> Self {
+        self.ordered_sections = ordered_sections;
+        self
+    }
 }
 
 impl Default for Options {
@@ -199,6 +208,7 @@ impl Default for Options {
             match_case: false,
             strip_inline_markup: true,
             allow_skipped_levels: false,
+            ordered_sections: true,
         }
     }
 }
@@ -255,6 +265,11 @@ pub struct SectionRule {
     pub outcome: RuleOutcome,
     /// Whether headers unmatched by a child rule are rejected.
     pub strict: bool,
+    /// Whether the child rules bind in document order: every header matched
+    /// by an earlier accepting rule must precede every header matched by a
+    /// later one (specification §3.7). Resolved from the rule's own `ordered`
+    /// key or, absent that, [`Options::ordered_sections`].
+    pub ordered: bool,
     /// Rules for direct child headers, in first-match order.
     pub sections: Vec<SectionRule>,
     /// Presence and ordering constraints attached to the child scope.

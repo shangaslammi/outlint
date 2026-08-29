@@ -161,6 +161,7 @@ options:                  # optional, see §7
   match_case: false
   strip_inline_markup: true
   allow_skipped_levels: false
+  ordered_sections: true
 frontmatter: <frontmatter-object>  # optional, see §2.3
 outline: [<rule>, ...]    # rules for h1 headers
 constraints: [<constraint>, ...]   # optional, see §5
@@ -262,6 +263,7 @@ than the six header levels of §1.2 can address.
   required: <bool>        # optional; sugar for repeat (see below)
   repeat: "<min>..<max>"  # optional; max is integer or "n" (unbounded)
   strict: <bool>          # optional, default false; closes the child scope (§3.4)
+  ordered: <bool>         # optional, default options.ordered_sections; orders the child scope (§3.7)
   sections: [<rule>...]   # optional; rules for this section's children (one level deeper)
   constraints: [...]      # optional; scoped to this rule's children (§5)
 ```
@@ -452,6 +454,34 @@ rule. "At least one child of any name" is therefore `match: "*"` with
 3.6. Duplicate header texts among siblings are legal per se; the matched
 rule's `repeat` governs whether the multiplicity is valid.
 
+3.7. **Ordered scopes.** A scope's rule list is also its document order. By
+default every scope is **ordered**: for each adjacent pair (A, B) of the
+scope's accepting rules (`allow: true`) that matched at least one header,
+in list order, every header matched by A MUST precede every header matched
+by B — `last(A) < first(B)`, exactly the test §5.1 defines for the
+`ordered` constraint. Rules that matched nothing drop out of the pairing,
+so an absent optional section constrains nothing; unmatched headers match
+no rule and float freely; a deny rule matches nothing that counts. Each
+violated pair is one diagnostic `ordered`, targeted and anchored like a
+constraint of the scope (§6.2), listing both rules' headers as involved
+headers, and attributed to the rule that owns the scope — the `title` node
+under the sugar, and no schema node at all for the general form's root,
+which is nobody's rule.
+
+`options.ordered_sections` (§7) sets the default for every scope, the
+outermost included; a rule's `ordered: <bool>` overrides it for that rule's
+child scope, in either direction. The outermost scope has no rule to carry
+`ordered`, so it follows the option alone.
+
+List order thereby does double duty: it is matching precedence (§3.2) and
+document order at once. The two agree wherever matchers do not overlap,
+which is the usual case, and a trailing accepting `match: "*"` reads as
+"anything else comes last". Where a specific rule must precede a general
+one for matching but follow it in the document, declare the scope
+`ordered: false` and spell the order with an `ordered` constraint (§5.1),
+which exists for exactly the orders a list cannot express: partial ones,
+and any order in an unordered scope.
+
 ---
 
 ## 4. Rule identifiers
@@ -587,6 +617,13 @@ non-final segment of an `ordered` ref's path MUST resolve to a rule with
 effective max ≤ 1 — ordering through repeated ancestors is not defined in
 v1 and is schema error `ordered-scope-mismatch`.
 
+An `ordered` constraint whose refs resolve in an ordered scope (§3.7) is
+likewise schema error `ordered-scope-mismatch`: that scope already orders
+every rule in it, so the constraint is either redundant — the same failure
+reported twice — or contradicts the list order, in which case every
+document fails one of the two. Declare the scope `ordered: false` to order
+it by constraint instead.
+
 That rule needs no special case at the h1 level. A root `ordered` over
 `outline` rules orders the parts of a document, and a listed rule may
 itself repeat — `last(A) < first(B)` says what that means — but a ref
@@ -684,6 +721,7 @@ whatever that fallback names.
 | `missing-frontmatter`, `forbidden-frontmatter`, `invalid-frontmatter` | `frontmatter` | the block's first line, or line 1 when absent |
 | `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and a fallback anchor (below) whenever the entry's position is unavailable |
 | constraint keywords | `header` of the scope's parent section; `document` for a constraint whose scope is the document root's, which has no parent header, and under the sugar's single-h1 voice (below) | the parent section's header line; line 1 for a `document` target |
+| `ordered` from an ordered scope (§3.7) | as a constraint of that scope | as a constraint of that scope |
 
 An entry's position is unavailable in one case: a literal or folded block
 scalar with no content line. A position-tracking parser marks a scalar at the
@@ -788,6 +826,7 @@ errors are load-time failures and are never suppressible.
 | `match_case` | bool | `false` | case-sensitive matching for all matcher forms |
 | `strip_inline_markup` | bool | `true` | reduce inline markup to text before matching (§1.3) |
 | `allow_skipped_levels` | bool | `false` | permit e.g. h4 directly under h2 |
+| `ordered_sections` | bool | `true` | every scope's rules bind in document order unless a rule's own `ordered` says otherwise (§3.7) |
 
 ---
 
@@ -813,8 +852,8 @@ load_schema:
               reject reserved id "fm"
   resolve every constraint ref (dotted rule path or fm.*):
     reject dangling refs, refs to allow:false rules, duplicate refs,
-    arity < 2 in set forms, ordered refs crossing scopes or passing
-    through rules with max > 1
+    arity < 2 in set forms, ordered refs crossing scopes, passing
+    through rules with max > 1, or resolving in an ordered scope (§3.7)
 
 validate(doc):
   split frontmatter (§1.6); parse markdown -> header tree under the
@@ -834,6 +873,8 @@ validate(doc):
         counts[rule] += 1
         visit(header.children, rule.sections or [], rule.constraints or [])
     for each rule: check counts[rule] against repeat -> missing/too-many
+    if the scope is ordered (§3.7): for each adjacent pair of accepting
+      rules that matched, check last(A) < first(B) -> ordered
     for each constraint: evaluate over ref satisfaction (§4.5, §4.6) -> report
 ```
 
@@ -893,7 +934,6 @@ constraints:
   - requires: { if: deployment, then: deployment.rollback-plan }
   - requires: { if: api.errors, then: overview }
   - conflicts: { if: deprecated, then_not: roadmap }
-  - ordered: [overview, api, deployment]
   - requires: { if: fm.status=deprecated, then: deprecated }
   - requires: { if: deployment, then: fm.rollout }
 ```
@@ -905,7 +945,9 @@ A conforming document: has YAML frontmatter valid against
 `## Deployment` exists it contains `### Rollback plan` and frontmatter
 declares a `rollout` key; `## Deprecated` and `## Roadmap` never co-occur;
 if frontmatter says `status: deprecated` a `## Deprecated` section exists;
-Overview precedes any API section, which precede Deployment.
+and the h2s come in the order the rules are listed — Overview, then any
+API sections, then Changelog or History, then Deployment — because a scope
+is ordered by default (§3.7), with nothing more to spell.
 
 The same machinery one level up — a multi-part handbook, written in the
 general form because it has several h1s:
@@ -925,13 +967,12 @@ outline:
       - match: "*"
   - match: "*"
     allow: false                 # closes the outline (§3.4)
-constraints:
-  - ordered: [intro, part]
 ```
 
 Every `# Part …` must contain its own `## Overview` — two parts, two
 obligations, never pooled across parts — the introduction precedes every
-part, and no other h1 exists.
+part, the outline scope being ordered like any other, and no other h1
+exists.
 
 ---
 
@@ -947,6 +988,10 @@ part, and no other h1 exists.
 - Order rules specific → general; end with `match: "*"` only when you need
   a default or a closed scope.
 - Use `strict: true` rather than a manual `"*"`/`allow: false` pair.
+- List rules in the order the sections should appear: that order is
+  enforced by default. Set `ordered: false` on a scope whose sections may
+  come in any order, and reach for the `ordered` constraint only there, or
+  for a partial order.
 - Express per-section obligations structurally (`required`, `repeat`);
   reserve `constraints` for presence logic *between* sections.
 - The default cardinality is `0..n`. Exact-text matchers almost always want

@@ -43,7 +43,7 @@ Write a schema. The default project schema is `.outlint.yml`:
 ```yaml
 version: 1
 title: "*"                  # exactly one h1, any text
-sections:                   # rules for h2 headings
+sections:                   # rules for h2 headings, in document order
   - id: overview
     match: "Overview"
     required: true
@@ -56,8 +56,6 @@ sections:                   # rules for h2 headings
   - id: rollout
     match: "Rollout"
     required: false
-constraints:
-  - ordered: [overview, design]
 ```
 
 Point it at a document. `design.md`:
@@ -77,14 +75,11 @@ outlint check design.md
 ```
 
 ```text
-design.md:1:1 [ordered] sections are not in the required order
-  expected order (among sections that are present):
-    1. overview (exact "Overview")
-    2. design (exact "Design")
+design.md:1:1 [ordered] sections are out of the declared order: `Overview` must precede `Design`
   observed order:
     design.md:3:1 "Widget Redesign > Design"
     design.md:7:1 "Widget Redesign > Overview"
-  constraint: .outlint.yml:17:5
+  schema: .outlint.yml:2:8
 
 design.md:5:1 [unexpected-section] the section is not permitted in this closed scope
   section: "Widget Redesign > Design > Implementation Notes"
@@ -98,7 +93,8 @@ output grammar. Its wording and layout may change between releases; use
 `--format json` for scripts and integrations.
 
 Two problems: `## Overview` comes after `## Design` although the schema
-orders them the other way, and `### Implementation Notes` is not one of the
+lists them the other way round — rule order is document order by default —
+and `### Implementation Notes` is not one of the
 children the `strict` Design scope permits. Each finding carries a stable
 diagnostic id (`ordered`, `unexpected-section`), the document location, and
 the schema location that produced it, so both sides of a failure are
@@ -167,7 +163,6 @@ sections:
 constraints:
   - one_of: [changelog, history]
   - requires: { if: api, then: overview }
-  - ordered: [overview, api]
 ```
 
 The pieces:
@@ -182,9 +177,14 @@ The pieces:
 - **Scopes.** A rule's `sections` describes the headings one level deeper.
   `strict: true` closes a scope so unmatched children are reported;
   `allow: false` turns a match into a violation outright.
+- **Order.** Rules bind in document order by default: the list above says
+  Overview comes before the API sections, which come before Changelog. Set
+  `ordered: false` on a rule (or `options.ordered_sections: false` for
+  every scope) where sections may come in any order.
 - **Constraints.** `one_of`, `any_of`, `at_most_one`, `all_or_none`,
   `requires`, `conflicts`, and `ordered` relate rules addressed by id, at
-  the schema root or inside any rule's scope.
+  the schema root or inside any rule's scope; `ordered` spells a partial
+  order, or any order inside a scope declared `ordered: false`.
 - **Frontmatter.** outlint checks presence (`required`, `allow`) and
   delegates value validation to either a self-contained inline JSON Schema or
   a linked JSON Schema whose path is relative to the Outlint schema file.

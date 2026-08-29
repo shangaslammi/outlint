@@ -1,0 +1,14 @@
+version: 1
+# Nothing here says `ordered`: the `sections` list orders itself (§3.7).
+# Unmatched headers match no rule and float freely in this open scope, and
+# the denied rule matches nothing that counts, so only Overview, Usage, and
+# the `API: *` sections take part.
+title: "*"
+sections:
+  - match: "Overview"
+    required: true
+  - match: "Usage"
+    required: false
+  - match: "API: *"
+  - match: "Internal"
+    allow: false

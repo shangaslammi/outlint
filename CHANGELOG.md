@@ -38,6 +38,15 @@ feature set of the `0.1.0` workspace.
   `fm.key` is presence of a non-null value, `fm.key=value` is typed scalar
   equality under the YAML core schema, and dotted paths step through nested
   mappings.
+- **Ordered scopes.** A scope's rule list is its document order by default:
+  every header an earlier accepting rule matched must precede every header
+  a later one matched, reported as `ordered` with the pair that broke.
+  `options.ordered_sections` sets the default for every scope and a rule's
+  `ordered: <bool>` overrides it for its child scope. An explicit `ordered`
+  constraint over an already-ordered scope is refused as
+  `ordered-scope-mismatch`, since it is either redundant or contradictory;
+  the constraint remains for partial orders and for scopes declared
+  `ordered: false`.
 - **Options.** `match_case`, `strip_inline_markup`, and
   `allow_skipped_levels`, normalized with defaults applied by the loader.
 - **Document shape.** The document root is a virtual level-0 header enclosing

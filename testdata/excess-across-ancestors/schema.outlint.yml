@@ -1,4 +1,8 @@
 version: 1
+# Unordered so that only cardinality speaks here: ordered by default, Beta's
+# `Note three` after `Step two` would also be out of order (§3.7).
+options:
+  ordered_sections: false
 sections:
   # Scopes bind per parent: each `h1` counts its own `Note`s and `Step`s.
   # `spread.md`'s four steps therefore conform — no single ancestor holds

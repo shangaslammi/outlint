@@ -1,9 +1,8 @@
 version: 1
-# Distinct h1 rules with distinct child scopes, plus constraints on the
-# outline scope itself: `ordered` across h1 headers is expressible exactly
-# because each ref path crosses only 0..1/1..1 ancestors (§5.1) — here the
-# refs *are* the h1 rules. A violation targets the document: the virtual root
-# has no header to name.
+# Distinct h1 rules with distinct child scopes. The outline scope is ordered
+# by default like any other (§3.7), so `# Guide` must precede `# Appendix`
+# with no constraint spelled. A violation targets the document: the virtual
+# root has no header to name.
 outline:
   - id: guide
     match: "Guide"
@@ -16,5 +15,3 @@ outline:
     repeat: "0..1"
     sections:
       - match: "References"
-constraints:
-  - ordered: [guide, appendix]

@@ -469,6 +469,15 @@ struct BindScopeInput<'a, 'd> {
     rules: &'a [SectionRule],
     prepared_rules: &'a [PreparedRule],
     strict: bool,
+    ordered: bool,
+    schema_scope: &'a ScopePath,
+    parent: Option<&'d Heading>,
+    parent_path: &'a HeaderPath,
+}
+
+struct OrderCheck<'a, 'd> {
+    rules: &'a [SectionRule],
+    occurrences: &'a [BoundSection<'d>],
     schema_scope: &'a ScopePath,
     parent: Option<&'d Heading>,
     parent_path: &'a HeaderPath,
@@ -559,6 +568,7 @@ impl<'a> Validator<'a> {
             rules: &schema.outline,
             prepared_rules: &plan.outline,
             strict: false,
+            ordered: schema.options.ordered_sections,
             schema_scope: &root_scope,
             parent: None,
             parent_path: &root_path,
@@ -760,6 +770,7 @@ impl<'a> Validator<'a> {
             rules: &rule.sections,
             prepared_rules: &prepared.sections,
             strict: rule.strict,
+            ordered: rule.ordered,
             schema_scope: &scope,
             parent,
             parent_path: &path,
@@ -951,6 +962,7 @@ impl<'a> Validator<'a> {
             rules,
             prepared_rules,
             strict,
+            ordered,
             schema_scope,
             parent,
             parent_path,
@@ -1008,6 +1020,7 @@ impl<'a> Validator<'a> {
                 rules: &rule.sections,
                 prepared_rules: &prepared_rule.sections,
                 strict: rule.strict,
+                ordered: rule.ordered,
                 schema_scope: &child_scope_path,
                 parent: Some(&section.heading),
                 parent_path: &path,
@@ -1036,7 +1049,102 @@ impl<'a> Validator<'a> {
                 parent_path,
             });
         }
+        if ordered {
+            self.validate_order(OrderCheck {
+                rules,
+                occurrences: &occurrences,
+                schema_scope,
+                parent,
+                parent_path,
+            });
+        }
         BoundScope { occurrences }
+    }
+
+    /// Checks an ordered scope: every header an earlier accepting rule
+    /// matched must precede every header a later one matched (§3.7).
+    ///
+    /// The check is §5.1's `last(A) < first(B)` over adjacent pairs of the
+    /// scope's accepting rules that matched anything, in list order. Denied
+    /// rules and unmatched headers match nothing that counts, so they float
+    /// freely. Each violated pair is one `ordered` diagnostic, so that a
+    /// misplaced section is named by the neighbours it broke rather than by
+    /// the whole scope at once.
+    fn validate_order(&mut self, check: OrderCheck<'_, '_>) {
+        let OrderCheck {
+            rules,
+            occurrences,
+            schema_scope,
+            parent,
+            parent_path,
+        } = check;
+        let present = rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| matches!(rule.outcome, RuleOutcome::Allow(_)))
+            .map(|(rule_index, rule)| {
+                let matched = occurrences
+                    .iter()
+                    .filter(|occurrence| occurrence.rule_index == rule_index)
+                    .collect::<Vec<_>>();
+                (rule, matched)
+            })
+            .filter(|(_, matched)| !matched.is_empty())
+            .collect::<Vec<_>>();
+        let schema_node = schema_scope.0.split_last().map_or_else(
+            || {
+                (self.schema.outline_provenance != OutlineProvenance::Outline)
+                    .then_some(SchemaNode::Title)
+            },
+            |(index, parent_scope)| {
+                Some(SchemaNode::Rule(crate::RulePath {
+                    scope: ScopePath(parent_scope.to_vec()),
+                    index: *index,
+                }))
+            },
+        );
+        for pair in present.windows(2) {
+            let [(earlier, earlier_matched), (later, later_matched)] = pair else {
+                continue;
+            };
+            let position =
+                |occurrence: &&BoundSection<'_>| occurrence.section.heading.location.range.start.0;
+            let last_earlier = earlier_matched.iter().map(position).max();
+            let first_later = later_matched.iter().map(position).min();
+            if matches!((last_earlier, first_later), (Some(last), Some(first)) if last < first) {
+                continue;
+            }
+            let mut involved = earlier_matched
+                .iter()
+                .chain(later_matched.iter())
+                .map(|occurrence| InvolvedHeader {
+                    path: occurrence.path.clone(),
+                    location: heading_location(&occurrence.section.heading.location),
+                })
+                .collect::<Vec<_>>();
+            involved.sort_by_key(|header| (header.location.line, header.location.column));
+            self.emit(
+                Diagnostic {
+                    id: DiagnosticId::Ordered,
+                    target: match parent {
+                        Some(_) => DiagnosticTarget::Header(parent_path.clone()),
+                        None => DiagnosticTarget::Document,
+                    },
+                    location: parent
+                        .map_or_else(root_location, |heading| heading_location(&heading.location)),
+                    schema_node: schema_node.clone(),
+                    involved_headers: involved,
+                    references: Vec::new(),
+                    message: format!(
+                        "sections are out of the declared order: `{}` must precede `{}`",
+                        matcher_label(&earlier.matcher),
+                        matcher_label(&later.matcher)
+                    ),
+                },
+                parent,
+                true,
+            );
+        }
     }
 
     fn validate_cardinality(&mut self, check: CardinalityCheck<'_, '_>) {
@@ -2903,5 +3011,185 @@ mod tests {
         let diagnostics = validate(&loaded.schema, &frontmatter_only).expect("schema prepares");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].id, DiagnosticId::Requires);
+    }
+
+    fn ordered_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
+        let loaded = load_schema(schema).expect("test schema is valid");
+        let document = parse_markdown(markdown, MarkdownOptions::default());
+        validate(&loaded.schema, &document)
+            .expect("schema prepares")
+            .into_iter()
+            .filter(|diagnostic| diagnostic.id == DiagnosticId::Ordered)
+            .collect()
+    }
+
+    #[test]
+    fn a_scope_orders_its_rules_by_default() {
+        // No constraint spelled: the `sections` list is the order. Under the
+        // sugar's document voice the violation targets the document and is
+        // attributed to the title node, since the scope has no rule of its
+        // own; the message names the pair that broke.
+        let schema =
+            "version: 1\nsections:\n  - match: Overview\n  - match: Usage\n  - match: Notes\n";
+        assert_eq!(
+            ids_and_targets(schema, "# T\n## Overview\n## Usage\n## Notes\n"),
+            []
+        );
+        let diagnostics = ordered_diagnostics(schema, "# T\n## Usage\n## Overview\n## Notes\n");
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.target, DiagnosticTarget::Document);
+        assert_eq!(diagnostic.schema_node, Some(SchemaNode::Title));
+        assert_eq!(diagnostic.location.line, 1);
+        assert!(diagnostic.references.is_empty());
+        assert_eq!(
+            diagnostic.message,
+            "sections are out of the declared order: `Overview` must precede `Usage`"
+        );
+        // Involved headers are the two rules' occurrences in document order.
+        assert_eq!(
+            diagnostic
+                .involved_headers
+                .iter()
+                .map(|header| header.path.clone())
+                .collect::<Vec<_>>(),
+            [
+                HeaderPath(vec!["T".into(), "Usage".into()]),
+                HeaderPath(vec!["T".into(), "Overview".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn implicit_order_reports_each_broken_adjacent_pair() {
+        // `last(A) < first(B)` over adjacent present rules, one diagnostic per
+        // broken pair: a fully reversed list breaks every pair, while a
+        // single displaced section breaks only the pairs around it.
+        let schema = "version: 1\nsections:\n  - match: A\n  - match: B\n  - match: C\n";
+        let reversed = ordered_diagnostics(schema, "# T\n## C\n## B\n## A\n");
+        assert_eq!(
+            reversed
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "sections are out of the declared order: `A` must precede `B`",
+                "sections are out of the declared order: `B` must precede `C`",
+            ]
+        );
+        let displaced = ordered_diagnostics(schema, "# T\n## A\n## C\n## B\n");
+        assert_eq!(displaced.len(), 1);
+        assert_eq!(
+            displaced[0].message,
+            "sections are out of the declared order: `B` must precede `C`"
+        );
+    }
+
+    #[test]
+    fn implicit_order_ignores_unmatched_and_denied_headers_and_absent_rules() {
+        // Unmatched headers in an open scope match no rule and float; a
+        // denied rule matches nothing that counts; an absent optional rule is
+        // simply not among the present pairs.
+        let schema = "version: 1\nsections:\n  - match: A\n  - match: B\n    required: false\n  - match: C\n  - match: X\n    allow: false\n";
+        assert_eq!(
+            ids_and_targets(schema, "# T\n## Free\n## A\n## Free\n## C\n## Free\n"),
+            []
+        );
+        assert_eq!(
+            ids_and_targets(schema, "# T\n## X\n## A\n## C\n"),
+            [(
+                DiagnosticId::NotAllowed,
+                DiagnosticTarget::Header(HeaderPath(vec!["T".into(), "X".into()])),
+            )]
+        );
+    }
+
+    #[test]
+    fn implicit_order_compares_all_occurrences_of_repeated_rules() {
+        // Repeats of one rule may sit together but not straddle the next
+        // rule's occurrences: every A precedes every B.
+        let schema = "version: 1\nsections:\n  - match: \"A *\"\n  - match: \"B *\"\n";
+        assert_eq!(
+            ids_and_targets(schema, "# T\n## A 1\n## A 2\n## B 1\n## B 2\n"),
+            []
+        );
+        assert_eq!(
+            ids_and_targets(schema, "# T\n## A 1\n## B 1\n## A 2\n"),
+            [(DiagnosticId::Ordered, DiagnosticTarget::Document)]
+        );
+    }
+
+    #[test]
+    fn nested_and_outline_scopes_order_themselves_with_their_own_owners() {
+        // A nested scope's violation targets the owning header and is
+        // attributed to the owning rule; the general form's outline scope
+        // targets the document and has no schema node, the root being
+        // nobody's rule.
+        let nested = "version: 1\nsections:\n  - match: Steps\n    sections:\n      - match: One\n      - match: Two\n";
+        let diagnostics = ordered_diagnostics(nested, "# T\n## Steps\n### Two\n### One\n");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].target,
+            DiagnosticTarget::Header(HeaderPath(vec!["T".into(), "Steps".into()]))
+        );
+        assert_eq!(
+            diagnostics[0].schema_node,
+            Some(SchemaNode::Rule(crate::RulePath {
+                scope: ScopePath(Vec::new()),
+                index: RuleIndex(0),
+            }))
+        );
+        assert_eq!(diagnostics[0].location.line, 2);
+
+        let outline = "version: 1\noutline:\n  - match: Intro\n  - match: Part\n";
+        let diagnostics = ordered_diagnostics(outline, "# Part\n# Intro\n");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].target, DiagnosticTarget::Document);
+        assert_eq!(diagnostics[0].schema_node, None);
+    }
+
+    #[test]
+    fn the_option_sets_the_default_and_a_rule_overrides_it_for_its_scope() {
+        let unordered = "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - match: A\n  - match: B\n";
+        assert_eq!(ids_and_targets(unordered, "# T\n## B\n## A\n"), []);
+
+        // The rule's own `ordered` wins in both directions.
+        let opted_in = "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - match: S\n    ordered: true\n    sections:\n      - match: A\n      - match: B\n";
+        assert_eq!(
+            ids_and_targets(opted_in, "# T\n## S\n### B\n### A\n"),
+            [(
+                DiagnosticId::Ordered,
+                DiagnosticTarget::Header(HeaderPath(vec!["T".into(), "S".into()])),
+            )]
+        );
+        let opted_out = "version: 1\nsections:\n  - match: S\n    ordered: false\n    sections:\n      - match: A\n      - match: B\n";
+        assert_eq!(ids_and_targets(opted_out, "# T\n## S\n### B\n### A\n"), []);
+    }
+
+    #[test]
+    fn implicit_order_binds_per_instance_and_speaks_for_each_owner() {
+        // Two h1s under the sugar bind two instances; each is compared on
+        // its own and names its owning h1, since the document voice would
+        // otherwise emit indistinguishable duplicates.
+        let schema = "version: 1\nsections:\n  - match: A\n  - match: B\n";
+        let diagnostics = ordered_diagnostics(schema, "# One\n## A\n## B\n# Two\n## B\n## A\n");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].target,
+            DiagnosticTarget::Header(HeaderPath(vec!["Two".into()]))
+        );
+        assert_eq!(diagnostics[0].location.line, 4);
+    }
+
+    #[test]
+    fn implicit_order_is_suppressible_at_the_owning_header() {
+        let schema = "version: 1\nsections:\n  - match: S\n    sections:\n      - match: A\n      - match: B\n";
+        assert_eq!(
+            ids_and_targets(
+                schema,
+                "# T\n<!-- outlint-disable ordered -->\n## S\n### B\n### A\n"
+            ),
+            []
+        );
     }
 }

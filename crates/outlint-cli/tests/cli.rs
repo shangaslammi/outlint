@@ -1339,7 +1339,7 @@ fn ordered_human_output_distinguishes_expected_and_observed_order() {
     let directory = TempDir::new("ordered-human");
     directory.write(
         "schema.yml",
-        "version: 1\ntitle: \"*\"\nsections:\n  - id: context\n    match: Context\n  - id: decision\n    match: Decision\n  - id: consequences\n    match: Consequences\nconstraints:\n  - ordered: [context, decision, consequences]\n",
+        "version: 1\noptions:\n  ordered_sections: false\ntitle: \"*\"\nsections:\n  - id: context\n    match: Context\n  - id: decision\n    match: Decision\n  - id: consequences\n    match: Consequences\nconstraints:\n  - ordered: [context, decision, consequences]\n",
     );
     directory.write(
         "docs/adr-0042.md",
@@ -1376,7 +1376,54 @@ fn ordered_human_output_distinguishes_expected_and_observed_order() {
             "\"ADR 0042: Retire the legacy upload API > Consequences\"\n",
             "    docs/adr-0042.md:11:1 ",
             "\"ADR 0042: Retire the legacy upload API > Decision\"\n",
-            "  constraint: schema.yml:11:5\n",
+            "  constraint: schema.yml:13:5\n",
+            "\n",
+            "1 diagnostic in 1 file\n"
+        )
+    );
+}
+
+#[test]
+fn implicit_order_human_output_names_the_broken_pair() {
+    // The default-ordered scope (§3.7) carries no references to list as an
+    // expected order; its headline is the message naming the pair instead,
+    // and the schema location is the owning node — the title, for the sugar.
+    let directory = TempDir::new("ordered-implicit-human");
+    directory.write(
+        "schema.yml",
+        "version: 1\ntitle: \"*\"\nsections:\n  - match: Context\n  - match: Decision\n  - match: Consequences\n",
+    );
+    directory.write(
+        "docs/adr-0042.md",
+        "# ADR 0042: Retire the legacy upload API\n\n## Context\n\nText.\n\n## Consequences\n\nText.\n\n## Decision\n",
+    );
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "docs/adr-0042.md",
+            "--schema",
+            "schema.yml",
+            "--color",
+            "never",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    // Deliberate snapshot of the current reader-oriented presentation, as
+    // above.
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "docs/adr-0042.md:1:1 [ordered] sections are out of the declared order: ",
+            "`Decision` must precede `Consequences`\n",
+            "  observed order:\n",
+            "    docs/adr-0042.md:7:1 ",
+            "\"ADR 0042: Retire the legacy upload API > Consequences\"\n",
+            "    docs/adr-0042.md:11:1 ",
+            "\"ADR 0042: Retire the legacy upload API > Decision\"\n",
+            "  schema: schema.yml:2:8\n",
             "\n",
             "1 diagnostic in 1 file\n"
         )

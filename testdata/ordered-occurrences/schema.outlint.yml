@@ -1,9 +1,8 @@
 version: 1
+# No constraint: the `sections` list is ordered by default (§3.7), and the
+# check is §5.1's `last(A) < first(B)` over adjacent rules, so repeats of one
+# rule may sit together but not straddle the next rule's occurrences.
 title: null
 sections:
-  - id: a
-    match: "A"
-  - id: b
-    match: "B"
-constraints:
-  - ordered: [a, b]
+  - match: "A"
+  - match: "B"
