@@ -76,7 +76,10 @@ feature set of the `0.1.0` workspace.
   `--schema`, `--format human|json`, `--color auto|always|never`, `--help`,
   and `--version`; `.outlint.yml` schema discovery walking up from each input;
   stdin input via `-`; and exit codes `0` (clean), `1` (diagnostics), `2`
-  (invocation or operational failure).
+  (invocation or operational failure). Human output is reader-oriented, with
+  labeled source and schema locations and expected-versus-observed ordering
+  evidence, and deliberately has no stable textual grammar; the versioned JSON
+  object is the interface for scripts and integrations.
 - **Binary distribution.** GitHub Releases provide pre-built binaries for
   macOS (x64 and arm64), Linux glibc (x64 and arm64), Linux musl (x64), and
   Windows (x64). The npm package downloads and verifies the matching binary

@@ -77,17 +77,32 @@ outlint check design.md
 ```
 
 ```text
-design.md:1:1 [ordered] the `ordered` constraint is not satisfied; target=document; schema_node=constraint(scope=[],index=0); schema_location=".outlint.yml":17:12; involved_headers=["Widget Redesign > Design"@3:1, "Widget Redesign > Overview"@7:1]; references=[overview=>exact:"Overview", design=>exact:"Design"]
-design.md:5:1 [unexpected-section] the section is not permitted in this closed scope; target=header("Widget Redesign > Design > Implementation Notes"); schema_node=rule(scope=[],index=1); schema_location=".outlint.yml":7:7
+design.md:1:1 [ordered] sections are not in the required order
+  expected order (among sections that are present):
+    1. overview (exact "Overview")
+    2. design (exact "Design")
+  observed order:
+    design.md:3:1 "Widget Redesign > Design"
+    design.md:7:1 "Widget Redesign > Overview"
+  constraint: .outlint.yml:17:5
+
+design.md:5:1 [unexpected-section] the section is not permitted in this closed scope
+  section: "Widget Redesign > Design > Implementation Notes"
+  rule: .outlint.yml:7:5
+
 2 diagnostics in 1 file
 ```
 
+This is an illustration of the current human presentation, not a parseable
+output grammar. Its wording and layout may change between releases; use
+`--format json` for scripts and integrations.
+
 Two problems: `## Overview` comes after `## Design` although the schema
 orders them the other way, and `### Implementation Notes` is not one of the
-children the `strict` Design scope permits. Each line carries a stable
+children the `strict` Design scope permits. Each finding carries a stable
 diagnostic id (`ordered`, `unexpected-section`), the document location, and
 the schema location that produced it, so both sides of a failure are
-traceable.
+traceable regardless of presentation.
 
 Fix the document — `good.md`:
 
@@ -263,14 +278,15 @@ rejected one value, its `pointer`). The kinds are distinct because their
 text has different provenance — a `missing_header` matcher is schema text
 that may appear nowhere in the document.
 
-**Diagnostic order.** Within each file, both formats emit diagnostics in a
-fixed total order: source line, then byte column, then diagnostic id, then
+**JSON diagnostic order.** Within each JSON result, diagnostics have a fixed
+total order: source line, then byte column, then diagnostic id, then
 `schema_location` as `(path, line, column)` with absent first, then
 `target` — by kind in the order above, then by its members — then
 `message`, with the remaining rendered fields breaking any residual tie so
 no two distinct diagnostics ever compare equal. The order is a pure
 function of the reported diagnostics, never of the order validation
-discovered them in, so identical inputs produce byte-identical output.
+discovered them in. Human output may group or order findings for readability
+and is not a stable machine interface.
 
 **Schemas alone.** `outlint schema check .outlint.yml` runs every
 schema-load-time check without needing a document — useful in CI when the
@@ -325,6 +341,19 @@ This is a 0.x release: expect breaking changes to the schema language, the
 diagnostic set, the JSON shape, and the library API before 1.0. Where an
 implementation and the specification disagree, the specification in `spec/`
 is the normative reference and the implementation is the bug.
+
+## Development process
+
+outlint is developed with AI coding agents under human design, specification,
+and review. The maintainer owns the design and the specification, reviews
+every change, and is accountable for the result; agents implement, test, and
+draft documentation against that specification, and commits they co-authored
+say so in a `Co-Authored-By` trailer. Every change is held to the same bar
+regardless of who wrote it: the specification is normative, the conformance
+corpus in `testdata/` runs in CI, and a diagnostic that disagrees with the
+specification is a bug whoever authored it. Contributors may use the same
+tools under the same conditions — see
+[CONTRIBUTING.md](CONTRIBUTING.md#ai-assisted-contributions).
 
 ## MSRV
 

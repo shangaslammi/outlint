@@ -858,7 +858,7 @@ fn diagnostic_sort_key(diagnostic: &RenderedDiagnostic) -> DiagnosticSortKey<'_>
     )
 }
 
-/// Sorts one file's diagnostics into the order both output formats promise.
+/// Sorts one file's diagnostics into the order the JSON contract promises.
 ///
 /// The key is **total**: it compares every rendered field, so the emitted
 /// order is a pure function of the diagnostic set and can never depend on the
@@ -929,7 +929,14 @@ fn render_human(results: &[ValidationResult], use_color: bool) -> String {
         return String::new();
     }
     let mut output = String::new();
-    for diagnostic in results.iter().flat_map(|result| &result.diagnostics) {
+    for (index, diagnostic) in results
+        .iter()
+        .flat_map(|result| &result.diagnostics)
+        .enumerate()
+    {
+        if index != 0 {
+            output.push('\n');
+        }
         let id = if use_color {
             format!("\u{1b}[31m[{}]\u{1b}[0m", escape_human(&diagnostic.id))
         } else {
@@ -941,15 +948,16 @@ fn render_human(results: &[ValidationResult], use_color: bool) -> String {
             diagnostic.line,
             diagnostic.column,
             id,
-            escape_human(&diagnostic.message)
+            human_headline(diagnostic)
         ));
-        append_human_details(&mut output, diagnostic);
         output.push('\n');
+        append_human_details(&mut output, diagnostic);
     }
     let files = results
         .iter()
         .filter(|result| !result.diagnostics.is_empty())
         .count();
+    output.push('\n');
     output.push_str(&format!(
         "{} {} in {} {}\n",
         diagnostic_count,
@@ -960,162 +968,212 @@ fn render_human(results: &[ValidationResult], use_color: bool) -> String {
     output
 }
 
+fn human_headline(diagnostic: &RenderedDiagnostic) -> String {
+    let headline = match diagnostic.id.as_str() {
+        "ordered" => "sections are not in the required order",
+        "one_of" => "exactly one referenced condition must be satisfied",
+        "any_of" => "at least one referenced condition must be satisfied",
+        "at_most_one" => "at most one referenced condition may be satisfied",
+        "all_or_none" => "all referenced conditions or none of them must be satisfied",
+        "requires" => "a required consequence is missing",
+        "conflicts" => "conflicting conditions are satisfied",
+        _ => diagnostic.message.as_str(),
+    };
+    escape_human(headline)
+}
+
 fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
     if let Some(target) = &diagnostic.target {
-        output.push_str("; target=");
-        output.push_str(&human_target(target));
+        match target {
+            RenderedTarget::Header { path } if diagnostic.id == "ordered" => {
+                append_human_header_detail(output, "within", path);
+            }
+            RenderedTarget::Header { path } => {
+                append_human_header_detail(output, "section", path);
+            }
+            RenderedTarget::MissingHeader { parent, matcher } => {
+                append_human_quoted_detail(output, "expected", matcher);
+                if !parent.is_empty() {
+                    append_human_header_detail(output, "within", parent);
+                }
+            }
+            RenderedTarget::Document => {}
+            RenderedTarget::Frontmatter {
+                line_range,
+                pointer,
+            } => {
+                if let Some(range) = line_range {
+                    output.push_str(&format!(
+                        "  frontmatter: lines {}-{}\n",
+                        range.start_line, range.end_line
+                    ));
+                }
+                if let Some(pointer) = pointer {
+                    if pointer.is_empty() {
+                        output.push_str("  value: <frontmatter root>\n");
+                    } else {
+                        append_human_quoted_detail(output, "value", pointer);
+                    }
+                }
+            }
+        }
     }
-    if let Some(node) = &diagnostic.schema_node {
-        output.push_str("; schema_node=");
-        output.push_str(&human_schema_node(node));
+
+    if diagnostic.id == "ordered" {
+        append_human_ordering_evidence(output, diagnostic);
+    } else {
+        append_human_constraint_evidence(output, diagnostic);
     }
+
     if let Some(location) = &diagnostic.schema_location {
-        output.push_str("; schema_location=\"");
-        output.push_str(&escape_human_quoted(&location.path));
-        output.push_str(&format!("\":{}:{}", location.line, location.column));
-    }
-    if !diagnostic.involved_headers.is_empty() {
-        output.push_str("; involved_headers=[");
-        for (index, header) in diagnostic.involved_headers.iter().enumerate() {
-            if index != 0 {
-                output.push_str(", ");
-            }
-            output.push('"');
-            output.push_str(&human_header_path(&header.header_path));
-            output.push_str(&format!("\"@{}:{}", header.line, header.column));
+        let duplicates_primary = location.path == diagnostic.source_path
+            && location.line == diagnostic.line
+            && location.column == diagnostic.column;
+        if !duplicates_primary {
+            let label = match diagnostic.schema_node.as_ref() {
+                Some(RenderedSchemaNode::Constraint { .. }) => "constraint",
+                Some(RenderedSchemaNode::Rule { .. }) => "rule",
+                _ => "schema",
+            };
+            output.push_str(&format!(
+                "  {label}: {}:{}:{}\n",
+                escape_human(&location.path),
+                location.line,
+                location.column
+            ));
         }
-        output.push(']');
-    }
-    if !diagnostic.references.is_empty() {
-        output.push_str("; references=[");
-        for (index, reference) in diagnostic.references.iter().enumerate() {
-            if index != 0 {
-                output.push_str(", ");
-            }
-            output.push_str(&human_reference(reference));
-        }
-        output.push(']');
     }
 }
 
-/// Renders a target in the same tagged `name` / `name(arguments)` shape the
-/// human output already uses for `schema_node`, so the kind is always visible
-/// and greppable and no kind has to borrow another's spelling.
-fn human_target(target: &RenderedTarget) -> String {
-    match target {
-        RenderedTarget::Header { path } => format!("header(\"{}\")", human_header_path(path)),
-        RenderedTarget::MissingHeader { parent, matcher } => format!(
-            "missing_header(parent=\"{}\",matcher=\"{}\")",
-            human_header_path(parent),
-            escape_human_quoted(matcher)
-        ),
-        RenderedTarget::Document => "document".to_owned(),
-        RenderedTarget::Frontmatter {
-            line_range,
-            pointer,
-        } => {
-            let mut arguments = Vec::new();
-            if let Some(range) = line_range {
-                arguments.push(format!("lines={}:{}", range.start_line, range.end_line));
-            }
-            if let Some(pointer) = pointer {
-                arguments.push(format!("pointer=\"{}\"", escape_human_quoted(pointer)));
-            }
-            if arguments.is_empty() {
-                "frontmatter".to_owned()
-            } else {
-                format!("frontmatter({})", arguments.join(","))
-            }
+fn append_human_quoted_detail(output: &mut String, label: &str, value: &str) {
+    output.push_str(&format!("  {label}: \"{}\"\n", escape_human_quoted(value)));
+}
+
+fn append_human_header_detail(output: &mut String, label: &str, path: &[String]) {
+    output.push_str(&format!("  {label}: \"{}\"\n", human_header_path(path)));
+}
+
+fn append_human_ordering_evidence(output: &mut String, diagnostic: &RenderedDiagnostic) {
+    if !diagnostic.references.is_empty() {
+        output.push_str("  expected order (among sections that are present):\n");
+        for (index, reference) in diagnostic.references.iter().enumerate() {
+            output.push_str(&format!(
+                "    {}. {}\n",
+                index + 1,
+                human_reference(reference)
+            ));
         }
     }
+    if !diagnostic.involved_headers.is_empty() {
+        output.push_str("  observed order:\n");
+        for header in &diagnostic.involved_headers {
+            output.push_str(&format!(
+                "    {}:{}:{} \"{}\"\n",
+                escape_human(&diagnostic.source_path),
+                header.line,
+                header.column,
+                human_header_path(&header.header_path)
+            ));
+        }
+    }
+}
+
+fn append_human_constraint_evidence(output: &mut String, diagnostic: &RenderedDiagnostic) {
+    if !diagnostic.references.is_empty() {
+        output.push_str("  references:\n");
+        for reference in &diagnostic.references {
+            output.push_str("    - ");
+            output.push_str(&human_reference(reference));
+            output.push('\n');
+        }
+    }
+    if !diagnostic.involved_headers.is_empty() {
+        output.push_str("  involved sections:\n");
+        for header in &diagnostic.involved_headers {
+            output.push_str(&format!(
+                "    {}:{}:{} \"{}\"\n",
+                escape_human(&diagnostic.source_path),
+                header.line,
+                header.column,
+                human_header_path(&header.header_path)
+            ));
+        }
+    }
+}
+
+fn human_matcher(matcher: &RenderedMatcher) -> String {
+    match matcher {
+        RenderedMatcher::Exact(value) => format!("exact \"{}\"", escape_human_quoted(value)),
+        RenderedMatcher::Glob(value) => format!("glob \"{}\"", escape_human_quoted(value)),
+        RenderedMatcher::Regex(value) => format!("regex \"{}\"", escape_human_quoted(value)),
+        RenderedMatcher::Any => "any heading".to_owned(),
+    }
+}
+
+/// Whether a character can alter terminal layout or the visual ordering of
+/// trusted formatter text.
+fn escape_human_character(character: char, escaped: &mut String) -> bool {
+    match character {
+        '\n' => escaped.push_str("\\n"),
+        '\r' => escaped.push_str("\\r"),
+        '\t' => escaped.push_str("\\t"),
+        '\u{1b}' => escaped.push_str("\\x1b"),
+        character
+            if character.is_control()
+                || matches!(
+                    character,
+                    '\u{061c}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{2028}'..='\u{202e}'
+                        | '\u{2066}'..='\u{206f}'
+                ) =>
+        {
+            escaped.push_str(&format!("\\u{{{:x}}}", u32::from(character)));
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// Escapes untrusted text for a free-text position in human output.
 ///
-/// The human renderer's escaping policy is: control characters are escaped so
-/// document- or schema-controlled text can never drive the terminal, and
-/// nothing else is — quotes, backslashes, and every other printable character
-/// appear verbatim. A message such as `"title" is a required property` prints
-/// with its quotes intact; JSON-style `\"` belongs only to `--format json`,
-/// where serde does the quoting. Text embedded inside a quote-delimited field
-/// goes through [`escape_human_quoted`] instead.
+/// Control characters, Unicode line separators, and bidi formatting controls
+/// are escaped so document- or schema-controlled text cannot drive or spoof
+/// the terminal. Printable quotes and backslashes remain verbatim here; text
+/// inside formatter-owned quotes goes through [`escape_human_quoted`].
 fn escape_human(value: &str) -> String {
     let mut escaped = String::new();
     for character in value.chars() {
-        match character {
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\u{1b}' => escaped.push_str("\\x1b"),
-            character if character.is_control() => {
-                escaped.push_str(&format!("\\u{{{:x}}}", u32::from(character)));
-            }
-            character => escaped.push(character),
+        if !escape_human_character(character, &mut escaped) {
+            escaped.push(character);
         }
     }
     escaped
 }
 
-/// Escapes untrusted text destined for the inside of a `"…"`-delimited field
-/// (header paths, matchers, pointers, string scalars, schema locations).
-///
-/// On top of [`escape_human`]'s control-character policy, the two characters
-/// that would break or forge the delimiters — `"` and `\` — are escaped, so a
-/// quoted field always ends exactly where its closing quote says it does.
+/// Escapes untrusted text inside a formatter-owned `"..."` field.
 fn escape_human_quoted(value: &str) -> String {
     let mut escaped = String::new();
     for character in value.chars() {
+        if escape_human_character(character, &mut escaped) {
+            continue;
+        }
         match character {
             '\\' => escaped.push_str("\\\\"),
             '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\u{1b}' => escaped.push_str("\\x1b"),
-            character if character.is_control() => {
-                escaped.push_str(&format!("\\u{{{:x}}}", u32::from(character)));
-            }
             character => escaped.push(character),
         }
     }
     escaped
 }
 
-/// Header paths appear only inside `"…"` delimiters in the human output, so
-/// the segments take the quoted escaping.
+/// Joins a header's already-distinct path segments for human presentation.
 fn human_header_path(path: &[String]) -> String {
     path.iter()
         .map(|part| escape_human_quoted(part))
         .collect::<Vec<_>>()
         .join(" > ")
-}
-
-fn human_schema_node(node: &RenderedSchemaNode) -> String {
-    match node {
-        RenderedSchemaNode::Title => "title".to_owned(),
-        RenderedSchemaNode::Frontmatter => "frontmatter".to_owned(),
-        RenderedSchemaNode::FrontmatterSchemaDeclaration => {
-            "frontmatter_schema_declaration".to_owned()
-        }
-        RenderedSchemaNode::FrontmatterSchemaDocument => "frontmatter_schema_document".to_owned(),
-        RenderedSchemaNode::Rule { scope, index } => {
-            format!("rule(scope={},index={index})", human_scope(scope))
-        }
-        RenderedSchemaNode::Constraint { scope, index } => {
-            format!("constraint(scope={},index={index})", human_scope(scope))
-        }
-    }
-}
-
-fn human_scope(scope: &[usize]) -> String {
-    format!(
-        "[{}]",
-        scope
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(",")
-    )
 }
 
 fn human_reference(reference: &RenderedReference) -> String {
@@ -1127,7 +1185,7 @@ fn human_reference(reference: &RenderedReference) -> String {
         } => {
             let prefix = if *anchor == "schema_root" { "$." } else { "" };
             format!(
-                "{}{}=>{}",
+                "{}{} ({})",
                 prefix,
                 path.iter()
                     .map(|part| escape_human(part))
@@ -1150,15 +1208,6 @@ fn human_reference(reference: &RenderedReference) -> String {
             }
             display
         }
-    }
-}
-
-fn human_matcher(matcher: &RenderedMatcher) -> String {
-    match matcher {
-        RenderedMatcher::Exact(value) => format!("exact:\"{}\"", escape_human_quoted(value)),
-        RenderedMatcher::Glob(value) => format!("glob:\"{}\"", escape_human_quoted(value)),
-        RenderedMatcher::Regex(value) => format!("regex:\"{}\"", escape_human_quoted(value)),
-        RenderedMatcher::Any => "any".to_owned(),
     }
 }
 
@@ -1423,12 +1472,12 @@ mod tests {
     }
 
     #[test]
-    fn human_escaping_neutralizes_control_characters_and_nothing_else() {
-        // Free text keeps quotes and backslashes verbatim; only control
-        // characters are rewritten.
+    fn human_escaping_neutralizes_terminal_controls_and_bidi_formatting() {
+        // Free text keeps quotes and backslashes verbatim; terminal controls,
+        // Unicode line separators, and bidi formatting characters are rewritten.
         assert_eq!(
-            escape_human("\"title\" is a C:\\ property\u{1b}\n"),
-            "\"title\" is a C:\\ property\\x1b\\n"
+            escape_human("\"title\" C:\\ \u{1b}\n\u{85}\u{2028}\u{202e}\u{2066}"),
+            "\"title\" C:\\ \\x1b\\n\\u{85}\\u{2028}\\u{202e}\\u{2066}"
         );
         // Inside a quote-delimited field the delimiter characters are escaped
         // on top of the same control-character policy.
@@ -1464,7 +1513,7 @@ mod tests {
     }
 
     /// Diagnostics that all tie under `(line, column, id, schema_location)`,
-    /// listed in the order the total key promises: target kind, then target
+    /// listed in the order the JSON total key promises: target kind, then target
     /// members, then message, with references as a final backstop.
     fn key_tied_fixture() -> Vec<RenderedDiagnostic> {
         let frontmatter = |pointer: &str| RenderedTarget::Frontmatter {
@@ -1521,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_tied_on_the_old_key_sort_into_the_documented_total_order() {
+    fn diagnostics_tied_on_the_old_key_sort_into_the_json_total_order() {
         let canonical = key_tied_fixture();
         // The key is total on the fixture: every adjacent pair is strictly
         // ordered, so no two distinct diagnostics compare equal.

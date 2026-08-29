@@ -1,10 +1,11 @@
 //! CLI surface regression tests.
 //!
 //! **This suite mixes contract tests and presentation regression tests.** The
-//! command grammar, discovery, stdin, streams, JSON data model, ordering, exit
-//! status, no-mutation rule, and offline behavior are normative in
-//! `spec/outlint-spec.md` §11. Exact message wording, help layout, and other
-//! human presentation remain implementation details.
+//! command grammar, discovery, stdin, streams, JSON data model and ordering,
+//! exit status, no-mutation rule, and offline behavior are normative in
+//! `spec/outlint-spec.md` §11. Human output deliberately has no stable grammar:
+//! exact wording, punctuation, layout, grouping, and ordering remain
+//! implementation details.
 //!
 //! Two consequences worth knowing before you change anything here:
 //!
@@ -18,16 +19,12 @@
 //!
 //! Ordering in particular: the conformance corpus (`testdata/`) deliberately does
 //! **not** constrain validator order — its format is shared by independent
-//! implementations. The reference CLI nevertheless promises its own total
-//! presentation order in §11.4; assertions of that order belong to the CLI
-//! contract, not the corpus.
+//! implementations. Section 11.4 specifies a total order for the reference
+//! CLI's JSON diagnostics only. Human ordering is presentation.
 //!
-//! TODO(cleanup): this suite needs a pass to separate the two kinds of assertion
-//! it currently mixes — normative behavioral contracts from implementation
-//! detail (message wording, help layout, and formatting). Contract tests should
-//! cite §11; incidental assertions should be visibly marked so a deliberate
-//! change to presentation does not read as a contract break. Until that pass
-//! happens, expect this file to over-constrain the implementation.
+//! Presentation assertions below are regression sentinels for unintended drift,
+//! not promises to consumers. A deliberate human-format redesign may update
+//! them without changing the specification; JSON contract assertions may not.
 
 use std::{
     fs,
@@ -126,8 +123,10 @@ fn human_check_is_quiet_on_pass_and_reports_failures() {
         ],
     );
     assert_eq!(fail.status.code(), Some(1));
-    assert!(stdout(&fail).contains("fail.md:1:1 [missing-section]"));
-    assert!(stdout(&fail).ends_with("1 diagnostic in 1 file\n"));
+    // Human syntax is intentionally unspecified (§11.3). These checks assert
+    // only that the current presentation identifies the source and stable id.
+    assert!(stdout(&fail).contains("fail.md:1:1"));
+    assert!(stdout(&fail).contains("missing-section"));
     assert_eq!(stderr(&fail), "");
 }
 
@@ -1136,7 +1135,7 @@ fn operational_error_wins_over_validation_diagnostics() {
         &["check", "fail.md", "missing.md", "--schema", "schema.yml"],
     );
     assert_eq!(output.status.code(), Some(2));
-    assert!(stdout(&output).contains("[missing-section]"));
+    assert!(stdout(&output).contains("missing-section"));
     assert!(stderr(&output).contains("missing.md"));
 }
 
@@ -1266,12 +1265,11 @@ fn discovered_invalid_schemas_are_grouped_by_resolved_path_in_input_order() {
         &["check", "a/one.md", "a/two.md", "--color", "never"],
     );
     assert_eq!(human.status.code(), Some(1));
-    assert_eq!(stdout(&human).matches("[unsupported-version]").count(), 1);
-    assert!(stdout(&human).ends_with("1 diagnostic in 1 file\n"));
+    assert_eq!(stdout(&human).matches("unsupported-version").count(), 1);
 }
 
 #[test]
-fn constraint_details_are_preserved_in_json_and_human_output() {
+fn constraint_details_are_preserved_in_json_and_current_human_presentation() {
     let directory = TempDir::new("constraint-details");
     directory.write(
         "schema.yml",
@@ -1327,11 +1325,62 @@ fn constraint_details_are_preserved_in_json_and_human_output() {
         ],
     );
     let human = stdout(&human);
-    assert!(human.contains("target=document"));
-    assert!(human.contains("schema_node=constraint(scope=[],index=0)"));
-    assert!(human.contains("schema_location=\"schema.yml\":"));
-    assert!(human.contains("involved_headers=[\"A\"@1:1, \"B\"@2:1]"));
-    assert!(human.contains("references=[a=>exact:\"A\", b=>exact:\"B\"]"));
+    // Presentation regression sentinel, not a grammar contract: §11.3 permits
+    // a deliberate human renderer redesign to express these facts differently.
+    assert!(human.contains("references:\n    - a (exact \"A\")\n    - b (exact \"B\")"));
+    assert!(human.contains("involved sections:\n    doc.md:1:1 \"A\"\n    doc.md:2:1 \"B\""));
+    assert!(human.contains("constraint: schema.yml:"));
+    assert!(!human.contains("target=document"));
+    assert!(!human.contains("schema_node="));
+}
+
+#[test]
+fn ordered_human_output_distinguishes_expected_and_observed_order() {
+    let directory = TempDir::new("ordered-human");
+    directory.write(
+        "schema.yml",
+        "version: 1\ntitle: \"*\"\nsections:\n  - id: context\n    match: Context\n  - id: decision\n    match: Decision\n  - id: consequences\n    match: Consequences\nconstraints:\n  - ordered: [context, decision, consequences]\n",
+    );
+    directory.write(
+        "docs/adr-0042.md",
+        "# ADR 0042: Retire the legacy upload API\n\n## Context\n\nText.\n\n## Consequences\n\nText.\n\n## Decision\n",
+    );
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "docs/adr-0042.md",
+            "--schema",
+            "schema.yml",
+            "--color",
+            "never",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    // Deliberate snapshot of the current reader-oriented presentation. Section
+    // 11.3 explicitly permits changing this string in a future redesign.
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "docs/adr-0042.md:1:1 [ordered] sections are not in the required order\n",
+            "  expected order (among sections that are present):\n",
+            "    1. context (exact \"Context\")\n",
+            "    2. decision (exact \"Decision\")\n",
+            "    3. consequences (exact \"Consequences\")\n",
+            "  observed order:\n",
+            "    docs/adr-0042.md:3:1 ",
+            "\"ADR 0042: Retire the legacy upload API > Context\"\n",
+            "    docs/adr-0042.md:7:1 ",
+            "\"ADR 0042: Retire the legacy upload API > Consequences\"\n",
+            "    docs/adr-0042.md:11:1 ",
+            "\"ADR 0042: Retire the legacy upload API > Decision\"\n",
+            "  constraint: schema.yml:11:5\n",
+            "\n",
+            "1 diagnostic in 1 file\n"
+        )
+    );
 }
 
 #[test]
@@ -1369,13 +1418,13 @@ fn frontmatter_reference_details_retain_typed_equality() {
 // exist on Unix. The escaping under test is platform-independent.
 #[cfg(unix)]
 #[test]
-fn human_output_escapes_untrusted_control_characters() {
+fn human_output_escapes_untrusted_terminal_and_bidi_controls() {
     let directory = TempDir::new("human-escape");
     directory.write(
         "schema.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: \"Required\\nHeading\"\n    required: true\n",
+        "version: 1\ntitle: null\nsections:\n  - match: \"Required\\nHeading\\u202e\"\n    required: true\n",
     );
-    let document = "evil\u{1b}\n.md";
+    let document = "evil\u{1b}\n\u{2028}\u{202e}.md";
     directory.write(document, "plain text\n");
 
     let output = run(
@@ -1391,17 +1440,17 @@ fn human_output_escapes_untrusted_control_characters() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(!output.stdout.contains(&0x1b));
-    assert!(stdout(&output).contains("evil\\x1b\\n.md:1:1"));
-    assert!(stdout(&output).contains("Required\\nHeading"));
-    assert_eq!(stdout(&output).lines().count(), 2);
+    assert!(stdout(&output).contains("evil\\x1b\\n\\u{2028}\\u{202e}.md:1:1"));
+    assert!(stdout(&output).contains("Required\\nHeading\\u{202e}"));
+    assert!(!stdout(&output).contains(['\u{2028}', '\u{202e}']));
 }
 
 #[test]
 fn human_output_prints_message_quotes_verbatim() {
     // jsonschema's messages quote the property they talk about; the human
-    // renderer must print those quotes as-is (`"title" is a required
-    // property`), not as the JSON-escaped `\"title\"`. JSON-style escaping
-    // belongs only to `--format json`.
+    // renderer currently prints those quotes as-is (`"title" is a required
+    // property`), not as the JSON-escaped `\"title\"`. This is a readability
+    // regression sentinel, not a stable grammar guarantee (§11.3).
     let directory = TempDir::new("human-quotes");
     directory.write(
         "schema.yml",
@@ -1444,7 +1493,7 @@ fn option_delimiter_makes_help_spellings_into_paths() {
 
     let schema = run(&directory, &["schema", "check", "--", "--help"]);
     assert_eq!(schema.status.code(), Some(1));
-    assert!(stdout(&schema).contains("[invalid-document-shape]"));
+    assert!(stdout(&schema).contains("invalid-document-shape"));
 
     let actual_help = run(&directory, &["check", "--help", "--", "missing"]);
     assert_eq!(actual_help.status.code(), Some(0));

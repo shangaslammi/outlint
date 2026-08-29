@@ -56,10 +56,24 @@ outlint check design.md
 ```
 
 ```text
-design.md:1:1 [ordered] the `ordered` constraint is not satisfied; target=document; schema_node=constraint(scope=[],index=0); schema_location=".outlint.yml":17:12; involved_headers=["Widget Redesign > Design"@3:1, "Widget Redesign > Overview"@7:1]; references=[overview=>exact:"Overview", design=>exact:"Design"]
-design.md:5:1 [unexpected-section] the section is not permitted in this closed scope; target=header("Widget Redesign > Design > Implementation Notes"); schema_node=rule(scope=[],index=1); schema_location=".outlint.yml":7:7
+design.md:1:1 [ordered] sections are not in the required order
+  expected order (among sections that are present):
+    1. overview (exact "Overview")
+    2. design (exact "Design")
+  observed order:
+    design.md:3:1 "Widget Redesign > Design"
+    design.md:7:1 "Widget Redesign > Overview"
+  constraint: .outlint.yml:17:5
+
+design.md:5:1 [unexpected-section] the section is not permitted in this closed scope
+  section: "Widget Redesign > Design > Implementation Notes"
+  rule: .outlint.yml:7:5
+
 2 diagnostics in 1 file
 ```
+
+This example shows the current human presentation only. It is not a stable or
+parseable output grammar; use `--format json` for scripts and integrations.
 
 Without `--schema`, the nearest `.outlint.yml` is discovered by walking up
 from each input file.
@@ -164,17 +178,20 @@ begin with `-`.
 
 ### Output options
 
-`--format human|json` selects line-oriented human diagnostics or one
-versioned JSON object for the invocation. Human output is the default and is
-quiet on success. JSON is always written without ANSI escapes.
+`--format human|json` selects reader-oriented diagnostics or one versioned
+JSON object for the invocation. Human output is the default and is quiet on
+success. Its wording, layout, and ordering may change between releases and
+must not be parsed as machine input. JSON is the specified machine-readable
+interface and is always written without ANSI escapes.
 
 `--color auto|always|never` controls ANSI color in human output. `auto`, the
 default, enables it only when standard output is a terminal; `always` forces
 it and `never` disables it. This option does not add color to JSON.
 
-Results follow input order. Within a result, diagnostics have a fixed total
-order beginning with source line, byte column, diagnostic id, schema
-location, and target. See specification Section 11.4 for the complete key.
+JSON results follow input order. Within a JSON result, diagnostics have a
+fixed total order beginning with source line, byte column, diagnostic id,
+schema location, and target. See specification Section 11.4 for the complete
+key. Human output may order or group diagnostics differently for readability.
 
 Validation output goes to stdout. Usage errors and failures to read or locate
 inputs go to stderr. If both diagnostics and an operational error occur,
@@ -194,8 +211,8 @@ Outlint reports both and exits with status 2.
   IO-free library this tool is built on.
 - [Outlint specification, Section 11](https://github.com/shangaslammi/outlint/blob/main/spec/outlint-spec.md#11-command-line-interface)
   — the normative behavior contract. This README describes how to use the
-  reference CLI; exact help layout and human wording are presentation, not
-  portable requirements.
+  reference CLI; help layout and every aspect of human formatting are
+  presentation, not a portable or machine-readable contract.
 
 ## License
 

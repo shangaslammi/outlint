@@ -48,8 +48,10 @@ in [`testdata/README.md`](testdata/README.md) and it is binding:
   optionally JSON Schema resources for `frontmatter.schema`.
 - Each expected diagnostic is `{ "id": ..., "target": ... }` — the public
   diagnostic id and the tagged target shape specified in §6.1.
-- Diagnostic order is deliberately ignored; multiplicity is significant. The
-  reference CLI's presentation order is a separate §11.4 contract.
+- Diagnostic order is deliberately ignored; multiplicity is significant.
+  The reference CLI specifies a deterministic order only for its versioned
+  JSON interface (§11.4). Human presentation is not a parseable or stable
+  contract.
 - Fixtures must not depend on Rust-specific APIs, source locations, or a flat
   resource layout. The Rust runner (`crates/outlint-cli/tests/conformance.rs`)
   discovers directories automatically; adding a fixture requires no code
@@ -172,6 +174,23 @@ Not planned, and please do not add speculatively: async or threading, an
 error-reporting framework (`thiserror`, `anyhow`, `miette` — errors are plain
 data structs carrying ranges and the CLI formats them), caching, incremental
 checking, or an LSP.
+
+## AI-assisted contributions
+
+You may use AI coding tools to prepare a contribution; the maintainer does
+(see the [README](README.md#development-process)). The conditions are the
+ones that apply to every change, stated explicitly:
+
+- You have read and understood everything you submit and can explain it in
+  review. You are the author of record and accountable for the change; a
+  tool is not.
+- Say in the pull request description which tools were used and for what.
+  Commits an agent co-authored carry a `Co-Authored-By` trailer.
+- The specification, the conformance corpus, and the verification commands
+  apply unchanged. Generated prose is not a substitute for a fixture or a
+  specification citation.
+- Do not submit unreviewed tool output. Bulk-generated pull requests, and
+  bug reports that do not reproduce with a concrete command, will be closed.
 
 ## Pull requests
 

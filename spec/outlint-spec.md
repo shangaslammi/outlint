@@ -919,9 +919,12 @@ part, and no other h1 exists.
 
 ## 11. Command-line interface
 
-This section defines the observable contract of the `outlint` command. It
-does not prescribe help-text layout, human-diagnostic wording, or other
-presentation details.
+This section defines the observable contract of the `outlint` command. JSON
+is its specified machine-readable interface. Human output is presentation
+for readers, not a second serialization format: it has no specified syntax or
+grammar and MUST NOT be parsed or treated as stable machine input. Its wording,
+punctuation, field order, grouping, and single- or multi-line layout MAY change
+between releases. Help-text layout is likewise not prescribed.
 
 ### 11.1 Commands and arguments
 
@@ -989,18 +992,28 @@ ANSI color in human output, `--color never` disables it, and `--color auto`
 enables it only when standard output is an interactive terminal. JSON output
 MUST NOT contain ANSI escapes regardless of `--color`.
 
+Human output MUST identify each diagnostic intelligibly and provide the
+semantic facts Sections 5 and 6 require, including an actionable source
+location and the responsible schema rule or constraint when one exists. It
+need not spell those facts as JSON field names or serialize every structured
+value literally. No particular record delimiter, line prefix, summary,
+indentation, or other textual representation is required. Tools that consume
+Outlint output MUST select `--format json`; a human-output change alone is not
+a machine-interface compatibility change.
+
 Human output MUST escape control characters originating in input paths,
 documents, schemas, or delegated validator messages so that an untrusted value
-cannot create another physical diagnostic line or emit terminal control
-sequences. ANSI escapes MAY be introduced only by the formatter when color is
-enabled.
+cannot create a physical line or terminal control sequence that the formatter
+did not intend. ANSI escapes MAY be introduced only by the formatter when
+color is enabled.
 
 Usage and operational errors are written to standard error. Schema errors
 are validation output, both for `schema check` and when encountered while
 checking a document, and therefore use the selected format on standard
 output.
 
-`--format json` writes one JSON object for the invocation. Its shape is:
+`--format json` writes one JSON object for the invocation. This versioned
+object is the command's machine-readable interface. Its shape is:
 
 ```json
 {
@@ -1030,9 +1043,11 @@ the number of results; the other counts partition those results by kind and
 count their diagnostics.
 
 Each diagnostic object has `id`, `message`, and `location` with one-based
-`line` and byte `column`. Document diagnostics also have the tagged `target`
-defined by Section 6.1. The following members are present when the
-corresponding semantic data exists and omitted otherwise:
+`line` and byte `column`. The `message` member is explanatory prose: its
+presence is specified, but consumers MUST use `id` and the structured members
+rather than parse or key behavior on its wording. Document diagnostics also
+have the tagged `target` defined by Section 6.1. The following members are
+present when the corresponding semantic data exists and omitted otherwise:
 
 - `schema_node`, using the `kind` spellings `title`, `frontmatter`,
   `frontmatter_schema_declaration`, `frontmatter_schema_document`, `rule`, or
@@ -1052,14 +1067,14 @@ array, and a `matcher`. Matchers have `kind` (`exact`, `glob`, `regex`, or
 canonical strings, while the other values use their corresponding JSON
 types.
 
-### 11.4 Ordering
+### 11.4 JSON ordering
 
-Result objects preserve input argument order. When one invalid schema
+JSON result objects preserve input argument order. When one invalid schema
 replaces multiple dependent document results as described in Section 11.2,
 the schema result occupies the first dependent document's position.
 
-Within one result, both output formats order diagnostics by the following
-total key, most significant component first:
+Within one JSON result, diagnostics are ordered by the following total key,
+most significant component first:
 
 1. source line and byte column;
 2. diagnostic id;
@@ -1075,6 +1090,10 @@ structured values compare by their variants in the order listed in Sections
 6.1 and 11.3, then by members in declaration order. This order is a function
 of rendered diagnostic data and MUST NOT depend on validator traversal or
 discovery order.
+
+Human output MAY order or group diagnostics differently when that improves its
+presentation. Its ordering, like its textual layout, is not a machine-readable
+contract.
 
 ### 11.5 Exit status
 

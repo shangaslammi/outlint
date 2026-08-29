@@ -61,6 +61,8 @@ All four were run locally:
 - [ ] `CHANGELOG.md` `## [Unreleased]` updated, if this is user-visible.
 - [ ] If release packaging changed, `npm/outlint/package.json` `version`
       matches `[workspace.package] version` in `Cargo.toml`.
+- [ ] AI tools used to prepare this change are named in the description
+      (or: none). See CONTRIBUTING.md, "AI-assisted contributions".
 
 ## Notes for the reviewer
 
