@@ -76,6 +76,10 @@ feature set of the `0.1.0` workspace.
   and `--version`; `.outlint.yml` schema discovery walking up from each input;
   stdin input via `-`; and exit codes `0` (clean), `1` (diagnostics), `2`
   (invocation or operational failure).
+- **Binary distribution.** GitHub Releases provide pre-built binaries for
+  macOS (x64 and arm64), Linux glibc (x64 and arm64), Linux musl (x64), and
+  Windows (x64). The npm package downloads and verifies the matching binary
+  during installation.
 - **Suppressions.** `<!-- outlint-disable <id>,... -->` before a heading and
   `<!-- outlint-disable-file <id>,... -->` anywhere in a file.
 - **Conformance corpus.** [`testdata/`](testdata/README.md), an
@@ -88,8 +92,5 @@ feature set of the `0.1.0` workspace.
 
 - Inline frontmatter JSON Schemas are planned for a future release; `0.1.0`
   requires a linked JSON file.
-- `npm/` distribution packaging exists but is not functional.
-- No pre-built binaries are published; `cargo install outlint` builds from
-  source.
 
 [Unreleased]: https://github.com/shangaslammi/outlint/commits/main/

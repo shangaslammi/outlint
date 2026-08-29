@@ -24,8 +24,14 @@ command you run in CI. It never rewrites your files — it only reports.
 cargo install outlint
 ```
 
-This builds the `outlint` binary from source. Alternatively, each release
-ships pre-built binaries and installer scripts on its
+This builds the `outlint` binary from source. To install the matching pre-built
+binary through npm instead:
+
+```sh
+npm install --global outlint
+```
+
+Each release also ships pre-built binaries and installer scripts on its
 [GitHub Release](https://github.com/shangaslammi/outlint/releases) — see the
 release page for the shell and PowerShell one-liners and per-platform
 archives with checksums.
@@ -306,7 +312,7 @@ including the complete `--help` surface.
   [Outlint specification](spec/outlint-spec.md)
 - `testdata/` — conformance corpus shared by all implementations
   ([README](testdata/README.md))
-- `npm/` — npm distribution packaging (not functional yet)
+- `npm/` — npm distribution packaging
 
 ## Status and stability
 

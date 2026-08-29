@@ -4,6 +4,11 @@
   "description": "Lint the header structure of Markdown documents against a schema",
   "license": "MIT OR Apache-2.0",
   "repository": "github:shangaslammi/outlint",
+  "engines": { "node": ">=18" },
   "bin": { "outlint": "bin.js" },
-  "files": ["bin.js", "LICENSE-MIT", "LICENSE-APACHE"]
+  "scripts": {
+    "postinstall": "node install.js",
+    "test": "node --test test.js"
+  },
+  "files": ["bin.js", "install.js", "LICENSE-MIT", "LICENSE-APACHE"]
 }
