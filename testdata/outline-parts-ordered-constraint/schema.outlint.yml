@@ -1,0 +1,23 @@
+version: 1
+# The explicit `ordered` constraint on the general form's outline scope,
+# declared unordered so the constraint is the only order. `ordered` across
+# h1 headers is expressible exactly because each ref path crosses only
+# 0..1/1..1 ancestors (§5.1) — here the refs *are* the h1 rules. A violation
+# targets the document: the virtual root has no header to name. The
+# implicit counterpart is `outline-parts-ordered/`.
+options:
+  ordered_sections: false
+outline:
+  - id: guide
+    match: "Guide"
+    required: true
+    sections:
+      - match: "Overview"
+        required: true
+  - id: appendix
+    match: "Appendix"
+    repeat: "0..1"
+    sections:
+      - match: "References"
+constraints:
+  - ordered: [guide, appendix]

@@ -1,0 +1,17 @@
+version: 1
+# The explicit `ordered` constraint attached to the sugar `sections` scope,
+# which binds once per enclosing `h1`: occurrences are compared within one
+# instance, so ordering never reaches across ancestors. `inverted.md` fires
+# inside its one part; `across.md` inverts the same pair across two parts
+# and the constraint stays vacuously satisfied, since each instance holds
+# only one of the refs — that document reports only the surplus `h1`. The
+# implicit counterpart is `ordered-across-ancestors/`.
+options:
+  ordered_sections: false
+sections:
+  - id: intro
+    match: "Intro"
+  - id: body
+    match: "Body"
+constraints:
+  - ordered: [intro, body]

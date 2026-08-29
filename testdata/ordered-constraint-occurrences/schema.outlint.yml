@@ -1,0 +1,16 @@
+version: 1
+# The explicit `ordered` constraint on an unordered scope, over repeating
+# rules: §5.1's `last(A) < first(B)` compares every occurrence, so repeats
+# may sit together but not straddle the next ref's occurrences. The
+# implicit counterpart is `ordered-occurrences/`; the two are separate
+# machinery sharing one definition.
+options:
+  ordered_sections: false
+title: null
+sections:
+  - id: a
+    match: "A"
+  - id: b
+    match: "B"
+constraints:
+  - ordered: [a, b]

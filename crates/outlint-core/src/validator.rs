@@ -3192,4 +3192,73 @@ mod tests {
             []
         );
     }
+
+    #[test]
+    fn explicit_ordered_compares_all_occurrences_of_repeated_refs() {
+        // The constraint path resolves refs by id rather than walking rule
+        // indices, so it is tested on its own: `last(A) < first(B)` over
+        // every occurrence, in an unordered scope where only the constraint
+        // speaks.
+        let schema = "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: \"A *\"\n  - id: b\n    match: \"B *\"\nconstraints:\n  - ordered: [a, b]\n";
+        assert_eq!(
+            ids_and_targets(schema, "# T\n## A 1\n## A 2\n## B 1\n## B 2\n"),
+            []
+        );
+        let diagnostics = ordered_diagnostics(schema, "# T\n## A 1\n## B 1\n## A 2\n");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].target, DiagnosticTarget::Document);
+        assert_eq!(
+            diagnostics[0].schema_node,
+            Some(SchemaNode::Constraint(ConstraintPath {
+                scope: ScopePath(Vec::new()),
+                index: ConstraintIndex(0),
+            }))
+        );
+        // The constraint form cites its refs, unlike the implicit form.
+        assert_eq!(diagnostics[0].references.len(), 2);
+        // Unordered scope: the reverse order is legal once the constraint
+        // says so, which the implicit form could never express.
+        let reversed = "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [b, a]\n";
+        assert_eq!(ids_and_targets(reversed, "# T\n## B\n## A\n"), []);
+        assert_eq!(
+            ids_and_targets(reversed, "# T\n## A\n## B\n"),
+            [(DiagnosticId::Ordered, DiagnosticTarget::Document)]
+        );
+    }
+
+    #[test]
+    fn explicit_ordered_binds_per_instance_and_never_reaches_across_ancestors() {
+        // Attached to the sugar `sections` scope, the constraint is evaluated
+        // once per enclosing h1. An inversion inside one part fires and names
+        // that part; the same pair split across two parts leaves each
+        // instance holding one ref, vacuously satisfied.
+        let schema = "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: intro\n    match: Intro\n  - id: body\n    match: Body\nconstraints:\n  - ordered: [intro, body]\n";
+        let diagnostics = ordered_diagnostics(
+            schema,
+            "# One\n## Intro\n## Body\n# Two\n## Body\n## Intro\n",
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].target,
+            DiagnosticTarget::Header(HeaderPath(vec!["Two".into()]))
+        );
+        assert!(ordered_diagnostics(schema, "# Alpha\n## Body\n# Beta\n## Intro\n").is_empty());
+    }
+
+    #[test]
+    fn explicit_ordered_on_the_outline_root_targets_the_document() {
+        let schema = "version: 1\noptions:\n  ordered_sections: false\noutline:\n  - id: guide\n    match: Guide\n    required: true\n  - id: appendix\n    match: Appendix\n    repeat: \"0..1\"\nconstraints:\n  - ordered: [guide, appendix]\n";
+        assert_eq!(ids_and_targets(schema, "# Guide\n# Appendix\n"), []);
+        let diagnostics = ordered_diagnostics(schema, "# Appendix\n# Guide\n");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].target, DiagnosticTarget::Document);
+        assert_eq!(diagnostics[0].location.line, 1);
+        assert_eq!(
+            diagnostics[0].schema_node,
+            Some(SchemaNode::Constraint(ConstraintPath {
+                scope: ScopePath(Vec::new()),
+                index: ConstraintIndex(0),
+            }))
+        );
+    }
 }

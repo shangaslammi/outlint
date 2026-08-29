@@ -1,0 +1,15 @@
+{
+  "in-order.md": [],
+  "inverted.md": [
+    {
+      "id": "ordered",
+      "target": { "kind": "document" }
+    }
+  ],
+  "across.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Beta"] }
+    }
+  ]
+}
