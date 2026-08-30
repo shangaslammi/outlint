@@ -2707,9 +2707,10 @@ impl Loader {
         }
         // An ordered scope already orders every rule in it, so an explicit
         // `ordered` over that scope is either redundant — the same failure
-        // reported twice — or contradicts the list order, in which case every
-        // document fails one of the two. Neither is what the author meant,
-        // and the fix is the same either way.
+        // reported twice — or contradicts the list order. When both rules in
+        // a reversed pair are present, one of the two orders necessarily
+        // fails; absent optional rules may satisfy both vacuously. Neither is
+        // what the author meant, and the fix is the same either way.
         if !mixed_scopes
             && parent_scope
                 .as_ref()

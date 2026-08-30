@@ -11,8 +11,7 @@ output shape, and the library API may all change in a minor release. See
 
 ## [Unreleased]
 
-Nothing has been released yet. Everything below is the initial, unreleased
-feature set of the `0.1.0` workspace.
+## [0.1.0] - 2026-08-30
 
 ### Added
 
@@ -91,8 +90,10 @@ feature set of the `0.1.0` workspace.
   object is the interface for scripts and integrations.
 - **Binary distribution.** GitHub Releases provide pre-built binaries for
   macOS (x64 and arm64), Linux glibc (x64 and arm64), Linux musl (x64), and
-  Windows (x64). The npm package downloads and verifies the matching binary
-  during installation.
+  Windows (x64), plus shell and PowerShell installers. The npm package has no
+  install-time lifecycle script: its first invocation downloads, verifies,
+  and caches the matching GitHub Release binary. The core library and CLI are
+  also published to crates.io.
 - **Suppressions.** `<!-- outlint-disable <id>,... -->` before a heading and
   `<!-- outlint-disable-file <id>,... -->` anywhere in a file.
 - **Conformance corpus.** [`testdata/`](testdata/README.md), an
@@ -101,4 +102,5 @@ feature set of the `0.1.0` workspace.
 - **Dual licensing** under [MIT](LICENSE-MIT) or
   [Apache-2.0](LICENSE-APACHE), and a declared MSRV of Rust 1.86 tested in CI.
 
-[Unreleased]: https://github.com/shangaslammi/outlint/commits/main/
+[Unreleased]: https://github.com/shangaslammi/outlint/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/shangaslammi/outlint/releases/tag/v0.1.0

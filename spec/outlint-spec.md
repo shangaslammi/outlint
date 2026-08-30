@@ -620,9 +620,10 @@ v1 and is schema error `ordered-scope-mismatch`.
 An `ordered` constraint whose refs resolve in an ordered scope (§3.7) is
 likewise schema error `ordered-scope-mismatch`: that scope already orders
 every rule in it, so the constraint is either redundant — the same failure
-reported twice — or contradicts the list order, in which case every
-document fails one of the two. Declare the scope `ordered: false` to order
-it by constraint instead.
+reported twice — or contradicts the list order. When the rules witnessing a
+reversed pair are present, at least one of the two orders necessarily fails;
+absent optional rules can make both orders vacuously satisfied. Declare the
+scope `ordered: false` to order it by constraint instead.
 
 That rule needs no special case at the h1 level. A root `ordered` over
 `outline` rules orders the parts of a document, and a listed rule may
@@ -1013,6 +1014,12 @@ for readers, not a second serialization format: it has no specified syntax or
 grammar and MUST NOT be parsed or treated as stable machine input. Its wording,
 punctuation, field order, grouping, and single- or multi-line layout MAY change
 between releases. Help-text layout is likewise not prescribed.
+
+The requirements in this section govern the native Rust reference `outlint`
+binary after it has been acquired. Package-manager distribution and bootstrap
+wrappers — including npm's documented first-run binary acquisition — are
+outside this CLI contract; once invoked, the native binary remains subject to
+every requirement below.
 
 ### 11.1 Commands and arguments
 

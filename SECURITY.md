@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-outlint has not been released yet. The workspace is at `0.1.0` and nothing is
-published to crates.io.
+The current release is `0.1.0`, distributed through GitHub Releases, crates.io,
+and npm.
 
 | Version | Supported |
 | --- | --- |
-| `0.1.0` (unreleased, `main`) | Yes — fixes land on `main` |
+| `0.1.0` | Yes — fixes land on `main` and ship in the next release |
 | Anything else | No |
 
 While the project is pre-1.0 there are no maintained release branches and no
@@ -23,9 +23,9 @@ Report it privately, by either route:
 - **Email** <sami@infer.fi>. Put "outlint security" in the subject. If you
   want an encrypted channel, say so in a first message with no details and one
   can be arranged.
-- **GitHub private security advisories**, once
-  <https://github.com/shangaslammi/outlint> exists as a public repository:
-  the "Report a vulnerability" button on the Security tab.
+- **GitHub private security advisories**: use the "Report a vulnerability"
+  button on the Security tab of
+  <https://github.com/shangaslammi/outlint/security>.
 
 Helpful things to include, roughly in order of usefulness:
 
@@ -57,13 +57,19 @@ maintainer the date you intend to publish.
 
 ## Threat model
 
-outlint is an offline command-line linter and library. It reads files, writes
-diagnostics to stdout/stderr, and exits. It **never modifies the documents it
-checks** ([`spec/outlint-spec.md`](spec/outlint-spec.md) §11.6) and performs no
-implicit network access (also §11.6). JSON Schema `$ref` resolution is
-file-local only: remote retrieval is refused and a remote `$ref` is reported as
-the schema error `invalid-frontmatter-schema`
+The native outlint command-line tool and library are offline. The CLI reads
+files, writes diagnostics to stdout/stderr, and exits. It **never modifies the
+documents it checks** ([`spec/outlint-spec.md`](spec/outlint-spec.md) §11.6)
+and performs no implicit network access (also §11.6). JSON Schema `$ref`
+resolution is file-local only: remote retrieval is refused and a remote `$ref`
+is reported as the schema error `invalid-frontmatter-schema`
 ([`spec/outlint-spec.md`](spec/outlint-spec.md) §2.3).
+
+The npm launcher is a distribution bootstrap rather than part of document
+validation. On its first invocation it downloads the matching binary and
+SHA-256 sidecar from the same-version GitHub Release, verifies the archive,
+and caches the executable for later runs. Document, Outlint schema, and JSON
+Schema contents do not influence that request.
 
 The realistic exposure is that outlint runs in CI over content from a pull
 request, so all three of its inputs may be attacker-controlled:
@@ -105,8 +111,6 @@ request, so all three of its inputs may be attacker-controlled:
 - Wrong diagnostics, missed violations, or false positives. Those are ordinary
   correctness bugs — please open a normal issue with a `testdata/` reproduction
   (see [CONTRIBUTING.md](CONTRIBUTING.md)).
-- Documented gaps, such as `fm.` propositions in constraints being parsed but
-  not evaluated.
 - Vulnerabilities in dependencies with no reachable path from outlint's own
   API. Report those upstream; a note here is welcome if outlint's usage does
   make them reachable.
