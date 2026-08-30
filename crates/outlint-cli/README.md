@@ -22,7 +22,7 @@ cargo install outlint
 ```yaml
 version: 1
 title: "*"                  # exactly one h1, any text
-sections:                   # rules for h2 headings
+sections:                   # rules for h2 headings, in document order
   - id: overview
     match: "Overview"
     required: true
@@ -35,8 +35,6 @@ sections:                   # rules for h2 headings
   - id: rollout
     match: "Rollout"
     required: false
-constraints:
-  - ordered: [overview, design]
 ```
 
 `design.md`:
@@ -56,14 +54,11 @@ outlint check design.md
 ```
 
 ```text
-design.md:1:1 [ordered] sections are not in the required order
-  expected order (among sections that are present):
-    1. overview (exact "Overview")
-    2. design (exact "Design")
+design.md:1:1 [ordered] sections are out of the declared order: `Overview` must precede `Design`
   observed order:
     design.md:3:1 "Widget Redesign > Design"
     design.md:7:1 "Widget Redesign > Overview"
-  constraint: .outlint.yml:17:5
+  schema: .outlint.yml:2:8
 
 design.md:5:1 [unexpected-section] the section is not permitted in this closed scope
   section: "Widget Redesign > Design > Implementation Notes"

@@ -3224,9 +3224,7 @@ pub(crate) fn canonical_float(source: &str) -> Option<String> {
     if matches!(unsigned, ".nan" | ".NaN" | ".NAN") {
         return (source == unsigned).then(|| "nan".into());
     }
-    let (mantissa, exponent) = unsigned
-        .split_once(['e', 'E'])
-        .map_or((unsigned, "0"), |parts| parts);
+    let (mantissa, exponent) = unsigned.split_once(['e', 'E']).unwrap_or((unsigned, "0"));
     let has_float_marker = mantissa.contains('.') || unsigned.contains(['e', 'E']);
     if !has_float_marker {
         return None;

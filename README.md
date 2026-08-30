@@ -31,6 +31,11 @@ binary through npm instead:
 npm install --global outlint
 ```
 
+The npm package has no install-time lifecycle script. On its first run it
+downloads the matching binary from the same-version GitHub Release, verifies
+the cargo-dist SHA-256 sidecar, and keeps the binary in the user cache for
+later runs. The first run therefore requires access to GitHub Releases.
+
 Each release also ships pre-built binaries and installer scripts on its
 [GitHub Release](https://github.com/shangaslammi/outlint/releases) — see the
 release page for the shell and PowerShell one-liners and per-platform

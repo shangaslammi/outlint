@@ -102,9 +102,25 @@ function sha256(file) {
   return hash.digest("hex");
 }
 
+function cacheRoot(environment = process.env, platform = process.platform, home = os.homedir()) {
+  if (environment.OUTLINT_CACHE_DIR) return path.resolve(environment.OUTLINT_CACHE_DIR);
+  if (platform === "win32") {
+    return path.join(environment.LOCALAPPDATA || path.join(home, "AppData", "Local"), "outlint");
+  }
+  if (platform === "darwin") return path.join(home, "Library", "Caches", "outlint");
+  return path.join(environment.XDG_CACHE_HOME || path.join(home, ".cache"), "outlint");
+}
+
+function cachedExecutable(version, artifact, root = cacheRoot()) {
+  return path.join(root, version, artifact.target, artifact.executable);
+}
+
 async function install() {
   const artifact = artifactFor(process.platform, process.arch);
   const version = packageJson.version;
+  const destination = cachedExecutable(version, artifact);
+  if (fs.existsSync(destination)) return destination;
+
   const baseUrl = `${RELEASES}/v${version}/${artifact.archive}`;
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "outlint-"));
 
@@ -122,11 +138,26 @@ async function install() {
 
     execFileSync("tar", ["-xf", archivePath, "-C", temporary], { stdio: "inherit" });
     const extracted = path.join(temporary, `outlint-${artifact.target}`, artifact.executable);
-    const destinationDirectory = path.join(__dirname, "bin");
-    const destination = path.join(destinationDirectory, artifact.executable);
+    const destinationDirectory = path.dirname(destination);
     fs.mkdirSync(destinationDirectory, { recursive: true });
-    fs.copyFileSync(extracted, destination);
-    if (process.platform !== "win32") fs.chmodSync(destination, 0o755);
+    const staged = path.join(
+      destinationDirectory,
+      `.${artifact.executable}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`,
+    );
+    try {
+      fs.copyFileSync(extracted, staged, fs.constants.COPYFILE_EXCL);
+      if (process.platform !== "win32") fs.chmodSync(staged, 0o755);
+      try {
+        fs.renameSync(staged, destination);
+      } catch (error) {
+        // Concurrent first runs may both prepare the same verified binary.
+        // Windows will not replace the winner; on Unix rename is atomic.
+        if (!fs.existsSync(destination)) throw error;
+      }
+    } finally {
+      fs.rmSync(staged, { force: true });
+    }
+    return destination;
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
@@ -139,4 +170,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { artifactFor, checksumFromSidecar };
+module.exports = { artifactFor, cacheRoot, cachedExecutable, checksumFromSidecar, install };
