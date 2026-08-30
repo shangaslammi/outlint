@@ -17,7 +17,7 @@ use saphyr_parser::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 use crate::markdown::{
     deeper_yaml_nesting, exact_yaml_scalar_to_json, validate_yaml_container_tag, ExactYamlBudget,
@@ -3067,6 +3067,10 @@ fn auto_id(value: &str) -> Option<String> {
             }
             result.push(character);
             separator_pending = false;
+        } else if is_combining_mark(character) {
+            // NFKD splits letters such as `ä` into an ASCII base followed by
+            // a combining mark. The mark modifies that base; it is not a word
+            // boundary and therefore must not introduce a slug separator.
         } else {
             separator_pending = true;
         }
@@ -3873,6 +3877,13 @@ sections:
 "#,
         );
         assert!(kinds.contains(&SchemaErrorKind::DuplicateId));
+    }
+
+    #[test]
+    fn auto_ids_discard_decomposed_marks_without_splitting_words() {
+        assert_eq!(auto_id("Mälardalen"), Some("malardalen".to_owned()));
+        assert_eq!(auto_id("nai\u{308}ve café"), Some("naive-cafe".to_owned()));
+        assert_eq!(auto_id("a—b"), Some("a-b".to_owned()));
     }
 
     #[test]

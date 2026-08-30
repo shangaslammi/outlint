@@ -489,11 +489,12 @@ and any order in an unordered scope.
 4.1. `id`, if given, MUST be a slug: `[a-z0-9]+(-[a-z0-9]+)*`.
 
 4.2. **Auto-id.** A rule with no explicit `id` and an **exact** matcher gets
-an auto-generated id: apply Unicode NFKD normalization, lowercase, replace
-each maximal run of characters outside `[a-z0-9]` with `-`, trim
-leading/trailing `-` (`"API Reference"` → `api-reference`). If the result
-is empty, the rule gets no auto id (it is then unreferencable without an
-explicit `id`; this is not an error). Rules with regex, glob, or `"*"`
+an auto-generated id: apply Unicode NFKD normalization, lowercase, discard
+combining marks, replace each maximal run of remaining characters outside
+`[a-z0-9]` with `-`, and trim leading/trailing `-` (`"API Reference"` →
+`api-reference`, `"Mälardalen"` → `malardalen`). If the result is empty, the
+rule gets no auto id (it is then unreferencable without an explicit `id`; this
+is not an error). Rules with regex, glob, or `"*"`
 matchers get **no** auto id and are unreferencable unless an explicit `id`
 is given.
 
