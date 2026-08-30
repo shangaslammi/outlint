@@ -70,8 +70,9 @@ design.md:5:1 [unexpected-section] the section is not permitted in this closed s
 This example shows the current human presentation only. It is not a stable or
 parseable output grammar; use `--format json` for scripts and integrations.
 
-Without `--schema`, the nearest `.outlint.yml` is discovered by walking up
-from each input file.
+Without `--schema`, each input file discovers its schema by walking up:
+`<stem>.outlint.yml` (its file name, extension removed) is preferred over
+`.outlint.yml` in each directory.
 
 `--format json` emits a versioned, machine-readable object on stdout. For a
 `rollout.md` that has `# Widget Redesign`, `## Overview`, and `## Rollout`
@@ -118,8 +119,10 @@ Options:
 ```text
 Usage: outlint check <FILE>... [options]
 
-Validate individual Markdown files. Without --schema, the nearest .outlint.yml
-is discovered separately for each file. Standard input (-) requires --schema.
+Validate individual Markdown files. Without --schema, each file discovers its
+schema separately: the nearest <stem>.outlint.yml (file name, extension
+removed) or .outlint.yml, specific name first in each ancestor directory.
+Standard input (-) requires --schema.
 
 Options:
   -s, --schema <SCHEMA>       Use one schema for every input
@@ -154,10 +157,13 @@ is top-level; the validation subcommands accept `--help` but not `--version`.
 ### Input and schema selection
 
 `outlint check` accepts one or more individual Markdown file paths. Without
-`--schema`, it searches upward from each file for the nearest `.outlint.yml`,
-so files in one invocation may use different schemas. Other schema filenames
-are never discovered automatically. `-s, --schema <SCHEMA>` selects one
-schema for every input and disables discovery.
+`--schema`, it searches upward from each file, checking each ancestor
+directory first for `<stem>.outlint.yml` — the file's name with its final
+extension removed, so `CHANGELOG.md` discovers `CHANGELOG.outlint.yml` —
+and then for `.outlint.yml`; the nearest match wins, and files in one
+invocation may use different schemas. Other schema filenames are never
+discovered automatically. `-s, --schema <SCHEMA>` selects one schema for
+every input and disables discovery.
 
 The file path `-` reads standard input and requires an explicit `--schema`.
 Outlint never reads stdin merely because no file was supplied. Directories

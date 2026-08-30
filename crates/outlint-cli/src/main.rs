@@ -28,8 +28,10 @@ Options:\n\
 
 const CHECK_HELP: &str = "Usage: outlint check <FILE>... [options]\n\
 \n\
-Validate individual Markdown files. Without --schema, the nearest .outlint.yml\n\
-is discovered separately for each file. Standard input (-) requires --schema.\n\
+Validate individual Markdown files. Without --schema, each file discovers its\n\
+schema separately: the nearest <stem>.outlint.yml (file name, extension\n\
+removed) or .outlint.yml, specific name first in each ancestor directory.\n\
+Standard input (-) requires --schema.\n\
 \n\
 Options:\n\
   -s, --schema <SCHEMA>       Use one schema for every input\n\
@@ -604,22 +606,47 @@ fn discover_schema(document: &Path) -> Result<PathBuf, String> {
             .map_err(|error| format!("cannot determine current directory: {error}"))?
             .join(document)
     };
+    // Candidate file names, most specific first: the document's stem (its
+    // file name with the final extension removed) with `.outlint.yml`
+    // appended, then the directory default. Spec section 11.2.
+    let mut names: Vec<std::ffi::OsString> = Vec::new();
+    if let Some(stem) = absolute.file_stem() {
+        let mut name = stem.to_os_string();
+        name.push(".outlint.yml");
+        names.push(name);
+    }
+    names.push(std::ffi::OsString::from(".outlint.yml"));
     let mut directory = absolute.parent();
     while let Some(candidate_directory) = directory {
-        let candidate = candidate_directory.join(".outlint.yml");
-        match candidate.try_exists() {
-            Ok(true) => return Ok(candidate),
-            Ok(false) => directory = candidate_directory.parent(),
-            Err(error) => {
-                return Err(format!(
-                    "cannot inspect schema candidate '{}': {error}",
-                    schema_loading::path_display(&candidate)
-                ));
+        for name in &names {
+            let candidate = candidate_directory.join(name);
+            // Only a regular file participates (spec section 11.2): a
+            // directory named like a schema is skipped as if absent.
+            match std::fs::metadata(&candidate) {
+                Ok(metadata) if metadata.is_file() => return Ok(candidate),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "cannot inspect schema candidate '{}': {error}",
+                        schema_loading::path_display(&candidate)
+                    ));
+                }
             }
         }
+        directory = candidate_directory.parent();
     }
+    let expected = names
+        .iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" or ");
     Err(format!(
-        "no .outlint.yml found for Markdown input '{}'",
+        "no {expected} found for Markdown input '{}'",
         schema_loading::path_display(document)
     ))
 }

@@ -243,10 +243,14 @@ Both validation commands accept:
 every input. A bare `--` ends option parsing.
 
 **Schema discovery.** Without `--schema`, outlint walks up from each input
-file looking for `.outlint.yml` and uses the nearest one. Discovery is per
-file, so one invocation can check documents belonging to different projects.
-Only the exact name `.outlint.yml` is discovered; files named
-`*.outlint.yml` are explicit schemas and must be passed with `--schema`.
+file and uses the nearest schema, checking each directory first for
+`<stem>.outlint.yml` — the file's name with its extension removed, so
+`CHANGELOG.md` discovers `CHANGELOG.outlint.yml` — and then for the
+directory default `.outlint.yml`. Discovery is per file, so one invocation
+can check documents belonging to different projects. Other schema filenames
+are explicit schemas and must be passed with `--schema`. (This repository
+uses the mechanism on itself: `CHANGELOG.outlint.yml` at the root validates
+`CHANGELOG.md` in CI.)
 
 **stdin.** A file argument of `-` reads standard input. Because stdin has no
 filesystem location, discovery is impossible and `--schema` is required:

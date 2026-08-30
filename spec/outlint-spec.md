@@ -8,8 +8,9 @@ Outlint is a declarative schema language for validating the header structure
 (outline) of Markdown documents. A schema constrains which headers may/must
 appear, their nesting, cardinality, order, and cross-section presence logic.
 
-Conventions: schema files are named `.outlint.yml` (project default) or
-`*.outlint.yml`; the reference CLI is `outlint` (e.g.
+Conventions: schema files are named `.outlint.yml` (directory default),
+`<stem>.outlint.yml` (per-document, discovered for the matching document),
+or `*.outlint.yml` (explicit input); the reference CLI is `outlint` (e.g.
 `outlint check README.md --schema docs.outlint.yml`).
 
 Sections 1 through 8 and Section 11 are normative. Sections 9 and 10 are
@@ -1065,10 +1066,19 @@ CLI MUST NOT prompt interactively.
 `outlint check` validates each named Markdown document. With
 `--schema <SCHEMA>`, that schema is used for every document and automatic
 discovery is disabled. Without `--schema`, discovery is performed separately
-for every document: beginning in the directory containing the document,
-Outlint searches each ancestor directory for `.outlint.yml`; the nearest
-existing file wins. No other filename participates in implicit discovery. If
-no schema is found, that document has an operational error.
+for every document. The document's **stem** is its file name with the final
+extension removed (`CHANGELOG.md` → `CHANGELOG`); a file name with no
+extension is its own stem, and the stem is taken byte-for-byte, with no case
+folding or Unicode normalization. Beginning in the directory containing the
+document, Outlint examines each ancestor directory in turn, checking first
+for `<stem>.outlint.yml` and then for `.outlint.yml`; the first existing
+regular file wins (a symbolic link counts as what it resolves to). A
+candidate that exists but is not a regular file — a directory, for example —
+does not participate in discovery and is skipped exactly as if absent. A document-specific schema therefore takes precedence over the
+directory default beside it, and a nearer directory — under either name —
+takes precedence over anything further up. No other filename participates in
+implicit discovery. If no schema is found, that document has an operational
+error.
 
 The path `-` names standard input. It is explicit input, never an implicit
 fallback when no files are supplied, and requires `--schema` because it has

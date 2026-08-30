@@ -60,7 +60,8 @@ the YAML core schema types agree), honouring `options.match_case` for
 string comparison.
 
 The CLI has two subcommands: `outlint check <FILE>...` (nearest
-`.outlint.yml` discovered per file unless `--schema` is given; `-` reads
+`<stem>.outlint.yml` or `.outlint.yml` discovered per file unless
+`--schema` is given; `-` reads
 stdin and requires `--schema`) and `outlint schema check <SCHEMA>...`.
 Both take `--format human|json` and `--color auto|always|never`. Exit
 codes: 0 clean, 1 diagnostics, 2 usage or operational error. The CLI's

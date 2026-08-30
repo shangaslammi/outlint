@@ -11,6 +11,24 @@ output shape, and the library API may all change in a minor release. See
 
 ## [Unreleased]
 
+### Added
+
+- **Per-document schema discovery.** Without `--schema`, discovery now checks
+  each ancestor directory for `<stem>.outlint.yml` — the document's file name
+  with its final extension removed, so `CHANGELOG.md` discovers
+  `CHANGELOG.outlint.yml` — before the directory default `.outlint.yml`. The
+  nearest directory still wins; within one directory the document-specific
+  name takes precedence. Other `*.outlint.yml` files remain explicit
+  `--schema` input (spec §11.2). This repository uses the mechanism on
+  itself: `CHANGELOG.outlint.yml` validates this changelog in CI.
+
+### Fixed
+
+- **Discovery ignores non-files.** A directory (or other non-regular file)
+  named `.outlint.yml` — or now `<stem>.outlint.yml` — no longer terminates
+  schema discovery only to fail when read; it is skipped as if absent and
+  the search continues upward (spec §11.2).
+
 ## [0.1.0] - 2026-08-30
 
 ### Added
