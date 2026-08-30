@@ -28,7 +28,7 @@ This builds the `outlint` binary from source. To install the matching pre-built
 binary through npm instead:
 
 ```sh
-npm install --global outlint
+npm install --global @outlint/cli
 ```
 
 The npm package has no install-time lifecycle script. On its first run it

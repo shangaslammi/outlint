@@ -1,9 +1,13 @@
 {
-  "name": "outlint",
+  "name": "@outlint/cli",
   "version": "0.1.0",
   "description": "Lint the header structure of Markdown documents against a schema",
   "license": "MIT OR Apache-2.0",
-  "repository": "github:shangaslammi/outlint",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shangaslammi/outlint.git",
+    "directory": "npm/outlint"
+  },
   "engines": { "node": ">=18" },
   "bin": { "outlint": "bin.js" },
   "scripts": {

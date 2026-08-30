@@ -133,7 +133,10 @@ test("a packed package installs without scripts and launches a cached binary", (
     );
 
     const installedPackage = JSON.parse(
-      fs.readFileSync(path.join(project, "node_modules", "outlint", "package.json"), "utf8"),
+      fs.readFileSync(
+        path.join(project, "node_modules", ...packageJson.name.split("/"), "package.json"),
+        "utf8",
+      ),
     );
     assert.equal(installedPackage.scripts.postinstall, undefined);
 

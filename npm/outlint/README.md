@@ -1,4 +1,4 @@
-# outlint
+# @outlint/cli
 
 Lint the header structure of Markdown documents against a declarative schema.
 The schema language and command-line contract are documented in the
@@ -7,7 +7,7 @@ The schema language and command-line contract are documented in the
 ## Install
 
 ```sh
-npm install --global outlint
+npm install --global @outlint/cli
 ```
 
 The package has no install-time lifecycle script. The first `outlint` command
