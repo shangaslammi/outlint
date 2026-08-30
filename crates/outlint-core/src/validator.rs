@@ -56,7 +56,7 @@ pub enum DiagnosticId {
     Requires,
     /// A `conflicts` condition and at least one exclusion are both satisfied.
     Conflicts,
-    /// Concrete occurrences violate an `ordered` constraint.
+    /// Concrete occurrences violate an explicit constraint or a scope's rule order.
     Ordered,
 }
 
@@ -172,9 +172,10 @@ pub enum DiagnosticTarget {
     MissingHeader {
         /// Document path of the header whose scope should have contained it.
         ///
-        /// Empty when no header encloses the missing section: either it belongs
-        /// to the root scope, or it is the title, which sits *above* the root
-        /// scope rather than in it.
+        /// Empty when no header encloses the missing section: it belongs to the
+        /// document root's scope (including a missing `h1` title), or the
+        /// sugar's single-`h1` voice reports its `sections` scope as the
+        /// document's.
         parent: HeaderPath,
         /// Label of the unsatisfied schema matcher: exact text, a glob, a
         /// slash-delimited regex, or `*`. This is schema text, not a heading.
@@ -182,9 +183,8 @@ pub enum DiagnosticTarget {
     },
     /// The document as a whole, when no single header can name the violation.
     ///
-    /// This is the root scope, which is attached to the schema root rather than
-    /// to any rule: a constraint on it has no parent header to point at, and
-    /// the enclosing `h1` is not one, since a document need not have an `h1`.
+    /// Used for the document root's scope, which has no parent header, and for
+    /// the sugar's single-`h1` document voice described by specification §6.2.
     Document,
     /// A frontmatter block, or a value inside one. Has no header path.
     Frontmatter {
@@ -208,7 +208,8 @@ pub struct FrontmatterBlock {
 pub struct Diagnostic {
     /// Stable diagnostic category.
     pub id: DiagnosticId,
-    /// What the diagnostic is about: a header, a missing one, or frontmatter.
+    /// What the diagnostic is about: a header, a missing one, the document, or
+    /// frontmatter.
     pub target: DiagnosticTarget,
     /// Primary Markdown source anchor.
     pub location: DiagnosticLocation,
@@ -626,8 +627,8 @@ impl<'a> Validator<'a> {
                 self.emit(
                     Diagnostic {
                         id: DiagnosticId::MissingTitle,
-                        // The title sits above the root scope, so it has no
-                        // parent.
+                        // A missing `h1` belongs to the document root's scope,
+                        // whose virtual parent has no header path.
                         target: DiagnosticTarget::MissingHeader {
                             parent: HeaderPath::default(),
                             matcher: matcher_label(&rule.matcher),
@@ -971,8 +972,9 @@ impl<'a> Validator<'a> {
         let mut occurrences = Vec::new();
         for pathed in sections {
             let section = pathed.section;
-            // Already the section's complete ancestor chain: a scope is not
-            // necessarily rooted at `parent_path` (the root scope is flat).
+            // Already the section's complete ancestor chain. Do not rebuild it
+            // from the diagnostic attribution path, which is intentionally
+            // empty under the sugar's single-`h1` document voice.
             let path = pathed.path.clone();
             let matched = rules
                 .iter()
@@ -1066,8 +1068,9 @@ impl<'a> Validator<'a> {
     ///
     /// The check is §5.1's `last(A) < first(B)` over adjacent pairs of the
     /// scope's accepting rules that matched anything, in list order. Denied
-    /// rules and unmatched headers match nothing that counts, so they float
-    /// freely. Each violated pair is one `ordered` diagnostic, so that a
+    /// rules do not participate in the order pairing, while unmatched headers
+    /// are unconstrained by ordering. Each violated pair is one `ordered`
+    /// diagnostic, so that a
     /// misplaced section is named by the neighbours it broke rather than by
     /// the whole scope at once.
     fn validate_order(&mut self, check: OrderCheck<'_, '_>) {
@@ -1242,9 +1245,10 @@ impl<'a> Validator<'a> {
             self.emit(
                 Diagnostic {
                     id,
-                    // The scope the constraint is attached to. At the document
-                    // root that scope is flat and spans headers under different
-                    // ancestors, so no single header can name it.
+                    // The scope the constraint is attached to. The virtual
+                    // document root has no header path; the sugar's single-h1
+                    // voice likewise attributes its sections scope to the
+                    // document (§6.2).
                     target: match parent {
                         Some(_) => DiagnosticTarget::Header(parent_path.clone()),
                         None => DiagnosticTarget::Document,
@@ -2523,8 +2527,9 @@ mod tests {
             .map(|diagnostic| diagnostic.target)
             .collect::<Vec<_>>();
 
-        // The root scope is flat, so a constraint on it has no one header to
-        // name; a missing root section still has its schema-side matcher label.
+        // Under the sugar's single-h1 voice, the sections scope is attributed
+        // to the document; a missing section still has its schema-side matcher
+        // label.
         assert_eq!(
             targets,
             [
@@ -2951,8 +2956,9 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         let diagnostic = &diagnostics[0];
         assert_eq!(diagnostic.id, DiagnosticId::Requires);
-        // The constraint sits at the schema root, so the target is the
-        // document; the frontmatter side is named among the references.
+        // The top-level sugar constraint binds the title's sections scope but
+        // uses the single-h1 document voice; the frontmatter side is named
+        // among the references.
         assert_eq!(diagnostic.target, DiagnosticTarget::Document);
         assert_eq!(
             diagnostic.references[0],
@@ -3027,8 +3033,8 @@ mod tests {
     fn a_scope_orders_its_rules_by_default() {
         // No constraint spelled: the `sections` list is the order. Under the
         // sugar's document voice the violation targets the document and is
-        // attributed to the title node, since the scope has no rule of its
-        // own; the message names the pair that broke.
+        // attributed to the title node that owns the sections scope; the
+        // message names the pair that broke.
         let schema =
             "version: 1\nsections:\n  - match: Overview\n  - match: Usage\n  - match: Notes\n";
         assert_eq!(
@@ -3087,9 +3093,9 @@ mod tests {
 
     #[test]
     fn implicit_order_ignores_unmatched_and_denied_headers_and_absent_rules() {
-        // Unmatched headers in an open scope match no rule and float; a
-        // denied rule matches nothing that counts; an absent optional rule is
-        // simply not among the present pairs.
+        // Unmatched headers in an open scope are unconstrained by ordering; a
+        // denied rule contributes no accepted occurrence to the order; an
+        // absent optional rule is simply not among the present pairs.
         let schema = "version: 1\nsections:\n  - match: A\n  - match: B\n    required: false\n  - match: C\n  - match: X\n    allow: false\n";
         assert_eq!(
             ids_and_targets(schema, "# T\n## Free\n## A\n## Free\n## C\n## Free\n"),

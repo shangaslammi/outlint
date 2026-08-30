@@ -271,7 +271,7 @@ outlint check rollout.md --format json
 ```
 
 ```json
-{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":7,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":2}
+{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":2}
 ```
 
 Every diagnostic carries a `target` saying what it is about, tagged by
@@ -371,17 +371,25 @@ newer toolchain), and the MSRV is tested in CI.
 ## Contributing
 
 Bug reports, specification questions, and pull requests are welcome via the
-issue tracker at <https://github.com/shangaslammi/outlint>. Behavior changes
-should come with a `testdata/` case and a specification update; please open
-an issue before large changes so the design can be settled first.
+issue tracker at <https://github.com/shangaslammi/outlint>. Changes to specified
+behavior should update the specification and add a `testdata/` case. A bug fix
+that brings code into line with the existing specification needs the fixture
+and a citation to that specification text, not a redundant specification edit.
+Please open an issue before large changes so the design can be settled first.
 
 Before submitting, run:
 
 ```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
+
+CI runs the dependency-resolving Cargo commands with `--locked`, runs tests on
+stable Linux, macOS, and Windows, and runs the full test suite on Rust 1.86.
+The local commands above omit `--locked` so an intentional lockfile change is
+reported normally; `cargo fmt` does not resolve dependencies.
 
 ## License
 

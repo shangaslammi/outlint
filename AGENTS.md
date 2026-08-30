@@ -3,8 +3,8 @@
 ## Project
 
 Outlint validates the header structure (outline) of Markdown documents
-against a declarative schema. Rust workspace at 0.1.0, unreleased; expect
-breaking changes before 1.0.
+against a declarative schema. Rust workspace at the 0.1.0 initial release;
+expect breaking changes before 1.0.
 
     crates/outlint-core   schema model, schema loader, validator (library)
     crates/outlint-cli    the `outlint` binary
@@ -34,7 +34,7 @@ invent, rename, or repurpose one without a spec change.
 
 ## Current state
 
-Feature-complete against the spec for a first release. The
+Released as 0.1.0 and feature-complete against specification v1. The
 pipeline in `outlint-core`: `load_schema` / `load_schema_with_resources`
 (`loader.rs`) turn schema text into a normalized `Schema` or an
 `InvalidSchema` carrying positioned `SchemaError`s; `parse_markdown`
@@ -69,7 +69,7 @@ JSON output is the full diagnostic shape; the conformance corpus's
 diverge deliberately — do not "align" them.
 
 MSRV is declared: `rust-version = "1.86"` in `[workspace.package]`, with
-a pinned CI job running `cargo check --workspace --all-targets` on it.
+a pinned CI job running `cargo test --workspace --locked` on it.
 
 Test surface: unit tests sit next to the code in `loader.rs`,
 `markdown.rs`, and `validator.rs`, including property tests over header
@@ -85,8 +85,11 @@ Absent by design, do not add speculatively:
 - Error/reporting frameworks (`thiserror`, `anyhow`, `miette`). Errors are
   plain data structs carrying ranges; the CLI formats them.
 - Async, threading, and parallel file checking.
-- Config files, caching, incremental checking, LSP. The CLI's
-  nearest-schema discovery is the only lookup that exists.
+- Config files, validation-result or incremental caches, incremental checking,
+  LSP. The native CLI's nearest-schema discovery is its only implicit
+  configuration or schema-selection lookup. This does not prohibit the
+  documented npm bootstrap from acquiring and caching the released native
+  binary before validation begins.
 
 `lib.rs` re-exports its modules with globs. Acceptable pre-1.0; revisit
 before stabilizing, and keep the modules themselves private.
@@ -215,12 +218,13 @@ Run:
     cargo test --workspace
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
-CI (`.github/workflows/ci.yml`) runs every check above with `--locked`:
-the tests on stable across Linux, macOS, and Windows, fmt and clippy on
-Linux, the doc build with `RUSTDOCFLAGS="-D warnings"`, and the full test
-suite on the 1.86 MSRV. It additionally runs `cargo deny check` against
-the committed `deny.toml` (advisories, licenses, bans, sources) — run it
-locally only when touching dependencies. If a check here starts catching
+CI (`.github/workflows/ci.yml`) runs the tests on stable across Linux, macOS,
+and Windows, fmt and clippy on Linux, the doc build with
+`RUSTDOCFLAGS="-D warnings"`, and the full test suite on the 1.86 MSRV. Cargo
+commands that resolve dependencies use `--locked`; `cargo fmt` runs as shown
+above because it does not resolve them. CI additionally runs `cargo deny check`
+against the committed `deny.toml` (advisories, licenses, bans, sources) — run
+it locally only when touching dependencies. If a check here starts catching
 things CI misses, add it to CI.
 
 `--all-features` is omitted deliberately — no crate defines features.

@@ -39,7 +39,7 @@ All four were run locally:
 
 - [ ] New or changed user-visible behavior has a `testdata/` fixture, and its
       `expected.json` names every and only the Markdown files in that
-      directory, with diagnostics in observed order.
+      directory. Diagnostic order is irrelevant; multiplicity is significant.
 - [ ] Loader/matcher invariants that are not user-visible have unit tests next
       to the code.
 - [ ] No existing test was weakened or deleted. (If an `expected.json` was

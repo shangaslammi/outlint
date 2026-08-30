@@ -88,9 +88,12 @@ The workspace has two crates:
 
 ## Verification
 
-Run all four before opening a pull request. CI runs the first three plus an
-MSRV build; the rustdoc check is part of the project standard even though CI
-does not currently run it.
+Run all four before opening a pull request. CI runs all four: tests on stable
+across Linux, macOS, and Windows, formatting, Clippy, and rustdoc on Linux. It
+also runs the full test suite on Rust 1.86 and `cargo deny check`. Commands
+that resolve the Cargo dependency graph use the committed lockfile in CI; the
+local commands below omit `--locked` so Cargo can report an intentionally
+changed lockfile normally.
 
 ```sh
 cargo fmt --all -- --check
@@ -172,8 +175,10 @@ an issue rather than working around it.
 
 Not planned, and please do not add speculatively: async or threading, an
 error-reporting framework (`thiserror`, `anyhow`, `miette` — errors are plain
-data structs carrying ranges and the CLI formats them), caching, incremental
-checking, or an LSP.
+data structs carrying ranges and the CLI formats them), validation-result or
+incremental caches, incremental checking, or an LSP. This does not prohibit
+the documented npm launcher from caching the released native binary it
+acquires before validation begins.
 
 ## AI-assisted contributions
 

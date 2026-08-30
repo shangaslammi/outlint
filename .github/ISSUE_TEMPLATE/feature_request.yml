@@ -15,7 +15,10 @@ body:
 
         Some things are out of scope on purpose: rewriting or fixing documents
         (outlint only reports), prose and formatting linting, directory
-        traversal in v1, network access, async or parallelism, and an LSP.
+        traversal in v1, implicit network access by the native CLI during
+        validation or resource retrieval, async or parallelism, and an LSP.
+        This does not include a package-manager bootstrap such as npm's
+        documented first-run acquisition of the released native binary.
 
   - type: dropdown
     id: area

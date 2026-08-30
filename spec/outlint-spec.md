@@ -478,9 +478,11 @@ document order at once. The two agree wherever matchers do not overlap,
 which is the usual case, and a trailing accepting `match: "*"` reads as
 "anything else comes last". Where a specific rule must precede a general
 one for matching but follow it in the document, declare the scope
-`ordered: false` and spell the order with an `ordered` constraint (§5.1),
-which exists for exactly the orders a list cannot express: partial ones,
-and any order in an unordered scope.
+unordered and spell the order with an `ordered` constraint (§5.1): set
+`ordered: false` on the rule that owns a child scope, or set
+`options.ordered_sections: false` for the outermost scope. The constraint
+exists for exactly the orders a list cannot express: partial ones, and any
+order in an unordered scope.
 
 ---
 
@@ -624,7 +626,9 @@ every rule in it, so the constraint is either redundant — the same failure
 reported twice — or contradicts the list order. When the rules witnessing a
 reversed pair are present, at least one of the two orders necessarily fails;
 absent optional rules can make both orders vacuously satisfied. Declare the
-scope `ordered: false` to order it by constraint instead.
+scope unordered to order it by constraint instead: set `ordered: false` on
+the rule that owns a child scope, or `options.ordered_sections: false` for
+the outermost scope.
 
 That rule needs no special case at the h1 level. A root `ordered` over
 `outline` rules orders the parts of a document, and a listed rule may
@@ -991,9 +995,10 @@ exists.
   a default or a closed scope.
 - Use `strict: true` rather than a manual `"*"`/`allow: false` pair.
 - List rules in the order the sections should appear: that order is
-  enforced by default. Set `ordered: false` on a scope whose sections may
-  come in any order, and reach for the `ordered` constraint only there, or
-  for a partial order.
+  enforced by default. For a child scope whose sections may come in any order,
+  set `ordered: false` on its owning rule; for the outermost scope, set
+  `options.ordered_sections: false`. Reach for the `ordered` constraint only
+  in an unordered scope, or for a partial order.
 - Express per-section obligations structurally (`required`, `repeat`);
   reserve `constraints` for presence logic *between* sections.
 - The default cardinality is `0..n`. Exact-text matchers almost always want
@@ -1215,7 +1220,7 @@ with document read errors; dependent documents are not partially validated.
 
 The V1 CLI validates only. It MUST NOT rewrite Markdown or schema files,
 insert or normalize headings in source, generate suppressions, or modify
-frontmatter. Setext normalization in Section 1.3 is an internal parsing step,
+frontmatter. Setext normalization in Section 1.2 is an internal parsing step,
 not a source edit.
 
 The CLI MUST NOT perform implicit network access. In particular, linked JSON

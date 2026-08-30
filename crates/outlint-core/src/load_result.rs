@@ -286,7 +286,9 @@ pub enum SchemaErrorKind {
     InvalidMatcher,
     /// A repeat declaration is malformed or has inconsistent bounds.
     InvalidRepeat,
-    /// References in an ordered constraint do not share a concrete scope.
+    /// An ordered constraint uses a non-positional frontmatter proposition,
+    /// mixes scopes, descends through a repeatable ancestor, or targets a
+    /// scope already ordered by its rule list.
     OrderedScopeMismatch,
     /// A rule declares both `required` and `repeat`, or denies a cardinality.
     ConflictingCardinality,
