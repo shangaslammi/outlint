@@ -180,9 +180,25 @@ fn has_zero_minimum(repetition: &Repetition) -> bool {
 mod tests {
     use super::{analyze, CaptureAnalysisError, CaptureAncestors};
 
+    /// The group participates in every successful match: a legal declaration.
     const LEGAL: CaptureAncestors = CaptureAncestors {
         alternation: false,
         min_zero_repetition: false,
+    };
+    /// Enclosed by an alternation only.
+    const ALTERNATION: CaptureAncestors = CaptureAncestors {
+        alternation: true,
+        min_zero_repetition: false,
+    };
+    /// Enclosed by a zero-minimum repetition only.
+    const MIN_ZERO: CaptureAncestors = CaptureAncestors {
+        alternation: false,
+        min_zero_repetition: true,
+    };
+    /// Enclosed by both, so both causes are reported.
+    const BOTH: CaptureAncestors = CaptureAncestors {
+        alternation: true,
+        min_zero_repetition: true,
     };
 
     /// The ancestor facts recorded for `name`, failing the test when the
@@ -192,6 +208,26 @@ mod tests {
             .unwrap_or_else(|error| panic!("`{pattern_body}` should parse, got {error:?}"))
             .get(name)
             .unwrap_or_else(|| panic!("`{pattern_body}` should declare a group named `{name}`"))
+    }
+
+    /// Checks a table of `(pattern body, group name, expected facts)` rows.
+    fn assert_ancestors(cases: &[(&str, &str, CaptureAncestors)]) {
+        for (pattern_body, name, expected) in cases {
+            assert_eq!(
+                ancestors(pattern_body, name),
+                *expected,
+                "group `{name}` of `{pattern_body}`"
+            );
+        }
+    }
+
+    /// Every named group of `pattern_body`, in report order.
+    fn names(pattern_body: &str) -> Vec<String> {
+        analyze(pattern_body)
+            .unwrap_or_else(|error| panic!("`{pattern_body}` should parse, got {error:?}"))
+            .iter()
+            .map(|(name, _)| name.to_owned())
+            .collect()
     }
 
     #[test]
@@ -212,24 +248,12 @@ mod tests {
 
     #[test]
     fn an_enclosing_alternation_is_recorded() {
-        assert_eq!(
-            ancestors("a|(?<x>b)", "x"),
-            CaptureAncestors {
-                alternation: true,
-                min_zero_repetition: false,
-            }
-        );
+        assert_eq!(ancestors("a|(?<x>b)", "x"), ALTERNATION);
     }
 
     #[test]
     fn an_enclosing_zero_minimum_repetition_is_recorded() {
-        assert_eq!(
-            ancestors("(?<x>a)?", "x"),
-            CaptureAncestors {
-                alternation: false,
-                min_zero_repetition: true,
-            }
-        );
+        assert_eq!(ancestors("(?<x>a)?", "x"), MIN_ZERO);
     }
 
     #[test]
@@ -249,17 +273,134 @@ mod tests {
 
     #[test]
     fn both_causes_can_hold_at_once() {
-        assert_eq!(
-            ancestors("(?:a|(?:(?<x>b))*)", "x"),
-            CaptureAncestors {
-                alternation: true,
-                min_zero_repetition: true,
-            }
-        );
+        assert_eq!(ancestors("(?:a|(?:(?<x>b))*)", "x"), BOTH);
     }
 
     #[test]
     fn malformed_syntax_reports_only_unparseable() {
         assert_eq!(analyze("(?<x>a"), Err(CaptureAnalysisError::Unparseable));
+    }
+
+    #[test]
+    fn both_spellings_coexist_in_one_expression() {
+        assert_ancestors(&[
+            ("(?<angle>x)(?P<python>y)", "angle", LEGAL),
+            ("(?<angle>x)(?P<python>y)", "python", LEGAL),
+        ]);
+        assert_eq!(names("(?<angle>x)(?P<python>y)"), ["angle", "python"]);
+    }
+
+    #[test]
+    fn every_zero_minimum_form_marks_the_capture_in_either_greediness() {
+        assert_ancestors(&[
+            ("(?<x>a)?", "x", MIN_ZERO),
+            ("(?<x>a)??", "x", MIN_ZERO),
+            ("(?<x>a)*", "x", MIN_ZERO),
+            ("(?<x>a)*?", "x", MIN_ZERO),
+            ("(?<x>a){0,3}", "x", MIN_ZERO),
+            ("(?<x>a){0,3}?", "x", MIN_ZERO),
+            ("(?<x>a){0}", "x", MIN_ZERO),
+            ("(?<x>a){0}?", "x", MIN_ZERO),
+            ("(?<x>a){0,}", "x", MIN_ZERO),
+            ("(?<x>a){0,}?", "x", MIN_ZERO),
+        ]);
+    }
+
+    #[test]
+    fn nonzero_repetition_forms_leave_the_capture_mandatory() {
+        assert_ancestors(&[
+            ("(?:(?<x>a))+", "x", LEGAL),
+            ("(?:(?<x>a))+?", "x", LEGAL),
+            ("(?:(?<x>a)){1}", "x", LEGAL),
+            ("(?:(?<x>a)){1,}", "x", LEGAL),
+            ("(?:(?<x>a)){1,3}", "x", LEGAL),
+        ]);
+    }
+
+    #[test]
+    fn alternation_ancestry_is_recorded_at_any_depth() {
+        assert_ancestors(&[
+            ("(?:a|(?:b|(?<x>x)))", "x", ALTERNATION),
+            // A branch no input can reach is still a branch: §2.2 is syntactic.
+            (r"(?:[^\s\S]|(?<x>a))", "x", ALTERNATION),
+            // The alternation is inside the capture, so it is not an ancestor.
+            ("(?<x>a|b)", "x", LEGAL),
+            // Both constructs enclose the group, so both causes are reported.
+            ("(?:(?:a|b(?<x>c))*)", "x", BOTH),
+        ]);
+    }
+
+    #[test]
+    fn nested_captures_are_classified_from_their_own_ancestors() {
+        assert_ancestors(&[
+            // The `?` sits inside `outer` but encloses `inner`.
+            ("(?<outer>(?<inner>x)?)", "outer", LEGAL),
+            ("(?<outer>(?<inner>x)?)", "inner", MIN_ZERO),
+            // A non-capturing repeated wrapper classifies what it wraps.
+            ("(?:(?<x>a))*", "x", MIN_ZERO),
+            ("(?:(?<x>a)){2,}", "x", LEGAL),
+        ]);
+    }
+
+    #[test]
+    fn group_lookalikes_produce_no_named_group() {
+        // Non-capturing groups are not captures at all.
+        assert!(names("(?:x)").is_empty());
+        // An escaped literal spelling of a named group is just text.
+        assert_eq!(
+            analyze(r"\(\?<x>literal\)")
+                .expect("literal parses")
+                .get("x"),
+            None
+        );
+        assert!(names(r"\(\?<x>literal\)").is_empty());
+        // Unnamed capturing groups stay ordinary groups (§2.2).
+        assert_eq!(names("(a)(?<x>b)(c)"), ["x"]);
+    }
+
+    #[test]
+    fn an_undeclared_optional_group_is_reported_not_rejected() {
+        // Only the loader knows which names a schema declared, so an optional
+        // helper group next to a mandatory one must analyze successfully.
+        let pattern_body = r"(?<version>\d+)(?:-(?<suffix>[a-z]+))?";
+        assert_eq!(names(pattern_body), ["suffix", "version"]);
+        assert_ancestors(&[
+            (pattern_body, "version", LEGAL),
+            (pattern_body, "suffix", MIN_ZERO),
+        ]);
+    }
+
+    #[test]
+    fn a_normalized_body_containing_a_slash_parses_directly() {
+        // `loader::rules::regex_body` has already turned `\/` into `/` and
+        // stripped the delimiters; this module repeats neither step.
+        assert_eq!(ancestors("(?<path>a/b)", "path"), LEGAL);
+    }
+
+    #[test]
+    fn a_reused_capture_name_is_unparseable() {
+        // Pinned `regex-syntax 0.8.11` rejects duplicate capture names, so the
+        // keyed report never has to choose between two groups of one name. If a
+        // future version admits duplicates this assertion fails: redesign the
+        // report's keying then rather than silently overwriting one occurrence.
+        assert_eq!(
+            analyze("(?<x>a)(?P<x>b)"),
+            Err(CaptureAnalysisError::Unparseable)
+        );
+    }
+
+    #[test]
+    fn other_parser_failures_carry_no_message() {
+        for pattern_body in [
+            "(?<x>a",       // unmatched parenthesis
+            "(?=a)(?<x>b)", // lookaround, outside the §2.2 dialect
+            r"(?<x>a)\1",   // backreference, outside the dialect too
+        ] {
+            let error = analyze(pattern_body).expect_err("should not parse");
+            assert_eq!(error, CaptureAnalysisError::Unparseable);
+            // The variant carries no payload, so no parser text can leak into a
+            // replacement for the loader's own `invalid-matcher` message.
+            assert_eq!(format!("{error:?}"), "Unparseable");
+        }
     }
 }
