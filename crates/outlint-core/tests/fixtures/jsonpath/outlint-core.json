@@ -1,0 +1,906 @@
+{
+  "description": "Outlint's authored corpus for the guaranteed JSONPath core of specification 4.6. This is the primary release gate. Every selector in `selection` and `rejected` lies inside the core grammar; no slice, descendant, union, filter, or function appears anywhere, because those are vendor tier and carry no Outlint guarantee. Expected normalized paths are authored by hand, not recorded from an implementation.",
+  "profile": "outlint-core",
+  "documents": {
+    "basic": {
+      "status": "draft",
+      "version": 3,
+      "tags": [
+        "a",
+        "b",
+        "c"
+      ],
+      "meta": {
+        "owner": {
+          "name": "Ada"
+        }
+      },
+      "matrix": [
+        [
+          1,
+          2
+        ],
+        [
+          3
+        ]
+      ],
+      "people": [
+        {
+          "name": "Ada"
+        },
+        {
+          "name": "Bob"
+        }
+      ],
+      "empty_list": [],
+      "empty_map": {}
+    },
+    "array_root": [
+      "x",
+      "y"
+    ],
+    "names": {
+      "status": "shorthand",
+      "\u00e9\u4e2d": "unicode shorthand",
+      "decision-makers": "hyphen",
+      "a.b": "dot",
+      "bracket]name": "right bracket",
+      "eq=name": "equals sign",
+      "it's": "apostrophe",
+      "dq\"uote": "double quote",
+      "back\\slash": "reverse solidus",
+      "tab\there": "tab",
+      "nl\nhere": "line feed",
+      "null\u0000char": "nul",
+      "vt\u000bchar": "vertical tab"
+    },
+    "numbers": {
+      "huge": 123456789012345678901234567890,
+      "precise": 0.1000000000000000000000000000000000001,
+      "boundary": 9007199254740991,
+      "negative_boundary": -9007199254740991,
+      "beyond": 9007199254740993,
+      "trailing": 1.00
+    },
+    "props": {
+      "flag_true": true,
+      "flag_false": false,
+      "nothing": null,
+      "text": "draft",
+      "count": 3,
+      "list": [
+        1,
+        2
+      ],
+      "map": {
+        "a": 1
+      },
+      "mixed": [
+        true,
+        "x"
+      ],
+      "nulls": [
+        null,
+        null
+      ],
+      "null_and_x": [
+        null,
+        "x"
+      ],
+      "flags": [
+        false,
+        true
+      ]
+    }
+  },
+  "selection": [
+    {
+      "name": "root selects the whole document",
+      "document": "basic",
+      "selector": "$",
+      "nodes": [
+        {
+          "path": "$",
+          "value": {
+            "status": "draft",
+            "version": 3,
+            "tags": [
+              "a",
+              "b",
+              "c"
+            ],
+            "meta": {
+              "owner": {
+                "name": "Ada"
+              }
+            },
+            "matrix": [
+              [
+                1,
+                2
+              ],
+              [
+                3
+              ]
+            ],
+            "people": [
+              {
+                "name": "Ada"
+              },
+              {
+                "name": "Bob"
+              }
+            ],
+            "empty_list": [],
+            "empty_map": {}
+          }
+        }
+      ]
+    },
+    {
+      "name": "root selects a document that is an array",
+      "document": "array_root",
+      "selector": "$",
+      "nodes": [
+        {
+          "path": "$",
+          "value": [
+            "x",
+            "y"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "nested names chain",
+      "document": "basic",
+      "selector": "$.meta.owner.name",
+      "nodes": [
+        {
+          "path": "$['meta']['owner']['name']",
+          "value": "Ada"
+        }
+      ]
+    },
+    {
+      "name": "a name then an index",
+      "document": "basic",
+      "selector": "$.tags[1]",
+      "nodes": [
+        {
+          "path": "$['tags'][1]",
+          "value": "b"
+        }
+      ]
+    },
+    {
+      "name": "an index then a name",
+      "document": "basic",
+      "selector": "$.people[0].name",
+      "nodes": [
+        {
+          "path": "$['people'][0]['name']",
+          "value": "Ada"
+        }
+      ]
+    },
+    {
+      "name": "two indices chain",
+      "document": "basic",
+      "selector": "$.matrix[0][1]",
+      "nodes": [
+        {
+          "path": "$['matrix'][0][1]",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "name": "whitespace before a dot segment",
+      "document": "basic",
+      "selector": "$ .status",
+      "nodes": [
+        {
+          "path": "$['status']",
+          "value": "draft"
+        }
+      ]
+    },
+    {
+      "name": "whitespace before a bracket segment",
+      "document": "basic",
+      "selector": "$ ['status']",
+      "nodes": [
+        {
+          "path": "$['status']",
+          "value": "draft"
+        }
+      ]
+    },
+    {
+      "name": "whitespace inside a bracket segment",
+      "document": "basic",
+      "selector": "$[ 'status' ]",
+      "nodes": [
+        {
+          "path": "$['status']",
+          "value": "draft"
+        }
+      ]
+    },
+    {
+      "name": "whitespace around an index selector",
+      "document": "basic",
+      "selector": "$.tags[ 1 ]",
+      "nodes": [
+        {
+          "path": "$['tags'][1]",
+          "value": "b"
+        }
+      ]
+    },
+    {
+      "name": "whitespace around a wildcard selector",
+      "document": "basic",
+      "selector": "$.empty_list[ * ]",
+      "nodes": []
+    },
+    {
+      "name": "a tab and a newline are S whitespace",
+      "document": "basic",
+      "selector": "$\t.meta\n.owner.name",
+      "nodes": [
+        {
+          "path": "$['meta']['owner']['name']",
+          "value": "Ada"
+        }
+      ]
+    },
+    {
+      "name": "a missing member selects nothing",
+      "document": "basic",
+      "selector": "$.absent",
+      "nodes": []
+    },
+    {
+      "name": "a name applied to an array selects nothing",
+      "document": "basic",
+      "selector": "$.tags.status",
+      "nodes": []
+    },
+    {
+      "name": "a name applied to a string selects nothing",
+      "document": "basic",
+      "selector": "$.status.length",
+      "nodes": []
+    },
+    {
+      "name": "an index applied to an object selects nothing",
+      "document": "basic",
+      "selector": "$.meta[0]",
+      "nodes": []
+    },
+    {
+      "name": "an index applied to a string selects nothing",
+      "document": "basic",
+      "selector": "$.status[0]",
+      "nodes": []
+    },
+    {
+      "name": "a wildcard applied to a string selects nothing",
+      "document": "basic",
+      "selector": "$.status[*]",
+      "nodes": []
+    },
+    {
+      "name": "a wildcard applied to a number selects nothing",
+      "document": "basic",
+      "selector": "$.version.*",
+      "nodes": []
+    },
+    {
+      "name": "an empty array yields no wildcard nodes",
+      "document": "basic",
+      "selector": "$.empty_list[*]",
+      "nodes": []
+    },
+    {
+      "name": "an empty object yields no wildcard nodes",
+      "document": "basic",
+      "selector": "$.empty_map.*",
+      "nodes": []
+    },
+    {
+      "name": "shorthand name",
+      "document": "names",
+      "selector": "$.status",
+      "nodes": [
+        {
+          "path": "$['status']",
+          "value": "shorthand"
+        }
+      ]
+    },
+    {
+      "name": "single-quoted name",
+      "document": "names",
+      "selector": "$['status']",
+      "nodes": [
+        {
+          "path": "$['status']",
+          "value": "shorthand"
+        }
+      ]
+    },
+    {
+      "name": "double-quoted name",
+      "document": "names",
+      "selector": "$[\"status\"]",
+      "nodes": [
+        {
+          "path": "$['status']",
+          "value": "shorthand"
+        }
+      ]
+    },
+    {
+      "name": "unicode shorthand name",
+      "document": "names",
+      "selector": "$.\u00e9\u4e2d",
+      "nodes": [
+        {
+          "path": "$['\u00e9\u4e2d']",
+          "value": "unicode shorthand"
+        }
+      ]
+    },
+    {
+      "name": "unicode quoted name",
+      "document": "names",
+      "selector": "$['\u00e9\u4e2d']",
+      "nodes": [
+        {
+          "path": "$['\u00e9\u4e2d']",
+          "value": "unicode shorthand"
+        }
+      ]
+    },
+    {
+      "name": "a hyphen requires bracket notation",
+      "document": "names",
+      "selector": "$['decision-makers']",
+      "nodes": [
+        {
+          "path": "$['decision-makers']",
+          "value": "hyphen"
+        }
+      ]
+    },
+    {
+      "name": "a dot inside a quoted name is literal",
+      "document": "names",
+      "selector": "$['a.b']",
+      "nodes": [
+        {
+          "path": "$['a.b']",
+          "value": "dot"
+        }
+      ]
+    },
+    {
+      "name": "a right bracket inside a quoted name is literal",
+      "document": "names",
+      "selector": "$['bracket]name']",
+      "nodes": [
+        {
+          "path": "$['bracket]name']",
+          "value": "right bracket"
+        }
+      ]
+    },
+    {
+      "name": "an equals sign inside a quoted name is literal",
+      "document": "names",
+      "selector": "$['eq=name']",
+      "nodes": [
+        {
+          "path": "$['eq=name']",
+          "value": "equals sign"
+        }
+      ]
+    },
+    {
+      "name": "an apostrophe is escaped in the rendered path",
+      "document": "names",
+      "selector": "$[\"it's\"]",
+      "nodes": [
+        {
+          "path": "$['it\\'s']",
+          "value": "apostrophe"
+        }
+      ]
+    },
+    {
+      "name": "an apostrophe can also be escaped in the selector",
+      "document": "names",
+      "selector": "$['it\\'s']",
+      "nodes": [
+        {
+          "path": "$['it\\'s']",
+          "value": "apostrophe"
+        }
+      ]
+    },
+    {
+      "name": "a double quote needs no escape in the rendered path",
+      "document": "names",
+      "selector": "$['dq\"uote']",
+      "nodes": [
+        {
+          "path": "$['dq\"uote']",
+          "value": "double quote"
+        }
+      ]
+    },
+    {
+      "name": "a reverse solidus is doubled in the rendered path",
+      "document": "names",
+      "selector": "$['back\\\\slash']",
+      "nodes": [
+        {
+          "path": "$['back\\\\slash']",
+          "value": "reverse solidus"
+        }
+      ]
+    },
+    {
+      "name": "a tab uses its short escape",
+      "document": "names",
+      "selector": "$[\"tab\\there\"]",
+      "nodes": [
+        {
+          "path": "$['tab\\there']",
+          "value": "tab"
+        }
+      ]
+    },
+    {
+      "name": "a line feed uses its short escape",
+      "document": "names",
+      "selector": "$[\"nl\\nhere\"]",
+      "nodes": [
+        {
+          "path": "$['nl\\nhere']",
+          "value": "line feed"
+        }
+      ]
+    },
+    {
+      "name": "a nul uses the four-digit lowercase form",
+      "document": "names",
+      "selector": "$[\"null\\u0000char\"]",
+      "nodes": [
+        {
+          "path": "$['null\\u0000char']",
+          "value": "nul"
+        }
+      ]
+    },
+    {
+      "name": "a vertical tab uses the four-digit lowercase form",
+      "document": "names",
+      "selector": "$[\"vt\\u000bchar\"]",
+      "nodes": [
+        {
+          "path": "$['vt\\u000bchar']",
+          "value": "vertical tab"
+        }
+      ]
+    },
+    {
+      "name": "index zero",
+      "document": "basic",
+      "selector": "$.tags[0]",
+      "nodes": [
+        {
+          "path": "$['tags'][0]",
+          "value": "a"
+        }
+      ]
+    },
+    {
+      "name": "a positive index",
+      "document": "basic",
+      "selector": "$.tags[2]",
+      "nodes": [
+        {
+          "path": "$['tags'][2]",
+          "value": "c"
+        }
+      ]
+    },
+    {
+      "name": "index -1 selects the last member",
+      "document": "basic",
+      "selector": "$.tags[-1]",
+      "nodes": [
+        {
+          "path": "$['tags'][2]",
+          "value": "c"
+        }
+      ]
+    },
+    {
+      "name": "a negative index renders as its non-negative position",
+      "document": "basic",
+      "selector": "$.tags[-3]",
+      "nodes": [
+        {
+          "path": "$['tags'][0]",
+          "value": "a"
+        }
+      ]
+    },
+    {
+      "name": "an exactly-too-negative index selects nothing",
+      "document": "basic",
+      "selector": "$.tags[-4]",
+      "nodes": []
+    },
+    {
+      "name": "a positive out-of-range index selects nothing",
+      "document": "basic",
+      "selector": "$.tags[3]",
+      "nodes": []
+    },
+    {
+      "name": "the positive I-JSON boundary is a valid index",
+      "document": "basic",
+      "selector": "$.tags[9007199254740991]",
+      "nodes": []
+    },
+    {
+      "name": "the negative I-JSON boundary is a valid index",
+      "document": "basic",
+      "selector": "$.tags[-9007199254740991]",
+      "nodes": []
+    },
+    {
+      "name": "a bracket wildcard over an array",
+      "document": "basic",
+      "selector": "$.tags[*]",
+      "nodes": [
+        {
+          "path": "$['tags'][0]",
+          "value": "a"
+        },
+        {
+          "path": "$['tags'][1]",
+          "value": "b"
+        },
+        {
+          "path": "$['tags'][2]",
+          "value": "c"
+        }
+      ]
+    },
+    {
+      "name": "a dot wildcard over an array",
+      "document": "basic",
+      "selector": "$.tags.*",
+      "nodes": [
+        {
+          "path": "$['tags'][0]",
+          "value": "a"
+        },
+        {
+          "path": "$['tags'][1]",
+          "value": "b"
+        },
+        {
+          "path": "$['tags'][2]",
+          "value": "c"
+        }
+      ]
+    },
+    {
+      "name": "a dot wildcard over an object",
+      "document": "basic",
+      "selector": "$.meta.*",
+      "nodes": [
+        {
+          "path": "$['meta']['owner']",
+          "value": {
+            "name": "Ada"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a bracket wildcard over the root object",
+      "document": "array_root",
+      "selector": "$[*]",
+      "nodes": [
+        {
+          "path": "$[0]",
+          "value": "x"
+        },
+        {
+          "path": "$[1]",
+          "value": "y"
+        }
+      ]
+    },
+    {
+      "name": "chained wildcards over nested arrays",
+      "document": "basic",
+      "selector": "$.matrix[*][*]",
+      "nodes": [
+        {
+          "path": "$['matrix'][0][0]",
+          "value": 1
+        },
+        {
+          "path": "$['matrix'][0][1]",
+          "value": 2
+        },
+        {
+          "path": "$['matrix'][1][0]",
+          "value": 3
+        }
+      ]
+    },
+    {
+      "name": "a wildcard followed by a name",
+      "document": "basic",
+      "selector": "$.people[*].name",
+      "nodes": [
+        {
+          "path": "$['people'][0]['name']",
+          "value": "Ada"
+        },
+        {
+          "path": "$['people'][1]['name']",
+          "value": "Bob"
+        }
+      ]
+    },
+    {
+      "name": "a wildcard followed by an index",
+      "document": "basic",
+      "selector": "$.matrix[*][0]",
+      "nodes": [
+        {
+          "path": "$['matrix'][0][0]",
+          "value": 1
+        },
+        {
+          "path": "$['matrix'][1][0]",
+          "value": 3
+        }
+      ]
+    },
+    {
+      "name": "a very large integer is selected intact",
+      "document": "numbers",
+      "selector": "$.huge",
+      "nodes": [
+        {
+          "path": "$['huge']",
+          "value": 123456789012345678901234567890
+        }
+      ]
+    },
+    {
+      "name": "a high-precision decimal is selected intact",
+      "document": "numbers",
+      "selector": "$.precise",
+      "nodes": [
+        {
+          "path": "$['precise']",
+          "value": 0.1000000000000000000000000000000000001
+        }
+      ]
+    },
+    {
+      "name": "a trailing-zero decimal is selected intact",
+      "document": "numbers",
+      "selector": "$.trailing",
+      "nodes": [
+        {
+          "path": "$['trailing']",
+          "value": 1.00
+        }
+      ]
+    },
+    {
+      "name": "an integer beyond the I-JSON range is still selectable",
+      "document": "numbers",
+      "selector": "$.beyond",
+      "nodes": [
+        {
+          "path": "$['beyond']",
+          "value": 9007199254740993
+        }
+      ]
+    }
+  ],
+  "rejected": [
+    {
+      "name": "an index with a leading zero",
+      "selector": "$.tags[01]",
+      "reason": "RFC 9535 int forbids a leading zero"
+    },
+    {
+      "name": "an index that is several digits with a leading zero",
+      "selector": "$.tags[0123]",
+      "reason": "RFC 9535 int forbids a leading zero"
+    },
+    {
+      "name": "negative zero as an index",
+      "selector": "$.tags[-0]",
+      "reason": "RFC 9535 int forbids -0"
+    },
+    {
+      "name": "one beyond the positive I-JSON boundary",
+      "selector": "$.tags[9007199254740992]",
+      "reason": "specification 4.6 bounds core index selectors to the I-JSON exact range"
+    },
+    {
+      "name": "one beyond the negative I-JSON boundary",
+      "selector": "$.tags[-9007199254740992]",
+      "reason": "specification 4.6 bounds core index selectors to the I-JSON exact range"
+    },
+    {
+      "name": "an index far beyond the I-JSON boundary",
+      "selector": "$.tags[99999999999999999999999999]",
+      "reason": "specification 4.6 bounds core index selectors to the I-JSON exact range"
+    }
+  ],
+  "propositions": [
+    {
+      "name": "a true node satisfies a bare read",
+      "document": "props",
+      "selector": "$.flag_true",
+      "bare": "satisfied"
+    },
+    {
+      "name": "a false node does not satisfy a bare read",
+      "document": "props",
+      "selector": "$.flag_false",
+      "bare": "unsatisfied"
+    },
+    {
+      "name": "a null node does not satisfy a bare read",
+      "document": "props",
+      "selector": "$.nothing",
+      "bare": "unsatisfied"
+    },
+    {
+      "name": "an empty result does not satisfy a bare read",
+      "document": "props",
+      "selector": "$.absent",
+      "bare": "unsatisfied"
+    },
+    {
+      "name": "a string node makes a bare read invalid",
+      "document": "props",
+      "selector": "$.text",
+      "bare": "invalid-value"
+    },
+    {
+      "name": "a number node makes a bare read invalid",
+      "document": "props",
+      "selector": "$.count",
+      "bare": "invalid-value"
+    },
+    {
+      "name": "a mapping node makes a bare read invalid",
+      "document": "props",
+      "selector": "$.map",
+      "bare": "invalid-value"
+    },
+    {
+      "name": "a true sibling does not short-circuit invalidity",
+      "document": "props",
+      "selector": "$.mixed[*]",
+      "bare": "invalid-value"
+    },
+    {
+      "name": "an all-null result set does not satisfy a bare read",
+      "document": "props",
+      "selector": "$.nulls[*]",
+      "bare": "unsatisfied"
+    },
+    {
+      "name": "a bare read is existential over booleans",
+      "document": "props",
+      "selector": "$.flags[*]",
+      "bare": "satisfied"
+    },
+    {
+      "name": "a matching string satisfies equality",
+      "document": "props",
+      "selector": "$.text",
+      "equals": "draft",
+      "equality": "satisfied"
+    },
+    {
+      "name": "a different string does not satisfy equality",
+      "document": "props",
+      "selector": "$.text",
+      "equals": "other",
+      "equality": "unsatisfied"
+    },
+    {
+      "name": "a matching integer satisfies equality",
+      "document": "props",
+      "selector": "$.count",
+      "equals": 3,
+      "equality": "satisfied"
+    },
+    {
+      "name": "there is no cross-type coercion",
+      "document": "props",
+      "selector": "$.count",
+      "equals": "3",
+      "equality": "unsatisfied"
+    },
+    {
+      "name": "a matching boolean satisfies equality",
+      "document": "props",
+      "selector": "$.flag_false",
+      "equals": false,
+      "equality": "satisfied"
+    },
+    {
+      "name": "equality against null is always false",
+      "document": "props",
+      "selector": "$.nothing",
+      "equals": null,
+      "equality": "unsatisfied"
+    },
+    {
+      "name": "equality against null is false even for a present value",
+      "document": "props",
+      "selector": "$.text",
+      "equals": null,
+      "equality": "unsatisfied"
+    },
+    {
+      "name": "a mapping never equals a literal",
+      "document": "props",
+      "selector": "$.map",
+      "equals": 1,
+      "equality": "unsatisfied"
+    },
+    {
+      "name": "a sequence never equals a literal",
+      "document": "props",
+      "selector": "$.list",
+      "equals": 1,
+      "equality": "unsatisfied"
+    },
+    {
+      "name": "equality is existential over non-null nodes",
+      "document": "props",
+      "selector": "$.null_and_x[*]",
+      "equals": "x",
+      "equality": "satisfied"
+    },
+    {
+      "name": "an all-null result set satisfies no equality",
+      "document": "props",
+      "selector": "$.nulls[*]",
+      "equals": "x",
+      "equality": "unsatisfied"
+    },
+    {
+      "name": "an empty result set satisfies no equality",
+      "document": "props",
+      "selector": "$.absent",
+      "equals": "x",
+      "equality": "unsatisfied"
+    }
+  ]
+}
