@@ -240,6 +240,12 @@ pub(crate) struct TypedValue {
 }
 
 impl TypedValue {
+    /// Wraps a normalized value. Private, and reachable only from a parser,
+    /// which is what makes [`TypedValue`] opaque.
+    fn from_normalized(value: NormalizedValue) -> TypedValue {
+        TypedValue { value }
+    }
+
     /// The type this value was parsed as.
     pub(crate) fn value_type(&self) -> ValueType {
         match self.value {
@@ -314,9 +320,28 @@ fn is_leap_year(year: u16) -> bool {
 
 /// A SemVer version admitted by §2.4, which is to say one whose build
 /// metadata is empty.
+///
+/// The field is written only by [`SemverValue::new`], so build metadata can
+/// never reach a normalized value and therefore can never influence equality
+/// or ordering.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SemverValue {
     version: semver::Version,
+}
+
+impl SemverValue {
+    /// Admits a version, or `None` if it carries build metadata.
+    fn new(version: semver::Version) -> Option<SemverValue> {
+        if !version.build.is_empty() {
+            return None;
+        }
+        Some(SemverValue { version })
+    }
+
+    /// The admitted version, whose build metadata is empty.
+    fn version(&self) -> &semver::Version {
+        &self.version
+    }
 }
 
 /// A non-empty `dotted` component sequence.
@@ -474,4 +499,199 @@ fn parse_dotted(source: &str) -> Result<DottedValue, ParseFailure> {
 /// supplied, so anything done here would be a silent change of value.
 fn parse_text(source: &str) -> String {
     source.to_owned()
+}
+
+/// Parses a SemVer 2.0.0 version and rejects build metadata.
+///
+/// Grammar and precedence belong to the `semver` crate: a handwritten SemVer
+/// parser would be a second, quietly divergent reading of a specification
+/// this crate already implements. Two things it does not decide are decided
+/// here.
+///
+/// The first is Outlint's own bound. §2.4 bounds every numeric identifier —
+/// major, minor, patch, and numeric pre-release identifiers — to unsigned 64
+/// bits, and the crate stores the pre-release as text, so an oversized
+/// numeric pre-release identifier would otherwise pass unnoticed. The scan
+/// runs only where the identifier is already shaped like a number, leaving
+/// every other malformation to the crate.
+///
+/// The second is build metadata. §2.4 rejects a `+` suffix and requires the
+/// diagnostic to name it, so an otherwise valid version carrying valid build
+/// metadata gets its own failure with the suffix attached, `+` included.
+fn parse_semver(source: &str) -> Result<SemverValue, ParseFailure> {
+    // `+` appears in SemVer only as the build separator, so the first one
+    // ends the part the bound applies to.
+    let (numeric_part, build) = match source.split_once('+') {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (source, None),
+    };
+
+    if let Some(failure) = semver_bound_failure(numeric_part) {
+        return Err(failure);
+    }
+
+    let version = match semver::Version::parse(source) {
+        Ok(version) => version,
+        Err(_) => return Err(ParseFailure::Lexical),
+    };
+
+    match SemverValue::new(version) {
+        Some(admitted) => Ok(admitted),
+        None => Err(ParseFailure::BuildMetadata {
+            suffix: match build {
+                Some(build) => format!("+{build}"),
+                // Unreachable: a version cannot carry build metadata that
+                // the source did not spell after a `+`.
+                None => "+".to_owned(),
+            },
+        }),
+    }
+}
+
+/// Reports the first numeric identifier of `numeric_part` that exceeds
+/// unsigned 64 bits, or `None` if the bound holds or the shape is one the
+/// `semver` crate should judge instead.
+///
+/// `numeric_part` is the source with any build metadata already removed.
+fn semver_bound_failure(numeric_part: &str) -> Option<ParseFailure> {
+    // The version core is digits and dots, so the first `-` is the
+    // pre-release separator.
+    let (core, prerelease) = match numeric_part.split_once('-') {
+        Some((core, prerelease)) => (core, Some(prerelease)),
+        None => (numeric_part, None),
+    };
+
+    let mut fields = core.split('.');
+    for component in [
+        BoundComponent::SemverMajor,
+        BoundComponent::SemverMinor,
+        BoundComponent::SemverPatch,
+    ] {
+        let field = fields.next()?;
+        if !is_ascii_decimal(field) {
+            // Not a number at all; the crate will say so.
+            return None;
+        }
+        if field.parse::<u64>().is_err() {
+            return Some(ParseFailure::BoundOverflow { component });
+        }
+    }
+    if fields.next().is_some() {
+        // More than three core fields is a grammar failure, not a bound one.
+        return None;
+    }
+
+    for (index, identifier) in prerelease?.split('.').enumerate() {
+        // An alphanumeric identifier carries no bound; only a numeric one
+        // does, and it is compared as a number by SemVer precedence.
+        if is_ascii_decimal(identifier) && identifier.parse::<u64>().is_err() {
+            return Some(ParseFailure::BoundOverflow {
+                component: BoundComponent::SemverPrerelease { index },
+            });
+        }
+    }
+    None
+}
+
+/// Whether `text` is a non-empty run of ASCII decimal digits.
+fn is_ascii_decimal(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+// ---------------------------------------------------------------------------
+// Source entry points
+// ---------------------------------------------------------------------------
+
+/// Parses a rule capture's header substring.
+///
+/// The source is the case-preserving substring the named group selected from
+/// the §1.3 matcher input, after the configured inline-markup handling and
+/// before any case folding used to decide the match. The type's lexical
+/// grammar applies to it exactly as written: a header `bool` is `true` or
+/// `false` and nothing else, because no YAML resolver stands between the
+/// document and this call.
+fn parse_header(value_type: ValueType, source: &str) -> Result<TypedValue, ParseFailure> {
+    parse_lexical(value_type, source)
+}
+
+/// Parses a frontmatter capture's selected node.
+///
+/// The YAML kind is checked strictly first, and only against the single kind
+/// §2.4 gives the type: nothing is coerced, so an unquoted `version: 1.2` is
+/// a YAML float and fails an `int` and a `semver` alike. `to_string()` is
+/// never called on a nonmatching value, because rendering one kind as
+/// another is the coercion the specification forbids.
+///
+/// Past the kind check the two sources agree. A YAML boolean arrives already
+/// resolved, so the document spelling `True` succeeds here while the header
+/// spelling `True` does not. A YAML integer is read from its exact
+/// arbitrary-precision spelling rather than through `as_i64`, which would
+/// erase the difference between a value past the bound and one that was
+/// never an integer.
+///
+/// A `value` whose shape disagrees with `yaml_kind` is a producer bug; it is
+/// reported as a kind failure against the shape actually supplied, and never
+/// panics.
+fn parse_frontmatter(
+    value_type: ValueType,
+    supplied: FrontmatterValue<'_>,
+) -> Result<TypedValue, ParseFailure> {
+    let expected = value_type.frontmatter_kind();
+    if supplied.yaml_kind() != expected {
+        return Err(ParseFailure::KindMismatch {
+            expected,
+            actual: supplied.yaml_kind(),
+        });
+    }
+
+    match (expected, supplied.value()) {
+        // `as_str` is the arbitrary-precision spelling, which this crate
+        // enables so that §1.6's exact mathematical value survives.
+        (ResolvedYamlKind::Integer, Value::Number(number)) => Ok(TypedValue::from_normalized(
+            NormalizedValue::Int(parse_int(number.as_str())?),
+        )),
+        (ResolvedYamlKind::Boolean, Value::Bool(resolved)) => Ok(TypedValue::from_normalized(
+            NormalizedValue::Bool(*resolved),
+        )),
+        (ResolvedYamlKind::String, Value::String(resolved)) => parse_lexical(value_type, resolved),
+        (_, value) => Err(ParseFailure::KindMismatch {
+            expected,
+            actual: json_shape_kind(value),
+        }),
+    }
+}
+
+/// Applies the type's lexical grammar to a source string.
+///
+/// §2.4 gives a type one grammar however its string was reached, so both
+/// entry points share this; what differs between them is admission, not
+/// parsing.
+fn parse_lexical(value_type: ValueType, source: &str) -> Result<TypedValue, ParseFailure> {
+    let value = match value_type {
+        ValueType::Int => NormalizedValue::Int(parse_int(source)?),
+        ValueType::Bool => NormalizedValue::Bool(parse_bool(source)?),
+        ValueType::Date => NormalizedValue::Date(parse_date(source)?),
+        ValueType::Semver => NormalizedValue::Semver(parse_semver(source)?),
+        ValueType::Dotted => NormalizedValue::Dotted(parse_dotted(source)?),
+        ValueType::Text => NormalizedValue::Text(parse_text(source)),
+    };
+    Ok(TypedValue::from_normalized(value))
+}
+
+/// The kind a JSON value's own shape implies.
+///
+/// Used only to report a `value`/`yaml_kind` pair that disagrees, which is a
+/// producer bug. A JSON number cannot say which YAML scalar produced it —
+/// that is the whole reason the kind travels separately — so a number is
+/// reported as an integer here; the accurate kind was the one the producer
+/// failed to supply.
+fn json_shape_kind(value: &Value) -> ResolvedYamlKind {
+    match value {
+        Value::Null => ResolvedYamlKind::Null,
+        Value::Bool(_) => ResolvedYamlKind::Boolean,
+        Value::Number(_) => ResolvedYamlKind::Integer,
+        Value::String(_) => ResolvedYamlKind::String,
+        Value::Array(_) => ResolvedYamlKind::Sequence,
+        Value::Object(_) => ResolvedYamlKind::Mapping,
+    }
 }

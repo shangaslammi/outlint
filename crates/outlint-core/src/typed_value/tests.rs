@@ -423,3 +423,593 @@ fn text_preserves_its_source_scalar_for_scalar() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Normalized-value accessors
+//
+// These reach into the private representation so a test can state what a
+// parse produced rather than only that it succeeded. The panics are on
+// invariants the test itself authored, never on parser input.
+// ---------------------------------------------------------------------------
+
+fn expect_int(parsed: &TypedValue) -> i64 {
+    match &parsed.value {
+        NormalizedValue::Int(value) => *value,
+        other => panic!("expected an int, got {other:?}"),
+    }
+}
+
+fn expect_bool(parsed: &TypedValue) -> bool {
+    match &parsed.value {
+        NormalizedValue::Bool(value) => *value,
+        other => panic!("expected a bool, got {other:?}"),
+    }
+}
+
+fn expect_date(parsed: &TypedValue) -> DateValue {
+    match &parsed.value {
+        NormalizedValue::Date(value) => *value,
+        other => panic!("expected a date, got {other:?}"),
+    }
+}
+
+fn expect_semver(parsed: &TypedValue) -> semver::Version {
+    match &parsed.value {
+        NormalizedValue::Semver(value) => value.version().clone(),
+        other => panic!("expected a semver, got {other:?}"),
+    }
+}
+
+fn expect_dotted(parsed: &TypedValue) -> Vec<u32> {
+    match &parsed.value {
+        NormalizedValue::Dotted(value) => value.components().to_vec(),
+        other => panic!("expected a dotted, got {other:?}"),
+    }
+}
+
+fn expect_text(parsed: &TypedValue) -> String {
+    match &parsed.value {
+        NormalizedValue::Text(value) => value.clone(),
+        other => panic!("expected a text, got {other:?}"),
+    }
+}
+
+/// The outcome of a header parse with the successful value discarded.
+///
+/// A test compares failures through this rather than through the `Result`
+/// itself, so that `TypedValue` never acquires a `PartialEq` of its own: the
+/// only equality it has is the §2.4 relation, and a derived one alongside it
+/// would be a second answer to the same question.
+fn header_outcome(value_type: ValueType, source: &str) -> Result<(), ParseFailure> {
+    parse_header(value_type, source).map(|_| ())
+}
+
+/// The outcome of a frontmatter parse, with the successful value discarded
+/// for the reason [`header_outcome`] gives.
+fn frontmatter_outcome(
+    value_type: ValueType,
+    supplied: FrontmatterValue<'_>,
+) -> Result<(), ParseFailure> {
+    parse_frontmatter(value_type, supplied).map(|_| ())
+}
+
+fn frontmatter_string(value_type: ValueType, source: &str) -> Result<TypedValue, ParseFailure> {
+    let json = Value::String(source.to_owned());
+    parse_frontmatter(
+        value_type,
+        FrontmatterValue::new(&json, ResolvedYamlKind::String),
+    )
+}
+
+fn exact_json_number(spelling: &str) -> Value {
+    serde_json::from_str(spelling).expect("the test supplies a valid JSON number")
+}
+
+// ---------------------------------------------------------------------------
+// `semver`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn semver_accepts_releases_and_prereleases_without_build_metadata() {
+    for source in [
+        "0.0.0",
+        "1.0.0",
+        "1.2.3",
+        "1.0.0-rc.1",
+        "1.0.0-alpha",
+        "1.0.0-alpha.beta",
+        "1.0.0-0.3.7",
+        "1.0.0-x.7.z.92",
+        "18446744073709551615.18446744073709551615.18446744073709551615",
+        "1.0.0-18446744073709551615",
+    ] {
+        let parsed = parse_semver(source).unwrap_or_else(|failure| {
+            panic!("semver {source} should parse, got {failure:?}");
+        });
+        assert!(
+            parsed.version().build.is_empty(),
+            "an admitted semver always has empty build metadata"
+        );
+        assert_eq!(parsed.version().to_string(), source, "semver {source}");
+    }
+}
+
+#[test]
+fn semver_preserves_prerelease_identifier_case() {
+    let parsed = parse_semver("1.0.0-RC.Alpha1").expect("the spelling is valid");
+    assert_eq!(parsed.version().pre.as_str(), "RC.Alpha1");
+    assert_ne!(parsed.version().pre.as_str(), "rc.alpha1");
+}
+
+#[test]
+fn semver_rejects_build_metadata_with_the_suffix_attached() {
+    for (source, suffix) in [
+        ("1.0.0+build", "+build"),
+        ("1.0.0+build.7", "+build.7"),
+        ("1.2.3+21AF26D3", "+21AF26D3"),
+        ("1.0.0-rc.1+exp.sha.5114f85", "+exp.sha.5114f85"),
+    ] {
+        assert_eq!(
+            parse_semver(source),
+            Err(ParseFailure::BuildMetadata {
+                suffix: suffix.to_owned()
+            }),
+            "semver {source}"
+        );
+    }
+}
+
+#[test]
+fn semver_reports_malformed_build_syntax_as_lexical() {
+    // An empty or malformed build suffix is not valid SemVer at all, so it
+    // is not the specific build-metadata rejection.
+    for source in ["1.0.0+", "1.0.0+build..7", "1.0.0+bu!ld", "1.0.0++build"] {
+        assert_eq!(
+            parse_semver(source),
+            Err(ParseFailure::Lexical),
+            "semver {source:?}"
+        );
+    }
+}
+
+#[test]
+fn semver_rejects_spellings_outside_the_grammar() {
+    for source in [
+        "",
+        "1",
+        "1.2",
+        "1.2.3.4",
+        "v1.2.3",
+        "1.2.3-",
+        "1.2.3-01",
+        "01.2.3",
+        "1.02.3",
+        "-1.2.3",
+        "1.2.-3",
+        "1.2.3 ",
+        " 1.2.3",
+        "1.2.x",
+        "1.0.0-rc..1",
+    ] {
+        assert_eq!(
+            parse_semver(source),
+            Err(ParseFailure::Lexical),
+            "semver {source:?}"
+        );
+    }
+}
+
+#[test]
+fn semver_bounds_every_numeric_position_to_unsigned_64_bits() {
+    let past_u64 = "18446744073709551616";
+    for (source, component) in [
+        (format!("{past_u64}.0.0"), BoundComponent::SemverMajor),
+        (format!("0.{past_u64}.0"), BoundComponent::SemverMinor),
+        (format!("0.0.{past_u64}"), BoundComponent::SemverPatch),
+        (
+            format!("1.0.0-{past_u64}"),
+            BoundComponent::SemverPrerelease { index: 0 },
+        ),
+        (
+            format!("1.0.0-rc.{past_u64}"),
+            BoundComponent::SemverPrerelease { index: 1 },
+        ),
+        (
+            format!("1.0.0-a.b.{past_u64}.c"),
+            BoundComponent::SemverPrerelease { index: 2 },
+        ),
+        (
+            format!("1.0.0-{past_u64}+build"),
+            BoundComponent::SemverPrerelease { index: 0 },
+        ),
+    ] {
+        assert_eq!(
+            parse_semver(&source),
+            Err(ParseFailure::BoundOverflow { component }),
+            "semver {source}"
+        );
+    }
+}
+
+#[test]
+fn semver_leaves_alphanumeric_prerelease_identifiers_unbounded() {
+    // The bound applies to numeric identifiers; a long alphanumeric one is
+    // compared as text and has no numeric value to exceed.
+    let source = format!("1.0.0-a{}", "9".repeat(40));
+    assert!(parse_semver(&source).is_ok(), "semver {source}");
+}
+
+// ---------------------------------------------------------------------------
+// Entry points: header
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_header_dispatches_each_type_to_its_own_grammar() {
+    assert_eq!(
+        expect_int(&parse_header(ValueType::Int, "-01").expect("valid int")),
+        -1
+    );
+    assert!(expect_bool(
+        &parse_header(ValueType::Bool, "true").expect("valid bool")
+    ));
+    assert_eq!(
+        expect_date(&parse_header(ValueType::Date, "2024-02-29").expect("valid date")),
+        DateValue {
+            year: 2024,
+            month: 2,
+            day: 29
+        }
+    );
+    assert_eq!(
+        expect_semver(&parse_header(ValueType::Semver, "1.0.0-rc.1").expect("valid semver"))
+            .to_string(),
+        "1.0.0-rc.1"
+    );
+    assert_eq!(
+        expect_dotted(&parse_header(ValueType::Dotted, "1.02.0").expect("valid dotted")),
+        vec![1, 2, 0]
+    );
+    assert_eq!(
+        expect_text(&parse_header(ValueType::Text, " 1.02.0 ").expect("valid text")),
+        " 1.02.0 "
+    );
+}
+
+#[test]
+fn parse_header_reports_the_value_type_it_parsed() {
+    for (value_type, source) in [
+        (ValueType::Int, "1"),
+        (ValueType::Bool, "false"),
+        (ValueType::Date, "2024-01-01"),
+        (ValueType::Semver, "1.0.0"),
+        (ValueType::Dotted, "1.2"),
+        (ValueType::Text, "anything"),
+    ] {
+        let parsed = parse_header(value_type, source).expect("the spelling is valid");
+        assert_eq!(parsed.value_type(), value_type);
+    }
+}
+
+#[test]
+fn parse_header_accepts_any_string_only_as_text() {
+    // A source that fails every other grammar is still a valid `text`.
+    let source = "not a value";
+    for value_type in [
+        ValueType::Int,
+        ValueType::Bool,
+        ValueType::Date,
+        ValueType::Semver,
+        ValueType::Dotted,
+    ] {
+        assert!(
+            parse_header(value_type, source).is_err(),
+            "{} accepted {source:?}",
+            value_type.as_str()
+        );
+    }
+    assert_eq!(
+        expect_text(&parse_header(ValueType::Text, source).expect("text takes any string")),
+        source
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Entry points: frontmatter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frontmatter_int_reads_the_exact_arbitrary_precision_spelling() {
+    for (spelling, expected) in [
+        ("0", 0),
+        ("-0", 0),
+        ("42", 42),
+        ("-42", -42),
+        ("9223372036854775807", i64::MAX),
+        ("-9223372036854775808", i64::MIN),
+    ] {
+        let json = exact_json_number(spelling);
+        let parsed = parse_frontmatter(
+            ValueType::Int,
+            FrontmatterValue::new(&json, ResolvedYamlKind::Integer),
+        )
+        .unwrap_or_else(|failure| panic!("frontmatter int {spelling}: {failure:?}"));
+        assert_eq!(expect_int(&parsed), expected, "frontmatter int {spelling}");
+    }
+}
+
+#[test]
+fn frontmatter_int_beyond_machine_bounds_is_a_bound_failure_not_a_lexical_one() {
+    // §1.6 preserves the exact mathematical value, so the kernel sees the
+    // real magnitude rather than a saturated or truncated one.
+    for spelling in [
+        "9223372036854775808",
+        "-9223372036854775809",
+        "170141183460469231731687303715884105728",
+    ] {
+        let json = exact_json_number(spelling);
+        assert_eq!(
+            frontmatter_outcome(
+                ValueType::Int,
+                FrontmatterValue::new(&json, ResolvedYamlKind::Integer),
+            ),
+            Err(ParseFailure::BoundOverflow {
+                component: BoundComponent::Int
+            }),
+            "frontmatter int {spelling}"
+        );
+        assert_eq!(json.as_i64(), None, "as_i64 would have erased {spelling}");
+    }
+}
+
+#[test]
+fn frontmatter_string_types_use_the_same_grammar_as_a_header() {
+    assert_eq!(
+        expect_date(&frontmatter_string(ValueType::Date, "0000-02-29").expect("valid date")),
+        DateValue {
+            year: 0,
+            month: 2,
+            day: 29
+        }
+    );
+    assert_eq!(
+        expect_semver(&frontmatter_string(ValueType::Semver, "1.0.0-rc.1").expect("valid semver"))
+            .to_string(),
+        "1.0.0-rc.1"
+    );
+    assert_eq!(
+        expect_dotted(&frontmatter_string(ValueType::Dotted, "1.02.0").expect("valid dotted")),
+        vec![1, 2, 0]
+    );
+    assert_eq!(
+        expect_text(&frontmatter_string(ValueType::Text, "  kept  ").expect("valid text")),
+        "  kept  "
+    );
+    assert_eq!(
+        frontmatter_string(ValueType::Semver, "1.0.0+build").map(|_| ()),
+        Err(ParseFailure::BuildMetadata {
+            suffix: "+build".to_owned()
+        })
+    );
+}
+
+#[test]
+fn frontmatter_rejects_every_kind_but_the_one_the_type_accepts() {
+    let null = Value::Null;
+    let boolean = Value::Bool(true);
+    let number = exact_json_number("1.20");
+    let integer = exact_json_number("1");
+    let string = Value::String("1.2.0".to_owned());
+    let sequence = Value::Array(vec![Value::String("1.2.0".to_owned())]);
+    let mapping = Value::Object(serde_json::Map::new());
+
+    let supplied = [
+        (&null, ResolvedYamlKind::Null),
+        (&boolean, ResolvedYamlKind::Boolean),
+        (&integer, ResolvedYamlKind::Integer),
+        (&number, ResolvedYamlKind::Float),
+        (&string, ResolvedYamlKind::String),
+        (&sequence, ResolvedYamlKind::Sequence),
+        (&mapping, ResolvedYamlKind::Mapping),
+    ];
+
+    for value_type in ValueType::ALL {
+        let expected = value_type.frontmatter_kind();
+        for (value, actual) in supplied {
+            if actual == expected {
+                continue;
+            }
+            assert_eq!(
+                frontmatter_outcome(value_type, FrontmatterValue::new(value, actual)),
+                Err(ParseFailure::KindMismatch { expected, actual }),
+                "{} should reject a {actual:?}",
+                value_type.as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn frontmatter_never_coerces_a_nonmatching_value_by_rendering_it() {
+    // `1.2` renders as a plausible `dotted` and `1` as a plausible `int`,
+    // yet neither is admitted, because the kind decides before the grammar.
+    let float = exact_json_number("1.2");
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Dotted,
+            FrontmatterValue::new(&float, ResolvedYamlKind::Float)
+        ),
+        Err(ParseFailure::KindMismatch {
+            expected: ResolvedYamlKind::String,
+            actual: ResolvedYamlKind::Float
+        })
+    );
+    let integer = exact_json_number("1");
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Semver,
+            FrontmatterValue::new(&integer, ResolvedYamlKind::Integer)
+        ),
+        Err(ParseFailure::KindMismatch {
+            expected: ResolvedYamlKind::String,
+            actual: ResolvedYamlKind::Integer
+        })
+    );
+}
+
+#[test]
+fn frontmatter_reports_a_disagreeing_value_and_kind_without_panicking() {
+    // A producer bug: the kind says integer while the node is a string.
+    let string = Value::String("42".to_owned());
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Int,
+            FrontmatterValue::new(&string, ResolvedYamlKind::Integer)
+        ),
+        Err(ParseFailure::KindMismatch {
+            expected: ResolvedYamlKind::Integer,
+            actual: ResolvedYamlKind::String
+        })
+    );
+    let sequence = Value::Array(Vec::new());
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Text,
+            FrontmatterValue::new(&sequence, ResolvedYamlKind::String)
+        ),
+        Err(ParseFailure::KindMismatch {
+            expected: ResolvedYamlKind::String,
+            actual: ResolvedYamlKind::Sequence
+        })
+    );
+    let boolean = Value::Bool(false);
+    assert_eq!(
+        parse_frontmatter(
+            ValueType::Bool,
+            FrontmatterValue::new(&boolean, ResolvedYamlKind::Boolean)
+        )
+        .map(|parsed| expect_bool(&parsed)),
+        Ok(false)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The §2.4 boundary table
+// ---------------------------------------------------------------------------
+
+#[test]
+fn boundary_header_int_negative_leading_zero_equals_negative_one() {
+    let padded = parse_header(ValueType::Int, "-01").expect("`-01` is a valid int");
+    let plain = parse_header(ValueType::Int, "-1").expect("`-1` is a valid int");
+    assert_eq!(expect_int(&padded), -1);
+    assert_eq!(expect_int(&padded), expect_int(&plain));
+}
+
+#[test]
+fn boundary_int_above_i64_max_is_bound_overflow() {
+    let overflow = Err(ParseFailure::BoundOverflow {
+        component: BoundComponent::Int,
+    });
+    assert_eq!(
+        header_outcome(ValueType::Int, "9223372036854775808"),
+        overflow
+    );
+
+    let json = exact_json_number("9223372036854775808");
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Int,
+            FrontmatterValue::new(&json, ResolvedYamlKind::Integer)
+        ),
+        overflow
+    );
+}
+
+#[test]
+fn boundary_header_bool_titlecase_is_lexical_error() {
+    assert_eq!(
+        header_outcome(ValueType::Bool, "True"),
+        Err(ParseFailure::Lexical)
+    );
+}
+
+#[test]
+fn boundary_frontmatter_bool_core_resolved_true_is_valid() {
+    // The document spelled `True`; the YAML 1.2 core resolver turned it into
+    // a boolean before the kernel ever saw it, so the kernel sees `true`.
+    let resolved = Value::Bool(true);
+    let parsed = parse_frontmatter(
+        ValueType::Bool,
+        FrontmatterValue::new(&resolved, ResolvedYamlKind::Boolean),
+    )
+    .expect("a resolved YAML boolean is a valid frontmatter bool");
+    assert!(expect_bool(&parsed));
+
+    // The same spelling reaching a header capture is still invalid.
+    assert_eq!(
+        header_outcome(ValueType::Bool, "True"),
+        Err(ParseFailure::Lexical)
+    );
+}
+
+#[test]
+fn boundary_date_leap_day_valid_and_common_year_invalid() {
+    assert_eq!(
+        expect_date(&parse_header(ValueType::Date, "2024-02-29").expect("2024 is a leap year")),
+        DateValue {
+            year: 2024,
+            month: 2,
+            day: 29
+        }
+    );
+    assert_eq!(
+        header_outcome(ValueType::Date, "2023-02-29"),
+        Err(ParseFailure::InvalidDate)
+    );
+}
+
+#[test]
+fn boundary_semver_prerelease_valid_and_build_metadata_rejected() {
+    let parsed =
+        parse_header(ValueType::Semver, "1.0.0-rc.1").expect("a pre-release is a valid semver");
+    assert_eq!(expect_semver(&parsed).to_string(), "1.0.0-rc.1");
+
+    assert_eq!(
+        header_outcome(ValueType::Semver, "1.0.0+build"),
+        Err(ParseFailure::BuildMetadata {
+            suffix: "+build".to_owned()
+        })
+    );
+}
+
+#[test]
+fn boundary_dotted_leading_zero_components_are_equal() {
+    let padded = parse_header(ValueType::Dotted, "1.02.0").expect("leading zeros are allowed");
+    let plain = parse_header(ValueType::Dotted, "1.2.0").expect("`1.2.0` is a valid dotted");
+    assert_eq!(expect_dotted(&padded), vec![1, 2, 0]);
+    assert_eq!(expect_dotted(&padded), expect_dotted(&plain));
+}
+
+#[test]
+fn boundary_dotted_component_above_u32_max_is_bound_overflow() {
+    assert_eq!(
+        header_outcome(ValueType::Dotted, "4294967296"),
+        Err(ParseFailure::BoundOverflow {
+            component: BoundComponent::DottedComponent { index: 0 }
+        })
+    );
+}
+
+#[test]
+fn boundary_frontmatter_text_does_not_coerce_integer_kind() {
+    let integer = exact_json_number("42");
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Text,
+            FrontmatterValue::new(&integer, ResolvedYamlKind::Integer)
+        ),
+        Err(ParseFailure::KindMismatch {
+            expected: ResolvedYamlKind::String,
+            actual: ResolvedYamlKind::Integer
+        })
+    );
+}
