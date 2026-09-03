@@ -19,11 +19,14 @@ jsonschema = { version = "0.49.2", default-features = false, features = ["arbitr
 num-bigint = "0.5"
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
+regex-syntax = { version = "=0.8.11", default-features = false, features = ["std", "unicode"] }
 # Pinned exactly: every `0.0.z` release is a breaking change under Cargo's
 # semver rules, and upstream ships breaking changes in them.
 saphyr-parser = "=0.0.11"
+semver = { version = "=1.0.28", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_json_path = { version = "=0.7.2", default-features = false, features = ["regex"] }
 unicode-normalization = "0.1"
 
 [dev-dependencies]
