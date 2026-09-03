@@ -227,3 +227,94 @@ pub(crate) fn decode_utf8(mut bytes: Vec<u8>) -> Result<String, String> {
     }
     String::from_utf8(bytes).map_err(|_| "input is not valid UTF-8".to_owned())
 }
+
+pub(crate) fn discover_schema(document: &Path) -> Result<PathBuf, String> {
+    let absolute = if document.is_absolute() {
+        document.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|error| format!("cannot determine current directory: {error}"))?
+            .join(document)
+    };
+    // Candidate file names, most specific first: the document's stem (its
+    // file name with the final extension removed) with `.outlint.yml`
+    // appended, then the directory default. Spec section 11.2.
+    let mut names: Vec<std::ffi::OsString> = Vec::new();
+    if let Some(stem) = absolute.file_stem() {
+        let mut name = stem.to_os_string();
+        name.push(".outlint.yml");
+        names.push(name);
+    }
+    names.push(std::ffi::OsString::from(".outlint.yml"));
+    let mut directory = absolute.parent();
+    while let Some(candidate_directory) = directory {
+        for name in &names {
+            let candidate = candidate_directory.join(name);
+            // Only a regular file participates (spec section 11.2): a
+            // directory named like a schema is skipped as if absent.
+            match std::fs::metadata(&candidate) {
+                Ok(metadata) if metadata.is_file() => return Ok(candidate),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "cannot inspect schema candidate '{}': {error}",
+                        path_display(&candidate)
+                    ));
+                }
+            }
+        }
+        directory = candidate_directory.parent();
+    }
+    let expected = names
+        .iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" or ");
+    Err(format!(
+        "no {expected} found for Markdown input '{}'",
+        path_display(document)
+    ))
+}
+
+pub(crate) fn display_path(path: &Path) -> String {
+    let relative = env::current_dir()
+        .ok()
+        .and_then(|current| path.strip_prefix(current).ok())
+        .filter(|path| !path.as_os_str().is_empty());
+    path_display(relative.unwrap_or(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_utf8, file_uri_path};
+    use std::path::Path;
+
+    #[test]
+    fn accepts_and_removes_utf8_bom() {
+        assert_eq!(
+            decode_utf8(b"\xef\xbb\xbfhello".to_vec()),
+            Ok("hello".into())
+        );
+    }
+
+    #[test]
+    fn file_uri_paths_accept_only_local_authorities() {
+        assert_eq!(
+            file_uri_path("file:///schemas/defs.json").as_deref(),
+            Some(Path::new("/schemas/defs.json"))
+        );
+        assert_eq!(
+            file_uri_path("file://LOCALHOST/schemas/defs.json").as_deref(),
+            Some(Path::new("/schemas/defs.json"))
+        );
+        assert_eq!(file_uri_path("file://attacker.invalid/defs.json"), None);
+        assert_eq!(file_uri_path("file://localhost.evil/defs.json"), None);
+        assert_eq!(file_uri_path("file://localhost@evil/defs.json"), None);
+        assert_eq!(file_uri_path("file://local%68ost/defs.json"), None);
+    }
+}
