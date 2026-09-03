@@ -123,6 +123,25 @@ if let Err(invalid) = load_schema("version: 99\n") {
 }
 ```
 
+Validation has two distinct failure kinds, and they mean different things.
+`PreparedValidator::new` fails with a `PrepareValidationError` when a schema
+cannot be compiled into a reusable validator. `PreparedValidator::validate`
+fails with a `ValidationOperationalError` when validating a document could not
+run to completion, so that document has no verdict at all. The one-shot
+`validate` performs both steps and reports which one failed through
+`ValidationError`.
+
+A rule violation is never an error: it is a `Diagnostic`. Success therefore
+carries the document's *complete* diagnostic set, and there is no way to
+represent a partial set alongside a failure — a truncated list would otherwise
+be indistinguishable from a clean document. Callers should treat an operational
+failure as "no answer for this input" rather than "this input passed", while
+still checking their remaining inputs.
+
+The engine has no failure path today and always succeeds; the channel is in
+place so that the evaluation limits arriving with JSONPath frontmatter
+propositions have somewhere to surface without another signature change.
+
 For schemas whose `frontmatter.schema` points at an external JSON Schema file,
 the caller owns the IO boundary. Use `linked_frontmatter_schema_path` to find
 the root path, assign that file an absolute logical URI, then walk its local

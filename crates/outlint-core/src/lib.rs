@@ -4,9 +4,12 @@
 mod case_fold;
 mod load_result;
 mod loader;
+mod locator;
 mod markdown;
 mod matcher;
+mod regex_capture;
 mod schema;
+mod typed_value;
 mod validator;
 mod yaml;
 
