@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json_path::JsonPath;
 
+use support::jsonpath_core_recognizer::classify;
 use support::jsonpath_path::render_normalized_path;
 
 const CORPUS: &str = include_str!("fixtures/jsonpath/outlint-core.json");
@@ -63,7 +64,6 @@ struct ExpectedNode {
 struct RejectedCase {
     name: String,
     selector: String,
-    #[allow(dead_code)]
     reason: String,
 }
 
@@ -763,27 +763,20 @@ mod rendering {
 // Core-membership contract
 // ---------------------------------------------------------------------------
 
-/// Every corpus selector must lie inside the §4.6 guaranteed core.
+/// Every corpus query must lie inside the §4.6 guaranteed core.
 ///
-/// This is the contract commit 1C activates: once the independent recognizer
-/// in `support::jsonpath_core_recognizer` lands, this test classifies every
-/// corpus selector with it and requires `core`. Until then it enforces the
-/// weaker, purely lexical property that no vendor-tier construct appears
-/// anywhere in the corpus, so a non-core selector cannot be added in the
-/// meantime.
+/// Classification comes from `support::jsonpath_core_recognizer`, which reads
+/// query text alone and never asks the provider. That makes this a real check
+/// rather than a tautology: the corpus states what Outlint guarantees, the
+/// recognizer states what the core grammar admits, and the two are written
+/// independently of each other.
 #[test]
-fn every_corpus_selector_lies_inside_the_guaranteed_core() {
+fn every_successful_corpus_query_is_classified_as_core() {
     let corpus = corpus();
-    let selectors = corpus
+    let successful = corpus
         .selection
         .iter()
         .map(|case| (case.name.as_str(), case.selector.as_str()))
-        .chain(
-            corpus
-                .rejected
-                .iter()
-                .map(|case| (case.name.as_str(), case.selector.as_str())),
-        )
         .chain(
             corpus
                 .propositions
@@ -791,26 +784,32 @@ fn every_corpus_selector_lies_inside_the_guaranteed_core() {
                 .map(|case| (case.name.as_str(), case.selector.as_str())),
         );
 
-    for (name, selector) in selectors {
+    for (name, selector) in successful {
+        let classification = classify(selector);
         assert!(
-            selector.starts_with('$'),
-            "`{name}` must be a complete query rooted at `$`"
+            classification.is_core(),
+            "corpus case `{name}` uses a non-core selector `{selector}`: {}",
+            classification.reason().unwrap_or("")
         );
-        // Descendant segments, filters, and function calls are vendor tier.
-        for vendor in ["..", "?", "("] {
-            assert!(
-                !selector.contains(vendor),
-                "`{name}` uses the vendor-tier construct `{vendor}`: {selector}"
-            );
-        }
-        // A slice or a union needs a `:` or a `,` inside a bracket segment.
-        // Neither can occur in a core selector outside a quoted name, and no
-        // corpus name contains one.
-        for vendor in [':', ','] {
-            assert!(
-                !selector.contains(vendor),
-                "`{name}` may use a slice or union: {selector}"
-            );
-        }
+    }
+}
+
+/// The corpus's binding rejections are exactly the index spellings §4.6 puts
+/// outside the core, so the recognizer must refuse them too.
+///
+/// This is the other direction of the same agreement: a rejection the corpus
+/// demands but the recognizer would wave through would mean the two disagree
+/// about where the core ends.
+#[test]
+fn every_rejected_corpus_query_is_classified_as_non_core() {
+    let corpus = corpus();
+    for case in &corpus.rejected {
+        assert!(
+            !classify(&case.selector).is_core(),
+            "corpus case `{}` must be outside the core: {} ({})",
+            case.name,
+            case.selector,
+            case.reason
+        );
     }
 }

@@ -1,0 +1,436 @@
+{
+  "profile": "outlint-core",
+  "profile_version": "1",
+  "suite": {
+    "repository": "https://github.com/jsonpath-standard/jsonpath-compliance-test-suite",
+    "commit": "7be7c1fc28057c91e8eefaf197060fba7ed43acd",
+    "total_cases": 703
+  },
+  "summary": {
+    "examined": 703,
+    "included": 83,
+    "deterministic": 81,
+    "nondeterministic": 2,
+    "invalid_recognized_as_core": 0,
+    "excluded": 0,
+    "non_core": 620
+  },
+  "included": [
+    {
+      "ordinal": 1,
+      "name": "basic, root",
+      "selector": "$"
+    },
+    {
+      "ordinal": 4,
+      "name": "basic, name shorthand",
+      "selector": "$.a"
+    },
+    {
+      "ordinal": 5,
+      "name": "basic, name shorthand, extended unicode ☺",
+      "selector": "$.☺"
+    },
+    {
+      "ordinal": 6,
+      "name": "basic, name shorthand, underscore",
+      "selector": "$._"
+    },
+    {
+      "ordinal": 9,
+      "name": "basic, name shorthand, absent data",
+      "selector": "$.c"
+    },
+    {
+      "ordinal": 10,
+      "name": "basic, name shorthand, array data",
+      "selector": "$.a"
+    },
+    {
+      "ordinal": 11,
+      "name": "basic, name shorthand, object data, nested",
+      "selector": "$.a.b.c"
+    },
+    {
+      "ordinal": 12,
+      "name": "basic, wildcard shorthand, object data",
+      "selector": "$.*"
+    },
+    {
+      "ordinal": 13,
+      "name": "basic, wildcard shorthand, array data",
+      "selector": "$.*"
+    },
+    {
+      "ordinal": 14,
+      "name": "basic, wildcard selector, array data",
+      "selector": "$[*]"
+    },
+    {
+      "ordinal": 15,
+      "name": "basic, wildcard shorthand, then name shorthand",
+      "selector": "$.*.a"
+    },
+    {
+      "ordinal": 32,
+      "name": "basic, name shorthand, true",
+      "selector": "$.true"
+    },
+    {
+      "ordinal": 33,
+      "name": "basic, name shorthand, false",
+      "selector": "$.false"
+    },
+    {
+      "ordinal": 34,
+      "name": "basic, name shorthand, null",
+      "selector": "$.null"
+    },
+    {
+      "ordinal": 232,
+      "name": "index selector, first element",
+      "selector": "$[0]"
+    },
+    {
+      "ordinal": 233,
+      "name": "index selector, second element",
+      "selector": "$[1]"
+    },
+    {
+      "ordinal": 234,
+      "name": "index selector, out of bound",
+      "selector": "$[2]"
+    },
+    {
+      "ordinal": 235,
+      "name": "index selector, min exact index",
+      "selector": "$[-9007199254740991]"
+    },
+    {
+      "ordinal": 236,
+      "name": "index selector, max exact index",
+      "selector": "$[9007199254740991]"
+    },
+    {
+      "ordinal": 241,
+      "name": "index selector, negative",
+      "selector": "$[-1]"
+    },
+    {
+      "ordinal": 242,
+      "name": "index selector, more negative",
+      "selector": "$[-2]"
+    },
+    {
+      "ordinal": 243,
+      "name": "index selector, negative out of bound",
+      "selector": "$[-3]"
+    },
+    {
+      "ordinal": 244,
+      "name": "index selector, on object",
+      "selector": "$[0]"
+    },
+    {
+      "ordinal": 251,
+      "name": "name selector, double quotes",
+      "selector": "$[\"a\"]"
+    },
+    {
+      "ordinal": 252,
+      "name": "name selector, double quotes, absent data",
+      "selector": "$[\"c\"]"
+    },
+    {
+      "ordinal": 253,
+      "name": "name selector, double quotes, array data",
+      "selector": "$[\"a\"]"
+    },
+    {
+      "ordinal": 254,
+      "name": "name selector, name, double quotes, contains single quote",
+      "selector": "$[\"a'\"]"
+    },
+    {
+      "ordinal": 255,
+      "name": "name selector, name, double quotes, nested",
+      "selector": "$[\"a\"][\"b\"][\"c\"]"
+    },
+    {
+      "ordinal": 288,
+      "name": "name selector, double quotes, embedded U+0020",
+      "selector": "$[\" \"]"
+    },
+    {
+      "ordinal": 289,
+      "name": "name selector, double quotes, embedded U+007F",
+      "selector": "$[\"\"]"
+    },
+    {
+      "ordinal": 290,
+      "name": "name selector, double quotes, supplementary plane character",
+      "selector": "$[\"𝄞\"]"
+    },
+    {
+      "ordinal": 291,
+      "name": "name selector, double quotes, escaped double quote",
+      "selector": "$[\"\\\"\"]"
+    },
+    {
+      "ordinal": 292,
+      "name": "name selector, double quotes, escaped reverse solidus",
+      "selector": "$[\"\\\\\"]"
+    },
+    {
+      "ordinal": 293,
+      "name": "name selector, double quotes, escaped solidus",
+      "selector": "$[\"\\/\"]"
+    },
+    {
+      "ordinal": 294,
+      "name": "name selector, double quotes, escaped backspace",
+      "selector": "$[\"\\b\"]"
+    },
+    {
+      "ordinal": 295,
+      "name": "name selector, double quotes, escaped form feed",
+      "selector": "$[\"\\f\"]"
+    },
+    {
+      "ordinal": 296,
+      "name": "name selector, double quotes, escaped line feed",
+      "selector": "$[\"\\n\"]"
+    },
+    {
+      "ordinal": 297,
+      "name": "name selector, double quotes, escaped carriage return",
+      "selector": "$[\"\\r\"]"
+    },
+    {
+      "ordinal": 298,
+      "name": "name selector, double quotes, escaped tab",
+      "selector": "$[\"\\t\"]"
+    },
+    {
+      "ordinal": 299,
+      "name": "name selector, double quotes, escaped ☺, upper case hex",
+      "selector": "$[\"\\u263A\"]"
+    },
+    {
+      "ordinal": 300,
+      "name": "name selector, double quotes, escaped ☺, lower case hex",
+      "selector": "$[\"\\u263a\"]"
+    },
+    {
+      "ordinal": 301,
+      "name": "name selector, double quotes, surrogate pair 𝄞",
+      "selector": "$[\"\\uD834\\uDD1E\"]"
+    },
+    {
+      "ordinal": 302,
+      "name": "name selector, double quotes, surrogate pair 😀",
+      "selector": "$[\"\\uD83D\\uDE00\"]"
+    },
+    {
+      "ordinal": 303,
+      "name": "name selector, double quotes, before high surrogates",
+      "selector": "$[\"\\uD7FF\\uD7FF\"]"
+    },
+    {
+      "ordinal": 304,
+      "name": "name selector, double quotes, after low surrogates",
+      "selector": "$[\"\\uE000\\uE000\"]"
+    },
+    {
+      "ordinal": 331,
+      "name": "name selector, single quotes",
+      "selector": "$['a']"
+    },
+    {
+      "ordinal": 332,
+      "name": "name selector, single quotes, absent data",
+      "selector": "$['c']"
+    },
+    {
+      "ordinal": 333,
+      "name": "name selector, single quotes, array data",
+      "selector": "$['a']"
+    },
+    {
+      "ordinal": 366,
+      "name": "name selector, single quotes, embedded U+0020",
+      "selector": "$[' ']"
+    },
+    {
+      "ordinal": 367,
+      "name": "name selector, single quotes, escaped single quote",
+      "selector": "$['\\'']"
+    },
+    {
+      "ordinal": 368,
+      "name": "name selector, single quotes, escaped reverse solidus",
+      "selector": "$['\\\\']"
+    },
+    {
+      "ordinal": 369,
+      "name": "name selector, single quotes, escaped solidus",
+      "selector": "$['\\/']"
+    },
+    {
+      "ordinal": 370,
+      "name": "name selector, single quotes, escaped backspace",
+      "selector": "$['\\b']"
+    },
+    {
+      "ordinal": 371,
+      "name": "name selector, single quotes, escaped form feed",
+      "selector": "$['\\f']"
+    },
+    {
+      "ordinal": 372,
+      "name": "name selector, single quotes, escaped line feed",
+      "selector": "$['\\n']"
+    },
+    {
+      "ordinal": 373,
+      "name": "name selector, single quotes, escaped carriage return",
+      "selector": "$['\\r']"
+    },
+    {
+      "ordinal": 374,
+      "name": "name selector, single quotes, escaped tab",
+      "selector": "$['\\t']"
+    },
+    {
+      "ordinal": 375,
+      "name": "name selector, single quotes, escaped ☺, upper case hex",
+      "selector": "$['\\u263A']"
+    },
+    {
+      "ordinal": 376,
+      "name": "name selector, single quotes, escaped ☺, lower case hex",
+      "selector": "$['\\u263a']"
+    },
+    {
+      "ordinal": 377,
+      "name": "name selector, single quotes, surrogate pair 𝄞",
+      "selector": "$['\\uD834\\uDD1E']"
+    },
+    {
+      "ordinal": 378,
+      "name": "name selector, single quotes, surrogate pair 😀",
+      "selector": "$['\\uD83D\\uDE00']"
+    },
+    {
+      "ordinal": 382,
+      "name": "name selector, double quotes, empty",
+      "selector": "$[\"\"]"
+    },
+    {
+      "ordinal": 383,
+      "name": "name selector, single quotes, empty",
+      "selector": "$['']"
+    },
+    {
+      "ordinal": 652,
+      "name": "whitespace, selectors, space between root and bracket",
+      "selector": "$ ['a']"
+    },
+    {
+      "ordinal": 653,
+      "name": "whitespace, selectors, newline between root and bracket",
+      "selector": "$\n['a']"
+    },
+    {
+      "ordinal": 654,
+      "name": "whitespace, selectors, tab between root and bracket",
+      "selector": "$\t['a']"
+    },
+    {
+      "ordinal": 655,
+      "name": "whitespace, selectors, return between root and bracket",
+      "selector": "$\r['a']"
+    },
+    {
+      "ordinal": 656,
+      "name": "whitespace, selectors, space between bracket and bracket",
+      "selector": "$['a'] ['b']"
+    },
+    {
+      "ordinal": 657,
+      "name": "whitespace, selectors, newline between bracket and bracket",
+      "selector": "$['a'] \n['b']"
+    },
+    {
+      "ordinal": 658,
+      "name": "whitespace, selectors, tab between bracket and bracket",
+      "selector": "$['a'] \t['b']"
+    },
+    {
+      "ordinal": 659,
+      "name": "whitespace, selectors, return between bracket and bracket",
+      "selector": "$['a'] \r['b']"
+    },
+    {
+      "ordinal": 660,
+      "name": "whitespace, selectors, space between root and dot",
+      "selector": "$ .a"
+    },
+    {
+      "ordinal": 661,
+      "name": "whitespace, selectors, newline between root and dot",
+      "selector": "$\n.a"
+    },
+    {
+      "ordinal": 662,
+      "name": "whitespace, selectors, tab between root and dot",
+      "selector": "$\t.a"
+    },
+    {
+      "ordinal": 663,
+      "name": "whitespace, selectors, return between root and dot",
+      "selector": "$\r.a"
+    },
+    {
+      "ordinal": 672,
+      "name": "whitespace, selectors, space between bracket and selector",
+      "selector": "$[ 'a']"
+    },
+    {
+      "ordinal": 673,
+      "name": "whitespace, selectors, newline between bracket and selector",
+      "selector": "$[\n'a']"
+    },
+    {
+      "ordinal": 674,
+      "name": "whitespace, selectors, tab between bracket and selector",
+      "selector": "$[\t'a']"
+    },
+    {
+      "ordinal": 675,
+      "name": "whitespace, selectors, return between bracket and selector",
+      "selector": "$[\r'a']"
+    },
+    {
+      "ordinal": 676,
+      "name": "whitespace, selectors, space between selector and bracket",
+      "selector": "$['a' ]"
+    },
+    {
+      "ordinal": 677,
+      "name": "whitespace, selectors, newline between selector and bracket",
+      "selector": "$['a'\n]"
+    },
+    {
+      "ordinal": 678,
+      "name": "whitespace, selectors, tab between selector and bracket",
+      "selector": "$['a'\t]"
+    },
+    {
+      "ordinal": 679,
+      "name": "whitespace, selectors, return between selector and bracket",
+      "selector": "$['a'\r]"
+    }
+  ],
+  "exclusions": []
+}
