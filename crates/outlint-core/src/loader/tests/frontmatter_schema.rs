@@ -1,0 +1,828 @@
+use std::sync::Arc;
+
+use serde_json::Value;
+
+use super::{error_kinds, valid};
+use crate::loader::frontmatter_schema::{external_source_id, invalid_inline_references};
+use crate::loader::{
+    json_schema_external_references, json_schema_reference_budget_message,
+    json_schema_reference_count, load_schema, load_schema_with_resources,
+    MAX_JSON_SCHEMA_REFERENCES,
+};
+use crate::{
+    ByteOffset, FrontmatterPolicy, LinkedJsonSchemaInput, LoadSchemaResult, SchemaErrorKind,
+    SchemaNode, SourceId, SourceLabel, TextRange,
+};
+
+#[test]
+fn external_source_ids_report_exhaustion_instead_of_saturating() {
+    assert_eq!(external_source_id(0), Some(SourceId(1)));
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(external_source_id(u32::MAX as usize), None);
+}
+
+#[test]
+fn normalizes_frontmatter_presence_policy() {
+    let schema = valid(
+        r#"
+version: 1
+frontmatter: { required: true }
+sections: []
+"#,
+    );
+    assert_eq!(
+        schema.frontmatter,
+        FrontmatterPolicy::Required { schema: None }
+    );
+}
+
+#[test]
+fn inline_frontmatter_schema_validates_and_preserves_primary_source_provenance() {
+    let source = r#"version: 1
+frontmatter:
+  schema:
+    type: object
+    required: [status]
+    properties:
+      status: { enum: [draft, final] }
+title: null
+sections: []
+"#;
+    let loaded = load_schema(source).expect("inline JSON Schema is valid");
+    let declaration = loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDeclaration];
+    let document = loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDocument];
+    assert_eq!(declaration, document);
+    assert_eq!(declaration.source, SourceId(0));
+    assert_eq!(
+        &source[declaration.range.start.0..declaration.range.end.0],
+        "type: object\n    required: [status]\n    properties:\n      status: { enum: [draft, final] }\n"
+    );
+
+    let document = crate::parse_markdown(
+        "---\nstatus: review\n---\n",
+        crate::MarkdownOptions::default(),
+    );
+    let diagnostics =
+        crate::validate(&loaded.schema, &document).expect("inline schema compiles again");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
+    let crate::DiagnosticTarget::Frontmatter { block: Some(block) } = &diagnostics[0].target else {
+        panic!("frontmatter schema diagnostic must target its block")
+    };
+    assert_eq!(block.json_pointer.as_deref(), Some("/status"));
+}
+
+#[test]
+fn inline_frontmatter_schema_accepts_fragment_references_and_cycles() {
+    let loaded = inline(
+        r##"{
+            "$ref": "#/$defs/node",
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "properties": { "child": { "$ref": "#/$defs/node" } }
+                }
+            }
+        }"##,
+    )
+    .expect("fragment-only recursive schema is valid");
+    let document = crate::parse_markdown(
+        "---\nchild:\n  child: false\n---\n",
+        crate::MarkdownOptions::default(),
+    );
+    let diagnostics =
+        crate::validate(&loaded.schema, &document).expect("recursive inline schema compiles");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
+
+    let loaded = inline(
+        r##"{
+            "$defs": {
+                "node": {
+                    "$dynamicAnchor": "node",
+                    "type": "object",
+                    "properties": { "child": { "$dynamicRef": "#node" } }
+                }
+            },
+            "properties": { "node": { "$ref": "#/$defs/node" } }
+        }"##,
+    )
+    .expect("fragment-only dynamic reference is valid");
+    let document = crate::parse_markdown(
+        "---\nnode:\n  child: false\n---\n",
+        crate::MarkdownOptions::default(),
+    );
+    let diagnostics = crate::validate(&loaded.schema, &document)
+        .expect("dynamic fragment reference validates without retrieval");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
+}
+
+#[test]
+fn inline_frontmatter_schema_reserves_reference_members_in_every_object() {
+    for (root, expected) in [
+        (r#"{"const":{"$ref":"literal"}}"#, "fragment-only"),
+        (r#"{"properties":{"$ref":"literal"}}"#, "fragment-only"),
+        (
+            r#"{"unknown":{"$dynamicRef":17}}"#,
+            "must be a string beginning with `#`",
+        ),
+    ] {
+        let invalid = inline(root).expect_err("reserved member is checked lexically");
+        assert_eq!(invalid.errors.iter().count(), 1);
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert!(invalid.errors.first.message.contains(expected));
+    }
+}
+
+#[test]
+fn inline_reference_walk_covers_every_object_member() {
+    let root = serde_json::json!({
+        "$defs": { "defined": { "$ref": "defined.json" } },
+        "properties": { "property": { "$ref": "property.json" } },
+        "patternProperties": { ".*": { "$ref": "pattern.json" } },
+        "dependentSchemas": { "key": { "$ref": "dependent.json" } },
+        "unevaluatedProperties": { "$ref": "unevaluated-properties.json" },
+        "unevaluatedItems": { "$ref": "unevaluated-items.json" },
+        "if": { "$ref": "if.json" },
+        "then": { "$ref": "then.json" },
+        "else": { "$ref": "else.json" },
+        "const": { "$ref": "literal.json" },
+        "enum": [{ "$dynamicRef": "literal.json" }],
+        "unknown": { "$ref": "unknown.json" }
+    });
+    assert_eq!(invalid_inline_references(&root).len(), 12);
+    assert_eq!(json_schema_reference_count(&root), 12);
+}
+
+#[test]
+fn inline_frontmatter_schema_rejects_pointer_hidden_external_references() {
+    let invalid = inline(
+        r##"{
+            "$ref": "#/const",
+            "const": { "$ref": "https://example.invalid/hidden.json" }
+        }"##,
+    )
+    .expect_err("a pointer-targeted object cannot hide an external reference");
+    assert_eq!(invalid.errors.iter().count(), 1);
+    assert!(invalid.errors.first.message.contains("fragment-only"));
+    assert!(invalid.errors.first.message.contains("hidden.json"));
+}
+
+#[test]
+fn inline_frontmatter_schema_relative_ids_resolve_from_the_synthetic_base() {
+    let root_id = inline(
+        r##"{
+            "$id": "schemas/root.json",
+            "$defs": { "status": { "enum": ["draft", "final"] } },
+            "properties": { "status": { "$ref": "#/$defs/status" } }
+        }"##,
+    )
+    .expect("a root relative id resolves against the hierarchical base");
+    let document = crate::parse_markdown(
+        "---\nstatus: review\n---\n",
+        crate::MarkdownOptions::default(),
+    );
+    assert_eq!(
+        crate::validate(&root_id.schema, &document)
+            .expect("root relative id compiles")
+            .len(),
+        1
+    );
+
+    let nested_id = inline(
+        r##"{
+            "$defs": {
+                "node": {
+                    "$id": "nested/node.json",
+                    "type": "object",
+                    "properties": { "child": { "$ref": "#" } }
+                }
+            },
+            "properties": { "node": { "$ref": "#/$defs/node" } }
+        }"##,
+    )
+    .expect("a nested relative id resolves against the hierarchical base");
+    let document = crate::parse_markdown(
+        "---\nnode:\n  child: false\n---\n",
+        crate::MarkdownOptions::default(),
+    );
+    assert_eq!(
+        crate::validate(&nested_id.schema, &document)
+            .expect("nested relative id compiles")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn inline_frontmatter_schema_enforces_the_supported_dialect_and_meta_schema() {
+    inline(
+        r#"{
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object"
+            }"#,
+    )
+    .expect("draft 2020-12 is supported inline");
+
+    for root in [
+        r#"{"$schema":"http://json-schema.org/draft-07/schema#"}"#,
+        r#"{"type":17}"#,
+    ] {
+        let invalid = inline(root).expect_err("unsupported or malformed schema is invalid");
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(invalid.errors.first.range.source, SourceId(0));
+    }
+}
+
+#[test]
+fn inline_frontmatter_schema_rejects_non_fragment_references() {
+    for (keyword, reference) in [
+        ("$ref", "defs.json#/$defs/value"),
+        ("$ref", "/schemas/defs.json"),
+        ("$ref", "file:///schemas/defs.json"),
+        ("$ref", "https://example.invalid/schema.json"),
+        ("$dynamicRef", "defs.json#node"),
+    ] {
+        let source = serde_json::json!({ keyword: reference }).to_string();
+        let invalid = inline(&source).expect_err("external inline reference is invalid");
+        assert_eq!(invalid.errors.iter().count(), 1);
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(invalid.errors.first.range.source, SourceId(0));
+        assert!(invalid.errors.first.message.contains("fragment-only"));
+        assert!(invalid.errors.first.message.contains(reference));
+        let range = invalid.errors.first.range.range;
+        let primary = &invalid.sources.documents[&SourceId(0)].text;
+        assert_eq!(&primary[range.start.0..range.end.0], source);
+    }
+}
+
+#[test]
+fn inline_frontmatter_schema_rejects_non_string_reference_values() {
+    for value in [serde_json::Value::Null, serde_json::json!(17)] {
+        let source = serde_json::json!({ "$ref": value }).to_string();
+        let invalid = inline(&source).expect_err("reference must be a string");
+        assert_eq!(invalid.errors.iter().count(), 1);
+        assert_eq!(
+            invalid.errors.first.message,
+            "inline frontmatter JSON Schema `$ref` must be a string beginning with `#`"
+        );
+    }
+}
+
+#[test]
+fn inline_frontmatter_schema_uses_the_shared_reference_budget() {
+    let at_budget = hidden_reference_chain(MAX_JSON_SCHEMA_REFERENCES);
+    assert_eq!(
+        json_schema_reference_count(&at_budget),
+        MAX_JSON_SCHEMA_REFERENCES
+    );
+    inline(&at_budget.to_string()).expect("a pointer-hidden chain may spend the whole budget");
+    linked(&at_budget.to_string(), &[]).expect("the linked budget admits the same exact boundary");
+
+    let over_budget = hidden_reference_chain(MAX_JSON_SCHEMA_REFERENCES + 1);
+    let invalid =
+        inline(&over_budget.to_string()).expect_err("one hidden reference more is refused");
+    assert_eq!(invalid.errors.iter().count(), 1);
+    assert_eq!(
+        invalid.errors.first.message,
+        json_schema_reference_budget_message()
+    );
+    assert_eq!(invalid.errors.first.range.source, SourceId(0));
+
+    let linked_invalid = linked(&over_budget.to_string(), &[])
+        .expect_err("linked graphs count pointer-hidden references too");
+    assert_eq!(
+        linked_invalid.errors.first.message,
+        json_schema_reference_budget_message()
+    );
+    assert_eq!(linked_invalid.errors.first.range.source, SourceId(1));
+}
+
+#[test]
+fn linked_frontmatter_schema_requires_file_context() {
+    let kinds = error_kinds(
+        r#"
+version: 1
+frontmatter: { schema: frontmatter.schema.json }
+sections: []
+"#,
+    );
+    assert_eq!(kinds, vec![SchemaErrorKind::InvalidFrontmatterSchema]);
+}
+
+#[test]
+fn external_references_separate_physical_paths_from_id_based_logical_uris() {
+    let references = json_schema_external_references(
+        r#"{
+                "$id": "https://example.com/schemas/root.json",
+                "allOf": [
+                    { "$ref": "defs.json" },
+                    { "$id": "nested/child.json", "$ref": "more.json" }
+                ]
+            }"#,
+        "file:///workspace/frontmatter.schema.json",
+        "https://outlint.invalid/workspace/frontmatter.schema.json",
+    )
+    .expect("references resolve under both bases");
+
+    assert_eq!(
+        references,
+        vec![
+            crate::JsonSchemaExternalReference {
+                physical_uri: "file:///workspace/defs.json".into(),
+                logical_uri: "https://example.com/schemas/defs.json".into(),
+            },
+            crate::JsonSchemaExternalReference {
+                physical_uri: "file:///workspace/more.json".into(),
+                logical_uri: "https://example.com/schemas/nested/more.json".into(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn loads_and_resolves_linked_frontmatter_schema_with_local_ref() {
+    let loaded = linked(
+        r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$ref":"defs.json#/$defs/frontmatter"}"#,
+        &[(
+            "https://outlint.invalid/defs.json",
+            r#"{"$defs":{"frontmatter":{"type":"object","required":["status"],"properties":{"status":{"enum":["draft","final"]}}}}}"#,
+        )],
+    )
+    .expect("linked JSON Schema is valid");
+    let FrontmatterPolicy::Optional { schema: Some(_) } = &loaded.schema.frontmatter else {
+        panic!("expected an optional linked frontmatter schema")
+    };
+    assert!(loaded.sources.documents.contains_key(&SourceId(1)));
+    assert!(loaded.sources.documents.contains_key(&SourceId(2)));
+    assert!(loaded
+        .locations
+        .nodes
+        .contains_key(&SchemaNode::FrontmatterSchemaDocument));
+    let document = crate::parse_markdown(
+        "---\nstatus: review\n---\n",
+        crate::MarkdownOptions::default(),
+    );
+    let diagnostics =
+        crate::validate(&loaded.schema, &document).expect("loader-created validator compiles");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
+}
+
+#[test]
+fn accepts_circular_fragment_refs_without_validation_time_io() {
+    linked(
+        r##"{
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": "#/$defs/node",
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "properties": { "child": { "$ref": "#/$defs/node" } }
+                }
+            }
+        }"##,
+        &[],
+    )
+    .expect("circular local refs are valid");
+}
+
+#[test]
+fn accepts_cycles_across_preloaded_resources() {
+    linked(
+        r#"{"$ref":"other.json"}"#,
+        &[(
+            "https://outlint.invalid/other.json",
+            r#"{"$ref":"root.json"}"#,
+        )],
+    )
+    .expect("the immutable registry supports cross-resource cycles");
+}
+
+#[test]
+fn semantic_schema_equality_ignores_resource_labels() {
+    let first = linked("{\"type\":\"object\"}", &[]).expect("first schema is valid");
+    let mut input = resource("https://outlint.invalid/root.json", "{\"type\":\"object\"}");
+    input.label = Some(SourceLabel("a/different/location.json".into()));
+    let second = load_schema_with_resources(
+        linked_schema_source(),
+        Some(SourceLabel("elsewhere/schema.yml".into())),
+        Some(LinkedJsonSchemaInput {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            resources: vec![input],
+        }),
+    )
+    .expect("second schema is valid");
+    assert_eq!(first.schema, second.schema);
+}
+
+#[test]
+fn rejects_remote_refs_without_network_retrieval() {
+    let remote_uri = "https://example.invalid/frontmatter.schema.json";
+    let invalid = linked(
+        r#"{
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$ref": "https://example.invalid/frontmatter.schema.json"
+            }"#,
+        &[],
+    )
+    .expect_err("remote refs are unsupported");
+    assert_eq!(
+        invalid.errors.first.kind,
+        SchemaErrorKind::InvalidFrontmatterSchema
+    );
+    assert_eq!(invalid.errors.first.range.source, SourceId(1));
+    assert!(
+        invalid.errors.first.message.contains(&format!(
+            "JSON Schema resource `{remote_uri}` was not preloaded"
+        )),
+        "unexpected retrieval diagnostic: {}",
+        invalid.errors.first.message
+    );
+    assert!(!invalid.errors.first.message.contains("Default retriever"));
+}
+
+#[test]
+fn preserves_ref_siblings_and_boolean_targets() {
+    let loaded = linked(
+        r#"{"$ref":"defs.json#/$defs/base","required":["sibling"]}"#,
+        &[(
+            "https://outlint.invalid/defs.json",
+            r#"{"$defs":{"base":{"required":["target"]}}}"#,
+        )],
+    )
+    .expect("ref with duplicate sibling keyword is valid");
+    let document = crate::parse_markdown(
+        "---\ntarget: true\n---\n",
+        crate::MarkdownOptions::default(),
+    );
+    let diagnostics =
+        crate::validate(&loaded.schema, &document).expect("loader-created validator compiles");
+    assert_eq!(diagnostics.len(), 1, "`$ref` siblings must both apply");
+
+    let loaded = linked(
+        r#"{"$ref":"defs.json#/$defs/base","type":"object"}"#,
+        &[(
+            "https://outlint.invalid/defs.json",
+            r#"{"$defs":{"base":false}}"#,
+        )],
+    )
+    .expect("boolean ref target is valid");
+    let diagnostics =
+        crate::validate(&loaded.schema, &document).expect("loader-created validator compiles");
+    assert_eq!(diagnostics.len(), 1, "false target must remain rejecting");
+}
+
+#[test]
+fn positions_invalid_linked_json_schema_in_its_own_source() {
+    let invalid = linked("{ invalid json }", &[]).expect_err("linked JSON Schema is invalid");
+    assert_eq!(invalid.errors.iter().count(), 1);
+    assert_eq!(
+        invalid.errors.first.kind,
+        SchemaErrorKind::InvalidFrontmatterSchema
+    );
+    assert_eq!(invalid.errors.first.range.source, SourceId(1));
+    let source = invalid
+        .sources
+        .documents
+        .get(&SourceId(1))
+        .unwrap_or_else(|| panic!("missing linked JSON Schema source"));
+    assert_eq!(source.label, Some(SourceLabel("root.json".into())));
+}
+
+#[test]
+fn positions_invalid_transitive_resource_in_its_own_source() {
+    let invalid = linked(
+        r#"{"$ref":"defs.json"}"#,
+        &[("https://outlint.invalid/defs.json", "{ invalid json }")],
+    )
+    .expect_err("transitive resource is invalid");
+    assert_eq!(invalid.errors.first.range.source, SourceId(2));
+    assert_eq!(
+        invalid.sources.documents[&SourceId(2)].label,
+        Some(SourceLabel("defs.json".into()))
+    );
+}
+
+#[test]
+fn collects_independent_linked_resource_errors_in_input_order() {
+    let invalid = linked(
+        r#"{"allOf":[{"$ref":"first.json"},{"$ref":"second.json"}]}"#,
+        &[
+            ("https://outlint.invalid/first.json", "{ invalid json }"),
+            ("https://outlint.invalid/second.json", "[]"),
+        ],
+    )
+    .expect_err("both invalid linked resources must be reported");
+    let errors = invalid.errors.iter().collect::<Vec<_>>();
+
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0].kind, SchemaErrorKind::InvalidFrontmatterSchema);
+    assert_eq!(errors[0].range.source, SourceId(2));
+    assert!(errors[0]
+        .message
+        .starts_with("invalid linked JSON Schema document:"));
+    assert_eq!(errors[1].kind, SchemaErrorKind::InvalidFrontmatterSchema);
+    assert_eq!(errors[1].range.source, SourceId(3));
+    assert_eq!(
+        errors[1].message,
+        "frontmatter JSON Schema root must be an object or boolean"
+    );
+}
+
+#[test]
+fn duplicate_linked_resource_error_uses_the_duplicate_occurrence_source() {
+    let uri = "https://outlint.invalid/duplicate.json";
+    let mut first = resource(uri, "{ invalid json }");
+    first.label = Some(SourceLabel("first-duplicate.json".into()));
+    let mut second = resource(uri, "{}");
+    second.label = Some(SourceLabel("second-duplicate.json".into()));
+    let invalid = load_schema_with_resources(
+        linked_schema_source(),
+        Some(SourceLabel("schema.yml".into())),
+        Some(LinkedJsonSchemaInput {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            resources: vec![
+                resource(
+                    "https://outlint.invalid/root.json",
+                    r#"{"$ref":"duplicate.json"}"#,
+                ),
+                first,
+                second,
+            ],
+        }),
+    )
+    .expect_err("invalid and duplicate resources must both be reported");
+    let errors = invalid.errors.iter().collect::<Vec<_>>();
+
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0].range.source, SourceId(2));
+    assert_eq!(errors[1].range.source, SourceId(3));
+    assert!(errors[1]
+        .message
+        .starts_with("duplicate JSON Schema resource URI"));
+    assert_eq!(
+        invalid.sources.documents[&SourceId(3)].label,
+        Some(SourceLabel("second-duplicate.json".into()))
+    );
+}
+
+#[test]
+fn positions_linked_schema_read_failures_at_the_unreadable_resource() {
+    let message = "cannot inspect linked JSON Schema 'missing.json': not found";
+    for (resources, expected_source, expected_label) in [
+        (
+            vec![failed_resource(
+                "https://outlint.invalid/root.json",
+                "missing-root.json",
+                message,
+            )],
+            SourceId(1),
+            "missing-root.json",
+        ),
+        (
+            vec![
+                resource(
+                    "https://outlint.invalid/root.json",
+                    r#"{"$ref":"missing.json"}"#,
+                ),
+                failed_resource(
+                    "https://outlint.invalid/missing.json",
+                    "missing.json",
+                    message,
+                ),
+            ],
+            SourceId(2),
+            "missing.json",
+        ),
+    ] {
+        let invalid = load_schema_with_resources(
+            linked_schema_source(),
+            Some(SourceLabel("schema.yml".into())),
+            Some(LinkedJsonSchemaInput {
+                root_uri: "https://outlint.invalid/root.json".into(),
+                resources,
+            }),
+        )
+        .expect_err("linked schema read failure is invalid");
+
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidFrontmatterSchema
+        );
+        assert_eq!(invalid.errors.first.message, message);
+        assert_eq!(invalid.errors.first.range.source, expected_source);
+        assert_eq!(
+            invalid.errors.first.range.range,
+            TextRange {
+                start: ByteOffset(0),
+                end: ByteOffset(0),
+            }
+        );
+        let source = &invalid.sources.documents[&expected_source];
+        assert_eq!(source.label, Some(SourceLabel(expected_label.into())));
+        assert_eq!(&*source.text, "");
+    }
+}
+
+#[test]
+fn rejects_missing_and_unsupported_linked_json_schemas() {
+    let root = resource("https://outlint.invalid/not-root.json", "{}");
+    let missing = load_schema_with_resources(
+        linked_schema_source(),
+        None,
+        Some(LinkedJsonSchemaInput {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            resources: vec![root],
+        }),
+    )
+    .expect_err("missing linked schema is invalid");
+    assert_eq!(
+        missing.errors.first.kind,
+        SchemaErrorKind::InvalidFrontmatterSchema
+    );
+    assert_eq!(missing.errors.first.range.source, SourceId(0));
+
+    let unsupported = linked(
+        r#"{"$schema":"http://json-schema.org/draft-07/schema#","type":"object"}"#,
+        &[],
+    )
+    .expect_err("unsupported dialect is invalid");
+    assert_eq!(
+        unsupported.errors.first.kind,
+        SchemaErrorKind::InvalidFrontmatterSchema
+    );
+    assert_eq!(unsupported.errors.first.range.source, SourceId(1));
+}
+
+fn linked(root: &str, resources: &[(&str, &str)]) -> LoadSchemaResult {
+    let mut rest = Vec::new();
+    for (uri, source) in resources {
+        rest.push(resource(uri, source));
+    }
+    load_schema_with_resources(
+        linked_schema_source(),
+        Some(SourceLabel("schema.yml".into())),
+        Some(LinkedJsonSchemaInput {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            resources: std::iter::once(resource("https://outlint.invalid/root.json", root))
+                .chain(rest)
+                .collect(),
+        }),
+    )
+}
+
+fn inline(root: &str) -> LoadSchemaResult {
+    let root: Value = serde_json::from_str(root).expect("test inline schema is valid JSON");
+    load_schema(&format!(
+        "version: 1\nfrontmatter:\n  schema: {}\ntitle: null\nsections: []\n",
+        serde_json::to_string(&root).expect("test inline schema serializes")
+    ))
+}
+
+fn resource(uri: &str, source: &str) -> crate::JsonSchemaResourceInput {
+    crate::JsonSchemaResourceInput {
+        uri: uri.into(),
+        label: Some(SourceLabel(
+            uri.rsplit('/').next().unwrap_or(uri).to_owned(),
+        )),
+        contents: crate::JsonSchemaResourceContents::Loaded(Arc::from(source)),
+    }
+}
+
+fn failed_resource(uri: &str, label: &str, message: &str) -> crate::JsonSchemaResourceInput {
+    crate::JsonSchemaResourceInput {
+        uri: uri.into(),
+        label: Some(SourceLabel(label.into())),
+        contents: crate::JsonSchemaResourceContents::ReadFailure(message.into()),
+    }
+}
+
+fn linked_schema_source() -> &'static str {
+    "version: 1\nfrontmatter:\n  schema: root.json\ntitle: null\nsections: []\n"
+}
+
+/// Builds a document whose root reference starts a chain of `links` hops,
+/// the last of which targets `tail`. It declares `links + 1` references
+/// and nests three levels however long the chain is.
+fn reference_chain(links: usize, tail: &str) -> String {
+    let mut definitions = serde_json::Map::new();
+    definitions.insert("end".into(), serde_json::Value::Bool(true));
+    for index in 0..links {
+        let target = if index + 1 == links {
+            tail.to_owned()
+        } else {
+            format!("#/$defs/{}", index + 1)
+        };
+        definitions.insert(index.to_string(), serde_json::json!({ "$ref": target }));
+    }
+    serde_json::json!({ "$ref": "#/$defs/0", "$defs": definitions }).to_string()
+}
+
+/// Builds a fragment chain whose schemas are hidden inside instance data.
+///
+/// The root pointer activates the first object in `const`; each object then
+/// points at the next array element until the final `true` schema. The
+/// result declares exactly `references` `$ref` members even though only
+/// the root occupies a keyword position recognized as a subresource.
+fn hidden_reference_chain(references: usize) -> Value {
+    assert!(references > 0, "a reference chain has a root reference");
+    let mut hidden = (0..references - 1)
+        .map(|index| serde_json::json!({ "$ref": format!("#/const/{}", index + 1) }))
+        .collect::<Vec<_>>();
+    hidden.push(Value::Bool(true));
+    serde_json::json!({ "$ref": "#/const/0", "const": hidden })
+}
+
+#[test]
+fn refuses_a_reference_chain_longer_than_the_compiler_can_recurse_over() {
+    // Compiling a reference re-enters the compiler at its target, so a
+    // chain costs a stack frame per link while every link of it sits at
+    // the same JSON depth: the YAML depth limit and `serde_json`'s parse
+    // limit are both satisfied with room to spare by a chain long enough
+    // to abort the process. The count is charged before the graph reaches
+    // the compiler, so the boundary is pinned on both sides -- a graph
+    // spending the whole budget must still load, or the bound would be
+    // free to drift downwards unnoticed.
+    let at_budget = reference_chain(MAX_JSON_SCHEMA_REFERENCES - 1, "#/$defs/end");
+    assert_eq!(
+        json_schema_reference_count(
+            &serde_json::from_str(&at_budget).expect("chain is valid JSON")
+        ),
+        MAX_JSON_SCHEMA_REFERENCES
+    );
+    linked(&at_budget, &[]).expect("a graph spending the whole budget still loads");
+
+    let over_budget = reference_chain(MAX_JSON_SCHEMA_REFERENCES, "#/$defs/end");
+    let invalid = linked(&over_budget, &[]).expect_err("one reference more is refused");
+    assert_eq!(
+        invalid.errors.first.kind,
+        SchemaErrorKind::InvalidFrontmatterSchema
+    );
+    assert_eq!(
+        invalid.errors.first.message,
+        json_schema_reference_budget_message()
+    );
+    assert_eq!(invalid.errors.first.range.source, SourceId(1));
+    assert!(invalid.errors.rest.is_empty());
+}
+
+#[test]
+fn the_reference_budget_counts_dynamic_references_too() {
+    // `$dynamicRef` compiles through the same function as `$ref` and
+    // re-enters the compiler the same way, so a chain of them aborts at
+    // the same length. Counting only `$ref` would leave the crash
+    // reachable by renaming one keyword.
+    let over_budget = reference_chain(MAX_JSON_SCHEMA_REFERENCES, "#/$defs/end")
+        .replace(r#""$ref""#, r#""$dynamicRef""#);
+    let invalid = linked(&over_budget, &[]).expect_err("a dynamic chain is a chain");
+    assert_eq!(
+        invalid.errors.first.message,
+        json_schema_reference_budget_message()
+    );
+}
+
+#[test]
+fn the_reference_budget_spans_the_graph_and_names_where_it_runs_out() {
+    // The compiler recurses across resource boundaries as readily as
+    // within one, so a per-document budget would be no budget at all: two
+    // documents each under it can name a chain twice as long as either.
+    // The total is therefore charged over the graph, and reported against
+    // the resource whose references spend the last of it rather than the
+    // root, so the diagnostic points at a document the author can shorten.
+    let half = MAX_JSON_SCHEMA_REFERENCES / 2;
+    let root = reference_chain(half - 1, "defs.json#/$defs/0");
+    let definitions = reference_chain(half, "#/$defs/end");
+    assert_eq!(
+        json_schema_reference_count(&serde_json::from_str(&root).expect("root is valid JSON"))
+            + json_schema_reference_count(
+                &serde_json::from_str(&definitions).expect("defs are valid JSON")
+            ),
+        MAX_JSON_SCHEMA_REFERENCES + 1
+    );
+
+    let invalid = linked(
+        &root,
+        &[("https://outlint.invalid/defs.json", &definitions)],
+    )
+    .expect_err("a chain split across two documents is still one chain");
+    assert_eq!(
+        invalid.errors.first.kind,
+        SchemaErrorKind::InvalidFrontmatterSchema
+    );
+    assert_eq!(
+        invalid.errors.first.message,
+        json_schema_reference_budget_message()
+    );
+    assert_eq!(invalid.errors.first.range.source, SourceId(2));
+}
