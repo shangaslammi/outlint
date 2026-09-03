@@ -860,32 +860,61 @@ The content of `fm[...]` is one complete RFC 9535 JSONPath query evaluated
 against the same YAML-to-JSON view used by `frontmatter.schema`. The wrapper
 ends after parsing that complete query, not at the first `]` or `=` occurring
 inside it; only an `=` following the wrapper introduces Outlint equality.
-RFC 9535 well-formedness and validity are checked at the locator's binding
-time. This includes statically typed function expressions and the RFC 9535
-§2.1 requirement that integers in index selectors and array-slice bounds and
-steps lie in the I-JSON exact range, −9,007,199,254,740,991 through
-9,007,199,254,740,991 inclusive. Integer literals inside filter expressions
-are not subject to this load-time bound; comparisons against them follow the
-numeric-interoperability rule below.
-Schema-resident failures are `invalid-document-shape`. The supported
-extension functions are exactly the initial RFC 9535 registry: `length`,
-`count`, `match`, `search`, and `value`. Unknown functions and
-implementation-specific operators are invalid.
-A well-typed `match()` or `search()` whose runtime string is not a valid
-I-Regexp evaluates as RFC 9535 specifies; it does not become a schema error.
 
-The full RFC 9535 query grammar is accepted. Its filters and comparisons,
-including `match()` and `search()`, retain RFC semantics and are unaffected by
-`options.match_case`. Numeric comparisons are exact within the I-JSON
-exact-integer range. Outside that range, comparison behavior follows the
-implementation's RFC-conformant numeric interoperability, and schema authors
-SHOULD NOT rely on a particular outcome (§10). At the `fm[...]` boundary,
-duplicate references to the same result node are collapsed; the resulting
-node set's order is not observable. Implementations MUST evaluate the complete
-result and MUST NOT silently truncate it. If an implementation-specific
-resource limit prevents completion, validation has not produced a document
-verdict and the CLI MUST surface an operational error (§11.5), not a partial
-diagnostic set.
+Within that grammar, Outlint's **guaranteed core** is:
+
+```text
+core-query    = "$" *(S core-segment)
+core-segment  = "." (member-name-shorthand / "*")
+              / "[" S core-selector S "]"
+core-selector = name-selector / index-selector / "*"
+```
+
+`S`, `member-name-shorthand`, `name-selector`, and `index-selector` retain
+their RFC 9535 definitions. A core query therefore consists only of child
+segments, with exactly one name, index, or wildcard selector per bracketed
+segment. Quoted names include the RFC's complete escape repertoire, including
+names containing quotes, backslashes, or C0 controls. For every valid core
+query, implementations MUST apply RFC 9535 child-segment semantics: a name
+selects that exact object member, an index selects that array member, a
+negative index counts back from the array's end, and a wildcard selects every
+immediate object or array child. A missing member, an out-of-range index, or a
+selector applied to the wrong container kind selects nothing.
+
+Only this core is covered by Outlint's self-verification corpus; vendor-tier
+query outcomes are not an Outlint conformance or release gate.
+
+Core index selectors are checked at binding time and MUST lie in the I-JSON
+exact range, −9,007,199,254,740,991 through 9,007,199,254,740,991 inclusive.
+A failure is `invalid-document-shape` for a schema-resident locator.
+
+The full RFC 9535 grammar remains admitted. A query using any other RFC
+construct MUST NOT be rejected merely for falling outside the guaranteed
+core; it is submitted in full to the implementation's JSONPath provider.
+Multiple selectors in one segment, slices, descendant segments, filters and
+comparisons, and function expressions are **vendor-tier** behavior: their
+binding and evaluation depend on that provider and carry no Outlint
+conformance or portability guarantee. This includes I-JSON validation of
+slice bounds and steps, function-expression well-typedness, numeric
+comparison behavior inside filters, and the runtime I-Regexp behavior of
+`match()` and `search()`. These constructs are unaffected by
+`options.match_case`. Outlint imposes no load-time bound on integer literals
+inside filters. The admitted extension functions are exactly the initial RFC
+9535 registry: `length`, `count`, `match`, `search`, and `value`. Unknown
+functions and implementation-specific operators remain invalid. An actual
+binding failure reported for a schema-resident query is
+`invalid-document-shape`.
+
+At the `fm[...]` boundary, duplicate references to the same result node are
+collapsed; the resulting node set's order is not observable. Outlint owns
+path rendering at this boundary: whenever it renders a normalized path or
+derives a §6.1 `pointer`, it MUST construct the representation from the node's
+path components according to RFC 9535 §2.7, including correct escaping of
+quotes, backslashes, and C0 controls. A JSONPath provider's rendered path is
+not authoritative. Implementations MUST evaluate the complete result and
+MUST NOT silently truncate it. If an implementation-specific resource limit
+prevents completion, validation has not produced a document verdict and the
+CLI MUST surface an operational error (§11.5), not a partial diagnostic set.
 
 The frontmatter source rule is common to both JSONPath proposition forms. If
 the block is `invalid-frontmatter`, the query is unevaluated and the entire
@@ -1067,6 +1096,9 @@ For `frontmatter`, `line_range` is the one-based inclusive `{start_line,
 end_line}` span of the whole block, absent exactly when the document has no
 frontmatter block at all (`missing-frontmatter`). `pointer` is an RFC 6901
 JSON Pointer: `~` in a member name is escaped as `~0` and `/` as `~1`.
+The §4.6 path-component rule applies before this conversion: implementations
+MUST derive the raw member names and array indices from path components, not
+by reparsing a JSONPath provider's rendered path.
 Usually it names an existing value rejected by JSON Schema or typed-value
 evaluation. For `missing-value`, it instead names the normalized path an
 absent singular query addressed whenever such a path can be formed. Its
@@ -1272,11 +1304,13 @@ load_schema:
               capture declarations and mandatory participation; normalize
               order entries; assign default ids; check named-scope
               uniqueness; reject reserved root ids "fm" and "linkdefs"
-  bind every schema locator (§4): validate full RFC 9535 queries and their
-    function expressions; reject dangling names, locators through allow:false
-    rules, plural non-terminal steps, duplicate locators, arity < 2 in set
-    forms, ordered locators crossing scopes or resolving in an ordered scope
-    (§3.7)
+  bind every schema locator (§4): submit full RFC 9535 queries to the JSONPath
+    provider; enforce the §4.6 guaranteed core's index bound and semantics;
+    admit vendor-tier constructs without a subset gate;
+    reject unknown functions and implementation-specific operators, dangling
+    names, locators through allow:false rules, plural non-terminal steps,
+    duplicate locators, arity < 2 in set forms, ordered locators crossing
+    scopes or resolving in an ordered scope (§3.7)
 
 validate(doc):
   split frontmatter (§1.6); parse markdown -> header tree under the
@@ -1310,8 +1344,9 @@ validate(doc):
 
 Outline matching performs O(H × R) matcher tests, H = headers and R = the
 maximum sibling rule count. Typed parsing and ordering are linear in the
-number of captured occurrences per order entry. JSONPath evaluation follows
-RFC 9535 and depends on the query and frontmatter value.
+number of captured occurrences per order entry. Guaranteed-core JSONPath
+evaluation follows §4.6; vendor-tier cost and results depend on the JSONPath
+provider and on the query and frontmatter value.
 
 ---
 
@@ -1456,12 +1491,13 @@ exists.
   consumes, `fm[...]` for document-time propositions, and `fm.<capture>` for
   typo-safe declared propositions. If a rule doesn't mention a section, it
   doesn't belong in an Outlint constraint.
-- Prefer simple RFC 9535 queries in `fm[...]`. Filters are supported, but
-  structural frontmatter logic is usually clearer in JSON Schema. For
-  portable behavior across JSON ecosystems, keep numbers compared by JSONPath
-  within the I-JSON exact-integer range (§4.6); §1.6's exact YAML conversion
-  does not make every external JSONPath implementation interoperable outside
-  it.
+- For portable behavior, keep `fm[...]` queries within the §4.6 guaranteed
+  core. Vendor-tier slices, descendants, filters, and functions remain
+  available but are provider-dependent. Prefer an explicit child path to a
+  descendant search; split multiple selectors into explicit constraint
+  operands; use a wildcard or specific indices instead of a slice; replace a
+  simple filter with a direct core path plus Outlint `=literal`; and put
+  structural or collection-wide predicates in `frontmatter.schema`.
 - Use captures when parsing the value is itself validation. Keep every
   capture group mandatory, and use an undeclared group for optional display
   suffixes. Use `order` for independent within-rule value orders; it is not a
