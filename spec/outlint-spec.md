@@ -1,12 +1,13 @@
 # Outlint Schema — Specification v1
 
-Status: Normative for the 0.1.0 reference implementation in this
-repository; may change before 1.0. Normative keywords MUST / MUST NOT /
-SHOULD / MAY per RFC 2119.
+Status: Normative public specification; may change before 1.0. The reference
+implementation in this repository may lag newly specified features.
+Normative keywords MUST / MUST NOT / SHOULD / MAY per RFC 2119.
 
 Outlint is a declarative schema language for validating the header structure
 (outline) of Markdown documents. A schema constrains which headers may/must
-appear, their nesting, cardinality, order, and cross-section presence logic.
+appear, their nesting, cardinality, order, typed values captured from headers
+and frontmatter, and cross-section presence logic.
 
 Conventions: schema files are named `.outlint.yml` (directory default),
 `<stem>.outlint.yml` (per-document, discovered for the matching document),
@@ -89,7 +90,7 @@ exists to describe. The general form has no such exception — a top-level h2
 under `outline` skips a level against the level-0 root. A skipping header
 takes part in no rule — it
 matches none, counts toward no cardinality, and satisfies no constraint
-ref — and neither does anything below it; §1.5 itself still applies inside
+locator — and neither does anything below it; §1.5 itself still applies inside
 the subtree, so a header that skips relative to a skipping parent is
 reported in its own right, but a well-nested descendant yields no cascade of
 complaints about a misplacement that is entirely its ancestor's.
@@ -265,6 +266,12 @@ than the six header levels of §1.2 can address.
   repeat: "<min>..<max>"  # optional; max is integer or "n" (unbounded)
   strict: <bool>          # optional, default false; closes the child scope (§3.4)
   ordered: <bool>         # optional, default options.ordered_sections; orders the child scope (§3.7)
+  captures:               # optional non-empty mapping; regex rules only (§2.2, §2.4)
+    <name>: <type>
+  order:                  # optional non-empty list; orders this rule's matches by capture (§3.8)
+    - by: <capture-name>
+      dir: asc            # optional: asc or desc; default asc
+      strict: false       # optional bool; default false
   sections: [<rule>...]   # optional; rules for this section's children (one level deeper)
   constraints: [...]      # optional; scoped to this rule's children (§5)
 ```
@@ -294,6 +301,20 @@ Specifying both `required` and `repeat` is a schema error
 schema error `conflicting-cardinality`. Rules with `allow: false` cannot be
 referenced by constraints (§4.4).
 
+`captures`, when present, MUST be a non-empty mapping from capture names to
+typed-value names (§2.4). `order`, when present, MUST be a non-empty list of
+objects having exactly the required key `by` and the optional keys `dir` and
+`strict`. A malformed or empty `captures` mapping, a duplicate capture key,
+an unsupported capture declaration, or a capture declared on a non-regex or
+`allow: false` rule is `invalid-capture`. A malformed or empty `order` list is
+`invalid-order`. Unknown keys inside an order entry are `invalid-order`; the
+general unknown-key rule of §2 applies outside these two constructs.
+
+A repeated key within one `captures` mapping is `invalid-capture`. Only after
+that mapping is well-formed are its declared capture names entered into the
+named scope; a collision there with a child rule's explicit or default id is
+`duplicate-id` (§4.3).
+
 **`repeat` grammar** (exact): `min ".." max` matching
 `^(0|[1-9][0-9]*)\.\.((0|[1-9][0-9]*)|n)$` — decimal integers without
 leading zeros or whitespace; `n` denotes unbounded. If `max` is an integer,
@@ -322,11 +343,25 @@ use the same regex case-folding semantics and compose with
 **Regex dialect** (normative for portability): the linear-time class as
 implemented by RE2 / the Rust `regex` crate — literals, classes (`[...]`,
 `\d`, `\w`, `\s` and negations), alternation, grouping (capturing and
-`(?:)`), quantifiers (`* + ? {m,n}`, greedy and lazy), and Unicode by
-default. Backreferences and lookaround are NOT part of the dialect; a
+`(?:)`), named capturing groups in either `(?<name>...)` or
+`(?P<name>...)` form, quantifiers (`* + ? {m,n}`, greedy and lazy), and
+Unicode by default. Backreferences and lookaround are NOT part of the dialect; a
 matcher using them is schema error `invalid-matcher`. A literal `/` inside
 the body is written `\/`; no other delimiter escaping exists. Inline flags
 `(?i)` etc. are permitted and compose with `options.match_case`.
+
+A declared capture name MUST match `[a-z][a-z0-9_]*` and MUST name a named
+group in that rule's regex. Each declaration binds the substring matched by
+that group. Undeclared named and unnamed groups remain ordinary regex groups.
+There are no reserved capture names.
+
+Declared captures are mandatory-participation groups. In the regex syntax
+tree, a declared group's node MUST NOT have either an alternation node or a
+repetition whose minimum is zero as an ancestor. The latter includes `?`,
+`*`, and `{0,n}`, in greedy or lazy form. This is a syntactic restriction:
+whether a branch is unreachable for a particular input does not change it.
+A missing group, invalid capture name, or declaration that violates this
+restriction is schema error `invalid-capture`.
 
 ### 2.3 Frontmatter object
 
@@ -335,16 +370,45 @@ frontmatter:
   required: <bool>          # default false; true = frontmatter block must exist
   allow: <bool>             # default true; false = frontmatter block is forbidden
   schema: <path-or-mapping> # optional JSON Schema for the frontmatter mapping
+  captures:                 # optional non-empty mapping of typed exports
+    <name>:
+      path: <jsonpath>      # optional absolute RFC 9535 singular query; default is the name
+      type: <type>          # required; see §2.4
+      required: <bool>      # optional, default false
 ```
 
 `required: true` with `allow: false` is a schema error
+`conflicting-frontmatter`. `captures` with `allow: false` is also
 `conflicting-frontmatter`.
 
-**Delegated validation.** Outlint does NOT define a value-validation
-language for frontmatter. If `schema` is given, it is either a path relative
-to the Outlint schema file or an inline YAML mapping interpreted as a JSON
-Schema object. The dialect is selected by the JSON Schema's own `$schema`
-keyword; absent `$schema`, the dialect is draft 2020-12. A path MUST name a
+A frontmatter `captures` value MUST be a non-empty mapping. Each key is a
+capture name under the grammar of §2.2, and each value is an object having
+exactly the required key `type` and optional keys `path` and `required`.
+Duplicate keys, empty or malformed mappings, unknown keys, unknown types, and
+invalid paths are schema error `invalid-capture`. Frontmatter captures have
+their own named scope (§4.3); they do not collide with outline names.
+
+`path` MUST be a string containing an absolute, `$`-rooted RFC 9535 JSONPath
+**singular query**: its segments are name or index segments only, as defined
+by RFC 9535 §2.3.5.1. A relative, `@`-rooted query is `invalid-capture`
+because this binding site supplies no current node. The path is evaluated
+against the YAML-to-JSON frontmatter value described in §1.6. When omitted, it
+defaults to the capture name as one name segment; for capture `version`, the
+default is equivalent to `$['version']`. A path is declarative even when it
+uses a negative index: its failure to select a node in a particular document
+is a runtime absence, not a schema error.
+
+JSONPath selects the JSON view, but a selected scalar retains its resolved
+YAML kind for the strict capture-kind check. In particular, JSON Schema sees
+both YAML integers and finite decimals as JSON numbers, while an `int`
+capture still accepts only the former.
+
+**Delegated structural validation.** Typed captures do not replace JSON
+Schema as the frontmatter validation language. If `schema` is given, it is
+either a path relative to the Outlint schema file or an inline YAML mapping
+interpreted as a JSON Schema object. The dialect is selected by the JSON
+Schema's own `$schema` keyword; absent `$schema`, the dialect is draft
+2020-12. A path MUST name a
 UTF-8 JSON document whose root is an object or boolean. Implementations MUST
 support draft 2020-12 and MAY support earlier drafts; an unsupported `$schema`
 is schema error `invalid-frontmatter-schema`.
@@ -397,9 +461,87 @@ and fragment cycles within an inline schema and cycles within or between
 linked files are required above to resolve, so an implementation MUST NOT
 refuse a graph for being cyclic.
 
-Outlint's own frontmatter awareness is limited to presence and equality via
-`fm.` refs in constraints (§4.6). Richer value logic belongs in the JSON
-Schema.
+`frontmatter.schema` and `frontmatter.captures` are complementary. The former
+validates structure; the latter exports typed scalar values. The same entry
+MAY be covered by both, and failures from the two mechanisms are independent.
+Frontmatter proposition addressing is defined in §4.6. Richer structural
+validation still belongs in JSON Schema.
+
+Capture evaluation uses the singular query's result nodelist:
+
+- No result node, or one null result node, is **absent**. It produces
+  `missing-value` exactly when that capture has `required: true`; an optional
+  absent capture is valid and unbound. Traversal through a value of the wrong
+  container kind produces an empty nodelist under RFC 9535 and is therefore
+  absence, not a separate traversal error.
+- One non-null scalar of the required YAML kind is parsed as §2.4 specifies.
+  A scalar of another kind, a mapping, a sequence, or a scalar that fails the
+  type's parse or bound is `invalid-value`.
+
+When the document has no frontmatter block, or its block is
+`invalid-frontmatter`, captures are not evaluated and produce neither
+`missing-value` nor `invalid-value`. The block-level diagnostic, when one is
+required, is sufficient. A `frontmatter-schema` failure does not suppress
+capture evaluation because a valid resolved mapping still exists.
+
+### 2.4 Typed values
+
+The set of capture types is closed:
+
+| Type | Header-capture form | Frontmatter kind | Equality and order | Bound |
+|---|---|---|---|---|
+| `int` | `-?[0-9]+`; leading zeros allowed | YAML integer | mathematical integer | signed 64-bit |
+| `bool` | exactly `true` or `false` | YAML boolean | `false < true` | — |
+| `date` | `YYYY-MM-DD` | YAML string | proleptic-Gregorian chronological order | — |
+| `semver` | SemVer 2.0.0 without build metadata | YAML string | SemVer precedence | each numeric identifier is unsigned 64-bit |
+| `dotted` | `[0-9]+(?:\.[0-9]+)*`; leading zeros allowed | YAML string | numeric component sequence | each component is unsigned 32-bit |
+| `text` | any string | YAML string | Unicode code-point order | — |
+
+No implicit coercion occurs. In particular, a frontmatter `int` accepts only
+a YAML integer and a frontmatter `bool` only a YAML boolean; every other type
+accepts only a YAML string. Thus unquoted `version: 1.2` is a YAML float and
+is not a `semver`; diagnostics SHOULD suggest quoting this common mistake.
+Values outside a type's bound are invalid even if the YAML parser represents
+them exactly.
+
+A `date` has four decimal year digits, two month digits, and two day digits,
+and MUST denote a valid date in the proleptic Gregorian calendar. Years
+`0000` through `9999` are valid; `0000` uses ISO 8601 astronomical year
+numbering. A `semver`
+MUST satisfy SemVer 2.0.0, except that a `+` build-metadata suffix is rejected;
+the diagnostic message MUST identify that suffix as the reason. The bound on
+SemVer numeric identifiers applies to major, minor, patch, and numeric
+pre-release identifiers. SemVer identifiers retain their case. A `dotted`
+value compares components numerically; when one sequence is an equal prefix
+of the other, the shorter sorts first. Consequently `1.02` equals `1.2`, but
+`1.2` sorts before `1.2.0`.
+
+Equality is equality of the parsed typed value. Ordering uses the relation in
+the table. `text` equality and order compare the unfolded Unicode code points
+exactly and are unaffected by `options.match_case`. Values of different types
+are never compared.
+
+For a rule capture, the source string is the case-preserving substring of the
+§1.3 matcher input selected by the named group, after the configured inline
+markup handling but before any case folding used to decide the match. For a
+frontmatter capture, it is the resolved YAML string verbatim; Markdown inline
+processing never applies to frontmatter. A `text` capture preserves that
+source string unchanged. Failure of the lexical, kind, calendar, SemVer, or
+bound requirement is document diagnostic `invalid-value` (§6).
+
+The following boundary cases are consequences of these rules:
+
+| Declaration and source | Result |
+|---|---|
+| header `int` `-01` | valid and equal to `-1` |
+| `int` `9223372036854775808` | `invalid-value` |
+| header `bool` `True` | `invalid-value`; header spelling is lowercase-only |
+| frontmatter `bool` written `True` | valid when the YAML core resolver yields boolean true |
+| `date` `2024-02-29` / `2023-02-29` | valid / `invalid-value` |
+| `semver` `1.0.0-rc.1` / `1.0.0+build` | valid / `invalid-value` |
+| `dotted` `1.02.0` | valid and equal to `1.2.0` |
+| `dotted` component `4294967296` | `invalid-value` |
+| frontmatter `text` whose YAML kind is integer | `invalid-value`, not coercion |
 
 ---
 
@@ -413,7 +555,7 @@ and `sections` desugar to (§2). Scopes are bound per parent at every level,
 the h1 level included: two h1s matched by the same rule open two separate
 child scopes, so a nested rule's cardinality and a nested constraint hold
 within each h1 on its own and are never pooled across ancestors. A skipping
-subtree under the default of §1.5 is in no scope, so §3.2 through §3.6
+subtree under the default of §1.5 is in no scope, so §3.2 through §3.8
 never see it.
 
 3.2. **First match wins.** For each child header, in document order, the
@@ -428,8 +570,8 @@ catch-alls; a trailing `match: "*"` acts as a default.
   diagnostic `unexpected-section` in a closed one. Unmatched sections are
   not recursed into.
 - Otherwise, the header's children are validated against the matched rule's
-  `sections` (recursion), and the matched rule's per-scope match count is
-  incremented.
+  `sections` (recursion), the matched rule's per-scope match count is
+  incremented, and every declared capture is parsed (§2.4).
 
 3.4. **Open vs. closed scopes.** A scope is **open** by default: unmatched
 headers pass. A scope is **closed** if its parent rule has `strict: true`.
@@ -485,143 +627,322 @@ unordered and spell the order with an `ordered` constraint (§5.1): set
 exists for exactly the orders a list cannot express: partial ones, and any
 order in an unordered scope.
 
+3.8. **Ordering repeated matches by captured value.** Each `order` entry on a
+rule independently orders the occurrences matched by that rule. `by` MUST
+name one of the rule's declared captures. `dir` is `asc` or `desc`, defaulting
+to `asc`; `strict` is boolean and defaults to false. Two entries whose
+normalized `(by, dir, strict)` values are equal are duplicates. An undeclared
+`by`, duplicate entry, invalid field value, or `order` on a rule whose
+effective maximum is at most one is schema error `invalid-order`.
+
+For one order entry in one concrete parent scope, form the sequence of headers
+whose first matching rule (§3.2) is this rule, in document order. Headers
+matched by other rules and unmatched headers do not break adjacency; they do
+not belong to the sequence. Headers beyond the rule's cardinality maximum
+remain in it, so `too-many-sections` does not suppress value ordering. Headers
+matched by deny rules and every header in a skipped or otherwise unvisited
+subtree contribute nothing. When an ancestor repeats, each concrete ancestor
+instance supplies a separate sequence; occurrences are never flattened
+across instances.
+
+Parse the selected capture of every header in that sequence according to
+§2.4. For each adjacent pair `(A, B)`, ascending order requires `A ≤ B` and
+descending order requires `A ≥ B`; `strict: true` replaces the inclusive
+relation with `<` or `>`. Thus strict ordering also requires uniqueness under
+typed equality: for `dotted`, adjacent spellings `1.02` and `1.2` violate a
+strict entry.
+
+Each violating adjacent pair produces one `order-violation`, targeted and
+anchored at the pair's second header and listing both headers as involved.
+Its message MUST identify both parsed values. One misplaced value can
+therefore produce two diagnostics. This mechanism is
+independent of the across-rule ordering in §3.7 and the `ordered` constraint
+in §5.1.
+
+If any selected capture in a sequence is invalid, the corresponding order
+entry produces no `order-violation` in that scope. Skipping only the invalid
+element would invent an adjacency, so suppression applies to the entire entry
+and scope. Other order entries, scopes, and primary `invalid-value`
+diagnostics are unaffected. This dependency suppression is computed from
+typed validity before the `outlint-disable` filtering of §6.3; hiding an
+`invalid-value` diagnostic MUST NOT re-enable dependent ordering.
+
+For example, under a SemVer capture ordered descending, the sequence
+`2.0.0`, `not-a-version`, `1.0.0` produces `invalid-value` for the middle
+header and no `order-violation` for that entry and scope. It does not compare
+the first and third values as if they were adjacent.
+
 ---
 
-## 4. Rule identifiers
+## 4. Names and locators
 
-4.1. `id`, if given, MUST be a slug: `[a-z0-9]+(-[a-z0-9]+)*`.
+4.1. An explicit rule `id` MUST be a slug:
+`[a-z0-9]+(-[a-z0-9]+)*`. Capture names use the distinct grammar in §2.2.
+The leading names `fm` and `linkdefs` are reserved: a top-level rule with
+either id is schema error `reserved-id`. `fm` is defined in §4.6;
+`linkdefs` is reserved for a later document source and has no behavior in
+this version.
 
-4.2. **Auto-id.** A rule with no explicit `id` and an **exact** matcher gets
-an auto-generated id: apply Unicode NFKD normalization, lowercase, discard
-combining marks, replace each maximal run of remaining characters outside
-`[a-z0-9]` with `-`, and trim leading/trailing `-` (`"API Reference"` →
-`api-reference`, `"Mälardalen"` → `malardalen`). If the result is empty, the
-rule gets no auto id (it is then unreferencable without an explicit `id`; this
-is not an error). Rules with regex, glob, or `"*"`
-matchers get **no** auto id and are unreferencable unless an explicit `id`
-is given.
+4.2. **Default heading ids.** A section rule with no explicit `id` and an
+**exact** matcher gets a default id: apply Unicode NFKD normalization,
+lowercase, discard combining marks, replace each maximal run of remaining
+characters outside `[a-z0-9]` with `-`, and trim leading/trailing `-`
+(`"API Reference"` → `api-reference`, `"Mälardalen"` → `malardalen`). If
+the result is empty, the rule has no default id. Regex, glob, and `"*"`
+rules likewise have no default id.
 
-4.3. **Uniqueness.** Ids (explicit and auto) MUST be unique within their
-sibling `sections` list only — not globally. A collision (including
-explicit-vs-auto) is a schema error `duplicate-id`.
+The same algorithm gives an unmatched concrete heading its document-side
+default id. Conceptually it is an implicit singleton rule. This permits a
+document-bound consumer to address headings in the absence of a schema, but
+does not make such a name available while loading a schema (§4.4). Markdown
+provides no corresponding default identity below headings; future content or
+item rules are explicit-id-or-unnameable, while concrete block and item nodes
+are reached structurally.
 
-4.4. Constraints reference rules **by id**, never by header text or matcher.
-A reference to a nonexistent or id-less rule is a schema error
-`unresolved-ref`; a reference to a rule with `allow: false` is a schema
-error `forbidden-ref` (a presence proposition over a forbidden section is
-either dead logic or a mistake). Both are reported at schema load time.
+4.3. **Named scopes and uniqueness.** The schema root and every section rule
+open a named scope. A rule's child section ids and the captures declared by
+that rule are names in the scope it opens. Names are unique within that scope,
+not globally. An explicit/default id collision, a child-rule/capture
+collision, or any other collision among names from otherwise well-formed
+declarations in one named scope is schema error `duplicate-id`. A key repeated
+within one `captures` mapping is instead `invalid-capture` and is rejected
+before named-scope collision checking (§2.1, §2.3).
 
-### 4.5 Reference paths
+Future structural content rules follow the same model: a rule with an
+explicit id opens a named scope; an anonymous structural rule does not, and
+names nested within it are hoisted to the nearest enclosing named scope.
+Naming such a container moves those nested names into the new scope. This
+paragraph fixes locator namespace behavior but does not introduce content or
+item rule syntax.
 
-A **ref** is a string: one id, or several ids joined with `.`:
+Frontmatter captures occupy a separate named scope rooted at `fm`; they do
+not collide with names at the schema root. A declared capture is a terminal
+typed value, not a child scope. A reference to a nonexistent name is
+`unresolved-ref`; a reference through a rule with `allow: false` is
+`forbidden-ref`. Both are load-time schema errors for schema-resident
+locators.
 
-```yaml
-then: rollback-plan               # bare id
-then: deployment.rollback-plan    # path
-then: $.overview.goals            # absolute path (anchored at schema root)
+### 4.4 Locator syntax and binding
+
+A **locator** denotes a node list. It consists of a relative or absolute name
+path, optionally followed by structural steps:
+
+```text
+rollback-plan                 relative name
+deployment.rollback-plan      relative name path
+$.overview.goals              absolute name path
+$.release[0].notes            positional narrowing
+$.section/list[0]/item[2]     structural traversal (when those kinds exist)
+$.release[0].version          declared capture value
+$.release[0]/text             intrinsic heading text value
 ```
 
-YAML sequences in constraint positions ALWAYS denote **lists of refs**,
-never paths — `[deployment, rollback-plan]` is two refs (fix for the
-ambiguity between ref paths and ref lists; the slug grammar guarantees ids
-never contain `.`, so dotted strings are unambiguous).
+Name steps use `.`, structural steps use `/`, and a zero-based positional
+subscript `[i]` MAY follow any step that produces a node list. `i` matches
+`0|[1-9][0-9]*`. A locator may move from names to structure but MUST NOT use
+a name step after a structural step. `$` anchors an absolute locator; `$`
+alone is not accepted by any constraint in this version. The former `@`
+prefix is not part of the locator language.
 
-- Bare id: resolved among the rules of the scope the constraint is attached
-  to (the direct-children rule list). No implicit upward or downward
-  search; failure to resolve is `unresolved-ref`.
-- Path: the first segment resolves as above; each subsequent segment
-  resolves within the previous rule's `sections`.
-- **Absolute path:** leading `$.` anchors resolution at the schema's
-  outermost rule list: the `outline` rules in the general form, the
-  `sections` list under the sugar. The sugar's synthesized title rule has
-  no id and adds no segment, so a sugar schema's absolute refs name what
-  they always have, while the general form spells the extra level —
-  `$.part.overview` where the sugar writes `$.overview`. `$` alone is not
-  a ref.
+A name step resolves only in the current named scope. There is no implicit
+upward or downward search. Rule-id steps produce the concrete headers whose
+first matched rule has that id. A capture-name step produces the typed value
+declared by the rule that owns the current named scope; after a rule-id step,
+that rule owns the next scope. A structural kind step filters
+the current nodes' direct structural children by the kind allocated by the
+feature defining those nodes; `[i]` then retains only the i-th result in
+document order, or the empty list if it does not exist. `/text` is a terminal
+intrinsic value for a heading and is its case-preserving §1.3 text. Intrinsic
+values use structural syntax so they cannot collide with declared names.
+Other structural kinds and intrinsic members, including `/label`, remain
+unallocated until the document features that own them are specified.
 
-**Truth value of a ref** (used by constraints): a ref is *satisfied* iff at
-least one concrete header exists that is matched along the full rule path —
-i.e. existential over every `repeat` step. Universal requirements ("every
-API section has an Errors child") MUST be expressed structurally via
-`required: true` on the nested rule, not via constraints.
+Every non-terminal step MUST be singular. It is singular statically when a
+schema-declared rule's effective maximum is at most one, or dynamically for a
+document-bound locator when the concrete default id is unique; `[i]` makes
+any step singular. Only the terminal step may remain plural. Implementations
+MUST NOT concatenate results across a plural intermediate step. This is the
+same rule for all locator consumers; a context may impose a stricter terminal
+cardinality. In a schema-resident locator, an otherwise valid locator with an
+unnarrowed, statically plural non-terminal step is
+`invalid-document-shape`. The same id applies when an otherwise valid
+locator's terminal kind is not accepted by its consuming context, unless that
+context assigns a more specific error.
 
-### 4.6 Frontmatter refs
+**Dependency suppression.** When a downstream check is defined only on the
+condition that an upstream check holds, failure of the upstream check leaves
+its diagnostic standing and suppresses the dependent evaluation. In
+particular, an unnarrowed non-terminal locator step may be statically singular
+because its rule has effective maximum one. If that rule nevertheless matches
+several headers in a cardinality-violating concrete scope,
+`too-many-sections` stands and every constraint evaluation that depends on
+descending through that step is suppressed in that scope; it emits no
+constraint diagnostic. This dependency is decided before the
+`outlint-disable` filtering of §6.3, so hiding `too-many-sections` does not
+make the descent evaluable. A step narrowed with `[i]` does not depend on the
+rule's cardinality holding and remains evaluable.
 
-A ref MAY instead address the document's frontmatter:
+This is the same dependency-suppression model used by typed ordering (§3.8)
+and frontmatter propositions (§4.6), but it does not make every cardinality
+failure suppress every later check. In particular, §3.8 explicitly keeps
+headers beyond a rule's maximum in that rule's order sequence because value
+ordering does not depend on the cardinality bound holding.
 
+**Binding-time principle.** The schema-namespace portion of a locator MUST
+resolve where the locator is bound. For a locator written in a schema, every
+rule id and capture name, and every structural kind required by such a
+schema-side traversal, is checked at schema load. Concrete indices, whether a
+matched set is empty, frontmatter queries, and equality literals are document
+data and are evaluated during validation. Consequently a schema-resident
+locator cannot use the implicit id of an unmatched document heading. A
+schema-resident structural kind step MUST land on a declared structural rule
+of that kind; a document-bound consumer instead traverses the concrete
+document freely. Because this version declares no content or item rules, it
+currently allocates no such schema-resident kind step.
+Invalid locator syntax is `invalid-document-shape`; failure to bind a
+declared name or schema-required structure is `unresolved-ref`.
+
+### 4.5 Outline locators and propositions
+
+For a constraint, a bare relative name starts in the named scope to which the
+constraint is attached. A subsequent name resolves in the scope opened by
+the preceding singular rule. A leading `$.` starts at the outermost named
+scope: the `outline` rules in the general form, and the `sections` rules under
+the sugar. The sugar's synthesized title rule is transparent and adds no
+segment. Thus `$.overview` names the same h2 rule a sugar schema has always
+treated as outermost, while the general form writes `$.part.overview` for a
+rule nested beneath h1 `part`. In a schemaless document `$` is the physical
+document root and an h1 is an ordinary default-id segment.
+
+An unmatched heading whose default id equals a sibling declared rule id is
+not separately name-addressable: the declared rule id wins. Skipped subtrees
+are in no validation scope and contribute no nodes. A deny-matched header can
+be addressed by a document-bound consumer, but a schema constraint naming its
+deny rule remains `forbidden-ref`.
+
+When an outline locator ending in a rule id is used as a proposition, it is
+satisfied iff its terminal node list is non-empty. Positional narrowing does
+not change that definition. Locators ending in a capture or intrinsic value
+are value locators and are not propositions in this version. Universal
+requirements ("every API section has an Errors child") MUST be expressed
+structurally with `required: true`, not by a proposition.
+
+YAML sequences in constraint positions always denote lists of locators, not
+locator paths: `[deployment, rollback-plan]` is two locators.
+
+### 4.6 Frontmatter locators and propositions
+
+Frontmatter has two locator forms:
+
+```text
+fm[$.draft]                    JSONPath proposition
+fm[$.status]=deprecated        JSONPath equality proposition
+fm[$['decision-makers']]       quoted member name
+fm.version                     declared frontmatter capture
 ```
-fm.<key>              satisfied iff frontmatter exists, has <key>, and its
-                      value is not null
-fm.<key>=<value>      satisfied iff fm.<key> is satisfied and the values
-                      are equal per the typed-equality rule below
-fm.<key>.<subkey>...  nested mappings, same rules per step
-```
 
-**Typed equality** (normative): frontmatter is parsed with the YAML 1.2
-core schema. The literal after `=` (everything to end of ref) is resolved
-with the same core-schema resolver, producing a typed scalar (string,
-integer, float, boolean, or null). The proposition is satisfied iff the
-resolved type AND value of both sides are equal — no cross-type coercion:
-`fm.count=1` does not match a string `"1"`, `fm.draft=true` does not match
-the string `"true"`, and `1` ≠ `1.0`. String-string comparison follows
-`options.match_case`, including the Unicode simple-folding semantics defined
-in §1.3. There is no quoting or escaping in the ref literal;
-values needing it are out of scope for `fm.` refs — use
-`frontmatter.schema`.
+The content of `fm[...]` is one complete RFC 9535 JSONPath query evaluated
+against the same YAML-to-JSON view used by `frontmatter.schema`. The wrapper
+ends after parsing that complete query, not at the first `]` or `=` occurring
+inside it; only an `=` following the wrapper introduces Outlint equality.
+RFC 9535 well-formedness and validity are checked at the locator's binding
+time. This includes statically typed function expressions and the RFC 9535
+§2.1 requirement that an integer appearing in the query lie in the I-JSON
+exact range, −9,007,199,254,740,991 through 9,007,199,254,740,991 inclusive.
+Schema-resident failures are `invalid-document-shape`. The supported
+extension functions are exactly the initial RFC 9535 registry: `length`,
+`count`, `match`, `search`, and `value`. Unknown functions and
+implementation-specific operators are invalid.
+A well-typed `match()` or `search()` whose runtime string is not a valid
+I-Regexp evaluates as RFC 9535 specifies; it does not become a schema error.
 
-Restrictions (normative):
-- `fm.` refs are propositions only — presence and typed scalar equality.
-  No comparisons, patterns, or type checks; those belong in
-  `frontmatter.schema` (§2.3).
-- `=` compares scalars; if the addressed value is a mapping or sequence,
-  the `=` form is unsatisfied. The bare form (`fm.key`) is satisfied by any
-  non-null value including mappings and sequences. Membership in sequences
-  is not expressible in v1.
-- Keys containing `.` or `=` are not addressable by `fm.` refs in v1 (no
-  escaping syntax exists); constrain such keys via `frontmatter.schema`.
-- `fm.` is a reserved prefix: a top-level rule id `fm` is a schema error
-  `reserved-id`.
-- `fm.` refs are valid in every constraint position except `ordered`
-  (frontmatter has no document position among headers); use in `ordered`
-  is a schema error `ordered-scope-mismatch`.
-- Because `fm.` refs address the document rather than a scope, they resolve
-  identically from any constraint node.
+The full RFC 9535 query grammar is accepted. Its filters and comparisons,
+including `match()` and `search()`, retain RFC semantics and are unaffected by
+`options.match_case`. At the `fm[...]` boundary, duplicate references to the
+same result node are collapsed; the resulting node set's order is not
+observable. Implementations MUST evaluate the complete result and MUST NOT
+silently truncate it. If an implementation-specific resource limit prevents
+completion, validation has not produced a document verdict and the CLI MUST
+surface an operational error (§11.5), not a partial diagnostic set.
 
-This enables cross-domain rules no single-tool combination expresses
-otherwise, e.g. `requires: { if: fm.status=deprecated, then: migration }`
-or `requires: { if: breaking-changes, then: fm.semver=major }`.
+The frontmatter source rule is common to both JSONPath proposition forms. If
+the block is `invalid-frontmatter`, the query is unevaluated and the entire
+containing constraint is suppressed. If the block is absent, the query
+produces an empty result: a bare boolean read is unsatisfied, and an equality
+proposition is unsatisfied.
+
+A bare `fm[...]` is a typed boolean read, not a presence test. It is satisfied
+iff at least one result node is the YAML/JSON boolean `true`. Boolean `false`,
+an empty result, and null are unsatisfied. Every non-boolean, non-null result
+node produces `invalid-value`, and the entire constraint containing the
+proposition is suppressed; a true sibling result or another already-true
+operand does not short-circuit that suppression.
+
+In `fm[query]=literal`, the literal is the remainder of the locator and is
+resolved as one YAML 1.2 core-schema scalar. Equality is existential over
+non-null result nodes: the proposition is satisfied iff at least one such
+node has the same resolved scalar type and value. There is no cross-type
+coercion; mappings and sequences never equal the literal; and
+`fm[query]=null` is always false. String equality follows `options.match_case`
+and §1.3. Thus a result set `[null, "x"]` satisfies `="x"` but a set
+containing only nulls satisfies no equality proposition.
+
+`fm.<name>` instead names a declared frontmatter capture and is checked at
+schema load. As a proposition it is satisfied iff the capture is valid and
+bound, except that a bound `bool` capture contributes its boolean value: a
+valid bound `false` is unsatisfied. Optional absence, including absence of an
+optional frontmatter block, is ordinary falsity. An invalid value, a missing
+required capture, invalid frontmatter, or absence of a required frontmatter
+block suppresses the entire containing constraint after its primary
+diagnostic. Unknown capture names are `unresolved-ref`, even if a YAML key of
+the same name exists.
+
+Both frontmatter forms resolve identically from every constraint scope and
+are invalid in `ordered`, because frontmatter has no header position; such use
+is `ordered-scope-mismatch`. `fm[$.x]` performs a document-time query, while
+`fm.x` is the typo-safe reference to a declaration. Hyphenated and otherwise
+non-shorthand member names require RFC 9535 bracket notation, as in
+`fm[$['decision-makers']]`.
 
 ---
 
 ## 5. Constraints
 
 `constraints` is a list attached to the schema root or to any rule; its
-refs' bare ids resolve in that node's child scope. Each constraint is a
-single-key object:
+locators' bare names resolve in that node's child named scope. Each constraint
+is a single-key object:
 
 | Constraint | Form | Satisfied iff |
 |---|---|---|
-| `one_of` | `one_of: [ref, ref, ...]` | exactly one listed ref is satisfied |
-| `any_of` | `any_of: [ref, ...]` | at least one is satisfied |
-| `at_most_one` | `at_most_one: [ref, ...]` | zero or one is satisfied |
-| `all_or_none` | `all_or_none: [ref, ...]` | all satisfied or none satisfied |
-| `requires` | `requires: {if: ref, then: ref}` | `if` unsatisfied, or `then` satisfied |
-| `conflicts` | `conflicts: {if: ref, then_not: ref}` | `if` unsatisfied, or `then_not` unsatisfied |
-| `ordered` | `ordered: [ref, ...]` | see 5.1 |
+| `one_of` | `one_of: [locator, locator, ...]` | exactly one listed proposition is satisfied |
+| `any_of` | `any_of: [locator, ...]` | at least one is satisfied |
+| `at_most_one` | `at_most_one: [locator, ...]` | zero or one is satisfied |
+| `all_or_none` | `all_or_none: [locator, ...]` | all satisfied or none satisfied |
+| `requires` | `requires: {if: locator, then: locator}` | `if` unsatisfied, or `then` satisfied |
+| `conflicts` | `conflicts: {if: locator, then_not: locator}` | `if` unsatisfied, or `then_not` unsatisfied |
+| `ordered` | `ordered: [locator, ...]` | see 5.1 |
 
-5.1. **`ordered`.** Consider the listed refs that are satisfied. For each
-adjacent pair (A, B) of those (in list order), every concrete header
-matched by A's rule MUST precede every concrete header matched by B's rule
-in document order: `last(A) < first(B)`. (Pairwise adjacency suffices;
-transitivity extends it to the whole list.) Unlisted siblings may
-interleave freely. All refs in one `ordered` constraint MUST resolve within
-the same concrete scope (bare ids, or paths sharing all but the last
-segment); mixing scopes is a schema error `ordered-scope-mismatch`. Every
-non-final segment of an `ordered` ref's path MUST resolve to a rule with
-effective max ≤ 1 — ordering through repeated ancestors is not defined in
-v1 and is schema error `ordered-scope-mismatch`.
+Every non-`ordered` locator position above accepts only a proposition defined
+by §4.5 or §4.6. An ordinary rule capture, `/text`, or another terminal value
+in such a position is `invalid-document-shape` under §4.4; values are not
+implicitly projected to booleans. `ordered` has the terminal-header
+requirement and specific error of §5.1. Value-comparison constraints are
+reserved for a later version.
 
-An `ordered` constraint whose refs resolve in an ordered scope (§3.7) is
+5.1. **`ordered`.** Evaluate each listed locator to its terminal header list
+after applying every positional subscript, then consider the locators whose
+lists are non-empty. For each adjacent pair (A, B) of those locators in list
+order, every header in A's terminal list MUST precede every header in B's
+terminal list: `last(A) < first(B)`. (Pairwise adjacency suffices;
+transitivity extends it to the whole list.) Unlisted siblings may interleave
+freely. All locators in one `ordered` constraint MUST terminate in rule ids
+within the same concrete scope. Mixing scopes, terminating in a frontmatter
+or typed value, or otherwise lacking header position is schema error
+`ordered-scope-mismatch`. The singular-non-terminal rule of §4.4 applies;
+`[i]` MAY narrow a repeated ancestor, and a bare terminal rule MAY remain
+plural.
+
+An `ordered` constraint whose locators resolve in an ordered scope (§3.7) is
 likewise schema error `ordered-scope-mismatch`: that scope already orders
 every rule in it, so the constraint is either redundant — the same failure
 reported twice — or contradicts the list order. When the rules witnessing a
@@ -633,24 +954,46 @@ the outermost scope.
 
 That rule needs no special case at the h1 level. A root `ordered` over
 `outline` rules orders the parts of a document, and a listed rule may
-itself repeat — `last(A) < first(B)` says what that means — but a ref
-descending *through* a repeatable h1 rule is `ordered-scope-mismatch` like
-any repeated ancestor, because "before" has no single meaning across many
-instances of a part. An `ordered` inside one h1 rule's `constraints` binds
-per instance (§3.1): it compares occurrences within each h1's own scope
-and never reaches across two h1s.
+itself repeat — `last(A) < first(B)` says what that means — but a locator
+descending *through* an unnarrowed repeatable h1 rule is
+`ordered-scope-mismatch` like any unnarrowed repeated ancestor, because
+"before" has no single meaning across many instances of a part. Applying
+`[i]` at that ancestor makes the descent legal, subject to the same-scope rule
+above. An `ordered` inside one h1 rule's `constraints` binds per instance
+(§3.1): it compares occurrences within each h1's own scope and never reaches
+across two h1s.
 
 5.2. `then` in `requires` and `then_not` in `conflicts` MAY be a list of
-refs, meaning conjunction: all must be (un)satisfied. `if` is a single ref.
+locators, meaning conjunction: all must be (un)satisfied. `if` is a single
+locator.
 
 5.3. Constraint violations are reported with diagnostic ids equal to the
 constraint keyword (`one_of`, `requires`, ...), the constraint's location in
-the schema, and the resolved refs with their matchers.
+the schema, and the resolved locators with their matchers or frontmatter
+declarations. If evaluating any proposition is suppressed under §4.4 or §4.6,
+the containing constraint produces no constraint diagnostic. Suppression
+applies to the whole boolean constraint without three-valued short-circuiting.
 
 5.4. **Arity.** The list forms (`one_of`, `any_of`, `at_most_one`,
-`all_or_none`, `ordered`) require at least 2 refs. A duplicate ref within
-one constraint (same resolved rule or identical `fm.` proposition) is a
-schema error `duplicate-ref`.
+`all_or_none`, `ordered`) require at least 2 locators. A duplicate locator
+within one constraint is schema error `duplicate-ref`. Outline locators duplicate
+when they resolve to the same declared rule steps with the same positional
+subscripts; frontmatter captures duplicate when they name the same
+declaration; `fm[...]` propositions duplicate when their query source is
+identical and either both lack equality or their equality literals resolve to
+values equal under §4.6. Syntactically different JSONPath queries
+are not treated as duplicates merely because they may select the same nodes.
+
+5.5. **Reserved and deferred typed-value features.** `equal-values`,
+`subset-values`, and selection objects using `select` are reserved for future
+value constraints; they have no validation semantics in this version.
+Likewise, `sequence` contiguity, capture cardinality refinements and optional
+participation, integer coercion or rounding, and `numbered` are not defined.
+Using any of those words where §2 does not admit it remains an unknown-key or
+invalid-shape error; reservation does not activate syntax. `linkdefs` is only
+the reserved locator root of §4.1. Captures on item rules will be specified
+with item scopes and are not introduced by this heading-only document model.
+The `#` character has no reserved capture or projection meaning.
 
 ---
 
@@ -700,12 +1043,22 @@ verbatim (e.g. `Step *`); Regex — the pattern body, with `\/` unescaped to
 
 For `frontmatter`, `line_range` is the one-based inclusive `{start_line,
 end_line}` span of the whole block, absent exactly when the document has no
-frontmatter block at all (`missing-frontmatter`). `pointer` is the JSON
-Pointer of the value a JSON Schema rejected. Its absence and the
-empty string differ: `""` is the root pointer, naming the frontmatter
-mapping itself, while no `pointer` member at all means the diagnostic is
-about the block rather than any value in it. An absent optional member MUST
-be omitted rather than emitted as null.
+frontmatter block at all (`missing-frontmatter`). `pointer` is an RFC 6901
+JSON Pointer: `~` in a member name is escaped as `~0` and `/` as `~1`.
+Usually it names an existing value rejected by JSON Schema or typed-value
+evaluation. For `missing-value`, it instead names the normalized path an
+absent singular query addressed whenever such a path can be formed. Its
+absence and the empty string differ:
+`""` is the root pointer, naming the frontmatter mapping itself, while no
+`pointer` member at all means the diagnostic is about the block rather than
+any value in it. An absent optional member MUST be omitted rather than emitted
+as null.
+
+`missing-value.pointer` MAY be omitted only when no normalized absent path
+exists — for example, for a negative index into an empty sequence. If present,
+its source anchor is the deepest resolving positioned ancestor of the absent
+path, falling back to the block's first line. The pointer continues to name
+the intended absent path rather than that ancestor.
 
 ### 6.2 Target and location per diagnostic
 
@@ -727,8 +1080,19 @@ whatever that fallback names.
 | `missing-title` | `missing_header` with empty `parent` and the label of the `title` matcher, spelled or implied (§2) | line 1 |
 | `missing-frontmatter`, `forbidden-frontmatter`, `invalid-frontmatter` | `frontmatter` | the block's first line, or line 1 when absent |
 | `frontmatter-schema` | `frontmatter` | the entry named by `pointer`, at its key for a mapping member and at the element itself for a sequence element; the block's first line for the root pointer `""`, and a fallback anchor (below) whenever the entry's position is unavailable |
+| `invalid-value` from a rule capture | `header` whose capture is invalid | that header's line |
+| `invalid-value` from a frontmatter capture or `fm[...]` boolean read | `frontmatter` with the failing value's pointer | the failing entry, with the same fallback rule as `frontmatter-schema` |
+| `missing-value` | `frontmatter` with the absent capture's pointer when one can be normalized | deepest resolving positioned ancestor of the addressed path; block's first line as floor |
+| `order-violation` | `header` of the violating adjacent pair's second header | that second header's line |
 | constraint keywords | `header` of the scope's parent section; `document` for a constraint whose scope is the document root's, which has no parent header, and under the sugar's single-h1 voice (below) | the parent section's header line; line 1 for a `document` target |
 | `ordered` from an ordered scope (§3.7) | as a constraint of that scope | as a constraint of that scope |
+
+An `invalid-value` message MUST identify the expected type and the responsible
+capture or frontmatter query. A rule-capture diagnostic is attributed to that
+capture declaration; a frontmatter-capture diagnostic and `missing-value` are
+attributed to that frontmatter capture declaration; an invalid boolean-read
+value is attributed to the constraint containing the query. An
+`order-violation` is attributed to its order entry.
 
 An entry's position is unavailable in one case: a literal or folded block
 scalar with no content line. A position-tracking parser marks a scalar at the
@@ -796,25 +1160,37 @@ h1. The general form has no document voice to keep: an h1 rule's child
 scope reports like any nested scope, with the h1 as parent.
 
 Constraint diagnostics additionally list the concrete headers involved, if
-any, each by its own header path (§5.3). Which diagnostics the `title`
-rule produces, and in what voice, is defined in §1.4 and §2.
+any, each by its own header path (§5.3). An `order-violation` lists exactly
+the first and second headers of its violating adjacent pair, in that order.
+Which diagnostics the `title` rule produces, and in what voice, is defined in
+§1.4 and §2.
 
 ### 6.3 Reserved ids
 
 Diagnostic ids: `skipped-level`, `not-allowed`, `unexpected-section`,
 `missing-section`, `too-few-sections`, `too-many-sections`,
 `missing-title`, `missing-frontmatter`,
-`forbidden-frontmatter`, `invalid-frontmatter`, `frontmatter-schema`, plus
+`forbidden-frontmatter`, `invalid-frontmatter`, `frontmatter-schema`,
+`invalid-value`, `missing-value`, `order-violation`, plus
 the constraint keywords `one_of`, `any_of`, `at_most_one`, `all_or_none`,
 `requires`, `conflicts`, `ordered`.
 
 Schema errors: `syntax`, `invalid-document-shape`, `unsupported-version`,
 `duplicate-id`, `unresolved-ref`, `forbidden-ref`, `duplicate-ref`,
-`reserved-id`, `invalid-matcher`, `invalid-repeat`,
+`reserved-id`, `invalid-matcher`, `invalid-repeat`, `invalid-capture`,
+`invalid-order`,
 `ordered-scope-mismatch`, `conflicting-cardinality`, `conflicting-outline`,
 `conflicting-frontmatter`, `invalid-frontmatter-schema`. These are load-time
 failures reported against the schema document and share the stability
 contract of the diagnostic ids above.
+
+`invalid-capture` anchors at the offending capture declaration, or at the
+`captures` key when the collection as a whole is invalid. `invalid-order`
+anchors at the offending entry, or at the `order` key when the collection as
+a whole is invalid. A duplicate normalized order entry anchors at the later
+entry. When `frontmatter.captures` conflicts with `frontmatter.allow: false`,
+`conflicting-frontmatter` anchors at whichever of those keys occurs second,
+following the top-level conflict convention of §2.
 
 **Suppression.** An HTML comment
 `<!-- outlint-disable <diag-id>[, <diag-id>...] -->` on the line
@@ -822,7 +1198,13 @@ immediately preceding a header suppresses the listed diagnostics *anchored
 to that header* (consequently, absence diagnostics are not suppressible per
 header — only file-wide). `<!-- outlint-disable-file <diag-id>... -->`
 anywhere in the file suppresses the listed diagnostics file-wide. Schema
-errors are load-time failures and are never suppressible.
+errors are load-time failures and are never suppressible. Dependency
+suppression (§3.8, §4.4, §4.6, §5.3) is decided before these comments filter
+diagnostics. Suppressing `invalid-value` therefore never re-enables a
+dependent `order-violation`; suppressing `too-many-sections` never re-enables
+a locator descent that depended on singularity; and suppressing
+`invalid-value`, `missing-value`, `missing-frontmatter`, or
+`invalid-frontmatter` never re-enables a dependent constraint.
 
 ---
 
@@ -853,14 +1235,18 @@ load_schema:
   load frontmatter.schema if given; for an inline schema reject every
     $ref/$dynamicRef that is not fragment-only; compile JSON Schema
     (dialect per $schema)
+  validate frontmatter.captures; parse every path as an RFC 9535 singular
+    query; assign defaults; build the separate fm capture namespace
   walk rules (outline and every nested sections):
               validate matchers (incl. regex dialect), repeat grammar,
-              assign auto-ids, check per-scope id uniqueness,
-              reject reserved id "fm"
-  resolve every constraint ref (dotted rule path or fm.*):
-    reject dangling refs, refs to allow:false rules, duplicate refs,
-    arity < 2 in set forms, ordered refs crossing scopes, passing
-    through rules with max > 1, or resolving in an ordered scope (§3.7)
+              capture declarations and mandatory participation; normalize
+              order entries; assign default ids; check named-scope
+              uniqueness; reject reserved root ids "fm" and "linkdefs"
+  bind every schema locator (§4): validate full RFC 9535 queries and their
+    function expressions; reject dangling names, locators through allow:false
+    rules, plural non-terminal steps, duplicate locators, arity < 2 in set
+    forms, ordered locators crossing scopes or resolving in an ordered scope
+    (§3.7)
 
 validate(doc):
   split frontmatter (§1.6); parse markdown -> header tree under the
@@ -868,6 +1254,8 @@ validate(doc):
     (ignore code fences; normalize setext)
   check frontmatter presence vs required/allow; if present and schema
     compiled, run JSON Schema validation -> frontmatter-schema diagnostics
+  if frontmatter is a valid mapping, evaluate each frontmatter capture ->
+    missing-value or invalid-value as applicable
   check skipped levels (§1.5; under the sugar with no h1 the root
     stands at level 1)
   visit(scope = the document root's children, rules = schema.outline,
@@ -878,14 +1266,22 @@ validate(doc):
       elif rule.allow == false: report not-allowed; skip subtree
       else:
         counts[rule] += 1
+        parse rule's declared captures -> invalid-value as applicable
         visit(header.children, rule.sections or [], rule.constraints or [])
     for each rule: check counts[rule] against repeat -> missing/too-many
     if the scope is ordered (§3.7): for each adjacent pair of accepting
       rules that matched, check last(A) < first(B) -> ordered
-    for each constraint: evaluate over ref satisfaction (§4.5, §4.6) -> report
+    for each rule order entry not suppressed by an invalid capture:
+      compare every adjacent value pair -> order-violation
+    for each constraint: evaluate locator propositions (§4.4–§4.6),
+      suppressing the whole constraint on a failed cardinality or typed-value
+      dependency -> report
 ```
 
-Complexity: O(H × R) matcher tests, H = headers, R = max sibling rule count.
+Outline matching performs O(H × R) matcher tests, H = headers and R = the
+maximum sibling rule count. Typed parsing and ordering are linear in the
+number of captured occurrences per order entry. JSONPath evaluation follows
+RFC 9535 and depends on the query and frontmatter value.
 
 ---
 
@@ -898,6 +1294,10 @@ title: "*"
 frontmatter:
   required: true
   schema: ./frontmatter.schema.json   # types/enums for status, semver, ...
+  captures:
+    version: { type: semver, required: true }
+    released: { path: "$.release.date", type: date }
+    draft: { type: bool }
 
 sections:
   - id: overview
@@ -905,9 +1305,9 @@ sections:
     required: true
     strict: true
     sections:
-      - match: "Goals"           # auto-id: goals
+      - match: "Goals"           # default id: goals
         required: true
-      - match: "Non-goals"       # auto-id: non-goals
+      - match: "Non-goals"       # default id: non-goals
         required: false          # 0..1 — default 0..n would allow repeats
 
   - id: api
@@ -919,19 +1319,27 @@ sections:
         required: false
       - match: "*"               # any other h3 permitted
 
-  - match: "Changelog"           # auto-id: changelog
+  - match: "Changelog"           # default id: changelog
     required: false
-  - match: "History"             # auto-id: history
+    sections:
+      - id: release
+        match: '/\[(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\] - (?<date>\d{4}-\d{2}-\d{2})/'
+        repeat: "1..n"
+        captures: { version: semver, date: date }
+        order:
+          - { by: version, dir: desc, strict: true }
+          - { by: date, dir: desc }
+  - match: "History"             # default id: history
     required: false
   - id: deployment
     match: "Deployment"
     required: false
     sections:
-      - match: "Rollback plan"   # auto-id: rollback-plan
+      - match: "Rollback plan"   # default id: rollback-plan
         required: false
-  - match: "Deprecated"          # auto-id: deprecated
+  - match: "Deprecated"          # default id: deprecated
     required: false
-  - match: "Roadmap"             # auto-id: roadmap
+  - match: "Roadmap"             # default id: roadmap
     required: false
   - match: "*"
     allow: false                 # closes the scope: no other h2 allowed
@@ -939,22 +1347,27 @@ sections:
 constraints:
   - one_of: [changelog, history]
   - requires: { if: deployment, then: deployment.rollback-plan }
-  - requires: { if: api.errors, then: overview }
   - conflicts: { if: deprecated, then_not: roadmap }
-  - requires: { if: fm.status=deprecated, then: deprecated }
-  - requires: { if: deployment, then: fm.rollout }
+  - requires: { if: "fm[$.status]=deprecated", then: deprecated }
+  - requires: { if: deployment, then: "fm[$.rollout]" }
+  - requires: { if: fm.released, then: changelog }
+  - conflicts: { if: fm.draft, then_not: roadmap }
 ```
 
 A conforming document: has YAML frontmatter valid against
-`frontmatter.schema.json`; one h1 (any title); an `## Overview` with
+`frontmatter.schema.json`, with a string `version` that parses as SemVer and
+optional date and boolean captures; one h1 (any title); an `## Overview` with
 `### Goals` (and optionally `### Non-goals`, nothing else); any number of
-`## API: …` sections; exactly one of `## Changelog` / `## History`; if
-`## Deployment` exists it contains `### Rollback plan` and frontmatter
-declares a `rollout` key; `## Deprecated` and `## Roadmap` never co-occur;
-if frontmatter says `status: deprecated` a `## Deprecated` section exists;
-and the h2s come in the order the rules are listed — Overview, then any
-API sections, then Changelog or History, then Deployment — because a scope
-is ordered by default (§3.7), with nothing more to spell.
+`## API: …` sections; exactly one of `## Changelog` / `## History`. A
+Changelog contains one or more headings such as
+`### [2.1.0] - 2026-09-03`, with strictly descending versions and descending
+dates. If `## Deployment` exists it contains `### Rollback plan` and frontmatter
+has boolean `rollout: true`; `## Deprecated` and `## Roadmap` never co-occur;
+if frontmatter says `status: deprecated` a `## Deprecated` section exists; if
+the captured `release.date` is present a Changelog exists; a true captured
+`draft` forbids a Roadmap; and the h2s come in the order the rules are listed —
+Overview, then any API sections, then Changelog or History, then Deployment —
+because a scope is ordered by default (§3.7), with nothing more to spell.
 
 The same machinery one level up — a multi-part handbook, written in the
 general form because it has several h1s:
@@ -990,8 +1403,10 @@ exists.
   document genuinely has several h1s. No h1 at all is `title: null` — not
   an empty outline, and not bare `sections`, which implies a title.
 - Prefer explicit `id` on any rule referenced by constraints; rely on
-  auto-ids only for throwaway exact matchers. Renaming a header text changes
-  its auto-id and breaks refs (loudly, at load time).
+  default ids only for throwaway exact matchers. Renaming a header text changes
+  its default id and breaks locators (loudly, at load time). Avoid using future
+  structural kind words such as `list` or `item` as ids even though the two
+  syntactic roads cannot collide.
 - Order rules specific → general; end with `match: "*"` only when you need
   a default or a closed scope.
 - Use `strict: true` rather than a manual `"*"`/`allow: false` pair.
@@ -1006,10 +1421,26 @@ exists.
   `required: false` (`0..1`) or `required: true` (`1..1`) — set one
   explicitly; leave the open default to pattern matchers (`/regex/`, globs,
   `"*"`), where multiplicity is usually the point.
-- Keep value validation of frontmatter in `frontmatter.schema` (JSON
-  Schema); use `fm.` refs only to couple frontmatter to outline structure.
-  If a rule doesn't mention a section, it doesn't belong in an outlint
-  constraint.
+- Keep structural validation of frontmatter in `frontmatter.schema` (JSON
+  Schema); use `frontmatter.captures` for typed values that Outlint itself
+  consumes, `fm[...]` for document-time propositions, and `fm.<capture>` for
+  typo-safe declared propositions. If a rule doesn't mention a section, it
+  doesn't belong in an Outlint constraint.
+- Prefer simple RFC 9535 queries in `fm[...]`. Filters are supported, but
+  structural frontmatter logic is usually clearer in JSON Schema. For
+  portable behavior across JSON ecosystems, keep numbers used by JSONPath
+  within the I-JSON exact-integer range; §1.6's exact YAML conversion does not
+  make every external JSONPath implementation interoperable outside it.
+- Use captures when parsing the value is itself validation. Keep every
+  capture group mandatory, and use an undeclared group for optional display
+  suffixes. Use `order` for independent within-rule value orders; it is not a
+  multi-key sort.
+- When migrating a pre-Typed-Values schema, respell a document key
+  proposition such as `fm.status=deprecated` as
+  `fm[$.status]=deprecated`. `fm.status` now means the declared frontmatter
+  capture named `status`; without that declaration it fails loudly at schema
+  load. The old `@` path prefix has no replacement because ordinary locators
+  now use declared ids by default.
 
 ---
 
@@ -1133,7 +1564,7 @@ object is the command's machine-readable interface. Its shape is:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "results": [
     {
       "kind": "document",
@@ -1158,6 +1589,11 @@ Operationally unreadable inputs do not produce results. `summary.files` is
 the number of results; the other counts partition those results by kind and
 count their diagnostics.
 
+Typed Values changes this envelope version from 2 to 3 because the
+`references` variants below can represent positional and RFC 9535 locators;
+consumers MUST reject unsupported envelope versions rather than interpreting
+them as an older reference shape.
+
 Each diagnostic object has `id`, `message`, and `location` with one-based
 `line` and byte `column`. The `message` member is explanatory prose: its
 presence is specified, but consumers MUST use `id` and the structured members
@@ -1166,22 +1602,42 @@ have the tagged `target` defined by Section 6.1. The following members are
 present when the corresponding semantic data exists and omitted otherwise:
 
 - `schema_node`, using the `kind` spellings `title`, `frontmatter`,
-  `frontmatter_schema_declaration`, `frontmatter_schema_document`, `rule`, or
-  `constraint`; rule and constraint nodes also have zero-based `scope` rule
-  indices and `index`;
+  `frontmatter_schema_declaration`, `frontmatter_schema_document`, `rule`,
+  `capture`, `frontmatter_capture`, `order_entry`, or `constraint`; rule and
+  constraint nodes retain their zero-based `scope` rule-index path and
+  `index`; `capture` adds its `name` to its owning rule coordinates,
+  `frontmatter_capture` has `name`, and `order_entry` adds zero-based
+  `order_index` to its owning rule coordinates;
 - `schema_location`, with `path`, one-based `line`, and one-based byte
   `column`;
 - `involved_headers`, whose entries have a `header_path` string array and a
   one-based `location`;
-- `references`, whose entries distinguish `rule` from `frontmatter` refs.
+- `references`, whose entries form the tagged union defined below.
 
-A rule reference has `anchor` (`current_scope` or `schema_root`), a `path`
-array, and a `matcher`. Matchers have `kind` (`exact`, `glob`, `regex`, or
-`any`); the first three also have `value`. A frontmatter reference has a
-`path` array and, for equality, an `equals` object. Its `type` is `null`,
-`boolean`, `integer`, `float`, or `string`; integer and float values are
-canonical strings, while the other values use their corresponding JSON
-types.
+Every `references` entry has an explicit `kind` member whose value is `rule`,
+`frontmatter_query`, or `frontmatter_capture`, and a `locator` member
+preserving the schema's locator spelling.
+
+A `rule` reference has, in member declaration order, `kind`, `locator`,
+`anchor` (`current_scope` or `schema_root`), `path`, optional `positions`, and
+`matcher`. `path` is an array of declared names. When any name step has
+positional narrowing, `positions` is an array aligned with `path`, using a
+non-negative integer for `[i]` and null for an unsubscripted step. A matcher
+has `kind` (`exact`, `glob`, `regex`, or `any`); the first three also have
+`value`.
+
+A `frontmatter_query` reference has, in member declaration order, `kind`,
+`locator`, `query`, and optional `equals`. `query` contains the RFC 9535 query
+without the `fm[...]` wrapper. For Outlint equality, `equals` is an object
+whose members are, in order, `type` and `value`. `type` is `null`, `boolean`,
+`integer`, `float`, or `string`; integer and float `value`s are canonical
+strings, while the other `value`s use their corresponding JSON types.
+
+A `frontmatter_capture` reference has, in member declaration order, `kind`,
+`locator`, `name`, and `type`, where `type` is one of the §2.4 type names.
+These representations are used only where the semantic reference data exists;
+for example, an `invalid-value` on a rule capture need not carry the
+constraint reference that might later consume it.
 
 ### 11.4 JSON ordering
 
@@ -1206,6 +1662,10 @@ structured values compare by their variants in the order listed in Sections
 6.1 and 11.3, then by members in declaration order. This order is a function
 of rendered diagnostic data and MUST NOT depend on validator traversal or
 discovery order.
+
+For `references`, "members in declaration order" means the member order
+stated for each tagged variant in §11.3; the `equals` object likewise compares
+`type` before `value`.
 
 Human output MAY order or group diagnostics differently when that improves its
 presentation. Its ordering, like its textual layout, is not a machine-readable
