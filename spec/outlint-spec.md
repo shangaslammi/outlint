@@ -315,6 +315,11 @@ that mapping is well-formed are its declared capture names entered into the
 named scope; a collision there with a child rule's explicit or default id is
 `duplicate-id` (§4.3).
 
+That special classification applies only to keys of the `captures` mapping
+itself. In a schema, duplicate YAML keys anywhere else — including within one
+frontmatter capture declaration or one order entry — remain schema error
+`syntax`.
+
 **`repeat` grammar** (exact): `min ".." max` matching
 `^(0|[1-9][0-9]*)\.\.((0|[1-9][0-9]*)|n)$` — decimal integers without
 leading zeros or whitespace; `n` denotes unbounded. If `max` is an integer,
@@ -402,6 +407,11 @@ JSONPath selects the JSON view, but a selected scalar retains its resolved
 YAML kind for the strict capture-kind check. In particular, JSON Schema sees
 both YAML integers and finite decimals as JSON numbers, while an `int`
 capture still accepts only the former.
+
+For capture kind checking, a frontmatter scalar carrying an unrecognized tag
+has the kind its text would resolve to under the YAML 1.2 core schema; the tag
+does not alter that kind. Thus `key: !custom 42` is integer-kinded and can
+satisfy an `int` capture.
 
 **Delegated structural validation.** Typed captures do not replace JSON
 Schema as the frontmatter validation language. If `schema` is given, it is
@@ -739,10 +749,15 @@ $.release[0]/text             intrinsic heading text value
 
 Name steps use `.`, structural steps use `/`, and a zero-based positional
 subscript `[i]` MAY follow any step that produces a node list. `i` matches
-`0|[1-9][0-9]*`. A locator may move from names to structure but MUST NOT use
-a name step after a structural step. `$` anchors an absolute locator; `$`
-alone is not accepted by any constraint in this version. The former `@`
-prefix is not part of the locator language.
+`0|[1-9][0-9]*` and denotes a mathematical non-negative integer with no upper
+bound. An index beyond the end of a concrete node list selects nothing and
+produces the empty list; its magnitude is never an error. Implementations
+MUST NOT allocate memory or perform work proportional to an index's numeric
+value; processing an index may be proportional only to the length of its
+spelling. A locator may move from names to structure but MUST NOT use a name
+step after a structural step. `$` anchors an absolute locator; `$` alone is
+not accepted by any constraint in this version. The former `@` prefix is not
+part of the locator language.
 
 A name step resolves only in the current named scope. There is no implicit
 upward or downward search. Rule-id steps produce the concrete headers whose
@@ -858,12 +873,16 @@ I-Regexp evaluates as RFC 9535 specifies; it does not become a schema error.
 
 The full RFC 9535 query grammar is accepted. Its filters and comparisons,
 including `match()` and `search()`, retain RFC semantics and are unaffected by
-`options.match_case`. At the `fm[...]` boundary, duplicate references to the
-same result node are collapsed; the resulting node set's order is not
-observable. Implementations MUST evaluate the complete result and MUST NOT
-silently truncate it. If an implementation-specific resource limit prevents
-completion, validation has not produced a document verdict and the CLI MUST
-surface an operational error (§11.5), not a partial diagnostic set.
+`options.match_case`. Numeric comparisons are exact within the I-JSON
+exact-integer range. Outside that range, comparison behavior follows the
+implementation's RFC-conformant numeric interoperability, and schema authors
+SHOULD NOT rely on a particular outcome (§10). At the `fm[...]` boundary,
+duplicate references to the same result node are collapsed; the resulting
+node set's order is not observable. Implementations MUST evaluate the complete
+result and MUST NOT silently truncate it. If an implementation-specific
+resource limit prevents completion, validation has not produced a document
+verdict and the CLI MUST surface an operational error (§11.5), not a partial
+diagnostic set.
 
 The frontmatter source rule is common to both JSONPath proposition forms. If
 the block is `invalid-frontmatter`, the query is unevaluated and the entire
@@ -1184,11 +1203,19 @@ Schema errors: `syntax`, `invalid-document-shape`, `unsupported-version`,
 failures reported against the schema document and share the stability
 contract of the diagnostic ids above.
 
+Independent schema errors MUST be collected together, but a check whose input
+could not be built MUST NOT be attempted. Thus a malformed `captures` mapping
+does not additionally produce `invalid-order` for entries that would refer to
+it, and an invalid regex does not produce capture-group errors.
+
 `invalid-capture` anchors at the offending capture declaration, or at the
 `captures` key when the collection as a whole is invalid. `invalid-order`
 anchors at the offending entry, or at the `order` key when the collection as
 a whole is invalid. A duplicate normalized order entry anchors at the later
-entry. When `frontmatter.captures` conflicts with `frontmatter.allow: false`,
+entry. For a `duplicate-id` collision between a capture and a child rule name,
+the later declaration in schema-document order anchors the error and the
+earlier declaration is reported as a related location. When
+`frontmatter.captures` conflicts with `frontmatter.allow: false`,
 `conflicting-frontmatter` anchors at whichever of those keys occurs second,
 following the top-level conflict convention of §2.
 
@@ -1428,9 +1455,10 @@ exists.
   doesn't belong in an Outlint constraint.
 - Prefer simple RFC 9535 queries in `fm[...]`. Filters are supported, but
   structural frontmatter logic is usually clearer in JSON Schema. For
-  portable behavior across JSON ecosystems, keep numbers used by JSONPath
-  within the I-JSON exact-integer range; §1.6's exact YAML conversion does not
-  make every external JSONPath implementation interoperable outside it.
+  portable behavior across JSON ecosystems, keep numbers compared by JSONPath
+  within the I-JSON exact-integer range (§4.6); §1.6's exact YAML conversion
+  does not make every external JSONPath implementation interoperable outside
+  it.
 - Use captures when parsing the value is itself validation. Keep every
   capture group mandatory, and use an undeclared group for optional display
   suffixes. Use `order` for independent within-rule value orders; it is not a
@@ -1622,9 +1650,10 @@ A `rule` reference has, in member declaration order, `kind`, `locator`,
 `anchor` (`current_scope` or `schema_root`), `path`, optional `positions`, and
 `matcher`. `path` is an array of declared names. When any name step has
 positional narrowing, `positions` is an array aligned with `path`, using a
-non-negative integer for `[i]` and null for an unsubscripted step. A matcher
-has `kind` (`exact`, `glob`, `regex`, or `any`); the first three also have
-`value`.
+non-negative integer for `[i]` and null for an unsubscripted step. Position
+values are arbitrary-precision JSON integers; consumers MUST NOT assume they
+fit a 64-bit integer type. A matcher has `kind` (`exact`, `glob`, `regex`, or
+`any`); the first three also have `value`.
 
 A `frontmatter_query` reference has, in member declaration order, `kind`,
 `locator`, `query`, and optional `equals`. `query` contains the RFC 9535 query
