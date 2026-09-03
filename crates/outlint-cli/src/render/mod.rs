@@ -3,29 +3,17 @@
 mod human;
 mod json;
 
-use std::io::{self, IsTerminal};
+use crate::{args::OutputFormat, diagnostics::ValidationResult};
 
-use crate::{
-    args::{ColorChoice, OutputFormat},
-    diagnostics::ValidationResult,
-};
-
-/// Renders one invocation's results in the requested format, resolving
-/// `--color auto` against the current stdout.
+/// Renders one invocation's results in the requested format. `--color auto`
+/// is resolved by the caller; `use_color` is the caller's decision.
 pub(crate) fn render(
     results: &[ValidationResult],
     format: OutputFormat,
-    color: ColorChoice,
+    use_color: bool,
 ) -> String {
     match format {
-        OutputFormat::Human => {
-            let use_color = match color {
-                ColorChoice::Always => true,
-                ColorChoice::Never => false,
-                ColorChoice::Auto => io::stdout().is_terminal(),
-            };
-            human::render_human(results, use_color)
-        }
+        OutputFormat::Human => human::render_human(results, use_color),
         OutputFormat::Json => json::render_json(results),
     }
 }

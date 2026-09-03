@@ -141,7 +141,7 @@ fn path_file_uri(path: &Path) -> Result<String, String> {
     Ok(uri)
 }
 
-pub(crate) fn file_uri_path(uri: &str) -> Option<PathBuf> {
+fn file_uri_path(uri: &str) -> Option<PathBuf> {
     let remainder = uri.strip_prefix("file://")?;
     let encoded = if remainder.starts_with('/') {
         remainder
@@ -190,7 +190,7 @@ fn uri_decoded_path(decoded: String) -> PathBuf {
 /// are canonical forward-slash on every platform; native separators are for
 /// filesystem access only. On Unix a backslash is an ordinary name byte, so
 /// this only rewrites separators where `\` cannot appear inside a name.
-pub(crate) fn path_display(path: &Path) -> String {
+fn path_display(path: &Path) -> String {
     let text = path.display().to_string();
     if cfg!(windows) {
         text.replace('\\', "/")
@@ -221,7 +221,7 @@ pub(crate) fn read_stdin_utf8() -> Result<String, String> {
     decode_utf8(bytes).map_err(|error| format!("standard input: {error}"))
 }
 
-pub(crate) fn decode_utf8(mut bytes: Vec<u8>) -> Result<String, String> {
+fn decode_utf8(mut bytes: Vec<u8>) -> Result<String, String> {
     if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
         bytes.drain(..3);
     }

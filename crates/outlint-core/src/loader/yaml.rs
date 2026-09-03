@@ -395,7 +395,7 @@ struct SchemaYamlSubtree {
 /// Builds the schema tree by pulling one event at a time from `saphyr-parser`.
 ///
 /// This is the schema-document counterpart of the frontmatter reader in
-/// `markdown.rs`, and it carries the same three protections through the same
+/// the `markdown` module, and it carries the same three protections through the same
 /// shared machinery: the [`ExactYamlBudget`] that bounds alias expansion by
 /// the input's own size, the [`MAX_YAML_DEPTH`](crate::yaml::MAX_YAML_DEPTH)
 /// bound charged as the recursion descends, and the

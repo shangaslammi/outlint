@@ -1,5 +1,6 @@
 //! Command dispatch, input preflight, and exit-code precedence.
 
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use outlint_core::{
@@ -263,7 +264,12 @@ fn finish_invocation(output: InvocationOutput, format: OutputFormat, color: Colo
         .iter()
         .map(|result| result.diagnostics.len())
         .sum::<usize>();
-    let rendered = render::render(&output.results, format, color);
+    let use_color = match color {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => io::stdout().is_terminal(),
+    };
+    let rendered = render::render(&output.results, format, use_color);
     let output_failed = if rendered.is_empty() {
         false
     } else {

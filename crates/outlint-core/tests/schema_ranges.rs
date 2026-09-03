@@ -98,7 +98,7 @@ fn malformed_schema_error_ranges_match_the_committed_baseline() {
 ///
 /// These live here rather than in `testdata/` because that corpus is the
 /// portable conformance contract, shared with implementations that have no
-/// schema loader of ours to position anything, and rather than in `loader.rs`'s
+/// schema loader of ours to position anything, and rather than in the `loader` module's
 /// unit tests because those sources are inline strings a `tests/` binary cannot
 /// reach without duplicating them. Keeping the sources and the baseline in one
 /// place means a reviewer reads the source and its recorded position together.
