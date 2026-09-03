@@ -862,8 +862,11 @@ ends after parsing that complete query, not at the first `]` or `=` occurring
 inside it; only an `=` following the wrapper introduces Outlint equality.
 RFC 9535 well-formedness and validity are checked at the locator's binding
 time. This includes statically typed function expressions and the RFC 9535
-§2.1 requirement that an integer appearing in the query lie in the I-JSON
-exact range, −9,007,199,254,740,991 through 9,007,199,254,740,991 inclusive.
+§2.1 requirement that integers in index selectors and array-slice bounds and
+steps lie in the I-JSON exact range, −9,007,199,254,740,991 through
+9,007,199,254,740,991 inclusive. Integer literals inside filter expressions
+are not subject to this load-time bound; comparisons against them follow the
+numeric-interoperability rule below.
 Schema-resident failures are `invalid-document-shape`. The supported
 extension functions are exactly the initial RFC 9535 registry: `length`,
 `count`, `match`, `search`, and `value`. Unknown functions and
