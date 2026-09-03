@@ -11,7 +11,6 @@ use std::{
     sync::Arc,
 };
 
-use num_bigint::{BigInt, BigUint};
 use saphyr_parser::{
     Event as YamlEvent, Parser as YamlParser, ScalarStyle, Span, StrInput, Tag as YamlTag,
 };
@@ -19,20 +18,20 @@ use serde::Deserialize;
 use serde_json::Value;
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
-use crate::markdown::{
-    deeper_yaml_nesting, exact_yaml_scalar_to_json, validate_yaml_container_tag, ExactYamlBudget,
-    ExactYamlScalar, YamlValueError,
-};
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
+use crate::yaml::{
+    deeper_yaml_nesting, exact_yaml_scalar_to_json, parse_frontmatter_scalar,
+    validate_yaml_container_tag, ExactYamlBudget, ExactYamlScalar, YamlValueError,
+};
 use crate::{
-    AtLeastTwo, ByteOffset, CanonicalFloat, CanonicalInteger, Cardinality, Constraint,
-    ConstraintIndex, ConstraintPath, ExactText, FrontmatterKey, FrontmatterPolicy, FrontmatterRef,
-    FrontmatterScalar, GlobPattern, InvalidSchema, JsonSchemaResourceContents,
-    LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, Matcher, NonEmpty, Options,
-    OutlineProvenance, Proposition, RefAnchor, RegexPattern, RelatedLocation, RuleId, RuleIndex,
-    RuleOutcome, RulePath, RuleRef, Schema, SchemaError, SchemaErrorKind, SchemaLocations,
-    SchemaNode, SchemaSource, SchemaSources, SchemaVersion, ScopePath, SectionRule, SourceId,
-    SourceLabel, SourceRange, TextRange, UpperBound,
+    AtLeastTwo, ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, ExactText,
+    FrontmatterKey, FrontmatterPolicy, FrontmatterRef, FrontmatterScalar, GlobPattern,
+    InvalidSchema, JsonSchemaResourceContents, LinkedJsonSchemaInput, LoadSchemaResult,
+    LoadedSchema, Matcher, NonEmpty, Options, OutlineProvenance, Proposition, RefAnchor,
+    RegexPattern, RelatedLocation, RuleId, RuleIndex, RuleOutcome, RulePath, RuleRef, Schema,
+    SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
+    SchemaVersion, ScopePath, SectionRule, SourceId, SourceLabel, SourceRange, TextRange,
+    UpperBound,
 };
 
 /// The object domain schema documents are validated in: JSON Schema's own.
@@ -1030,7 +1029,7 @@ struct SchemaYamlSubtree {
 /// This is the schema-document counterpart of the frontmatter reader in
 /// `markdown.rs`, and it carries the same three protections through the same
 /// shared machinery: the [`ExactYamlBudget`] that bounds alias expansion by
-/// the input's own size, the [`MAX_YAML_DEPTH`](crate::markdown::MAX_YAML_DEPTH)
+/// the input's own size, the [`MAX_YAML_DEPTH`](crate::yaml::MAX_YAML_DEPTH)
 /// bound charged as the recursion descends, and the
 /// alias-charged-before-clone ordering that refuses a bomb before building
 /// it. What differs is only what a node remembers — character spans for
@@ -3185,89 +3184,6 @@ fn frontmatter_identity(reference: &FrontmatterRef, match_case: bool) -> Frontma
     identity
 }
 
-pub(crate) fn parse_frontmatter_scalar(source: &str) -> FrontmatterScalar {
-    match source {
-        "" | "~" | "null" | "Null" | "NULL" => FrontmatterScalar::Null,
-        "true" | "True" | "TRUE" => FrontmatterScalar::Boolean(true),
-        "false" | "False" | "FALSE" => FrontmatterScalar::Boolean(false),
-        _ => {
-            if let Some(integer) = canonical_integer(source) {
-                FrontmatterScalar::Integer(CanonicalInteger(integer))
-            } else if let Some(float) = canonical_float(source) {
-                FrontmatterScalar::Float(CanonicalFloat(float))
-            } else {
-                FrontmatterScalar::String(source.to_owned())
-            }
-        }
-    }
-}
-
-fn canonical_integer(source: &str) -> Option<String> {
-    let (negative, unsigned) = strip_sign(source);
-    let (base, digits) = if let Some(digits) = unsigned.strip_prefix("0o") {
-        (8_u8, digits)
-    } else if let Some(digits) = unsigned.strip_prefix("0x") {
-        (16, digits)
-    } else {
-        (10, unsigned)
-    };
-    if digits.is_empty() {
-        return None;
-    }
-    let value = BigUint::parse_bytes(digits.as_bytes(), u32::from(base))?;
-    if value == BigUint::from(0_u8) {
-        return Some("0".into());
-    }
-    Some(format!("{}{value}", if negative { "-" } else { "" }))
-}
-
-pub(crate) fn canonical_float(source: &str) -> Option<String> {
-    let (negative, unsigned) = strip_sign(source);
-    if matches!(unsigned, ".inf" | ".Inf" | ".INF") {
-        return Some(if negative { "-inf" } else { "inf" }.into());
-    }
-    if matches!(unsigned, ".nan" | ".NaN" | ".NAN") {
-        return (source == unsigned).then(|| "nan".into());
-    }
-    let (mantissa, exponent) = unsigned.split_once(['e', 'E']).unwrap_or((unsigned, "0"));
-    let has_float_marker = mantissa.contains('.') || unsigned.contains(['e', 'E']);
-    if !has_float_marker {
-        return None;
-    }
-    let exponent = exponent.parse::<BigInt>().ok()?;
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    if whole.is_empty() && fraction.is_empty() {
-        return None;
-    }
-    if !whole.bytes().all(|byte| byte.is_ascii_digit())
-        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let digits = format!("{whole}{fraction}");
-    let trimmed_leading = digits.trim_start_matches('0');
-    if trimmed_leading.is_empty() {
-        return Some("0e0".into());
-    }
-    let trailing = trimmed_leading.len() - trimmed_leading.trim_end_matches('0').len();
-    let coefficient = trimmed_leading.trim_end_matches('0');
-    let adjusted = exponent - BigInt::from(fraction.len()) + BigInt::from(trailing);
-    Some(format!(
-        "{}{coefficient}e{adjusted}",
-        if negative { "-" } else { "" }
-    ))
-}
-
-fn strip_sign(source: &str) -> (bool, &str) {
-    if let Some(unsigned) = source.strip_prefix('-') {
-        (true, unsigned)
-    } else if let Some(unsigned) = source.strip_prefix('+') {
-        (false, unsigned)
-    } else {
-        (false, source)
-    }
-}
-
 /// Whether a value is an integer the schema's own fields can hold.
 ///
 /// The engine preserves a number's exact spelling, so an integer of any
@@ -3356,6 +3272,8 @@ fn at_least_two<T>(mut values: Vec<T>) -> Option<AtLeastTwo<T>> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    use crate::CanonicalInteger;
 
     fn valid(source: &str) -> Schema {
         match load_schema(source) {
@@ -4490,30 +4408,6 @@ constraints:
     }
 
     #[test]
-    fn yaml_core_scalars_support_arbitrary_magnitude_without_signed_nan() {
-        assert_eq!(
-            parse_frontmatter_scalar("1e100000000000000000000000000000000000000"),
-            FrontmatterScalar::Float(CanonicalFloat(
-                "1e100000000000000000000000000000000000000".into()
-            ))
-        );
-        assert_eq!(
-            parse_frontmatter_scalar("-0xffffffffffffffffffffffffffffffff"),
-            FrontmatterScalar::Integer(CanonicalInteger(
-                "-340282366920938463463374607431768211455".into()
-            ))
-        );
-        assert_eq!(
-            parse_frontmatter_scalar("-.nan"),
-            FrontmatterScalar::String("-.nan".into())
-        );
-        assert_eq!(
-            parse_frontmatter_scalar("+.NaN"),
-            FrontmatterScalar::String("+.NaN".into())
-        );
-    }
-
-    #[test]
     fn normalizes_frontmatter_presence_policy() {
         let schema = valid(
             r#"
@@ -5377,30 +5271,6 @@ constraints:
                     max: UpperBound::Unbounded,
                 })
             );
-        }
-
-        #[test]
-        fn canonical_integer_normalization_is_idempotent(value in any::<i64>()) {
-            let source = if value >= 0 {
-                format!("+000{value}")
-            } else {
-                format!("-000{}", value.unsigned_abs())
-            };
-            let canonical = canonical_integer(&source).expect("generated decimal is valid");
-            prop_assert_eq!(canonical.as_str(), value.to_string());
-            let repeated = canonical_integer(&canonical);
-            prop_assert_eq!(repeated.as_deref(), Some(canonical.as_str()));
-        }
-
-        #[test]
-        fn canonical_float_normalization_is_idempotent(
-            coefficient in any::<i64>(),
-            exponent in any::<i16>(),
-        ) {
-            let source = format!("{coefficient}e{exponent}");
-            let canonical = canonical_float(&source).expect("generated decimal float is valid");
-            let repeated = canonical_float(&canonical);
-            prop_assert_eq!(repeated.as_deref(), Some(canonical.as_str()));
         }
     }
 

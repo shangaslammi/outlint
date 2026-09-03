@@ -8,6 +8,7 @@ mod markdown;
 mod matcher;
 mod schema;
 mod validator;
+mod yaml;
 
 pub use load_result::{
     ByteOffset, ConstraintIndex, ConstraintPath, InvalidSchema, JsonSchemaExternalReference,

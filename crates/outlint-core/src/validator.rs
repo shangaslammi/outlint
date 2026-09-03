@@ -4,10 +4,11 @@
 //! and parse fixture text once, then pass only values to [`validate`].
 
 use crate::loader::{
-    json_schema_reference_budget_message, json_schema_reference_count, parse_frontmatter_scalar,
+    json_schema_reference_budget_message, json_schema_reference_count,
     preloaded_json_schema_registry, NoExternalRetrieve, MAX_JSON_SCHEMA_REFERENCES,
 };
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
+use crate::yaml::parse_frontmatter_scalar;
 use crate::{
     ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
     DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, FrontmatterPolicy, FrontmatterRef,
