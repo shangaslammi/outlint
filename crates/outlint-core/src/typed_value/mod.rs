@@ -272,11 +272,44 @@ enum NormalizedValue {
 
 /// A valid proleptic-Gregorian calendar date, stored as numeric fields so
 /// chronological order is structural rather than lexical.
+///
+/// The fields are written only by [`DateValue::new`], which admits nothing
+/// the calendar does not, so no invalid date reaches normalized storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct DateValue {
     year: u16,
     month: u8,
     day: u8,
+}
+
+impl DateValue {
+    /// Builds a date, or `None` if the fields name no day in the proleptic
+    /// Gregorian calendar. Years `0000` through `9999` are in range; `0000`
+    /// is astronomical year numbering, and it is a leap year.
+    fn new(year: u16, month: u8, day: u8) -> Option<DateValue> {
+        if year > 9999 || day < 1 || day > days_in_month(year, month)? {
+            return None;
+        }
+        Some(DateValue { year, month, day })
+    }
+}
+
+/// The length of a month, or `None` if `month` is not one of the twelve.
+fn days_in_month(year: u16, month: u8) -> Option<u8> {
+    let length = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    };
+    Some(length)
+}
+
+/// The proleptic-Gregorian leap rule, applied to every year in range rather
+/// than only to years the Gregorian calendar was historically in force for.
+fn is_leap_year(year: u16) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 /// A SemVer version admitted by §2.4, which is to say one whose build
@@ -287,7 +320,158 @@ struct SemverValue {
 }
 
 /// A non-empty `dotted` component sequence.
+///
+/// The field is written only by [`DottedValue::new`], which rejects the
+/// empty sequence, so a `dotted` value always has a first component to
+/// compare.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct DottedValue {
     components: Vec<u32>,
+}
+
+impl DottedValue {
+    /// Builds a component sequence, or `None` if it is empty.
+    fn new(components: Vec<u32>) -> Option<DottedValue> {
+        if components.is_empty() {
+            return None;
+        }
+        Some(DottedValue { components })
+    }
+
+    /// The components, outermost first.
+    fn components(&self) -> &[u32] {
+        &self.components
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lexical parsers
+//
+// Each parser is total over `&str`: every string either yields a normalized
+// value or a structured failure, and none of them can panic. They are shared
+// by both source paths, because §2.4 gives a type one grammar however the
+// string was reached.
+// ---------------------------------------------------------------------------
+
+/// Parses `-?[0-9]+` into a signed 64-bit integer.
+///
+/// ASCII digits only. A `+` sign, surrounding whitespace, digit separators,
+/// and non-ASCII digits are all lexical failures rather than tolerated
+/// spellings. Leading zeros are allowed and carry no meaning, so `-01` is
+/// `-1` and `-0` is `0`.
+fn parse_int(source: &str) -> Result<i64, ParseFailure> {
+    let digits = match source.strip_prefix('-') {
+        Some(rest) => rest,
+        None => source,
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ParseFailure::Lexical);
+    }
+    // The grammar held, so the only remaining way to fail is the bound. That
+    // separation is the reason the shape is checked here rather than left to
+    // `FromStr`, whose single error would conflate the two.
+    match source.parse::<i64>() {
+        Ok(value) => Ok(value),
+        Err(_) => Err(ParseFailure::BoundOverflow {
+            component: BoundComponent::Int,
+        }),
+    }
+}
+
+/// Parses the header spelling of a boolean, which is exactly `true` or
+/// `false`.
+///
+/// Lowercase only: a frontmatter `bool` reaches the kernel already resolved
+/// by YAML, so the wider YAML spellings never pass through here.
+fn parse_bool(source: &str) -> Result<bool, ParseFailure> {
+    match source {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(ParseFailure::Lexical),
+    }
+}
+
+/// Parses `YYYY-MM-DD` into a calendar date.
+///
+/// The shape is fixed: ten ASCII characters, dashes at positions 4 and 7,
+/// and decimal digits elsewhere. A well-shaped string that names no day —
+/// `2023-02-29`, `2024-13-01`, `2024-04-31` — fails the calendar rather than
+/// the grammar, which lets the reporting phase say which one it was.
+fn parse_date(source: &str) -> Result<DateValue, ParseFailure> {
+    let bytes: [u8; 10] = match source.as_bytes().try_into() {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ParseFailure::Lexical),
+    };
+    let [y3, y2, y1, y0, first_dash, m1, m0, second_dash, d1, d0] = bytes;
+    if first_dash != b'-' || second_dash != b'-' {
+        return Err(ParseFailure::Lexical);
+    }
+    let digits = [y3, y2, y1, y0, m1, m0, d1, d0];
+    if !digits.iter().all(|byte| byte.is_ascii_digit()) {
+        return Err(ParseFailure::Lexical);
+    }
+
+    // Four digits never exceed `u16` and two never exceed `u8`, so these are
+    // exact conversions rather than bound checks.
+    let year = u16::from(decimal_digit(y3)) * 1000
+        + u16::from(decimal_digit(y2)) * 100
+        + u16::from(decimal_digit(y1)) * 10
+        + u16::from(decimal_digit(y0));
+    let month = decimal_digit(m1) * 10 + decimal_digit(m0);
+    let day = decimal_digit(d1) * 10 + decimal_digit(d0);
+
+    match DateValue::new(year, month, day) {
+        Some(date) => Ok(date),
+        None => Err(ParseFailure::InvalidDate),
+    }
+}
+
+/// The value of one ASCII decimal digit; any other byte contributes zero.
+///
+/// Callers check `is_ascii_digit` first, so the fallback is unreachable in
+/// practice and exists only to keep this total.
+fn decimal_digit(byte: u8) -> u8 {
+    if byte.is_ascii_digit() {
+        byte - b'0'
+    } else {
+        0
+    }
+}
+
+/// Parses `[0-9]+(?:\.[0-9]+)*` into a non-empty component sequence.
+///
+/// Every component is a non-empty run of ASCII digits, so an empty input, a
+/// leading dot, a doubled dot, and a trailing dot are all lexical failures.
+/// Leading zeros within a component are allowed and carry no meaning, which
+/// is what makes `1.02.0` the same value as `1.2.0`.
+fn parse_dotted(source: &str) -> Result<DottedValue, ParseFailure> {
+    let mut components = Vec::new();
+    for (index, component) in source.split('.').enumerate() {
+        if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ParseFailure::Lexical);
+        }
+        match component.parse::<u32>() {
+            Ok(value) => components.push(value),
+            Err(_) => {
+                return Err(ParseFailure::BoundOverflow {
+                    component: BoundComponent::DottedComponent { index },
+                })
+            }
+        }
+    }
+    match DottedValue::new(components) {
+        Some(dotted) => Ok(dotted),
+        // `split` yields at least one item, and an empty one already failed
+        // above, so the sequence is non-empty by the time it gets here.
+        None => Err(ParseFailure::Lexical),
+    }
+}
+
+/// Preserves the source string exactly.
+///
+/// No trimming, no case folding, no Unicode normalization, and no Markdown
+/// processing: `text` equality and order compare the code points that were
+/// supplied, so anything done here would be a silent change of value.
+fn parse_text(source: &str) -> String {
+    source.to_owned()
 }
