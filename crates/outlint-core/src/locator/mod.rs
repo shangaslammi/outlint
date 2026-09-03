@@ -9,3 +9,14 @@
 //! collapsing duplicate result nodes, converting a result location to a JSON
 //! Pointer, and enforcing evaluation limits. Nothing about the underlying
 //! engine is re-exported; callers see Outlint types only.
+//!
+//! The first thing to exist here is the executable statement of what the
+//! pinned JSONPath provider does and does not do, in [`tests`]. Every design
+//! decision the parser will rest on — that a quoted `]` does not close a
+//! bracket, that duplicate located paths arrive un-collapsed, that a location
+//! offers name and index components and not a trustworthy spelling — is
+//! pinned there before any parser is written, rather than rediscovered from a
+//! failure later.
+
+#[cfg(test)]
+mod tests;
