@@ -20,6 +20,25 @@ pub const SUITE_COMMIT: &str = "7be7c1fc28057c91e8eefaf197060fba7ed43acd";
 pub const PROFILE: &str = "outlint-core";
 pub const PROFILE_VERSION: &str = "1";
 
+/// A case recognized as core that is deliberately not evaluated.
+///
+/// Adding one requires maintainer approval, the exact upstream case name, and
+/// a written normative reason. A failing core case is an escalation, never a
+/// new entry here; see `tests/fixtures/jsonpath/UPDATING.md`.
+#[derive(Debug, Clone, Copy)]
+pub struct ReviewedExclusion {
+    pub name: &'static str,
+    pub reason: &'static str,
+}
+
+/// The reviewed exclusions for the pinned suite.
+///
+/// This is the single source both the generator example and the secondary-gate
+/// test read, so the checked-in manifest and the manifest CI recomputes cannot
+/// disagree about which cases were excluded. It is empty, and must stay empty
+/// unless a maintainer records an entry.
+pub const REVIEWED_EXCLUSIONS: &[ReviewedExclusion] = &[];
+
 // ---------------------------------------------------------------------------
 // Suite reading
 // ---------------------------------------------------------------------------
@@ -215,7 +234,8 @@ pub struct Manifest {
     pub suite: Suite,
     pub summary: Summary,
     pub included: Vec<Included>,
-    /// Cases recognized as core but deliberately not evaluated.
+    /// Cases recognized as core but deliberately not evaluated, from
+    /// [`REVIEWED_EXCLUSIONS`].
     ///
     /// Empty for this pin, and it must stay empty unless a maintainer records
     /// a reviewed reason. A failing core case is an escalation, never a new
@@ -254,15 +274,42 @@ pub struct Exclusion {
     pub reason: String,
 }
 
-/// Classifies every case in the suite and builds the manifest.
+/// Classifies every case in the suite and builds the manifest, applying the
+/// reviewed exclusions in [`REVIEWED_EXCLUSIONS`].
+pub fn build_manifest(cts_json: &str) -> Manifest {
+    build_manifest_with_exclusions(cts_json, REVIEWED_EXCLUSIONS)
+}
+
+/// Builds the manifest against an explicit exclusion set.
+///
+/// Separated from [`build_manifest`] so the exclusion mechanism can be
+/// exercised by a test without touching the checked-in manifest.
 ///
 /// Classification is by query text alone. A case recognized as core but marked
 /// `invalid_selector` upstream would be a contradiction between the recognizer
 /// and the RFC; it is counted so the test can escalate rather than hide it.
-pub fn build_manifest(cts_json: &str) -> Manifest {
+pub fn build_manifest_with_exclusions(
+    cts_json: &str,
+    exclusions: &[ReviewedExclusion],
+) -> Manifest {
+    let mut seen = std::collections::BTreeSet::new();
+    for exclusion in exclusions {
+        assert!(
+            seen.insert(exclusion.name),
+            "exclusion `{}` is listed twice",
+            exclusion.name
+        );
+        assert!(
+            !exclusion.reason.trim().is_empty(),
+            "exclusion `{}` needs a written reason",
+            exclusion.name
+        );
+    }
+
     let cases = read_suite(cts_json);
 
     let mut included = Vec::new();
+    let mut excluded = Vec::new();
     let mut deterministic = 0usize;
     let mut nondeterministic = 0usize;
     let mut invalid_recognized_as_core = 0usize;
@@ -273,6 +320,18 @@ pub fn build_manifest(cts_json: &str) -> Manifest {
         }
         if case.is_invalid_selector() {
             invalid_recognized_as_core += 1;
+            continue;
+        }
+        // Recognized as core. It is either evaluated, or excluded by a
+        // reviewed decision; it is never silently dropped.
+        if let Some(exclusion) = exclusions
+            .iter()
+            .find(|exclusion| exclusion.name == case.name)
+        {
+            excluded.push(Exclusion {
+                name: exclusion.name.to_owned(),
+                reason: exclusion.reason.to_owned(),
+            });
             continue;
         }
         if case.is_nondeterministic() {
@@ -293,8 +352,8 @@ pub fn build_manifest(cts_json: &str) -> Manifest {
         deterministic,
         nondeterministic,
         invalid_recognized_as_core,
-        excluded: 0,
-        non_core: cases.len() - included.len() - invalid_recognized_as_core,
+        excluded: excluded.len(),
+        non_core: cases.len() - included.len() - excluded.len() - invalid_recognized_as_core,
     };
 
     Manifest {
@@ -307,7 +366,7 @@ pub fn build_manifest(cts_json: &str) -> Manifest {
         },
         summary,
         included,
-        exclusions: Vec::new(),
+        exclusions: excluded,
     }
 }
 

@@ -1,5 +1,5 @@
 {
-  "description": "Outlint's authored corpus for the guaranteed JSONPath core of specification 4.6. This is the primary release gate. Every selector in `selection` and `rejected` lies inside the core grammar; no slice, descendant, union, filter, or function appears anywhere, because those are vendor tier and carry no Outlint guarantee. Expected normalized paths are authored by hand, not recorded from an implementation.",
+  "description": "Outlint's authored corpus for the guaranteed JSONPath core of specification 4.6. This is the primary release gate. `selection` and `propositions` hold valid core queries: each one is admitted by the core grammar and its outcome is guaranteed. `rejected` holds core-shaped but invalid spellings -- index selectors with a leading zero, `-0`, or a magnitude outside the I-JSON exact range -- which use only core syntax positions but are not valid core queries and must be refused at binding time. No slice, descendant, union, filter, or function appears anywhere in the file, because those are vendor tier and carry no Outlint guarantee. Expected normalized paths are authored by hand, not recorded from an implementation.",
   "profile": "outlint-core",
   "documents": {
     "basic": {

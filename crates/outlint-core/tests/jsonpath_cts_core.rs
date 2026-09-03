@@ -25,7 +25,8 @@ use serde_json::Value;
 use serde_json_path::JsonPath;
 
 use support::jsonpath_core_manifest::{
-    build_manifest, read_suite, to_canonical_json, Case, Expectation, Manifest,
+    build_manifest, build_manifest_with_exclusions, read_suite, to_canonical_json, Case,
+    Expectation, Manifest, ReviewedExclusion,
 };
 use support::jsonpath_core_recognizer::{classify, Classification};
 use support::jsonpath_path::{render_json_pointer, render_normalized_path};
@@ -115,7 +116,11 @@ fn the_generated_manifest_matches_the_checked_in_file() {
 
 #[test]
 fn every_recognized_case_is_accounted_for_exactly_once() {
-    let manifest = build_manifest(CTS);
+    // Deliberately the checked-in file, not a freshly generated one: a stale
+    // or duplicated exclusion committed by hand must fail here even before
+    // anyone regenerates the manifest.
+    let manifest: Manifest = serde_json::from_str(CHECKED_IN_MANIFEST)
+        .expect("the checked-in manifest must deserialize");
     let suite = read_suite(CTS);
 
     let recognized: Vec<&Case> = suite
@@ -150,10 +155,24 @@ fn every_recognized_case_is_accounted_for_exactly_once() {
     names.dedup();
     assert_eq!(names.len(), total, "exclusions must not repeat a name");
 
+    // No case may be both evaluated and excluded.
+    for exclusion in &manifest.exclusions {
+        assert!(
+            !manifest
+                .included
+                .iter()
+                .any(|case| case.name == exclusion.name),
+            "`{}` appears in both `included` and `exclusions`",
+            exclusion.name
+        );
+    }
+
     for exclusion in &manifest.exclusions {
         assert!(
             recognized.iter().any(|case| case.name == exclusion.name),
-            "exclusion `{}` matches no recognized core case and is stale",
+            "exclusion `{}` is stale: no case of that name is currently \
+             recognized as core. Either the suite moved or the recognizer \
+             changed; review it rather than deleting it silently.",
             exclusion.name
         );
         assert!(
@@ -168,6 +187,69 @@ fn every_recognized_case_is_accounted_for_exactly_once() {
     assert!(
         manifest.exclusions.is_empty(),
         "exclusions must be empty for this pin; see UPDATING.md"
+    );
+}
+
+/// The exclusion mechanism must actually work, not merely be documented.
+///
+/// This drives a synthetic exclusion through the real builder and checks that
+/// the case moves out of `included`, into `exclusions` with its reason, and
+/// that every count follows. It never touches the checked-in manifest, which
+/// stays at zero exclusions.
+#[test]
+fn a_reviewed_exclusion_moves_a_case_out_of_the_evaluated_set() {
+    // A real recognized case, named as a literal so the exclusion set is
+    // shaped exactly like a genuine reviewed entry.
+    const VICTIM: &str = "basic, name shorthand";
+
+    let baseline = build_manifest(CTS);
+    assert!(
+        baseline.exclusions.is_empty(),
+        "the checked-in configuration must have no exclusions"
+    );
+    assert!(
+        baseline.included.iter().any(|case| case.name == VICTIM),
+        "`{VICTIM}` must be a recognized core case for this test to mean anything"
+    );
+
+    let excluded = build_manifest_with_exclusions(
+        CTS,
+        &[ReviewedExclusion {
+            name: VICTIM,
+            reason: "synthetic exclusion exercising the mechanism",
+        }],
+    );
+
+    assert!(
+        !excluded.included.iter().any(|case| case.name == VICTIM),
+        "an excluded case must leave `included`"
+    );
+    assert_eq!(excluded.exclusions.len(), 1);
+    assert_eq!(excluded.exclusions[0].name, VICTIM);
+    assert_eq!(
+        excluded.exclusions[0].reason,
+        "synthetic exclusion exercising the mechanism"
+    );
+
+    assert_eq!(excluded.summary.excluded, 1);
+    assert_eq!(excluded.summary.included, baseline.summary.included - 1);
+    // Exclusion is not reclassification: the case is still recognized as core,
+    // so the non-core count must not move.
+    assert_eq!(excluded.summary.non_core, baseline.summary.non_core);
+    assert_eq!(excluded.summary.examined, baseline.summary.examined);
+    assert_eq!(
+        excluded.summary.deterministic + excluded.summary.nondeterministic,
+        excluded.summary.included,
+        "the deterministic split must cover exactly the evaluated cases"
+    );
+
+    // Accounting still balances across every bucket.
+    assert_eq!(
+        excluded.summary.included
+            + excluded.summary.excluded
+            + excluded.summary.invalid_recognized_as_core
+            + excluded.summary.non_core,
+        excluded.summary.examined
     );
 }
 
@@ -423,10 +505,16 @@ mod recognizer {
         assert_core(r"$['back\\slash']");
         assert_core(r"$['\b\f\n\r\t']");
         assert_core(r"$['\/']");
-        assert_core(r"$['A']");
-        assert_core(r"$['é']");
-        assert_core(r"$['😀']");
-        assert_core(r"$['😀']");
+        // `\uXXXX`, in both hexadecimal cases.
+        assert_core(r"$['\u0041']");
+        assert_core(r"$['\u00e9']");
+        assert_core(r"$['\u00E9']");
+        // A C0 control is legal when written as an escape.
+        assert_core(r"$['\u0000']");
+        assert_core(r"$['a\u001fb']");
+        // A valid surrogate pair, in both hexadecimal cases.
+        assert_core(r"$['\uD83D\uDE00']");
+        assert_core(r"$['\ud83d\ude00']");
     }
 
     #[test]
