@@ -1,6 +1,8 @@
 use outlint_core::{
-    load_schema, ByteOffset, DiagnosticId, DocumentFrontmatter, FrontmatterAnchors,
-    FrontmatterLocation, HeaderPath, Options, PrepareValidationError, SchemaError, TextRange,
+    load_schema, parse_markdown, validate, ByteOffset, Diagnostic, DiagnosticId, Document,
+    DocumentFrontmatter, FrontmatterAnchors, FrontmatterLocation, HeaderPath, MarkdownOptions,
+    Options, PrepareValidationError, PreparedValidator, Schema, SchemaError, TextRange,
+    ValidationError, ValidationOperationalError,
 };
 
 #[test]
@@ -31,6 +33,85 @@ fn public_errors_implement_the_standard_error_trait() {
     assert_error::<outlint_core::InvalidSchema>();
     assert_error::<SchemaError>();
     assert_error::<PrepareValidationError>();
+    assert_error::<ValidationOperationalError>();
+    assert_error::<ValidationError>();
+}
+
+/// Pins the two validation signatures. If either result type changes, these
+/// coercions stop compiling and the change has to be made deliberately.
+#[test]
+fn the_validation_signatures_are_pinned() {
+    let prepared_validate: fn(
+        &PreparedValidator,
+        &Document,
+    ) -> Result<Vec<Diagnostic>, ValidationOperationalError> = PreparedValidator::validate;
+    let one_shot_validate: fn(&Schema, &Document) -> Result<Vec<Diagnostic>, ValidationError> =
+        validate;
+    let prepare: fn(&Schema) -> Result<PreparedValidator, PrepareValidationError> =
+        PreparedValidator::new;
+
+    let loaded = load_schema("version: 1\ntitle: '*'\nsections: []\n").expect("schema is valid");
+    let document = parse_markdown("# Guide\n", MarkdownOptions::default());
+
+    let validator = prepare(&loaded.schema).expect("the loaded schema compiles");
+    assert!(prepared_validate(&validator, &document)
+        .expect("validation completes")
+        .is_empty());
+    assert!(one_shot_validate(&loaded.schema, &document)
+        .expect("preparation and validation both succeed")
+        .is_empty());
+}
+
+#[test]
+fn the_validation_error_channel_separates_preparation_from_operation() {
+    let preparation = PrepareValidationError {
+        message: "schema did not compile".to_owned(),
+    };
+    let operational = ValidationOperationalError::new("validation did not complete");
+
+    // Both halves reach `ValidationError` through `From`.
+    let from_preparation = ValidationError::from(preparation.clone());
+    let from_operational = ValidationError::from(operational.clone());
+    assert_eq!(
+        from_preparation,
+        ValidationError::Preparation(preparation.clone())
+    );
+    assert_eq!(
+        from_operational,
+        ValidationError::Operational(operational.clone())
+    );
+
+    // The wrapper is transparent for display and exposes the contained error
+    // as its source.
+    assert_eq!(from_preparation.to_string(), "schema did not compile");
+    assert_eq!(from_operational.to_string(), "validation did not complete");
+    assert_eq!(operational.message, "validation did not complete");
+
+    let source = std::error::Error::source(&from_operational).expect("a source is exposed");
+    assert_eq!(source.to_string(), "validation did not complete");
+    assert!(std::error::Error::source(&from_preparation).is_some());
+
+    // The `?` operator carries either half into the combined type.
+    fn preparation_failure() -> Result<(), ValidationError> {
+        Err(PrepareValidationError {
+            message: "schema did not compile".to_owned(),
+        })?;
+        unreachable!()
+    }
+    fn operational_failure() -> Result<(), ValidationError> {
+        Err(ValidationOperationalError::new(
+            "validation did not complete",
+        ))?;
+        unreachable!()
+    }
+    assert!(matches!(
+        preparation_failure(),
+        Err(ValidationError::Preparation(_))
+    ));
+    assert!(matches!(
+        operational_failure(),
+        Err(ValidationError::Operational(_))
+    ));
 }
 
 #[test]

@@ -232,3 +232,91 @@ impl fmt::Display for PrepareValidationError {
 }
 
 impl Error for PrepareValidationError {}
+
+/// Failure to complete validation of one document.
+///
+/// This is the runtime half of the validation error channel. It reports that
+/// validation did not finish, so no verdict exists for the document. It is
+/// never used to report a rule violation: those are [`Diagnostic`]s, and a
+/// document that validates successfully returns its complete diagnostic set
+/// however large that set is.
+///
+/// Returning this instead of a diagnostic list makes "partial diagnostics plus
+/// failure" unrepresentable. A document yields either every diagnostic it has
+/// or an operational failure, never a truncated list that reads as a clean
+/// document (specification §11.5).
+///
+/// The current engine cannot fail: every validation returns `Ok`. The channel
+/// exists so that the evaluation limits introduced with JSONPath frontmatter
+/// propositions have somewhere to surface without changing the signature a
+/// second time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ValidationOperationalError {
+    /// Human-readable description of why validation could not complete.
+    pub message: String,
+}
+
+impl ValidationOperationalError {
+    /// Builds an operational failure from a human-readable description.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ValidationOperationalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for ValidationOperationalError {}
+
+/// Failure of the one-shot [`validate`] entry point.
+///
+/// [`validate`] both prepares a validator and runs it, so it can fail in either
+/// of two unrelated ways. Callers that prepare once and validate repeatedly use
+/// [`PrepareValidationError`] and [`ValidationOperationalError`] directly and
+/// never see this type.
+///
+/// [`validate`]: crate::validate
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValidationError {
+    /// The schema could not be compiled into a reusable validator.
+    Preparation(PrepareValidationError),
+    /// The schema compiled, but validating the document did not complete.
+    Operational(ValidationOperationalError),
+}
+
+impl fmt::Display for ValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preparation(error) => error.fmt(formatter),
+            Self::Operational(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ValidationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Preparation(error) => Some(error),
+            Self::Operational(error) => Some(error),
+        }
+    }
+}
+
+impl From<PrepareValidationError> for ValidationError {
+    fn from(error: PrepareValidationError) -> Self {
+        Self::Preparation(error)
+    }
+}
+
+impl From<ValidationOperationalError> for ValidationError {
+    fn from(error: ValidationOperationalError) -> Self {
+        Self::Operational(error)
+    }
+}

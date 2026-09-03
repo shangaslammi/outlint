@@ -1,6 +1,6 @@
 use crate::loader::{json_schema_reference_budget_message, MAX_JSON_SCHEMA_REFERENCES};
 use crate::validator::prepare::PreparedMatcher;
-use crate::validator::{validate, PreparedValidator};
+use crate::validator::{validate, PreparedValidator, ValidationError};
 use crate::{
     load_schema, parse_markdown, ExactText, FrontmatterPolicy, FrontmatterSchema, GlobPattern,
     MarkdownOptions, Matcher, RegexPattern,
@@ -142,6 +142,9 @@ fn preparing_refuses_a_reference_chain_longer_than_the_compiler_can_recurse_over
         schema: Some(reference_chain_schema(MAX_JSON_SCHEMA_REFERENCES)),
     };
     let error = validate(&schema, &document).expect_err("one reference more is refused");
+    let ValidationError::Preparation(error) = error else {
+        panic!("a reference budget overrun is a preparation failure, not an operational one")
+    };
     assert_eq!(error.message, json_schema_reference_budget_message());
 }
 

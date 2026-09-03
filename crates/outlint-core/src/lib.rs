@@ -36,5 +36,5 @@ pub use schema::{
 pub use validator::{
     validate, Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticReference, DiagnosticTarget,
     FrontmatterBlock, FrontmatterLineRange, HeaderPath, InvolvedHeader, PrepareValidationError,
-    PreparedValidator,
+    PreparedValidator, ValidationError, ValidationOperationalError,
 };

@@ -14,6 +14,7 @@ mod tests;
 pub use diagnostic::{
     Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticReference, DiagnosticTarget,
     FrontmatterBlock, FrontmatterLineRange, HeaderPath, InvolvedHeader, PrepareValidationError,
+    ValidationError, ValidationOperationalError,
 };
 
 use crate::{Document, Schema};
@@ -56,8 +57,26 @@ impl PreparedValidator {
     /// refactor may reorder it between releases. Callers that promise an
     /// output order must sort on diagnostic content, as the CLI does with a
     /// documented total key.
-    pub fn validate(&self, document: &Document) -> Vec<Diagnostic> {
-        engine::validate_document(&self.schema, document, &self.plan)
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ValidationOperationalError`] if validation could not run to
+    /// completion, in which case the document has no verdict. Success carries
+    /// the document's complete diagnostic set, so a caller can never observe a
+    /// partial set that reads as a clean document (§11.5).
+    ///
+    /// The present engine has no failure path and always returns `Ok`. The
+    /// result type is the channel through which the evaluation limits of
+    /// JSONPath frontmatter propositions will surface.
+    pub fn validate(
+        &self,
+        document: &Document,
+    ) -> Result<Vec<Diagnostic>, ValidationOperationalError> {
+        Ok(engine::validate_document(
+            &self.schema,
+            document,
+            &self.plan,
+        ))
     }
 }
 
@@ -67,6 +86,12 @@ impl PreparedValidator {
 /// Diagnostic order is deterministic but not a contract; see
 /// [`PreparedValidator::validate`].
 ///
+/// # Errors
+///
+/// Returns [`ValidationError::Preparation`] if the schema cannot be compiled,
+/// or [`ValidationError::Operational`] if validation could not run to
+/// completion.
+///
 /// # Example
 ///
 /// ```
@@ -75,14 +100,12 @@ impl PreparedValidator {
 /// let loaded = load_schema("version: 1\ntitle: '*'\nsections: []\n")?;
 /// let document = parse_markdown("# Guide\n", MarkdownOptions::default());
 /// let diagnostics = validate(&loaded.schema, &document)
-///     .expect("loaded schema matchers compile");
+///     .expect("the loaded schema compiles and validation completes");
 ///
 /// assert!(diagnostics.is_empty());
 /// # Ok::<(), outlint_core::InvalidSchema>(())
 /// ```
-pub fn validate(
-    schema: &Schema,
-    document: &Document,
-) -> Result<Vec<Diagnostic>, PrepareValidationError> {
-    PreparedValidator::new(schema).map(|prepared| prepared.validate(document))
+pub fn validate(schema: &Schema, document: &Document) -> Result<Vec<Diagnostic>, ValidationError> {
+    let prepared = PreparedValidator::new(schema)?;
+    Ok(prepared.validate(document)?)
 }

@@ -73,7 +73,13 @@ sections:
 
     // 4. Inspect the diagnostics. The target distinguishes a heading that is
     //    really there from a schema matcher that nothing matched.
-    for diagnostic in validator.validate(&document) {
+    //    Validation returns either the document's complete diagnostic set or
+    //    an operational failure; a partial set is not representable.
+    let diagnostics = validator
+        .validate(&document)
+        .expect("validation completes");
+
+    for diagnostic in &diagnostics {
         let target = match &diagnostic.target {
             DiagnosticTarget::Header(path) => path.to_string(),
             DiagnosticTarget::MissingHeader { matcher, .. } => format!("expected {matcher}"),
