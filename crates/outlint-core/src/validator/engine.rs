@@ -13,7 +13,7 @@ use crate::{
     UpperBound,
 };
 
-use super::constraints::EvalCtx;
+use super::constraints::{EvalCtx, Truth};
 use super::diagnostic::{
     Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticTarget, FrontmatterBlock,
     FrontmatterLineRange, HeaderPath, InvolvedHeader,
@@ -660,7 +660,15 @@ impl<'a> Validator<'a> {
             occurrences: &occurrences,
             schema_scope,
         });
-        BoundScope { occurrences }
+        // §4.4's runtime singularity, taken from the raw match counts. It is
+        // recorded here, beside the cardinality check that has just read the
+        // same counts, precisely so that a locator descent never has to ask
+        // whether a `too-many-sections` diagnostic survived §6.3 filtering.
+        let singular = counts.iter().map(|count| *count <= 1).collect();
+        BoundScope {
+            occurrences,
+            singular,
+        }
     }
 
     /// Parses every capture the matched rule declares (§3.3, §2.4).
@@ -931,12 +939,23 @@ impl<'a> Validator<'a> {
         parent_path: &HeaderPath,
     ) {
         for (index, constraint) in constraints.iter().enumerate() {
-            if eval.constraint_satisfied(constraint) {
-                continue;
+            let evaluation = eval.constraint_evaluation(constraint);
+            // The operands' own primaries stand whatever the constraint
+            // concluded, and they are emitted before that conclusion is
+            // acted on: §4.6 has one node both produce `invalid-value` and
+            // suppress its constraint, so neither replaces the other.
+            for pending in evaluation.pending {
+                self.emit(pending, None, false);
+            }
+            match evaluation.truth {
+                // §5.3: a suppressed constraint "produces no constraint
+                // diagnostic". Its operands' primaries have already gone out.
+                Truth::Satisfied | Truth::Suppressed => continue,
+                Truth::Unsatisfied => {}
             }
             let id = constraint_id(constraint);
-            let involved = eval
-                .constraint_occurrences(constraint)
+            let involved = evaluation
+                .occurrences
                 .into_iter()
                 .map(|occurrence| InvolvedHeader {
                     path: occurrence.path.clone(),
@@ -1030,6 +1049,28 @@ impl<'a> Validator<'a> {
 #[derive(Debug)]
 pub(super) struct BoundScope<'d> {
     pub(super) occurrences: Vec<BoundSection<'d>>,
+    /// Whether each rule of this scope, in rule-list order, matched at most
+    /// one header here.
+    ///
+    /// §4.4 makes an unnarrowed non-terminal locator step depend on exactly
+    /// this: a statically singular rule that matched several headers in a
+    /// cardinality-violating concrete scope suppresses every constraint
+    /// evaluation descending through it. The fact is computed from raw match
+    /// counts as the scope is bound, which is what puts it before the §6.3
+    /// filtering of the `too-many-sections` diagnostic that reports the same
+    /// counts.
+    singular: Vec<bool>,
+}
+
+impl BoundScope<'_> {
+    /// Whether the rule at `rule_index` matched at most one header here.
+    ///
+    /// A rule index this scope does not have cannot have matched anything, so
+    /// it is singular; treating the unknown as plural would suppress a
+    /// descent that never depended on anything.
+    pub(super) fn is_singular(&self, rule_index: usize) -> bool {
+        self.singular.get(rule_index).copied().unwrap_or(true)
+    }
 }
 
 #[derive(Debug)]

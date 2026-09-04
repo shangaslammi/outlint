@@ -2,6 +2,7 @@
 
 mod captures;
 mod constraints;
+mod dependency_suppression;
 mod engine;
 mod frontmatter;
 mod ordering;
