@@ -459,14 +459,20 @@ impl Loader {
 
     /// Normalizes one rule's `order` list (§2.1, §3.8).
     ///
-    /// The parse runs in two halves, because §6.3 makes only one of them
-    /// depend on anything: an entry's own shape, field set, and value types
-    /// are decided against the entry alone, and so are the duplicates that
-    /// appear once defaults are applied. Only `by` needs the capture mapping,
-    /// and only the maximum needs the cardinality, so a rule whose captures or
-    /// whose `repeat` never normalized still reports every structural fault
-    /// its `order` has — and reports nothing that would have to guess at the
-    /// value it lost.
+    /// Four checks run, and §6.3 makes them independent of one another. An
+    /// entry's own shape, field set, and value types are decided against the
+    /// entry alone, and so are the duplicates that appear once defaults are
+    /// applied; only `by` needs the capture mapping, and only the maximum
+    /// needs the cardinality. So a rule whose captures or whose `repeat` never
+    /// normalized still reports every structural fault its `order` has, and
+    /// reports nothing it would have to guess the lost value to know.
+    ///
+    /// Independence is symmetric, so it also holds within one entry: only the
+    /// entry's own structure gates the other three, and past that a duplicate,
+    /// an undeclared `by`, and an unrepeatable rule are each reported wherever
+    /// they apply. An entry wrong in two independent ways therefore says so
+    /// twice, rather than one check silently consuming what the next would
+    /// have found.
     ///
     /// Like [`Self::build_rule_captures`], `None` distinguishes a collection
     /// that never became one from an absent declaration's valid empty list.
@@ -509,7 +515,14 @@ impl Loader {
         // An entry is addressed by its position whether or not anything in it
         // is understood, so every element gets its node before any of them is
         // read.
-        let mut entries = Vec::with_capacity(elements.len());
+        //
+        // The four checks that follow are independent in the sense of §6.3:
+        // only an entry's own structure gates the rest, and a fault one check
+        // finds never hides what another would have found. So faults
+        // accumulate against the entry they belong to and are reported
+        // together, in document order — no pass consumes the entries a later
+        // pass has still to read.
+        let mut reports = Vec::with_capacity(elements.len());
         for (index, element) in elements.iter().enumerate() {
             let order_index = OrderIndex(index);
             let range = self.range(RangeKey::RuleOrderEntry(rule_path.clone(), order_index));
@@ -520,90 +533,78 @@ impl Loader {
                 }),
                 range,
             );
-            let parsed = self.parse_order_entry(element, range);
-            entries.push((range, parsed));
+            let (entry, faults) = parse_order_entry(element);
+            reports.push(OrderEntryReport {
+                range,
+                entry,
+                faults,
+            });
         }
-        let mut complete = entries.iter().all(|(_, entry)| entry.is_some());
 
         // §3.8 compares entries after defaults are applied, so `by: v` and
         // `{by: v, dir: asc, strict: false}` are the same entry twice. The
         // later spelling is the one a reader meets as the repetition.
         let mut seen = HashSet::new();
-        let duplicates = entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (range, entry))| {
-                let entry = entry.as_ref()?;
-                let key = (entry.by.clone(), entry.direction, entry.strict);
-                (!seen.insert(key)).then(|| (index, *range, entry.by.clone()))
-            })
-            .collect::<Vec<_>>();
-        for (index, range, by) in duplicates {
-            self.error_at(
-                SchemaErrorKind::InvalidOrder,
-                range,
-                format!("`order` already declares this ordering of capture `{by}`"),
-            );
-            entries[index].1 = None;
-            complete = false;
+        for report in &mut reports {
+            let Some(entry) = &report.entry else { continue };
+            let key = (entry.by.clone(), entry.direction, entry.strict);
+            if !seen.insert(key) {
+                report.faults.push(format!(
+                    "`order` already declares this ordering of capture `{}`",
+                    entry.by
+                ));
+            }
         }
 
-        match captures {
-            Some(captures) => {
-                let unresolved = entries
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, (range, entry))| {
-                        let entry = entry.as_ref()?;
-                        let declared = captures.contains_key(&CaptureName(entry.by.clone()));
-                        (!declared).then(|| (index, *range, entry.by.clone()))
-                    })
-                    .collect::<Vec<_>>();
-                for (index, range, by) in unresolved {
-                    self.error_at(
-                        SchemaErrorKind::InvalidOrder,
-                        range,
-                        format!("`order` entry `by: {by}` names no capture declared by this rule"),
-                    );
-                    entries[index].1 = None;
-                    complete = false;
+        // §6.3: the names `by` would resolve against were never entered when
+        // the capture mapping failed, so the resolution is not attempted
+        // rather than failed. Nothing else here reads those names, and the
+        // collection still cannot be built.
+        let captures_known = captures.is_some();
+        if let Some(captures) = captures {
+            for report in &mut reports {
+                let Some(entry) = &report.entry else { continue };
+                if !captures.contains_key(&CaptureName(entry.by.clone())) {
+                    report.faults.push(format!(
+                        "`order` entry `by: {}` names no capture declared by this rule",
+                        entry.by
+                    ));
                 }
             }
-            // §6.3: the names `by` would resolve against were never entered,
-            // so the resolution is not attempted rather than failed. The
-            // collection still cannot be built.
-            None => complete = false,
         }
 
         // §3.8 orders a rule's own repeated matches, which a rule that can
-        // match at most once does not have. A cardinality that never
+        // match at most once does not have. Every entry is refused, including
+        // the ones already faulted for a reason of their own: the maximum is a
+        // fact about the rule, not about any entry, so no entry escapes it by
+        // being wrong in some other way first. A cardinality that never
         // normalized supplies no maximum to test, so the check is skipped
         // rather than run against an invented one.
         if let Some(RuleOutcome::Allow(cardinality)) = outcome {
             if matches!(cardinality.max, UpperBound::Bounded(max) if max <= 1) {
-                let offending = entries
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, (range, entry))| entry.as_ref().map(|_| (index, *range)))
-                    .collect::<Vec<_>>();
-                for (index, range) in offending {
-                    self.error_at(
-                        SchemaErrorKind::InvalidOrder,
-                        range,
+                for report in reports.iter_mut().filter(|report| report.entry.is_some()) {
+                    report.faults.push(
                         "`order` needs a rule that can match more than once, and this rule's \
-                         effective maximum is one",
+                         effective maximum is one"
+                            .to_owned(),
                     );
-                    entries[index].1 = None;
-                    complete = false;
                 }
             }
         }
 
+        let mut complete = captures_known;
+        for report in &reports {
+            complete &= report.entry.is_some() && report.faults.is_empty();
+            for fault in &report.faults {
+                self.error_at(SchemaErrorKind::InvalidOrder, report.range, fault.clone());
+            }
+        }
+
         complete.then(|| {
-            entries
+            reports
                 .into_iter()
-                .map(|(_, entry)| {
-                    let entry = entry.expect("a complete collection has every entry");
+                .map(|report| {
+                    let entry = report.entry.expect("a complete collection has every entry");
                     ValueOrderEntry {
                         by: CaptureName(entry.by),
                         direction: entry.direction,
@@ -612,85 +613,6 @@ impl Loader {
                 })
                 .collect()
         })
-    }
-
-    /// Parses one `order` entry's own shape, independently of every other
-    /// entry and of the rule around it (§2.1).
-    ///
-    /// Faults within one entry are independent of each other, so all of them
-    /// are reported rather than only the first.
-    fn parse_order_entry(&mut self, element: &Value, range: SourceRange) -> Option<OrderEntry> {
-        let Some(mapping) = element.as_object() else {
-            self.error_at(
-                SchemaErrorKind::InvalidOrder,
-                range,
-                "each `order` entry must be a mapping",
-            );
-            return None;
-        };
-        let mut valid = true;
-        for key in mapping.keys() {
-            if !matches!(key.as_str(), "by" | "dir" | "strict") {
-                self.error_at(
-                    SchemaErrorKind::InvalidOrder,
-                    range,
-                    format!("unknown `order` entry field `{key}`"),
-                );
-                valid = false;
-            }
-        }
-        let by = match mapping.get("by") {
-            Some(Value::String(by)) => Some(by.clone()),
-            Some(_) => {
-                self.error_at(
-                    SchemaErrorKind::InvalidOrder,
-                    range,
-                    "`order` entry `by` must be a capture name string",
-                );
-                None
-            }
-            None => {
-                self.error_at(
-                    SchemaErrorKind::InvalidOrder,
-                    range,
-                    "each `order` entry must declare `by`",
-                );
-                None
-            }
-        };
-        let direction = match mapping.get("dir") {
-            None => Some(ValueOrderDirection::Ascending),
-            Some(Value::String(dir)) if dir == "asc" => Some(ValueOrderDirection::Ascending),
-            Some(Value::String(dir)) if dir == "desc" => Some(ValueOrderDirection::Descending),
-            Some(_) => {
-                self.error_at(
-                    SchemaErrorKind::InvalidOrder,
-                    range,
-                    "`order` entry `dir` must be `asc` or `desc`",
-                );
-                None
-            }
-        };
-        let strict = match mapping.get("strict") {
-            None => Some(false),
-            Some(Value::Bool(strict)) => Some(*strict),
-            Some(_) => {
-                self.error_at(
-                    SchemaErrorKind::InvalidOrder,
-                    range,
-                    "`order` entry `strict` must be a bool",
-                );
-                None
-            }
-        };
-        match (valid, by, direction, strict) {
-            (true, Some(by), Some(direction), Some(strict)) => Some(OrderEntry {
-                by,
-                direction,
-                strict,
-            }),
-            _ => None,
-        }
     }
 
     /// The range of one capture declaration — its key through its value —
@@ -886,6 +808,77 @@ fn reserved_root_id(id: &str) -> Option<&'static str> {
         "linkdefs" => Some("a later document source"),
         _ => None,
     }
+}
+
+/// Parses one `order` entry's own shape, independently of every other entry
+/// and of the rule around it (§2.1).
+///
+/// Faults within one entry are independent of each other, so all of them are
+/// collected rather than only the first, and the entry normalizes only when
+/// none was found. Nothing is reported from here: the caller holds the
+/// entry's range and reports its faults beside those the checks that need the
+/// rule's captures and cardinality add later.
+fn parse_order_entry(element: &Value) -> (Option<OrderEntry>, Vec<String>) {
+    let mut faults = Vec::new();
+    let Some(mapping) = element.as_object() else {
+        faults.push("each `order` entry must be a mapping".to_owned());
+        return (None, faults);
+    };
+    for key in mapping.keys() {
+        if !matches!(key.as_str(), "by" | "dir" | "strict") {
+            faults.push(format!("unknown `order` entry field `{key}`"));
+        }
+    }
+    let by = match mapping.get("by") {
+        Some(Value::String(by)) => Some(by.clone()),
+        Some(_) => {
+            faults.push("`order` entry `by` must be a capture name string".to_owned());
+            None
+        }
+        None => {
+            faults.push("each `order` entry must declare `by`".to_owned());
+            None
+        }
+    };
+    let direction = match mapping.get("dir") {
+        None => Some(ValueOrderDirection::Ascending),
+        Some(Value::String(dir)) if dir == "asc" => Some(ValueOrderDirection::Ascending),
+        Some(Value::String(dir)) if dir == "desc" => Some(ValueOrderDirection::Descending),
+        Some(_) => {
+            faults.push("`order` entry `dir` must be `asc` or `desc`".to_owned());
+            None
+        }
+    };
+    let strict = match mapping.get("strict") {
+        None => Some(false),
+        Some(Value::Bool(strict)) => Some(*strict),
+        Some(_) => {
+            faults.push("`order` entry `strict` must be a bool".to_owned());
+            None
+        }
+    };
+    let form = match (by, direction, strict) {
+        (Some(by), Some(direction), Some(strict)) if faults.is_empty() => Some(OrderEntry {
+            by,
+            direction,
+            strict,
+        }),
+        _ => None,
+    };
+    (form, faults)
+}
+
+/// One `order` entry as the normalization sees it: where it is, what it
+/// normalized to if it did, and every fault found against it (§3.8).
+///
+/// Faults accumulate rather than replacing the normalized form, so a check
+/// that rejects an entry does not remove it from the checks that follow. §6.3
+/// makes the four independent — only the entry's own structure gates the rest
+/// — and an entry that is wrong in two independent ways says so twice.
+struct OrderEntryReport {
+    range: SourceRange,
+    entry: Option<OrderEntry>,
+    faults: Vec<String>,
 }
 
 /// One `order` entry after its own shape is normalized but before `by` is

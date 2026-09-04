@@ -1048,21 +1048,28 @@ fn captures_must_be_nonempty() {
 /// slug: lowercase-initial, then lowercase, digits, and `_`.
 #[test]
 fn capture_names_follow_exact_grammar() {
-    for name in ["Major", "_major", "9major", "ma-jor", "mäjor", "\"\""] {
+    // The spelling as written, and the name the loader reads out of it: a
+    // quoted empty key is written `""` and names the empty string.
+    for (spelling, name) in [
+        ("Major", "Major"),
+        ("_major", "_major"),
+        ("9major", "9major"),
+        ("ma-jor", "ma-jor"),
+        ("mäjor", "mäjor"),
+        ("\"\"", ""),
+    ] {
         let source = format!(
             "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n\
-             \x20   captures:\n      {name}: int\n"
+             \x20   captures:\n      {spelling}: int\n"
         );
-        let error = invalid(&source)
-            .errors
-            .iter()
-            .find(|error| error.kind == SchemaErrorKind::InvalidCapture)
-            .cloned()
-            .unwrap_or_else(|| panic!("`{name}` must be refused as a capture name"));
-        assert!(
-            error.message.contains("must match `[a-z][a-z0-9_]*`"),
-            "unexpected message for `{name}`: {:?}",
-            error.message
+        let error = sole_error(
+            &source,
+            SchemaErrorKind::InvalidCapture,
+            &format!("{spelling}: int"),
+        );
+        assert_eq!(
+            error.message,
+            format!("capture name `{name}` must match `[a-z][a-z0-9_]*`")
         );
     }
     // `_` and digits are legal after the first character.
@@ -1139,22 +1146,18 @@ sections:
       major: int
       minor: text
 "#;
-    let errors = invalid(source)
-        .errors
-        .iter()
-        .map(|error| (error.kind, error.message.clone()))
-        .collect::<Vec<_>>();
+    assert_errors(
+        source,
+        &[
+            (SchemaErrorKind::InvalidCapture, "major: int"),
+            (SchemaErrorKind::InvalidCapture, "minor: text"),
+        ],
+    );
     assert_eq!(
-        errors,
+        error_messages(source),
         vec![
-            (
-                SchemaErrorKind::InvalidCapture,
-                "capture `major` cannot be declared on an `allow: false` rule".to_owned()
-            ),
-            (
-                SchemaErrorKind::InvalidCapture,
-                "capture `minor` cannot be declared on an `allow: false` rule".to_owned()
-            ),
+            "capture `major` cannot be declared on an `allow: false` rule".to_owned(),
+            "capture `minor` cannot be declared on an `allow: false` rule".to_owned(),
         ]
     );
 }
@@ -1925,4 +1928,121 @@ sections:
             "\"/(?<major>x)(?<major>y)/\"",
         )],
     );
+}
+
+/// §6.3 collects independent schema errors together, and §3.8's four order
+/// checks are independent past an entry's own structure: a duplicate, an
+/// undeclared `by`, and an unrepeatable rule are three separate faults, and
+/// finding one must not hide another. Each is reported against every entry it
+/// applies to, so one entry can carry more than one.
+#[test]
+fn undeclared_by_on_an_unrepeatable_rule_reports_both_faults() {
+    let source = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    required: true
+    captures:
+      major: int
+    order:
+      - by: minor
+"#;
+    assert_errors(
+        source,
+        &[
+            (SchemaErrorKind::InvalidOrder, "by: minor\n"),
+            (SchemaErrorKind::InvalidOrder, "by: minor\n"),
+        ],
+    );
+    assert_eq!(
+        error_messages(source),
+        vec![
+            "`order` entry `by: minor` names no capture declared by this rule".to_owned(),
+            "`order` needs a rule that can match more than once, and this rule's effective \
+             maximum is one"
+                .to_owned(),
+        ]
+    );
+}
+
+/// The maximum is a fact about the rule, not about any one entry, so §3.8
+/// rejects every entry — the duplicate included, which an earlier pass must
+/// not have removed from this one's view.
+#[test]
+fn an_unrepeatable_rule_rejects_every_order_entry_including_duplicates() {
+    let source = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    required: true
+    captures:
+      major: int
+    order:
+      - by: major
+      - by: major
+"#;
+    assert_errors(
+        source,
+        &[
+            (SchemaErrorKind::InvalidOrder, "by: major\n      "),
+            (SchemaErrorKind::InvalidOrder, "by: major\n"),
+            (SchemaErrorKind::InvalidOrder, "by: major\n"),
+        ],
+    );
+    assert_eq!(
+        error_messages(source),
+        vec![
+            "`order` needs a rule that can match more than once, and this rule's effective \
+             maximum is one"
+                .to_owned(),
+            "`order` already declares this ordering of capture `major`".to_owned(),
+            "`order` needs a rule that can match more than once, and this rule's effective \
+             maximum is one"
+                .to_owned(),
+        ]
+    );
+}
+
+/// A duplicate entry is still an entry: its `by` is resolved like any other's,
+/// rather than going unchecked because an earlier pass had already rejected
+/// it.
+#[test]
+fn a_duplicate_entry_still_reports_its_undeclared_capture() {
+    let source = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+    order:
+      - by: minor
+      - by: minor
+"#;
+    assert_eq!(
+        error_messages(source),
+        vec![
+            "`order` entry `by: minor` names no capture declared by this rule".to_owned(),
+            "`order` already declares this ordering of capture `minor`".to_owned(),
+            "`order` entry `by: minor` names no capture declared by this rule".to_owned(),
+        ]
+    );
+}
+
+/// Every message one invalid schema produced, in the order the loader
+/// collected them.
+fn error_messages(source: &str) -> Vec<String> {
+    invalid(source)
+        .errors
+        .iter()
+        .map(|error| error.message.clone())
+        .collect()
+}
+
+/// Asserts the loader collected exactly one error, of `kind` and anchored at
+/// `anchor`, and returns it.
+#[track_caller]
+fn sole_error(source: &str, kind: SchemaErrorKind, anchor: &str) -> SchemaError {
+    let invalid = invalid(source);
+    let errors = invalid.errors.iter().cloned().collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1, "expected one error, collected {errors:#?}");
+    assert_eq!(errors[0].kind, kind);
+    assert_eq!(source_slice(source, errors[0].range), anchor);
+    errors[0].clone()
 }
