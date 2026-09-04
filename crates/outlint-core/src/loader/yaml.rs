@@ -908,6 +908,23 @@ fn report_duplicate_keys(
 
 /// The string a mapping key resolves to, or `None` if it resolves to no
 /// string — a number, a boolean, a null, or a collection.
+///
+/// Resolved-equality duplicate detection is deliberately string-only, and a
+/// key that resolves to a non-string therefore falls back to whole-node
+/// equality rather than to equality of its resolved value. So `1` and `01`,
+/// which both resolve to the integer one, are not paired here.
+///
+/// That is not a gap. Every construct whose duplicates are classified
+/// specially takes string keys by grammar — a capture name is
+/// `[a-z][a-z0-9_]*` under §2.2 — so the special classification's input is
+/// string keys, and §6.3 is explicit that "a check whose input could not be
+/// built MUST NOT be attempted". A non-string key fails the schema's upstream
+/// shape rule (`invalid-document-shape`, "mapping keys must be strings"), and
+/// duplicate classification is correctly never reached. Such a schema cannot
+/// be valid under any classification, so no stable-id contract turns on which
+/// of the two refusals it gets. Pairing non-string resolved values would add
+/// machinery that could only ever change the wording of an already-doomed
+/// load.
 fn resolved_key_text(key: &SchemaYamlNode) -> Option<String> {
     let SchemaYamlKind::Scalar(scalar) = &key.kind else {
         return None;

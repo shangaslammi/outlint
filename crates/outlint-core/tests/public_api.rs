@@ -279,6 +279,38 @@ fn repeated_capture_keys_are_classified_apart_from_other_duplicate_keys() {
     assert_eq!(kinds, ["invalid-capture", "invalid-capture"]);
 }
 
+/// Pins the precedence between the schema's shape rule and §2.1's duplicate
+/// classification: shape wins, and duplicate classification is never reached.
+///
+/// `1` and `01` both resolve to the integer one, so they are two spellings of
+/// one key — yet inside a `captures` mapping they produce
+/// `invalid-document-shape`, not `invalid-capture`. That is the specified
+/// outcome, not an escape. A capture name is `[a-z][a-z0-9_]*` under §2.2, so
+/// the duplicate-capture check's input is string keys; §6.3 requires that "a
+/// check whose input could not be built MUST NOT be attempted", and a
+/// non-string key has already failed the upstream rule that mapping keys are
+/// strings. The schema is refused either way and no stable-id contract turns
+/// on which refusal it gets, so this test exists to keep the precedence from
+/// being "fixed" into a second classification path that could only reword an
+/// already-doomed load.
+#[test]
+fn non_string_capture_keys_fail_the_shape_rule_before_duplicate_classification() {
+    let invalid = load_schema(
+        "version: 1\nsections:\n  - match: /(?<a>.)/\n    captures:\n      1: text\n      01: int\n",
+    )
+    .expect_err("a non-string mapping key is refused");
+
+    assert_eq!(
+        invalid.errors.first.kind.to_string(),
+        "invalid-document-shape"
+    );
+    assert_eq!(invalid.errors.first.message, "mapping keys must be strings");
+    assert!(invalid
+        .errors
+        .iter()
+        .all(|error| error.kind.to_string() != "invalid-capture"));
+}
+
 /// Pins that `captures` and `order` are admitted as rule and frontmatter
 /// fields rather than refused as unknown keys. Their contents are still
 /// unvalidated and unnormalized here: the loader lanes that read them land
