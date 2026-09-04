@@ -512,9 +512,11 @@ fn diagnostic_sort_key(diagnostic: &RenderedDiagnostic) -> DiagnosticSortKey<'_>
 
 /// Sorts one file's diagnostics into the order the JSON contract promises.
 ///
-/// The key is **total**: it compares every rendered field, so the emitted
-/// order is a pure function of the diagnostic set and can never depend on the
-/// order the validator happened to produce them in. The tiers, most
+/// The key is **total** and is built from nothing but rendered version 3
+/// data. §11.4 requires exactly that — "this order is a function of rendered
+/// diagnostic data and MUST NOT depend on validator traversal or discovery
+/// order" — so no validator index, discovery sequence, pointer address, or
+/// other emission-time artifact appears in it anywhere. The tiers, most
 /// significant first:
 ///
 /// 1. source `line`, then byte `column`;
@@ -525,8 +527,24 @@ fn diagnostic_sort_key(diagnostic: &RenderedDiagnostic) -> DiagnosticSortKey<'_>
 ///    (path segments; parent then matcher; line range then pointer), absent
 ///    first — schema errors have no target;
 /// 5. `message`, lexicographically by bytes;
-/// 6. `schema_node`, `involved_headers`, `references`, and `source_path`, in
-///    that order, purely so no two distinct diagnostics ever compare equal.
+/// 6. `schema_node`, by kind in the §11.3 order and then by its members in
+///    declaration order;
+/// 7. `involved_headers`, lexicographically, each by header path then
+///    location;
+/// 8. `references`, lexicographically, each by kind in the §11.3 order and
+///    then by that variant's members in the order §11.3 declares them;
+/// 9. `source_path`, the last resort, so no two distinct diagnostics ever
+///    compare equal.
+///
+/// Every tier below the second is a derived [`Ord`], which is why the variant
+/// order of [`RenderedTarget`], [`RenderedSchemaNode`], [`RenderedReference`],
+/// [`RenderedMatcher`], and [`RenderedScalar`] is §11.3's own order and the
+/// fields inside each variant stand in §11.3's declaration order: the
+/// comparison and the wire format are then the same statement made once.
+/// [`RenderedPosition`] is the one member that cannot be derived, because
+/// §11.4's "compare by members in declaration order" over an aligned
+/// `positions` array has to mean the *integers* — lexical decimal order would
+/// put `10` before `2`.
 ///
 /// The target outranks the message so that key-equal lines group by what they
 /// are about rather than alphabetizing prose, and because for the one tie
@@ -540,75 +558,479 @@ pub(crate) fn sort_diagnostics(diagnostics: &mut [RenderedDiagnostic]) {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
+
     use super::{
-        diagnostic_sort_key, line_column, sort_diagnostics, RenderedDiagnostic, RenderedLineRange,
-        RenderedLocation, RenderedMatcher, RenderedReference, RenderedSchemaNode, RenderedTarget,
+        diagnostic_sort_key, line_column, sort_diagnostics, RenderedDiagnostic,
+        RenderedInvolvedHeader, RenderedLineRange, RenderedLocation, RenderedMatcher,
+        RenderedPosition, RenderedReference, RenderedScalar, RenderedSchemaNode, RenderedTarget,
     };
+
+    /// Asserts that `chain` is strictly increasing, which is how every §11.4
+    /// variant and member-precedence claim is stated here: each entry differs
+    /// from its neighbour in exactly the one place under test, so a pair that
+    /// compares equal or reversed names the member that regressed.
+    fn assert_ascending<T: Ord + Debug>(what: &str, chain: &[T]) {
+        for pair in chain.windows(2) {
+            assert!(pair[0] < pair[1], "{what} out of §11.4 order: {pair:#?}");
+        }
+    }
+
+    fn position(digits: &str) -> RenderedPosition {
+        RenderedPosition::from_canonical_digits(digits.to_owned())
+    }
+
+    /// §11.4 compares aligned positions as integers. Lexical decimal order
+    /// would read `10` as smaller than `2`, and would read a 39-digit numeral
+    /// as smaller than `4`; comparing digit *count* first and only then the
+    /// digits is what makes the leading-zero-free spelling order like the
+    /// number it denotes.
+    #[test]
+    fn positions_compare_as_integers_and_not_as_decimal_text() {
+        assert_ascending(
+            "positions",
+            &[
+                position("0"),
+                position("2"),
+                position("9"),
+                position("10"),
+                position("11"),
+                position("100"),
+                // 2^64 - 1, 2^64, and 2^128: the boundary a `u64` narrowing
+                // would collapse, and a value far past it.
+                position("18446744073709551615"),
+                position("18446744073709551616"),
+                position("340282366920938463463374607431768211456"),
+            ],
+        );
+        // The pin the plain lexical order gets wrong, stated on its own.
+        assert!(position("2") < position("10"));
+        assert!(position("10") < position("340282366920938463463374607431768211456"));
+    }
+
+    /// §6.1's four kinds in order, then each kind's members in declaration
+    /// order: a header path segment by segment, `parent` before `matcher`,
+    /// and `line_range` before `pointer` — with absence first for both of the
+    /// frontmatter kind's optional members, so a block-level diagnostic sorts
+    /// ahead of one about a value inside that block.
+    #[test]
+    fn target_variants_and_members_follow_the_section_6_1_order() {
+        let frontmatter = |line_range, pointer: Option<&str>| RenderedTarget::Frontmatter {
+            line_range,
+            pointer: pointer.map(ToOwned::to_owned),
+        };
+        let range = |start_line, end_line| {
+            Some(RenderedLineRange {
+                start_line,
+                end_line,
+            })
+        };
+        assert_ascending(
+            "target kinds and members",
+            &[
+                RenderedTarget::Header {
+                    path: vec!["Alpha".into()],
+                },
+                RenderedTarget::Header {
+                    path: vec!["Alpha".into(), "Beta".into()],
+                },
+                RenderedTarget::Header {
+                    path: vec!["Beta".into()],
+                },
+                RenderedTarget::MissingHeader {
+                    parent: Vec::new(),
+                    matcher: "Zeta".into(),
+                },
+                RenderedTarget::MissingHeader {
+                    parent: vec!["Alpha".into()],
+                    matcher: "Alpha".into(),
+                },
+                RenderedTarget::MissingHeader {
+                    parent: vec!["Alpha".into()],
+                    matcher: "Beta".into(),
+                },
+                RenderedTarget::Document,
+                frontmatter(None, None),
+                frontmatter(range(1, 3), None),
+                frontmatter(range(1, 3), Some("")),
+                frontmatter(range(1, 3), Some("/a")),
+                frontmatter(range(1, 4), Some("/a")),
+                frontmatter(range(2, 3), Some("/a")),
+            ],
+        );
+    }
 
     /// The schema-node variant order is what the JSON total key compares
     /// schema nodes by, and §11.3 fixes it. Appending a variant instead of
     /// inserting it where §11.3 lists it would silently reorder diagnostics
     /// that tie on every earlier tier, so the order is asserted rather than
-    /// left to whoever edits the enum next.
+    /// left to whoever edits the enum next — as is each variant's own member
+    /// precedence: `scope` outranks `index`, which outranks the `name` or
+    /// `order_index` the typed-value kinds add.
     #[test]
     fn schema_node_variants_are_ordered_as_the_json_contract_lists_them() {
-        let rule_coordinates = || (vec![0_usize], 1_usize);
-        let (scope, index) = rule_coordinates();
-        let declaration_order = [
-            RenderedSchemaNode::Title,
-            RenderedSchemaNode::Frontmatter,
-            RenderedSchemaNode::FrontmatterSchemaDeclaration,
-            RenderedSchemaNode::FrontmatterSchemaDocument,
-            RenderedSchemaNode::Rule {
-                scope: scope.clone(),
-                index,
-            },
-            RenderedSchemaNode::Capture {
-                scope: scope.clone(),
-                index,
-                name: "version".into(),
-            },
-            RenderedSchemaNode::FrontmatterCapture {
-                name: "version".into(),
-            },
-            RenderedSchemaNode::OrderEntry {
-                scope: scope.clone(),
-                index,
-                order_index: 0,
-            },
-            RenderedSchemaNode::Constraint { scope, index },
-        ];
-        for pair in declaration_order.windows(2) {
-            assert!(pair[0] < pair[1], "out of §11.3 order: {pair:#?}");
-        }
+        let scope = || vec![1_usize];
+        assert_ascending(
+            "schema node kinds",
+            &[
+                RenderedSchemaNode::Title,
+                RenderedSchemaNode::Frontmatter,
+                RenderedSchemaNode::FrontmatterSchemaDeclaration,
+                RenderedSchemaNode::FrontmatterSchemaDocument,
+                RenderedSchemaNode::Rule {
+                    scope: scope(),
+                    index: 1,
+                },
+                RenderedSchemaNode::Capture {
+                    scope: scope(),
+                    index: 1,
+                    name: "version".into(),
+                },
+                RenderedSchemaNode::FrontmatterCapture {
+                    name: "version".into(),
+                },
+                RenderedSchemaNode::OrderEntry {
+                    scope: scope(),
+                    index: 1,
+                    order_index: 0,
+                },
+                RenderedSchemaNode::Constraint {
+                    scope: scope(),
+                    index: 1,
+                },
+            ],
+        );
+        assert_ascending(
+            "rule coordinates",
+            &[
+                RenderedSchemaNode::Rule {
+                    scope: vec![0],
+                    index: 9,
+                },
+                RenderedSchemaNode::Rule {
+                    scope: vec![1],
+                    index: 0,
+                },
+                RenderedSchemaNode::Rule {
+                    scope: vec![1],
+                    index: 1,
+                },
+                RenderedSchemaNode::Rule {
+                    scope: vec![1, 0],
+                    index: 0,
+                },
+            ],
+        );
+        assert_ascending(
+            "capture coordinates then name",
+            &[
+                RenderedSchemaNode::Capture {
+                    scope: scope(),
+                    index: 0,
+                    name: "zeta".into(),
+                },
+                RenderedSchemaNode::Capture {
+                    scope: scope(),
+                    index: 1,
+                    name: "alpha".into(),
+                },
+                RenderedSchemaNode::Capture {
+                    scope: scope(),
+                    index: 1,
+                    name: "beta".into(),
+                },
+            ],
+        );
+        assert_ascending(
+            "order-entry coordinates then order index",
+            &[
+                RenderedSchemaNode::OrderEntry {
+                    scope: scope(),
+                    index: 0,
+                    order_index: 9,
+                },
+                RenderedSchemaNode::OrderEntry {
+                    scope: scope(),
+                    index: 1,
+                    order_index: 0,
+                },
+                RenderedSchemaNode::OrderEntry {
+                    scope: scope(),
+                    index: 1,
+                    order_index: 1,
+                },
+            ],
+        );
     }
 
     /// The same argument for references: §11.4 compares them "by their
     /// variants in the order listed in Sections 6.1 and 11.3", which is the
-    /// derived `Ord` only while the variants stay in §11.3's order.
+    /// derived `Ord` only while the variants stay in §11.3's order — and
+    /// within a variant, "members in declaration order" is §11.3's own member
+    /// list, so a rule compares `locator`, `anchor`, `path`, `positions`, and
+    /// only then `matcher`.
     #[test]
     fn reference_variants_follow_the_declaration_order_of_section_11_3() {
-        let declaration_order = [
-            RenderedReference::Rule {
-                locator: "a".into(),
-                anchor: "current_scope",
-                path: vec!["a".into()],
-                positions: None,
-                matcher: RenderedMatcher::Any,
-            },
-            RenderedReference::FrontmatterQuery {
-                locator: "fm[$.a]".into(),
-                query: "$.a".into(),
-                equals: None,
-            },
-            RenderedReference::FrontmatterCapture {
-                locator: "fm.a".into(),
-                name: "a".into(),
-                value_type: "text".into(),
-            },
-        ];
-        for pair in declaration_order.windows(2) {
-            assert!(pair[0] < pair[1], "out of declaration order: {pair:#?}");
+        let rule =
+            |locator: &str, anchor, path: &[&str], positions, matcher| RenderedReference::Rule {
+                locator: locator.to_owned(),
+                anchor,
+                path: path.iter().map(|step| (*step).to_owned()).collect(),
+                positions,
+                matcher,
+            };
+        assert_ascending(
+            "reference kinds",
+            &[
+                rule("a", "current_scope", &["a"], None, RenderedMatcher::Any),
+                RenderedReference::FrontmatterQuery {
+                    locator: "fm[$.a]".into(),
+                    query: "$.a".into(),
+                    equals: None,
+                },
+                RenderedReference::FrontmatterCapture {
+                    locator: "fm.a".into(),
+                    name: "a".into(),
+                    value_type: "text".into(),
+                },
+            ],
+        );
+        assert_ascending(
+            "rule members in declaration order",
+            &[
+                // `locator` outranks everything after it, so a locator that
+                // sorts first wins despite a later member that would not.
+                rule("a", "schema_root", &["z"], None, RenderedMatcher::Any),
+                rule("b", "current_scope", &["a"], None, RenderedMatcher::Any),
+                // Then `anchor`, then `path`, then `positions` (absence
+                // first, and the entries as integers), and last `matcher`.
+                rule("b", "schema_root", &["a"], None, RenderedMatcher::Any),
+                rule("b", "schema_root", &["b"], None, RenderedMatcher::Any),
+                rule(
+                    "b",
+                    "schema_root",
+                    &["b"],
+                    Some(vec![None]),
+                    RenderedMatcher::Any,
+                ),
+                rule(
+                    "b",
+                    "schema_root",
+                    &["b"],
+                    Some(vec![Some(position("2"))]),
+                    RenderedMatcher::Any,
+                ),
+                rule(
+                    "b",
+                    "schema_root",
+                    &["b"],
+                    Some(vec![Some(position("10"))]),
+                    RenderedMatcher::Exact("A".into()),
+                ),
+                rule(
+                    "b",
+                    "schema_root",
+                    &["b"],
+                    Some(vec![Some(position("10"))]),
+                    RenderedMatcher::Any,
+                ),
+            ],
+        );
+        assert_ascending(
+            "frontmatter query members in declaration order",
+            &[
+                // `locator` first, then `query`, then `equals` with absence
+                // first — a bare boolean read before the same query's
+                // equality proposition.
+                RenderedReference::FrontmatterQuery {
+                    locator: "fm[$.a]".into(),
+                    query: "$.z".into(),
+                    equals: None,
+                },
+                RenderedReference::FrontmatterQuery {
+                    locator: "fm[$.b]".into(),
+                    query: "$.a".into(),
+                    equals: None,
+                },
+                RenderedReference::FrontmatterQuery {
+                    locator: "fm[$.b]".into(),
+                    query: "$.b".into(),
+                    equals: None,
+                },
+                RenderedReference::FrontmatterQuery {
+                    locator: "fm[$.b]".into(),
+                    query: "$.b".into(),
+                    equals: Some(RenderedScalar::Null),
+                },
+            ],
+        );
+        assert_ascending(
+            "frontmatter capture members in declaration order",
+            &[
+                RenderedReference::FrontmatterCapture {
+                    locator: "fm.a".into(),
+                    name: "z".into(),
+                    value_type: "text".into(),
+                },
+                RenderedReference::FrontmatterCapture {
+                    locator: "fm.b".into(),
+                    name: "a".into(),
+                    value_type: "text".into(),
+                },
+                RenderedReference::FrontmatterCapture {
+                    locator: "fm.b".into(),
+                    name: "b".into(),
+                    value_type: "date".into(),
+                },
+                RenderedReference::FrontmatterCapture {
+                    locator: "fm.b".into(),
+                    name: "b".into(),
+                    value_type: "int".into(),
+                },
+            ],
+        );
+    }
+
+    /// §11.3 lists the matcher kinds `exact`, `glob`, `regex`, `any`, and the
+    /// `equals` types `null`, `boolean`, `integer`, `float`, `string`, and
+    /// says `equals` compares `type` before `value`. A tagged value's variant
+    /// *is* its type, so the discriminant carrying that precedence is exactly
+    /// what the derived `Ord` compares first.
+    #[test]
+    fn matcher_and_equality_variants_compare_by_kind_before_value() {
+        assert_ascending(
+            "matcher kinds then values",
+            &[
+                RenderedMatcher::Exact("A".into()),
+                RenderedMatcher::Exact("B".into()),
+                RenderedMatcher::Glob("A *".into()),
+                RenderedMatcher::Regex("A.+".into()),
+                RenderedMatcher::Any,
+            ],
+        );
+        assert_ascending(
+            "equality types then values",
+            &[
+                RenderedScalar::Null,
+                RenderedScalar::Boolean(false),
+                RenderedScalar::Boolean(true),
+                // An integer's rendered `value` is the canonical *string*
+                // §11.3 requires, and it is that rendered member the order
+                // compares; only `positions` are rendered as JSON numbers.
+                RenderedScalar::Integer("16".into()),
+                RenderedScalar::Integer("2".into()),
+                RenderedScalar::Float("15e-1".into()),
+                RenderedScalar::String("release".into()),
+            ],
+        );
+    }
+
+    /// One tier of the §11.4 key, able to set a diagnostic's contribution to
+    /// it either low or high while touching nothing else.
+    type Tier = (&'static str, fn(&mut RenderedDiagnostic, bool));
+
+    /// The nine §11.4 tiers, most significant first, with the source line and
+    /// its byte column as the two halves of the first.
+    const TIERS: [Tier; 10] = [
+        ("source line", |d, low| d.line = if low { 1 } else { 2 }),
+        ("byte column", |d, low| d.column = if low { 1 } else { 2 }),
+        ("diagnostic id", |d, low| {
+            d.id = if low { "a" } else { "z" }.into();
+        }),
+        ("schema location", |d, low| {
+            d.schema_location = (!low).then(|| RenderedLocation {
+                path: "schema.yml".into(),
+                line: 1,
+                column: 1,
+            });
+        }),
+        ("target", |d, low| {
+            d.target = (!low).then_some(RenderedTarget::Document);
+        }),
+        ("message", |d, low| {
+            d.message = if low { "a" } else { "z" }.into();
+        }),
+        ("schema node", |d, low| {
+            d.schema_node = (!low).then_some(RenderedSchemaNode::Title);
+        }),
+        ("involved headers", |d, low| {
+            d.involved_headers = if low {
+                Vec::new()
+            } else {
+                vec![RenderedInvolvedHeader {
+                    header_path: vec!["Alpha".into()],
+                    line: 1,
+                    column: 1,
+                }]
+            };
+        }),
+        ("references", |d, low| {
+            d.references = if low {
+                Vec::new()
+            } else {
+                vec![RenderedReference::FrontmatterCapture {
+                    locator: "fm.a".into(),
+                    name: "a".into(),
+                    value_type: "text".into(),
+                }]
+            };
+        }),
+        ("source path", |d, low| {
+            d.source_path = if low { "a.md" } else { "z.md" }.into();
+        }),
+    ];
+
+    /// A diagnostic every tier of which is still to be set by [`TIERS`].
+    fn unset_diagnostic() -> RenderedDiagnostic {
+        RenderedDiagnostic {
+            id: String::new(),
+            message: String::new(),
+            source_path: String::new(),
+            line: 0,
+            column: 0,
+            target: None,
+            schema_node: None,
+            schema_location: None,
+            involved_headers: Vec::new(),
+            references: Vec::new(),
+        }
+    }
+
+    /// A less significant member can never overrule a more significant one.
+    ///
+    /// For each tier: the tier under test is set low on the left and high on
+    /// the right, every *earlier* tier is set identically on both so it cannot
+    /// decide anything, and every *later* tier is set the other way round — so
+    /// a key that dropped this tier, demoted it, or reordered it against a
+    /// neighbour lands on the opposite answer instead of accidentally
+    /// agreeing. Sorting a reversed pair must reach the same conclusion, which
+    /// is what rules out an ordering that merely preserves emission order.
+    #[test]
+    fn an_earlier_tier_always_outranks_every_later_one() {
+        for (index, (name, tier)) in TIERS.iter().enumerate() {
+            let (mut left, mut right) = (unset_diagnostic(), unset_diagnostic());
+            for (_, earlier) in &TIERS[..index] {
+                earlier(&mut left, false);
+                earlier(&mut right, false);
+            }
+            tier(&mut left, true);
+            tier(&mut right, false);
+            for (_, later) in &TIERS[index + 1..] {
+                later(&mut left, false);
+                later(&mut right, true);
+            }
+
+            assert!(
+                diagnostic_sort_key(&left) < diagnostic_sort_key(&right),
+                "the `{name}` tier was overruled by a less significant member"
+            );
+            let expected = vec![
+                format!("{:?}", diagnostic_sort_key(&left)),
+                format!("{:?}", diagnostic_sort_key(&right)),
+            ];
+            let mut reversed = vec![right, left];
+            sort_diagnostics(&mut reversed);
+            assert_eq!(key_strings(&reversed), expected, "`{name}` did not sort");
         }
     }
 
@@ -687,7 +1109,7 @@ mod tests {
                 "m",
                 vec![RenderedReference::Rule {
                     locator: "a".into(),
-                    anchor: "/",
+                    anchor: "current_scope",
                     path: vec!["a".into()],
                     positions: None,
                     matcher: RenderedMatcher::Exact("A".into()),
