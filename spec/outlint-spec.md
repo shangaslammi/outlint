@@ -873,9 +873,13 @@ core-selector = name-selector / index-selector / "*"
 `S`, `member-name-shorthand`, `name-selector`, and `index-selector` retain
 their RFC 9535 definitions. A core query therefore consists only of child
 segments, with exactly one name, index, or wildcard selector per bracketed
-segment. Quoted names include the RFC's complete escape repertoire, including
-names containing quotes, backslashes, or C0 controls. For every valid core
-query, implementations MUST apply RFC 9535 child-segment semantics: a name
+segment. Within quoted names, the guarantee covers RFC single-character
+escapes and `\uXXXX` escapes whose code unit is not a surrogate, including
+spellings for quotes, backslashes, and C0 controls. A high-surrogate escape
+followed by a low-surrogate escape is vendor-tier; write the corresponding
+non-BMP character literally for a portable core query, because literal
+non-BMP member names remain fully guaranteed. For every valid core query,
+implementations MUST apply RFC 9535 child-segment semantics: a name
 selects that exact object member, an index selects that array member, a
 negative index counts back from the array's end, and a wildcard selects every
 immediate object or array child. A missing member, an out-of-range index, or a
