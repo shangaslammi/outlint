@@ -1,0 +1,59 @@
+version: 1
+# JSONPath frontmatter propositions (spec 4.6). Every query here stays inside
+# the guaranteed core of 4.6 — child segments with exactly one name, index, or
+# wildcard selector each. Filters, slices, descendant segments, multi-selectors
+# and extension functions are vendor-tier and are deliberately absent: 4.6
+# states that vendor-tier query outcomes are not an Outlint conformance gate,
+# so they have no place in the portable corpus.
+#
+# `fm[...]` is the JSONPath form; `fm.<name>` is the separate declared-capture
+# form and is covered by `frontmatter-capture-propositions`.
+#
+# `match_case` keeps its `false` default, which 4.6 makes string equality
+# follow.
+options:
+  ordered_sections: false
+title: null
+sections:
+  - id: bool-proof
+    match: Bool Proof
+    required: false
+  - id: values-proof
+    match: Values Proof
+    required: false
+  - id: quoted-proof
+    match: Quoted Proof
+    required: false
+  - id: last-proof
+    match: Last Proof
+    required: false
+  - id: number-proof
+    match: Number Proof
+    required: false
+  - id: null-proof
+    match: Null Proof
+    required: false
+  - id: area
+    match: Area
+    required: false
+    sections:
+      - id: nested-proof
+        match: Nested Proof
+        required: false
+    constraints:
+      # Both frontmatter forms resolve identically from every constraint
+      # scope (4.6); only the diagnostic's target follows the scope.
+      - requires: { if: "fm[$.nested]", then: nested-proof }
+constraints:
+  # A bare read is a typed boolean read, not a presence test.
+  - requires: { if: "fm[$.flag]", then: bool-proof }
+  # Equality is existential over non-null result nodes.
+  - requires: { if: "fm[$.values[*]]=x", then: values-proof }
+  # A hyphenated member name requires RFC 9535 bracket notation.
+  - requires: { if: "fm[$['decision-makers']]=ada", then: quoted-proof }
+  # A negative index counts back from the array's end.
+  - requires: { if: "fm[$.items[-1]]=tail", then: last-proof }
+  # The literal resolves as one YAML 1.2 core scalar; there is no coercion.
+  - requires: { if: "fm[$.number]=1", then: number-proof }
+  # Equality with null is always false.
+  - requires: { if: "fm[$.nothing]=null", then: null-proof }

@@ -1,0 +1,46 @@
+version: 1
+# Declared frontmatter captures used as propositions (spec 4.6, `fm.<name>`).
+#
+# `fm.<name>` is the typo-safe reference to a declaration and is checked at
+# schema load, where `fm[$.name]` is a document-time query. As a proposition it
+# is satisfied iff the capture is valid and bound — except that a bound `bool`
+# capture contributes its own boolean value, so a valid bound `false` is
+# unsatisfied. Optional absence is ordinary falsity, while an invalid value, a
+# missing required capture, invalid frontmatter, or an absent required block
+# suppresses the whole containing constraint after its primary diagnostic.
+options:
+  ordered_sections: false
+title: null
+frontmatter:
+  required: true
+  captures:
+    draft:
+      type: bool
+    version:
+      type: semver
+      required: true
+    label:
+      type: text
+sections:
+  - id: draft-proof
+    match: Draft Proof
+    required: false
+  - id: version-proof
+    match: Version Proof
+    required: false
+  - id: label-proof
+    match: Label Proof
+    required: false
+  - id: area
+    match: Area
+    required: false
+    sections:
+      - id: nested-proof
+        match: Nested Proof
+        required: false
+    constraints:
+      - requires: { if: fm.label, then: nested-proof }
+constraints:
+  - requires: { if: fm.draft, then: draft-proof }
+  - requires: { if: fm.version, then: version-proof }
+  - requires: { if: fm.label, then: label-proof }

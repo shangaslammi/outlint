@@ -652,3 +652,262 @@ would fail on multiplicity alone.
 This document has no frontmatter block, so the disable comment can sit on the
 first line; the file-wide form of 6.3 applies from anywhere in the file
 regardless.
+
+---
+
+## Group `frontmatter-jsonpath`
+
+Six root constraints and one nested constraint, each pairing one JSONPath
+proposition with an optional proof heading. Every query stays inside the 4.6
+**guaranteed core**: child segments carrying exactly one name, index, or
+wildcard selector. Filters, slices, descendant segments, multi-selectors, and
+extension functions are vendor-tier under 4.6 and carry no conformance
+guarantee, so they are excluded from the portable corpus by construction.
+
+| # | Constraint | Form under test |
+|---|---|---|
+| C1 | `fm[$.flag]` → `bool-proof` | bare typed **boolean read** |
+| C2 | `fm[$.values[*]]=x` → `values-proof` | wildcard selector, existential equality |
+| C3 | `fm[$['decision-makers']]=ada` → `quoted-proof` | quoted member name, case-folded string equality |
+| C4 | `fm[$.items[-1]]=tail` → `last-proof` | negative index |
+| C5 | `fm[$.number]=1` → `number-proof` | integer literal, no coercion |
+| C6 | `fm[$.nothing]=null` → `null-proof` | equality with `null` |
+| C7 (inside `area`) | `fm[$.nested]` → `nested-proof` | the same forms resolve from a nested scope |
+
+Every root violation is `requires` → D anchored at line 1; C7's is `requires` →
+H("Area") anchored at the `Area` header's line (6.2: a constraint targets its
+scope's parent section).
+
+Each document below declares only the keys its own case needs, so every other
+constraint's `if` is unsatisfied against an absent member and holds vacuously.
+That is what keeps each expected count at exactly one — or zero.
+
+| Document | Frontmatter | Active constraint | Expected |
+|---|---|---|---|
+| `boolean-true.md` | `flag: true` | C1: one result node is boolean `true` → satisfied; `Bool Proof` absent | `requires` → D ×1 |
+| `boolean-false.md` | `flag: false` | C1: boolean `false` is **unsatisfied** (4.6: a bare read is a typed boolean read, not a presence test) → `if` unsatisfied | `[]` |
+| `wildcard-existential.md` | `values: [null, y, x]` | C2: wildcard selects all three; equality is existential over **non-null** nodes and `"x"` matches → satisfied; `Values Proof` absent | `requires` → D ×1 |
+| `negative-index.md` | `items: [head, tail]` | C4: `[-1]` counts back from the end → `"tail"` → satisfied; `Last Proof` absent | `requires` → D ×1 |
+| `quoted-name-casefold.md` | `decision-makers: Ada` | C3: bracket notation reaches the hyphenated name; 4.6 makes string equality follow `options.match_case`, which is `false`, so `Ada` equals `ada` → satisfied; `Quoted Proof` absent | `requires` → D ×1 |
+| `integer-equality.md` | `number: 1` | C5: literal `1` resolves as a YAML core **integer** and the node is an integer of the same value → satisfied; `Number Proof` absent | `requires` → D ×1 |
+| `no-coercion.md` | `number: "1"` | C5: the node is a **string**; 4.6 gives no cross-type coercion → unsatisfied | `[]` |
+| `null-equality.md` | `nothing: null` | C6: 4.6 — `fm[query]=null` is **always false**; equality ranges over non-null nodes only | `[]` |
+| `wrong-container.md` | `values: 7`, `items: {}`, `number: []` | C2: a wildcard on a scalar selects nothing. C4: an index selector on an object selects nothing. C5: a sequence never equals the literal. All unsatisfied | `[]` |
+| `nested-scope.md` | `nested: true` | C7: satisfied inside the concrete `Area` scope; `Nested Proof` absent | `requires` → H("Area") ×1 |
+
+**Why no `invalid-value` appears anywhere in this group.** 4.6 says every
+non-boolean, non-null result node of a *bare* read produces `invalid-value`
+and suppresses the containing constraint. C1 and C7 are the only bare reads,
+and in every document above their queries select either nothing or a boolean.
+`wrong-container.md` deliberately gives `values`, `items`, and `number`
+non-boolean values but leaves `flag` and `nested` absent, so the wrong-kind
+nodes are only ever reached by **equality** propositions, which have no
+`invalid-value` path — they simply do not match. The invalid-read case is
+covered by `frontmatter-query-suppression`, where it is the subject.
+
+**`nested-scope.md` raw-record notes.** The diagnostic's `schema_node` is
+`kind: "constraint"` with the `area` rule's scope coordinates, and its
+`references` entry is `kind: "frontmatter_query"` with `query: "$.nested"` and
+no `equals` member. Equality constraints instead carry `equals` with `type`
+before `value`; C5's `type` is `integer` with a canonical **string** value,
+C3's and C4's are `string`, and C1/C7 carry no `equals` at all (11.3).
+
+---
+
+## Group `frontmatter-query-suppression`
+
+One constraint: `any_of: ["fm[$.flags[*]]", fallback]`. The bare read is the
+first operand and `fallback` the second, so the fixture can show that an
+already-satisfiable `any_of` is still suppressed.
+
+### `multiple-invalid.md` (block lines 1–10) — expected exactly 4 diagnostics
+
+`$.flags[*]` selects all seven elements. Per 4.6, each result node is
+classified independently:
+
+| Index | Value | Classification |
+|---|---|---|
+| 0 | `true` | boolean → **satisfies** the read |
+| 1 | `bad` | string → non-boolean, non-null → `invalid-value` |
+| 2 | `7` | integer → `invalid-value` |
+| 3 | `{x: 1}` | mapping → `invalid-value` |
+| 4 | `[false]` | sequence → `invalid-value` |
+| 5 | `false` | boolean → valid, unsatisfied |
+| 6 | `null` | null → unsatisfied, **no** `invalid-value` |
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `invalid-value` | F(10,"/flags/1") | 1 | line 4 col 5 |
+| `invalid-value` | F(10,"/flags/2") | 1 | line 5 col 5 |
+| `invalid-value` | F(10,"/flags/3") | 1 | line 6 col 5 |
+| `invalid-value` | F(10,"/flags/4") | 1 | line 7 col 5 |
+
+Anchors are the sequence **elements** themselves (6.2: at the key for a mapping
+member, at the element itself for a sequence element). The block is written as
+a two-space-indented block sequence, so each element's first byte is column 5.
+
+**No `any_of` diagnostic.** 4.6: the whole containing constraint is suppressed,
+and "a true sibling result or another already-true operand does not
+short-circuit that suppression". Both escape hatches are present here on
+purpose — element 0 is boolean `true`, which would satisfy the read outright,
+and `Fallback` is present, which would satisfy the `any_of` by its second
+operand — and neither may rescue the constraint. 5.3: suppression applies to
+the whole boolean constraint without three-valued short-circuiting.
+
+**Implementations must evaluate the complete result.** 4.6 forbids silent
+truncation; stopping at the first satisfying node (index 0) would emit no
+`invalid-value` at all, and stopping at the first invalid node would emit one.
+Exactly four is the discriminating count.
+
+### `false-and-null.md` — expected exactly 1 diagnostic
+
+`flags: [false, null]`. Boolean `false` is valid and unsatisfied; `null` is
+unsatisfied and produces no `invalid-value`. Nothing is suppressed, so the
+constraint evaluates: neither operand is satisfied and `Fallback` is absent.
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `any_of` | D | 1 | line 1 col 1 |
+
+### `absent.md` — expected exactly 1 diagnostic
+
+No frontmatter block and no `Fallback`. 4.6: "If the block is absent, the query
+produces an **empty result**: a bare boolean read is unsatisfied." An empty
+result is falsity, not suppression — the distinction this document exists to
+pin, since a suppressing implementation would report `[]`.
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `any_of` | D | 1 | line 1 col 1 |
+
+No `missing-frontmatter`: this schema declares no `frontmatter` object, so
+`required` is `false` by default.
+
+### `invalid-frontmatter.md` (block lines 1–3) — expected exactly 1 diagnostic
+
+A top-level YAML **sequence** where 1.6 requires a mapping.
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `invalid-frontmatter` | F(3,**no-pointer**) | 1 | line 1 col 1 |
+
+The target names the block, not a value in it, so `pointer` is omitted
+entirely — 6.1 distinguishes that from `"pointer": ""`, which would name the
+mapping itself. 4.6: "If the block is `invalid-frontmatter`, the query is
+unevaluated and the entire containing constraint is suppressed", so no `any_of`
+accompanies it even though `Fallback` is also absent.
+
+### `disabled-invalid.md` — expected `[]`
+
+`flags: [bad]`, no `Fallback`, and a file-wide `invalid-value` suppression.
+The `invalid-value` for `/flags/0` is produced and then filtered; the
+constraint stays suppressed because 6.3 decides dependency suppression before
+the comment filters anything: "suppressing `invalid-value` … never re-enables a
+dependent constraint". A filter-first implementation would report an `any_of`
+here — a diagnostic conjured by hiding another one.
+
+The disable comment sits **after** the frontmatter block: 1.6 requires the
+opening `---` to be the very first line of the file, so a comment above it
+would destroy the block this fixture is about. The file-wide form of 6.3 works
+from anywhere in the file.
+
+---
+
+## Group `frontmatter-capture-propositions`
+
+`frontmatter.required: true` and three captures: `draft` (`bool`, optional),
+`version` (`semver`, **required**), `label` (`text`, optional). Three root
+constraints `requires: {if: fm.<name>, then: <name>-proof}` and one nested
+constraint inside `area` requiring `Nested Proof` when `fm.label` is bound.
+
+4.6 governs `fm.<name>`: satisfied iff the capture is valid and bound, "except
+that a bound `bool` capture contributes its boolean value: a valid bound
+`false` is unsatisfied". Optional absence is ordinary falsity. An invalid
+value, a missing required capture, invalid frontmatter, or an absent required
+block suppresses the entire containing constraint **after** its primary
+diagnostic.
+
+| Document | State | Expected |
+|---|---|---|
+| `bool-true.md` | `draft: true`, version valid, `Version Proof` present, no `Draft Proof` | `requires` → D ×1 |
+| `bool-false.md` | as above with `draft: false` | `[]` — a bound `false` is unsatisfied, so the `if` does not fire |
+| `version-present.md` | version valid, no `Version Proof` | `requires` → D ×1 |
+| `text-empty.md` | `label: ""`, version valid + proof, no `Label Proof` | `requires` → D ×1 — empty `text` is valid and **bound**, which is exactly the case a truthiness-based reading would get wrong |
+| `nested-text.md` | version + label bound, both root proofs present, `Area` without `Nested Proof` | `requires` → H("Area") ×1 |
+| `optional-absent.md` | version valid + proof; `draft` and `label` absent | `[]` — optional absence is ordinary falsity, not an error |
+
+Anchors: root violations at line 1 col 1; `nested-text.md`'s at the `Area`
+header, line 10 col 1.
+
+### Failure and suppression cases
+
+| Document | id | target | multiplicity | anchor | reasoning |
+|---|---|---|---|---|---|
+| `invalid-version.md` (lines 1–3) | `invalid-value` | F(3,"/version") | 1 | line 2 col 1 | unquoted `1.2` is a YAML float; `semver` needs a YAML string (2.4). The `fm.version` constraint is suppressed after this primary diagnostic (4.6), so no `requires` accompanies it even though `Version Proof` is absent |
+| `missing-version.md` (lines 1–3) | `missing-value` | F(3,"/version") | 1 | line 1 col 1 | the block is a valid mapping without `version`; the required capture is absent (2.3). Its constraint is likewise suppressed. The anchor is the deepest resolving positioned ancestor of `/version` — here the root mapping, whose anchor 6.2 gives as the block's first line |
+| `no-frontmatter.md` | `missing-frontmatter` | F(**absent**) | 1 | line 1 col 1 | `required: true` with no block. 6.1: `line_range` is absent **exactly** when the document has no frontmatter block at all, so this is the only target shape in the corpus carrying neither member |
+| `invalid-frontmatter.md` (lines 1–3) | `invalid-frontmatter` | F(3,no-pointer) | 1 | line 1 col 1 | top-level sequence |
+| `disabled-invalid.md` | — | — | 0 | — | invalid `version` with file-wide `invalid-value` suppression |
+
+**Why the absent and invalid block cases carry no capture diagnostics.** 2.3:
+"When the document has no frontmatter block, or its block is
+`invalid-frontmatter`, captures are not evaluated and produce neither
+`missing-value` nor `invalid-value`. The block-level diagnostic, when one is
+required, is sufficient." So `no-frontmatter.md` reports one diagnostic and
+**not** an additional `missing-value` for the required `version`, and
+`invalid-frontmatter.md` likewise reports exactly one. All three constraints
+are suppressed in both, per 4.6.
+
+**`disabled-invalid.md` is the filtering-order case.** The `invalid-value` is
+produced and filtered file-wide; the `fm.version` constraint remains suppressed
+because 6.3 decides dependency suppression first. Expected exactly `[]`: a
+filter-first implementation would find `version` unbound, read that as ordinary
+falsity, and — since the `if` would then be unsatisfied — also report `[]`
+here by luck. What it would get wrong is the *reason*, which
+`invalid-version.md` pins instead by requiring exactly one diagnostic where a
+naive reading gives two.
+
+---
+
+## Audit of the two already-respelled legacy groups
+
+Neither group is modified; their `expected.json` files are re-derived here from
+the spec to confirm they remain correct under Typed Values, and are re-run
+against the post-4A/4B CLI at activation to confirm they are byte-for-byte
+unchanged.
+
+### `frontmatter-refs`
+
+Spellings in use: `fm[$.status]=deprecated` and `fm[$.semver]=major` — the
+`fm[...]` JSONPath equality form of 4.6, not the `fm.<name>` capture form. The
+schema declares no `frontmatter` object, so no capture exists and no
+`missing-frontmatter` is reachable.
+
+This schema does **not** set `ordered_sections: false`, so its root scope is
+ordered (3.7). Its two rules are `migration` then `breaking-changes`, and the
+only document containing both, `pass-satisfied.md`, spells them in that order,
+so no `ordered` diagnostic arises.
+
+| Document | Derivation | Committed |
+|---|---|---|
+| `pass-inert.md` | no block → both queries produce empty results → both `if`s unsatisfied → both constraints hold vacuously | `[]` ✓ |
+| `pass-satisfied.md` | C1 `if` satisfied and `Migration` present; C2 `if` satisfied and `fm[$.semver]=major` satisfied | `[]` ✓ |
+| `fail-missing-migration.md` | C1 `if` satisfied, `Migration` absent → violated; C2 `if` unsatisfied | `requires` → D ×1 ✓ |
+| `fail-semver.md` | C1 `if` unsatisfied; C2 `if` satisfied, `semver: minor` ≠ `major` → violated | `requires` → D ×1 ✓ |
+
+### `frontmatter-ref-typed-equality`
+
+Spellings in use: `fm[$.count]=1` and `fm[$.checked]=true`. One constraint:
+`requires: { if: "fm[$.count]=1", then: "fm[$.checked]=true" }`. 4.6 resolves
+each literal as one YAML 1.2 core scalar and requires the result node to have
+"the same resolved scalar type **and** value".
+
+| Document | `count` node vs literal integer `1` | `checked` node vs literal boolean `true` | Committed |
+|---|---|---|---|
+| `pass-typed.md` | integer 1 = integer 1 → `if` satisfied | boolean true = boolean true → `then` satisfied | `[]` ✓ |
+| `pass-string-count.md` | string `"1"` vs integer → type differs → `if` unsatisfied | not reached | `[]` ✓ |
+| `pass-float-count.md` | float `1.0` vs integer → type differs → `if` unsatisfied | not reached | `[]` ✓ |
+| `fail-quoted-bool.md` | integer 1 → `if` satisfied | string `"true"` vs boolean → type differs → `then` unsatisfied | `requires` → D ×1 ✓ |
+
+Both groups agree with the specification as re-derived. Their `expected.json`
+files are correct and MUST NOT be changed.
