@@ -1,0 +1,30 @@
+version: 1
+# Positional narrowing in outline locators (spec 4.4, 4.5).
+#
+# `group` is a repeatable regex rule and so is statically plural. A bare
+# `group` step could not be a non-terminal, but `[i]` makes any step singular,
+# which is what lets `group[0].ready` descend at all.
+#
+# The `any_of` index is far outside the unsigned 64-bit range on purpose. 4.4
+# gives `[i]` a mathematical non-negative integer with no upper bound: an index
+# beyond the end of a concrete node list selects nothing and its magnitude is
+# never an error, and no work may be proportional to its numeric value. 11.3
+# additionally requires it to be serialized as an arbitrary-precision JSON
+# integer in `references[].positions`, not as a string.
+options:
+  ordered_sections: false
+title: null
+sections:
+  - id: group
+    match: '/Group .+/'
+    sections:
+      - id: ready
+        match: Ready
+        required: false
+  - id: fallback
+    match: Fallback
+    required: false
+constraints:
+  - requires: { if: "group[0]", then: "group[1]" }
+  - conflicts: { if: "group[0].ready", then_not: "group[1].ready" }
+  - any_of: ["group[184467440737095516160]", fallback]

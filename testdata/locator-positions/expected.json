@@ -1,0 +1,21 @@
+{
+  "huge-out-of-range.md": [
+    {
+      "id": "any_of",
+      "target": { "kind": "document" }
+    }
+  ],
+  "one-group.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "position-pass.md": [],
+  "two-ready.md": [
+    {
+      "id": "conflicts",
+      "target": { "kind": "document" }
+    }
+  ]
+}

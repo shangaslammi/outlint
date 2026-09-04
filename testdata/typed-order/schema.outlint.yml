@@ -1,0 +1,67 @@
+version: 1
+# Value ordering of a rule's repeated matches (spec 3.8). Each `order` entry
+# independently orders the occurrences its own rule matched; headers matched by
+# other rules and unmatched headers do not break adjacency.
+#
+# `ordered_sections: false` switches off the across-rule ordering of 3.7, so
+# every `order-violation` here comes from a declared `order` entry and nothing
+# else. Every ordered rule keeps an effective maximum above one, which 3.8
+# requires: an `order` on a rule bounded to at most one match is `invalid-order`.
+options:
+  ordered_sections: false
+title: null
+sections:
+  - id: number
+    match: '/Number (?<value>.+)/'
+    captures:
+      value: int
+    order:
+      - by: value
+  - id: flag
+    match: '/Flag (?<value>.+)/'
+    captures:
+      value: bool
+    order:
+      - by: value
+  - id: date
+    match: '/Date (?<value>.+)/'
+    captures:
+      value: date
+    order:
+      - by: value
+  - id: version
+    match: '/Version (?<value>.+)/'
+    captures:
+      value: semver
+    order:
+      - by: value
+        dir: desc
+  - id: dotted
+    match: '/Dotted (?<value>.+)/'
+    captures:
+      value: dotted
+    order:
+      - by: value
+        strict: true
+  - id: text
+    match: '/Text (?<value>.+)/'
+    captures:
+      value: text
+    order:
+      - by: value
+  - id: bounded
+    match: '/Bounded (?<value>.+)/'
+    repeat: "0..2"
+    captures:
+      value: int
+    order:
+      - by: value
+  - id: series
+    match: '/Series .+/'
+    sections:
+      - id: point
+        match: '/Point (?<value>.+)/'
+        captures:
+          value: int
+        order:
+          - by: value

@@ -1,0 +1,30 @@
+version: 1
+# Typed captures declared on regex rules (spec 2.1, 2.2, 2.4).
+#
+# `ordered_sections: false` keeps the default across-rule ordering of 3.7 out
+# of this fixture: what is under test is capture parsing, not scope order.
+#
+# `match_case` keeps its `false` default, so `/Flag (?<value>true|false)/`
+# matches the header `Flag TRUE` while the captured source string stays the
+# case-preserving substring `TRUE` (2.4) — which the lowercase-only header
+# spelling of `bool` rejects.
+options:
+  ordered_sections: false
+title: null
+sections:
+  - id: release
+    match: '/Release (?<version>.+)/'
+    captures:
+      version: semver
+  - id: count
+    match: '/Count (?<value>.+)/'
+    captures:
+      value: int
+  - id: flag
+    match: '/Flag (?<value>true|false)/'
+    captures:
+      value: bool
+  - id: label
+    match: '/Label (?<value>.+)/'
+    captures:
+      value: text

@@ -1,0 +1,26 @@
+version: 1
+# Dependency suppression for value ordering (spec 3.8, last paragraphs).
+#
+# One rule declares two independent `order` entries over two captures of the
+# same match. An invalid capture suppresses only its own entry, and only in the
+# scope where it occurs: skipping just the invalid element would invent an
+# adjacency that the document does not contain.
+#
+# The suppression is computed from typed validity *before* the
+# `outlint-disable` filtering of 6.3, so hiding an `invalid-value` never
+# re-enables the ordering that depended on it.
+options:
+  ordered_sections: false
+title: null
+sections:
+  - id: group
+    match: '/Group .+/'
+    sections:
+      - id: item
+        match: '/Item (?<version>\S+) rank=(?<rank>\S+)/'
+        captures:
+          version: semver
+          rank: int
+        order:
+          - by: version
+          - by: rank

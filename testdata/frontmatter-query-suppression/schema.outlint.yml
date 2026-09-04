@@ -1,0 +1,18 @@
+version: 1
+# Suppression driven by a JSONPath boolean read (spec 4.6).
+#
+# A bare `fm[...]` is a typed boolean read: satisfied iff at least one result
+# node is boolean true; boolean false, null, and an empty result are
+# unsatisfied; and every non-boolean, non-null result node produces
+# `invalid-value` and suppresses the entire containing constraint. 4.6 is
+# explicit that a true sibling result or an already-true operand does not
+# short-circuit that suppression, which the `any_of` here is arranged to test.
+options:
+  ordered_sections: false
+title: null
+sections:
+  - id: fallback
+    match: Fallback
+    required: false
+constraints:
+  - any_of: ["fm[$.flags[*]]", fallback]

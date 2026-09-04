@@ -1,0 +1,42 @@
+{
+  "boolean-false.md": [],
+  "boolean-true.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "integer-equality.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "negative-index.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "nested-scope.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "header", "path": ["Area"] }
+    }
+  ],
+  "no-coercion.md": [],
+  "null-equality.md": [],
+  "quoted-name-casefold.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "wildcard-existential.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "wrong-container.md": []
+}
