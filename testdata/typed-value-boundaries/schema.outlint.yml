@@ -1,0 +1,54 @@
+version: 1
+# Every boundary named in the spec 2.4 type table and its consequences list,
+# reached from both capture sites: a regex rule capture, whose source is the
+# case-preserving substring the named group selected, and a frontmatter
+# capture, whose source is the resolved YAML scalar and whose YAML kind is
+# checked strictly, with no coercion.
+options:
+  ordered_sections: false
+title: null
+frontmatter:
+  captures:
+    int:
+      path: "$.int"
+      type: int
+    bool:
+      path: "$.bool"
+      type: bool
+    date:
+      path: "$.date"
+      type: date
+    semver:
+      path: "$.semver"
+      type: semver
+    dotted:
+      path: "$.dotted"
+      type: dotted
+    text:
+      path: "$.text"
+      type: text
+sections:
+  - id: int-value
+    match: '/Int (?<value>.+)/'
+    captures:
+      value: int
+  - id: bool-value
+    match: '/Bool (?<value>.+)/'
+    captures:
+      value: bool
+  - id: date-value
+    match: '/Date (?<value>.+)/'
+    captures:
+      value: date
+  - id: semver-value
+    match: '/Semver (?<value>.+)/'
+    captures:
+      value: semver
+  - id: dotted-value
+    match: '/Dotted (?<value>.+)/'
+    captures:
+      value: dotted
+  - id: text-value
+    match: '/Text (?<value>.+)/'
+    captures:
+      value: text

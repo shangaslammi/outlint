@@ -228,3 +228,64 @@ fn human_output_prints_message_quotes_verbatim() {
     assert!(stdout(&output).contains("\"title\" is a required property"));
     assert!(!stdout(&output).contains("\\\""));
 }
+
+/// §11.3 requires human output to escape control characters "originating in
+/// input paths, documents, schemas, or delegated validator messages so that an
+/// untrusted value cannot create a physical line or terminal control
+/// sequence". A constraint's references are schema-controlled text on that
+/// list, and they reach the terminal through their own renderer: the reference
+/// locator and the matcher label are printed by `human_reference`, not by the
+/// target or message paths the sibling regression covers.
+///
+/// The characters are chosen for what each one could do if it escaped: ESC
+/// starts a terminal control sequence, a newline forges a second diagnostic
+/// line, and U+202E reverses the visual order of everything after it — so a
+/// locator could be made to read as a different one.
+#[test]
+fn human_output_escapes_untrusted_text_reaching_it_through_a_reference() {
+    let directory = TempDir::new("human-escape-reference");
+    directory.write(
+        "schema.yml",
+        concat!(
+            "version: 1\n",
+            "title: null\n",
+            "sections:\n",
+            "  - id: a\n",
+            "    match: \"A\u{202e}B\\nC\\u001b\"\n",
+            "constraints:\n",
+            "  - one_of: [\"fm[$['draft\u{202e}']]=x\", a]\n",
+        ),
+    );
+    directory.write("doc.md", "plain text\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--color",
+            "never",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let human = stdout(&output);
+    // Presentation regression sentinel, not a grammar contract (§11.3); what
+    // is normative is that no raw control or bidi character survives.
+    assert!(
+        human.contains("    - fm[$['draft\\u{202e}']]=x\n"),
+        "the query locator keeps its spelling, escaped: {human}"
+    );
+    assert!(
+        human.contains("    - a (exact \"A\\u{202e}B\\nC\\x1b\")\n"),
+        "the matcher label is escaped inside its quotes: {human}"
+    );
+    assert!(!output.stdout.contains(&0x1b));
+    assert!(!human.contains('\u{202e}'));
+    // Headline, `references:`, its two entries, the constraint location, a
+    // blank line, and the summary. The escaped newline inside the matcher
+    // label did not forge an eighth line that would read as its own record.
+    assert_eq!(human.lines().count(), 7, "{human}");
+}

@@ -1,0 +1,28 @@
+{
+  "disabled-file.md": [],
+  "disabled-inline.md": [],
+  "one-entry-suppressed.md": [
+    {
+      "id": "invalid-value",
+      "target": { "kind": "header", "path": ["Group A", "Item bad rank=2"] }
+    },
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Group A", "Item bad rank=2"] }
+    },
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Group A", "Item 2.0.0 rank=1"] }
+    }
+  ],
+  "scope-isolation.md": [
+    {
+      "id": "invalid-value",
+      "target": { "kind": "header", "path": ["Group A", "Item bad rank=1"] }
+    },
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Group B", "Item 1.0.0 rank=2"] }
+    }
+  ]
+}

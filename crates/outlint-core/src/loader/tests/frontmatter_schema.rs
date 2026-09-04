@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{error_kinds, valid};
+use super::{error_kinds, invalid, source_slice, valid};
 use crate::loader::frontmatter_schema::{external_source_id, invalid_inline_references};
 use crate::loader::{
     json_schema_external_references, json_schema_reference_budget_message,
-    json_schema_reference_count, load_schema, load_schema_with_resources,
-    MAX_JSON_SCHEMA_REFERENCES,
+    json_schema_reference_count, linked_frontmatter_schema_path, load_schema,
+    load_schema_with_resources, MAX_JSON_SCHEMA_REFERENCES,
 };
 use crate::{
     ByteOffset, FrontmatterPolicy, LinkedJsonSchemaInput, LoadSchemaResult, SchemaErrorKind,
@@ -825,4 +825,1198 @@ fn the_reference_budget_spans_the_graph_and_names_where_it_runs_out() {
         json_schema_reference_budget_message()
     );
     assert_eq!(invalid.errors.first.range.source, SourceId(2));
+}
+
+// ---------------------------------------------------------------------------
+// Frontmatter capture guardrails
+// ---------------------------------------------------------------------------
+//
+// These pin the answers a `frontmatter.captures` declaration already gets from
+// the reader and the shape rule, before the frontmatter loader normalizes one.
+// They belong here rather than beside the duplicate-classification walk because
+// what they hold is the frontmatter loader's contract with that walk: the
+// classification and its anchor are what the loader must not restate, and the
+// JSON Schema behaviour is what declaring captures must not disturb.
+
+/// §2.3 makes a key repeated inside `captures` `invalid-capture` rather than
+/// `syntax`, and §6.3 anchors it at the later spelling: the one an author
+/// would delete. Nothing downstream re-checks this, so the classification and
+/// the anchor are pinned from the side that depends on them.
+#[test]
+fn repeated_frontmatter_capture_names_anchor_the_later_key() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "    version:\n",
+        "      type: text\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(refused.errors.first.kind, SchemaErrorKind::InvalidCapture);
+    assert_eq!(
+        refused.errors.first.message,
+        "duplicate capture name `version`"
+    );
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    assert_eq!(source_slice(source, refused.errors.first.range), "version");
+    let later = source
+        .rfind("    version:\n")
+        .expect("the source spells the name twice")
+        + "    ".len();
+    assert_eq!(
+        refused.errors.first.range.range,
+        TextRange {
+            start: ByteOffset(later),
+            end: ByteOffset(later + "version".len()),
+        }
+    );
+}
+
+/// §2.1's special classification covers the `captures` mapping's own keys and
+/// stops there: a key repeated *inside* one declaration is ordinary duplicate
+/// YAML and stays `syntax`. Pinned because the two mappings are one line apart
+/// in the source and a widened scope would silently reclassify this one.
+#[test]
+fn capture_declaration_duplicates_remain_syntax() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "      type: text\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
+    assert_eq!(
+        refused.errors.first.message,
+        "invalid YAML: duplicate mapping key `type`"
+    );
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    assert_eq!(source_slice(source, refused.errors.first.range), "type");
+    let later = source
+        .rfind("      type:")
+        .expect("the declaration spells the key twice")
+        + "      ".len();
+    assert_eq!(
+        refused.errors.first.range.range,
+        TextRange {
+            start: ByteOffset(later),
+            end: ByteOffset(later + "type".len()),
+        }
+    );
+}
+
+/// A capture name is `[a-z][a-z0-9_]*` under §2.2, so the name checks the
+/// frontmatter loader performs take string keys. A non-string key has already
+/// failed the upstream rule that mapping keys are strings, and §6.3 forbids
+/// attempting a check whose input could not be built, so the refusal stays
+/// `invalid-document-shape` and never becomes a second `invalid-capture`.
+#[test]
+fn non_string_frontmatter_capture_keys_fail_shape_first() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    1:\n",
+        "      type: int\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(
+        refused.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
+    assert_eq!(refused.errors.first.message, "mapping keys must be strings");
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    assert_eq!(source_slice(source, refused.errors.first.range), "1");
+    assert!(refused
+        .errors
+        .iter()
+        .all(|error| error.kind != SchemaErrorKind::InvalidCapture));
+}
+
+/// The linked-schema path is read off the outer YAML before anything is
+/// loaded, so the I/O shell can perform its reads first. A sibling `captures`
+/// key is not on that path and must not change what it returns.
+#[test]
+fn a_captures_declaration_does_not_disturb_the_linked_schema_path() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  schema: linked.json\n",
+        "sections: []\n",
+    );
+    assert_eq!(
+        linked_frontmatter_schema_path(source).as_deref(),
+        Some("linked.json")
+    );
+}
+
+/// §2.3: "`frontmatter.schema` and `frontmatter.captures` are complementary."
+/// Declaring captures must therefore leave inline schema preparation exactly
+/// as it was — same declaration and document nodes, same primary source.
+#[test]
+fn inline_json_schema_loads_beside_a_captures_declaration() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  schema:\n",
+        "    type: object\n",
+        "title: null\n",
+        "sections: []\n",
+    );
+    let loaded = load_schema(source).expect("captures do not disturb an inline schema");
+    assert!(loaded.schema.frontmatter.schema().is_some());
+    let declaration = loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDeclaration];
+    let document = loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDocument];
+    assert_eq!(declaration, document);
+    assert_eq!(declaration.source, SourceId(0));
+    assert_eq!(source_slice(source, declaration), "type: object\n");
+}
+
+/// The linked half of the same guarantee: external source ids, the external
+/// document node, and the compiled schema all survive a sibling `captures`
+/// declaration untouched.
+#[test]
+fn linked_json_schema_loads_beside_a_captures_declaration() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  schema: root.json\n",
+        "title: null\n",
+        "sections: []\n",
+    );
+    let loaded = load_schema_with_resources(
+        source,
+        Some(SourceLabel("schema.yml".into())),
+        Some(LinkedJsonSchemaInput {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            resources: vec![resource(
+                "https://outlint.invalid/root.json",
+                r#"{"type":"object","required":["status"]}"#,
+            )],
+        }),
+    )
+    .expect("captures do not disturb a linked schema");
+    assert!(loaded.schema.frontmatter.schema().is_some());
+    assert!(loaded.sources.documents.contains_key(&SourceId(1)));
+    assert_eq!(
+        loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDocument].source,
+        SourceId(1)
+    );
+    assert_eq!(
+        loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDeclaration].source,
+        SourceId(0)
+    );
+    let document = crate::parse_markdown("---\ntitle: x\n---\n", crate::MarkdownOptions::default());
+    let diagnostics =
+        crate::validate(&loaded.schema, &document).expect("the linked schema compiles again");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
+}
+
+// ---------------------------------------------------------------------------
+// Frontmatter capture normalization
+// ---------------------------------------------------------------------------
+
+/// Loads one frontmatter capture declaration and returns the policy's view.
+fn captures_of(declarations: &str) -> crate::Schema {
+    valid(&format!(
+        "version: 1\nfrontmatter:\n  captures:\n{declarations}sections: []\n"
+    ))
+}
+
+/// §2.4's type set is closed and its spellings are stable, so each of the six
+/// resolves and reports itself back by the name the source used.
+#[test]
+fn every_declared_capture_type_normalizes() {
+    let schema = captures_of(concat!(
+        "    a:\n      type: int\n",
+        "    b:\n      type: bool\n",
+        "    c:\n      type: date\n",
+        "    d:\n      type: semver\n",
+        "    e:\n      type: dotted\n",
+        "    f:\n      type: text\n",
+    ));
+    let captures = schema.frontmatter.captures();
+    assert_eq!(captures.len(), 6);
+    assert_eq!(
+        captures
+            .iter()
+            .map(|(name, capture)| (name.as_str(), capture.type_name()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("a", "int"),
+            ("b", "bool"),
+            ("c", "date"),
+            ("d", "semver"),
+            ("e", "dotted"),
+            ("f", "text"),
+        ]
+    );
+}
+
+/// §2.3 gives `required` the default `false`; an explicit value of either
+/// polarity is kept. The default is what decides whether an absent value is
+/// `missing-value`, so it is pinned rather than left to the reader.
+#[test]
+fn an_omitted_capture_required_flag_defaults_to_false() {
+    let schema = captures_of(concat!(
+        "    plain:\n      type: text\n",
+        "    yes_flag:\n      type: text\n      required: true\n",
+        "    no_flag:\n      type: text\n      required: false\n",
+    ));
+    let captures = schema.frontmatter.captures();
+    assert_eq!(
+        captures
+            .iter()
+            .map(|(name, capture)| (name.as_str(), capture.is_required()))
+            .collect::<Vec<_>>(),
+        vec![("no_flag", false), ("plain", false), ("yes_flag", true)]
+    );
+}
+
+/// §2.3: "When omitted, it defaults to the capture name as one name segment;
+/// for capture `version`, the default is equivalent to `$['version']`." The
+/// default is spelled in bracket-quoted form so that one normalized spelling
+/// serves every name the grammar admits.
+#[test]
+fn an_omitted_capture_path_defaults_to_the_bracketed_name() {
+    let schema = captures_of("    version:\n      type: semver\n");
+    let captures = schema.frontmatter.captures();
+    let (name, _) = captures.iter().next().expect("the declaration normalized");
+    assert_eq!(name.as_str(), "version");
+    let capture = captures
+        .get(&name.clone())
+        .expect("the collection is keyed by that name");
+    assert_eq!(capture.path_source(), "$['version']");
+}
+
+/// The default path is not merely equivalent to the explicit spelling, it is
+/// that spelling: two schemas differing only in whether the author wrote it
+/// compare equal, so no consumer can tell the defaulted one apart.
+#[test]
+fn a_defaulted_capture_path_equals_the_explicit_spelling() {
+    let defaulted = captures_of("    version:\n      type: semver\n");
+    let explicit = captures_of("    version:\n      type: semver\n      path: \"$['version']\"\n");
+    assert_eq!(defaulted.frontmatter, explicit.frontmatter);
+}
+
+/// §2.3's presence policies and its capture declaration are independent, and
+/// the model makes the two allowed combinations the only representable ones.
+/// Both are reached here so neither variant can be produced by accident.
+#[test]
+fn capture_bearing_policies_follow_the_presence_policy() {
+    let optional = captures_of("    version:\n      type: semver\n");
+    assert!(matches!(
+        optional.frontmatter,
+        FrontmatterPolicy::OptionalWithCaptures { schema: None, .. }
+    ));
+    assert!(!optional.frontmatter.is_required());
+
+    let required = valid(concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  required: true\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "sections: []\n",
+    ));
+    assert!(matches!(
+        required.frontmatter,
+        FrontmatterPolicy::RequiredWithCaptures { schema: None, .. }
+    ));
+    assert!(required.frontmatter.is_required());
+    assert!(!required.frontmatter.is_forbidden());
+}
+
+/// The collection is keyed rather than ordered, so several declarations
+/// arrive in capture-name order however the source spelled them, and each
+/// keeps its own type, path, and flag.
+#[test]
+fn several_capture_declarations_normalize_into_one_keyed_collection() {
+    let schema = captures_of(concat!(
+        "    status:\n      type: text\n      path: \"$.meta['status']\"\n",
+        "    version:\n      type: semver\n      required: true\n",
+        "    build:\n      type: int\n      path: \"$.builds[-1]\"\n",
+    ));
+    let captures = schema.frontmatter.captures();
+    assert_eq!(captures.len(), 3);
+    assert_eq!(
+        captures
+            .iter()
+            .map(|(name, capture)| (
+                name.as_str(),
+                capture.type_name(),
+                capture.path_source(),
+                capture.is_required()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("build", "int", "$.builds[-1]", false),
+            ("status", "text", "$.meta['status']", false),
+            ("version", "semver", "$['version']", true),
+        ]
+    );
+    assert!(captures
+        .declared()
+        .is_some_and(|declared| declared.len() == 3));
+}
+
+/// §6.3 anchors `invalid-capture` "at the offending capture declaration", so
+/// the node the loader records has to be that whole entry — key through the
+/// end of its value — and not just the name or just the declaration body.
+#[test]
+fn a_frontmatter_capture_node_covers_its_complete_declaration() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "      required: true\n",
+        "sections: []\n",
+    );
+    let loaded = load_schema(source).expect("the declaration normalizes");
+    let captures = loaded.schema.frontmatter.captures();
+    let (name, _) = captures.iter().next().expect("the declaration normalized");
+    let range = loaded.locations.nodes[&SchemaNode::FrontmatterCapture(name.clone())];
+    assert_eq!(range.source, SourceId(0));
+    assert_eq!(
+        source_slice(source, range),
+        "version:\n      type: semver\n      required: true\n"
+    );
+}
+
+/// §4.3: "Frontmatter captures occupy a separate named scope rooted at `fm`;
+/// they do not collide with names at the schema root." A capture sharing a
+/// root rule's default id is therefore an ordinary schema, not `duplicate-id`.
+#[test]
+fn frontmatter_captures_do_not_collide_with_outline_names() {
+    let schema = valid(concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    overview:\n",
+        "      type: text\n",
+        "outline:\n",
+        "  - match: Overview\n",
+    ));
+    assert_eq!(schema.frontmatter.captures().len(), 1);
+    assert_eq!(schema.outline.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Frontmatter capture rejection
+// ---------------------------------------------------------------------------
+
+/// Builds a schema whose `frontmatter.captures` is spelled by `declarations`.
+fn capture_source(declarations: &str) -> String {
+    format!("version: 1\nfrontmatter:\n  captures:\n{declarations}sections: []\n")
+}
+
+/// The one error a source is expected to produce, with its anchor's text.
+fn single_capture_error(source: &str) -> (String, String) {
+    let refused = invalid(source);
+    assert!(
+        refused.errors.rest.is_empty(),
+        "expected one error, got {:#?}",
+        refused.errors
+    );
+    assert_eq!(refused.errors.first.kind, SchemaErrorKind::InvalidCapture);
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    (
+        refused.errors.first.message.clone(),
+        source_slice(source, refused.errors.first.range).to_owned(),
+    )
+}
+
+/// §2.3: "A frontmatter `captures` value MUST be a non-empty mapping." Every
+/// way of writing something else is one fault of the collection, so §6.3
+/// anchors it at the `captures` key rather than at an entry there is none of.
+#[test]
+fn rejects_invalid_capture_collections() {
+    for (spelling, anchor) in [
+        ("  captures: {}\n", "{}"),
+        ("  captures: null\n", "null"),
+        ("  captures: version\n", "version"),
+        ("  captures: 3\n", "3"),
+        ("  captures: [version]\n", "[version]"),
+    ] {
+        let source = format!("version: 1\nfrontmatter:\n{spelling}sections: []\n");
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message, "frontmatter.captures must be a non-empty mapping of capture declarations",
+            "for {spelling:?}"
+        );
+        assert_eq!(slice, anchor, "for {spelling:?}");
+    }
+}
+
+/// §2.2's capture-name grammar is `[a-z][a-z0-9_]*`, and it is ASCII: an
+/// uppercase letter, a hyphen, a dot, a leading digit, a leading underscore,
+/// and the empty name are each outside it. §6.3 anchors the refusal at the
+/// declaration, which is the entry an author would rename.
+#[test]
+fn rejects_invalid_capture_names() {
+    for spelled in ["Version", "my-name", "my.name", "1st", "_lead", "verão"] {
+        let source = capture_source(&format!("    {spelled}:\n      type: text\n"));
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            format!("capture name `{spelled}` must match `[a-z][a-z0-9_]*`")
+        );
+        assert_eq!(slice, format!("{spelled}:\n      type: text\n"));
+    }
+
+    let source = capture_source("    \"\":\n      type: text\n");
+    let (message, slice) = single_capture_error(&source);
+    assert_eq!(message, "capture name `` must match `[a-z][a-z0-9_]*`");
+    assert_eq!(slice, "\"\":\n      type: text\n");
+}
+
+/// §2.3 requires each value to be "an object having exactly the required key
+/// `type` and optional keys `path` and `required`". A value that is not an
+/// object, one missing `type`, and one carrying a key outside that set are
+/// the three ways of failing that sentence.
+#[test]
+fn rejects_malformed_capture_objects() {
+    // A declaration written with no value at all ends at its own key, and one
+    // written as a flow scalar or sequence ends with that value: the anchor
+    // covers the entry either way, which is what §6.3 asks of it.
+    for (spelled, anchor) in [
+        ("    version:\n", "version"),
+        ("    version: text\n", "version: text"),
+        ("    version: [text]\n", "version: [text]"),
+    ] {
+        let source = capture_source(spelled);
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            "frontmatter capture `version` must be a mapping declaring a `type`"
+        );
+        assert_eq!(slice, anchor, "for {spelled:?}");
+    }
+
+    let source = capture_source("    version:\n      path: \"$.version\"\n");
+    let (message, slice) = single_capture_error(&source);
+    assert_eq!(
+        message,
+        "frontmatter capture `version` is missing required field `type`"
+    );
+    assert_eq!(slice, "version:\n      path: \"$.version\"\n");
+
+    let source = capture_source("    version:\n      type: text\n      kind: header\n");
+    let (message, slice) = single_capture_error(&source);
+    assert_eq!(
+        message,
+        "unknown field `kind` in frontmatter capture `version`"
+    );
+    assert_eq!(slice, "version:\n      type: text\n      kind: header\n");
+}
+
+/// §2.4's type set is closed and its spellings are exact, so a type that is
+/// not a string, not one of the six, or one of the six in another case is
+/// refused. The message lists the set, because "unknown" is only actionable
+/// beside what is known.
+#[test]
+fn rejects_invalid_capture_types() {
+    for spelled in ["      type:\n", "      type: 3\n", "      type: [text]\n"] {
+        let source = capture_source(&format!("    version:\n{spelled}"));
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            "frontmatter capture `version` `type` must be a string and cannot be null"
+        );
+        assert_eq!(slice, format!("version:\n{spelled}"), "for {spelled:?}");
+    }
+
+    for spelled in ["bogus", "Text", "INT", "string"] {
+        let source = capture_source(&format!("    version:\n      type: {spelled}\n"));
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            format!(
+                "unknown capture type `{spelled}` in frontmatter capture `version`; \
+                 expected one of `int`, `bool`, `date`, `semver`, `dotted`, `text`"
+            )
+        );
+        assert_eq!(slice, format!("version:\n      type: {spelled}\n"));
+    }
+}
+
+/// §2.3: "`path` MUST be a string containing an absolute, `$`-rooted RFC 9535
+/// JSONPath singular query." A value that is not a string never reaches the
+/// query parser, so it is refused for what it is.
+#[test]
+fn rejects_non_string_capture_paths() {
+    for spelled in [
+        "      path:\n",
+        "      path: 3\n",
+        "      path: [\"$.a\"]\n",
+    ] {
+        let source = capture_source(&format!("    version:\n      type: text\n{spelled}"));
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            "frontmatter capture `version` `path` must be a string and cannot be null"
+        );
+        assert_eq!(
+            slice,
+            format!("version:\n      type: text\n{spelled}"),
+            "for {spelled:?}"
+        );
+    }
+}
+
+/// §2.3 gives `required` the type `bool`. YAML 1.2's core resolver makes
+/// `yes` a string rather than a boolean, so the common spelling is refused
+/// here too rather than silently reading as true.
+#[test]
+fn rejects_invalid_capture_required_flags() {
+    for spelled in [
+        "      required:\n",
+        "      required: 1\n",
+        "      required: yes\n",
+        "      required: [true]\n",
+    ] {
+        let source = capture_source(&format!("    version:\n      type: text\n{spelled}"));
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            "frontmatter capture `version` `required` must be a bool and cannot be null"
+        );
+        assert_eq!(
+            slice,
+            format!("version:\n      type: text\n{spelled}"),
+            "for {spelled:?}"
+        );
+    }
+}
+
+/// §6.3: "Independent schema errors MUST be collected together." One bad
+/// declaration therefore does not hide the next, and each keeps its own
+/// anchor rather than sharing the collection's.
+#[test]
+fn collects_independent_capture_declaration_errors() {
+    let source = capture_source(concat!(
+        "    good:\n      type: text\n",
+        "    bad:\n      type: bogus\n",
+        "    worse:\n      type: 3\n",
+    ));
+    let refused = invalid(&source);
+    let errors = refused.errors.iter().collect::<Vec<_>>();
+    assert_eq!(errors.len(), 2);
+    assert!(errors
+        .iter()
+        .all(|error| error.kind == SchemaErrorKind::InvalidCapture));
+    assert_eq!(
+        errors
+            .iter()
+            .map(|error| source_slice(&source, error.range))
+            .collect::<Vec<_>>(),
+        // A declaration's range runs from its key to the end of its value,
+        // so a non-final entry carries the indentation the next key sits on.
+        vec!["bad:\n      type: bogus\n    ", "worse:\n      type: 3\n"]
+    );
+}
+
+/// The same rule inside one declaration: its faults are independent of each
+/// other, so all four are reported, and §6.3 anchors every one of them at the
+/// declaration they belong to.
+#[test]
+fn collects_independent_defects_within_one_capture_declaration() {
+    let source = capture_source(concat!(
+        "    version:\n",
+        "      type: bogus\n",
+        "      path: 3\n",
+        "      required: 4\n",
+        "      extra: yes\n",
+    ));
+    let refused = invalid(&source);
+    let errors = refused.errors.iter().collect::<Vec<_>>();
+    assert_eq!(errors.len(), 4);
+    assert!(errors
+        .iter()
+        .all(|error| error.kind == SchemaErrorKind::InvalidCapture));
+    let declaration = source_slice(
+        &source,
+        errors.first().expect("the declaration was refused").range,
+    );
+    assert_eq!(
+        declaration,
+        "version:\n      type: bogus\n      path: 3\n      required: 4\n      extra: yes\n"
+    );
+    assert!(errors
+        .iter()
+        .all(|error| source_slice(&source, error.range) == declaration));
+}
+
+/// A collection with one unusable entry is unusable as a whole: the load
+/// fails, so neither the refused entry nor its valid neighbour can be
+/// observed in a normalized collection or in the node map.
+#[test]
+fn a_rejected_capture_never_reaches_a_loaded_schema() {
+    let source = capture_source(concat!(
+        "    good:\n      type: text\n",
+        "    bad:\n      type: bogus\n",
+    ));
+    assert_eq!(
+        error_kinds(&source),
+        vec![SchemaErrorKind::InvalidCapture],
+        "only the unusable entry is refused"
+    );
+    assert!(load_schema(&source).is_err());
+}
+
+/// §2.1's special classification is for keys *inside* a `captures` mapping.
+/// The `captures` key itself is an ordinary key of the `frontmatter` mapping,
+/// so repeating it stays `syntax`, anchored at the later spelling.
+#[test]
+fn frontmatter_field_duplicates_remain_syntax() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  captures:\n",
+        "    build:\n",
+        "      type: int\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
+    assert_eq!(
+        refused.errors.first.message,
+        "invalid YAML: duplicate mapping key `captures`"
+    );
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    assert_eq!(source_slice(source, refused.errors.first.range), "captures");
+    let later = source
+        .rfind("  captures:")
+        .expect("the frontmatter mapping spells the key twice")
+        + "  ".len();
+    assert_eq!(
+        refused.errors.first.range.range,
+        TextRange {
+            start: ByteOffset(later),
+            end: ByteOffset(later + "captures".len()),
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Capture paths and the forbidden-policy conflict
+// ---------------------------------------------------------------------------
+
+/// A schema whose one capture declares `path`, spelled so that YAML delivers
+/// the query verbatim however many backslashes and quotes it contains.
+fn capture_path_source(path: &str) -> String {
+    format!(
+        concat!(
+            "version: 1\n",
+            "frontmatter:\n",
+            "  captures:\n",
+            "    version:\n",
+            "      type: text\n",
+            "      path: {}\n",
+            "sections: []\n",
+        ),
+        serde_json::to_string(path).expect("a path serializes as a quoted scalar")
+    )
+}
+
+/// §2.3 admits exactly RFC 9535 §2.3.5.1's name and index segments, and the
+/// declaration keeps the spelling the author used rather than a rewritten
+/// one: diagnostics quote `path` back.
+#[test]
+fn accepts_absolute_singular_capture_paths() {
+    for path in [
+        "$",
+        "$.version",
+        "$['version']",
+        r#"$["version"]"#,
+        "$.release[0]['date']",
+        "$[-1]",
+        "$ .release ['date'] [0]",
+        // §4.6's I-JSON exact range, at both ends.
+        "$[9007199254740991]",
+        "$[-9007199254740991]",
+        // A BMP escape and a literal astral character; see the provider
+        // boundary pinned below for the spelling that is refused.
+        r"$['\u00e4']",
+        "$['ä']",
+        "$['😀']",
+    ] {
+        let source = capture_path_source(path);
+        let schema = valid(&source);
+        let captures = schema.frontmatter.captures();
+        let (_, capture) = captures
+            .iter()
+            .next()
+            .expect("the declaration normalized its path");
+        assert_eq!(capture.path_source(), path, "for `{path}`");
+    }
+}
+
+/// The one error a capture path is expected to produce, with its anchor.
+fn capture_path_error(path: &str) -> (String, String) {
+    let source = capture_path_source(path);
+    let refused = invalid(&source);
+    assert!(
+        refused.errors.rest.is_empty(),
+        "expected one error for `{path}`, got {:#?}",
+        refused.errors
+    );
+    assert_eq!(
+        refused.errors.first.kind,
+        SchemaErrorKind::InvalidCapture,
+        "for `{path}`"
+    );
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    assert_eq!(
+        source_slice(&source, refused.errors.first.range),
+        format!(
+            "version:\n      type: text\n      path: {}\n",
+            serde_json::to_string(path).expect("a path serializes")
+        ),
+        "for `{path}`"
+    );
+    (
+        refused.errors.first.message.clone(),
+        source_slice(&source, refused.errors.first.range).to_owned(),
+    )
+}
+
+/// §2.3: "A relative, `@`-rooted query is `invalid-capture` because this
+/// binding site supplies no current node." A bare or dot-led name is refused
+/// for the same reason, and the message says which reason it was.
+#[test]
+fn rejects_relative_and_at_rooted_capture_paths() {
+    for path in ["@", "@.version", ".version", "version", ""] {
+        let (message, _) = capture_path_error(path);
+        assert_eq!(
+            message,
+            format!(
+                "frontmatter capture `version` path `{path}` is not an absolute singular \
+                 JSONPath query: a capture path must be `$`-rooted at offset 0"
+            )
+        );
+    }
+}
+
+/// Everything RFC 9535 §2.3.5.1 leaves out of a singular query. §2.3 gives a
+/// capture "one absolute singular query", so a construct that could select
+/// more than one node is refused at the declaration rather than resolved at
+/// evaluation time.
+#[test]
+fn rejects_plural_capture_paths() {
+    for path in [
+        "$.*",
+        "$[*]",
+        "$['a','b']",
+        "$[0,1]",
+        "$[1:3]",
+        "$..a",
+        "$[?@.enabled]",
+        "$.a[*].b",
+    ] {
+        let (message, _) = capture_path_error(path);
+        assert!(
+            message.starts_with(&format!(
+                "frontmatter capture `version` path `{path}` is not an absolute singular \
+                 JSONPath query: a capture path takes only name and index segments at offset "
+            )),
+            "for `{path}`: {message}"
+        );
+    }
+}
+
+/// A path that is not a JSONPath query at all is refused as one, so a
+/// malformed spelling is never reported as "not singular".
+#[test]
+fn rejects_malformed_capture_paths() {
+    for path in ["$.", "$[", "$['a", r"$['\q']", r"$['\u00']", "$.a extra"] {
+        let (message, _) = capture_path_error(path);
+        assert!(
+            message.starts_with(&format!(
+                "frontmatter capture `version` path `{path}` is not an absolute singular \
+                 JSONPath query: not a valid JSONPath query"
+            )),
+            "for `{path}`: {message}"
+        );
+    }
+}
+
+/// §4.6 caps an index selector at the I-JSON exact range. One past either end
+/// is refused while parsing the declaration, not deferred to evaluation.
+#[test]
+fn rejects_out_of_range_capture_indexes() {
+    for path in ["$[9007199254740992]", "$[-9007199254740992]"] {
+        let (message, _) = capture_path_error(path);
+        assert!(
+            message.contains("not a valid JSONPath query"),
+            "for `{path}`: {message}"
+        );
+    }
+}
+
+/// A provider-boundary pin, not a portable conformance requirement.
+///
+/// RFC 9535's `hexchar` is case-insensitive, so a surrogate-pair escape names
+/// one astral character however its hex digits are cased, and this crate's own
+/// recognizer decodes either. The pinned `serde_json_path = 0.7.2` does not:
+/// it admits a pair whose **high** surrogate is spelled in uppercase and
+/// refuses the same pair spelled in lowercase, which is why `\uD83D\ude00`
+/// loads here and `\ud83d\ude00` does not.
+///
+/// The loader inherits both answers deliberately. Decoding around the provider
+/// to close the gap would leave a path admitted here that the evaluator — the
+/// same provider — could not run. §2.3 admits the full RFC grammar, so this is
+/// a gap between the spec and the provider rather than a choice Outlint gets
+/// to make; a provider bump that closes it should update this test and the
+/// loader behaviour it describes together. See the locator's own boundary
+/// test, which pins the same limitation one layer down.
+#[test]
+fn the_provider_decides_which_surrogate_pair_escapes_a_capture_path_may_use() {
+    let (message, _) = capture_path_error(r"$['\ud83d\ude00']");
+    assert!(
+        message.contains("not a valid JSONPath query"),
+        "a lowercase high surrogate is refused by the provider: {message}"
+    );
+
+    // The literal character, an ordinary BMP escape, and the spellings whose
+    // high surrogate is uppercase all reach the recognizer and load.
+    for path in [
+        "$['😀']",
+        r"$['\u0041']",
+        r"$['\uD83D\uDE00']",
+        r"$['\uD83D\ude00']",
+    ] {
+        let schema = valid(&capture_path_source(path));
+        let captures = schema.frontmatter.captures();
+        let (_, capture) = captures.iter().next().expect("the path loaded");
+        assert_eq!(capture.path_source(), path, "for `{path}`");
+    }
+}
+
+/// §6.3: when `frontmatter.captures` conflicts with `frontmatter.allow:
+/// false`, `conflicting-frontmatter` "anchors at whichever of those keys
+/// occurs second". Both orders are spelled here, because an anchor that
+/// always picked the same key would pass one of them by accident.
+#[test]
+fn capture_conflict_anchors_the_later_field() {
+    let allow_first = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  allow: false\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "sections: []\n",
+    );
+    let refused = invalid(allow_first);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(
+        refused.errors.first.kind,
+        SchemaErrorKind::ConflictingFrontmatter
+    );
+    assert_eq!(
+        refused.errors.first.message,
+        "`frontmatter.captures` cannot be declared together with `frontmatter.allow`"
+    );
+    assert_eq!(
+        source_slice(allow_first, refused.errors.first.range),
+        "version:\n      type: semver\n"
+    );
+    let related = &refused.errors.first.related;
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].message, "`frontmatter.allow` declared here");
+    assert_eq!(source_slice(allow_first, related[0].range), "false");
+
+    let captures_first = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  allow: false\n",
+        "sections: []\n",
+    );
+    let refused = invalid(captures_first);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(
+        refused.errors.first.kind,
+        SchemaErrorKind::ConflictingFrontmatter
+    );
+    assert_eq!(
+        refused.errors.first.message,
+        "`frontmatter.allow` cannot be declared together with `frontmatter.captures`"
+    );
+    assert_eq!(
+        source_slice(captures_first, refused.errors.first.range),
+        "false"
+    );
+    let related = &refused.errors.first.related;
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].message, "`frontmatter.captures` declared here");
+    // A mapping value runs to the start of the key that follows it, so the
+    // captures mapping carries the indentation `allow` sits on.
+    assert_eq!(
+        source_slice(captures_first, related[0].range),
+        "version:\n      type: semver\n  "
+    );
+}
+
+/// The conflict is decided from the presence of the two keys, so it is
+/// reported even when the declaration is also malformed — and the
+/// declaration's own fault is reported alongside it, as §6.3 requires of
+/// independent errors.
+#[test]
+fn collects_capture_conflict_and_declaration_errors() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  allow: false\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: bogus\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert_eq!(
+        refused
+            .errors
+            .iter()
+            .map(|error| error.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            SchemaErrorKind::ConflictingFrontmatter,
+            SchemaErrorKind::InvalidCapture,
+        ]
+    );
+    assert_eq!(
+        source_slice(source, refused.errors.rest[0].range),
+        "version:\n      type: bogus\n"
+    );
+}
+
+/// §2.3: "`frontmatter.schema` and `frontmatter.captures` are complementary."
+/// A normalized capture collection leaves inline and linked JSON Schema
+/// preparation, its source attribution, and its document node untouched.
+#[test]
+fn json_schema_preparation_is_unchanged_by_normalized_captures() {
+    let inline_source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  schema:\n",
+        "    type: object\n",
+        "title: null\n",
+        "sections: []\n",
+    );
+    let loaded = load_schema(inline_source).expect("an inline schema loads beside captures");
+    let FrontmatterPolicy::OptionalWithCaptures {
+        schema: Some(_),
+        captures,
+    } = &loaded.schema.frontmatter
+    else {
+        panic!("expected an optional policy carrying both a schema and captures")
+    };
+    assert_eq!(captures.len(), 1);
+    assert_eq!(
+        loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDocument],
+        loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDeclaration]
+    );
+
+    let linked_source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  required: true\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  schema: root.json\n",
+        "title: null\n",
+        "sections: []\n",
+    );
+    let loaded = load_schema_with_resources(
+        linked_source,
+        Some(SourceLabel("schema.yml".into())),
+        Some(LinkedJsonSchemaInput {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            resources: vec![resource(
+                "https://outlint.invalid/root.json",
+                r#"{"type":"object"}"#,
+            )],
+        }),
+    )
+    .expect("a linked schema loads beside captures");
+    assert!(matches!(
+        loaded.schema.frontmatter,
+        FrontmatterPolicy::RequiredWithCaptures {
+            schema: Some(_),
+            ..
+        }
+    ));
+    assert!(loaded.sources.documents.contains_key(&SourceId(1)));
+    assert_eq!(
+        loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDocument].source,
+        SourceId(1)
+    );
+}
+
+/// The model has no forbidden-with-captures variant, and the loader has no
+/// path to one: every spelling that would need it fails the load, while a
+/// forbidden policy without captures still loads exactly as before.
+#[test]
+fn no_forbidden_policy_carries_captures() {
+    for declaration in [
+        "    version:\n      type: semver\n",
+        "    version:\n      type: bogus\n",
+        "    Version:\n      type: semver\n",
+    ] {
+        let source = format!(
+            "version: 1\nfrontmatter:\n  allow: false\n  captures:\n{declaration}sections: []\n"
+        );
+        assert!(
+            load_schema(&source).is_err(),
+            "forbidden frontmatter must not carry captures: {declaration}"
+        );
+    }
+    // An empty or null collection is refused for being one, and still never
+    // produces a forbidden policy carrying captures.
+    assert!(load_schema(
+        "version: 1\nfrontmatter:\n  allow: false\n  captures: {}\nsections: []\n"
+    )
+    .is_err());
+
+    let schema = valid("version: 1\nfrontmatter:\n  allow: false\nsections: []\n");
+    assert_eq!(
+        schema.frontmatter,
+        FrontmatterPolicy::Forbidden { schema: None }
+    );
+    assert!(schema.frontmatter.is_forbidden());
+    assert!(schema.frontmatter.captures().is_empty());
+}
+
+/// §2.3 states two conflicts and §6.3 requires independent schema errors to
+/// be collected together, so a policy that spells both still reports both —
+/// and neither suppresses the declaration's own fault, which is read from the
+/// `captures` mapping rather than from the policy. Pinned because the
+/// `required`/`allow` refusal predates captures and used to return before the
+/// declaration was ever looked at, hiding two errors behind one.
+#[test]
+fn a_required_and_forbidden_policy_still_reports_its_capture_faults() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  required: true\n",
+        "  allow: false\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: bogus\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert_eq!(
+        refused
+            .errors
+            .iter()
+            .map(|error| error.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            SchemaErrorKind::ConflictingFrontmatter,
+            SchemaErrorKind::ConflictingFrontmatter,
+            SchemaErrorKind::InvalidCapture,
+        ]
+    );
+
+    // The presence conflict anchors at the whole `frontmatter` mapping, as it
+    // did before captures existed.
+    assert_eq!(
+        refused.errors.first.message,
+        "frontmatter cannot be both required and forbidden"
+    );
+    assert_eq!(
+        source_slice(source, refused.errors.first.range),
+        "required: true\n  allow: false\n  captures:\n    version:\n      type: bogus\n"
+    );
+    assert!(refused.errors.first.related.is_empty());
+
+    // The capture conflict anchors at `captures`, the later of its two keys,
+    // with `allow` attached (§6.3).
+    let conflict = &refused.errors.rest[0];
+    assert_eq!(
+        conflict.message,
+        "`frontmatter.captures` cannot be declared together with `frontmatter.allow`"
+    );
+    assert_eq!(
+        source_slice(source, conflict.range),
+        "version:\n      type: bogus\n"
+    );
+    assert_eq!(conflict.related.len(), 1);
+    assert_eq!(
+        conflict.related[0].message,
+        "`frontmatter.allow` declared here"
+    );
+    assert_eq!(source_slice(source, conflict.related[0].range), "false");
+
+    // The declaration's own fault anchors at the declaration.
+    let declaration = &refused.errors.rest[1];
+    assert_eq!(
+        declaration.message,
+        "unknown capture type `bogus` in frontmatter capture `version`; \
+         expected one of `int`, `bool`, `date`, `semver`, `dotted`, `text`"
+    );
+    assert_eq!(
+        source_slice(source, declaration.range),
+        "version:\n      type: bogus\n"
+    );
+
+    // Without captures, the pre-existing refusal is unchanged: one error, no
+    // related location, anchored at the `frontmatter` mapping.
+    let policy_only = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  required: true\n",
+        "  allow: false\n",
+        "sections: []\n",
+    );
+    let refused = invalid(policy_only);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(
+        refused.errors.first.kind,
+        SchemaErrorKind::ConflictingFrontmatter
+    );
+    assert_eq!(
+        refused.errors.first.message,
+        "frontmatter cannot be both required and forbidden"
+    );
+    assert_eq!(
+        source_slice(policy_only, refused.errors.first.range),
+        "required: true\n  allow: false\n"
+    );
 }

@@ -1,26 +1,45 @@
 //! The validation walk: level admission, scope binding, and diagnostics.
 
+use std::collections::BTreeMap;
+
+use crate::typed_value::{
+    parse_header, BoundComponent, ParseFailure, ResolvedYamlKind, TypedValue, ValueType,
+};
 use crate::{
-    ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
-    DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, FrontmatterPolicy, HeaderLevel,
-    Heading, HeadingLocation, Matcher, OutlineProvenance, RuleIndex, RuleOutcome, Schema,
-    SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
+    ByteOffset, CaptureName, CapturePath, Cardinality, Constraint, ConstraintIndex, ConstraintPath,
+    Document, DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, HeaderLevel, Heading,
+    HeadingLocation, Matcher, OrderEntryPath, OrderIndex, OutlineProvenance, RuleIndex,
+    RuleOutcome, RulePath, Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange,
+    UpperBound,
 };
 
-use super::constraints::EvalCtx;
+use crate::locator::QueryLimitExceeded;
+
+use super::constraints::{EvalCtx, Truth};
 use super::diagnostic::{
     Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticTarget, FrontmatterBlock,
-    FrontmatterLineRange, HeaderPath, InvolvedHeader,
+    FrontmatterLineRange, HeaderPath, InvolvedHeader, ValidationOperationalError,
 };
+use super::frontmatter_values::{self, CaptureFailure, CaptureProblem, FrontmatterValues};
 use super::prepare::{PreparedRule, ValidationPlan};
+use super::value_order;
 
 /// Validates one parsed document against a schema and its prepared plan.
+///
+/// # Errors
+///
+/// Returns the operational failure of §4.6 when a frontmatter query cannot be
+/// evaluated within this implementation's resource limit. The walk stops
+/// there and its diagnostics are discarded: §11.5 admits a complete verdict or
+/// none, and a set built up to the point of failure would read as the former.
 pub(super) fn validate_document(
     schema: &Schema,
     document: &Document,
     plan: &ValidationPlan,
-) -> Vec<Diagnostic> {
-    Validator::new(schema, document).run(plan)
+) -> Result<Vec<Diagnostic>, ValidationOperationalError> {
+    Validator::new(schema, document)
+        .run(plan)
+        .map_err(|limit| ValidationOperationalError::new(limit.to_string()))
 }
 
 struct Validator<'a> {
@@ -48,6 +67,12 @@ struct OrderCheck<'a, 'd> {
     parent_path: &'a HeaderPath,
 }
 
+struct ValueOrderCheck<'a, 'd> {
+    rules: &'a [SectionRule],
+    occurrences: &'a [BoundSection<'d>],
+    schema_scope: &'a ScopePath,
+}
+
 struct CardinalityCheck<'a, 'd> {
     cardinality: Cardinality,
     count: usize,
@@ -68,8 +93,13 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn run(mut self, plan: &ValidationPlan) -> Vec<Diagnostic> {
+    fn run(mut self, plan: &ValidationPlan) -> Result<Vec<Diagnostic>, QueryLimitExceeded> {
         self.validate_frontmatter(plan.frontmatter.as_ref());
+        // §8 evaluates the declared frontmatter captures once, straight after
+        // the block's own checks and before the outline walk. §2.3 keeps this
+        // independent of `frontmatter.schema`: a JSON Schema failure leaves a
+        // valid resolved mapping, so the captures are still read.
+        let values = self.evaluate_frontmatter_captures();
         let document = self.document;
         let top = top_level_sections(&document.sections);
         let has_h1 = top
@@ -97,19 +127,15 @@ impl<'a> Validator<'a> {
             // retired `detached-section` diagnostic used to name.
             self.validate_skipped_levels(&document.sections, root_level, &HeaderPath::default());
         }
-        let frontmatter = match &document.frontmatter {
-            DocumentFrontmatter::Mapping { value, .. } => Some(value),
-            DocumentFrontmatter::Absent | DocumentFrontmatter::Invalid { .. } => None,
-        };
         match self.schema.outline_provenance {
-            OutlineProvenance::Outline => self.validate_outline_root(&top, plan, frontmatter),
+            OutlineProvenance::Outline => self.validate_outline_root(&top, plan, &values)?,
             OutlineProvenance::Title
             | OutlineProvenance::BareSections
             | OutlineProvenance::NoTitle => {
-                self.validate_sugar_root(&top, has_h1, plan, frontmatter)
+                self.validate_sugar_root(&top, has_h1, plan, &values)?
             }
         }
-        self.diagnostics
+        Ok(self.diagnostics)
     }
 
     /// Binds the general form's outline scope: `h1` rules on the virtual root.
@@ -122,8 +148,8 @@ impl<'a> Validator<'a> {
         &mut self,
         top: &[PathedSection<'a>],
         plan: &ValidationPlan,
-        frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
-    ) {
+        frontmatter: &FrontmatterValues<'a>,
+    ) -> Result<(), QueryLimitExceeded> {
         let schema = self.schema;
         let admitted = admitted_at_root(top, HeaderLevel::H1, schema.options.allow_skipped_levels);
         let root_scope = ScopePath(Vec::new());
@@ -145,13 +171,14 @@ impl<'a> Validator<'a> {
                 root: &root,
                 root_rules: &schema.outline,
                 frontmatter,
+                queries: &plan.queries,
                 match_case: schema.options.match_case,
             },
             &schema.constraints,
             &root_scope,
             None,
             &root_path,
-        );
+        )
     }
 
     /// Binds a sugar schema's synthesized `h1` rule with its legacy voice.
@@ -173,12 +200,12 @@ impl<'a> Validator<'a> {
         top: &[PathedSection<'a>],
         has_h1: bool,
         plan: &ValidationPlan,
-        frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
-    ) {
+        frontmatter: &FrontmatterValues<'a>,
+    ) -> Result<(), QueryLimitExceeded> {
         let schema = self.schema;
         let provenance = schema.outline_provenance;
         let (Some(rule), Some(prepared)) = (schema.outline.first(), plan.outline.first()) else {
-            return;
+            return Ok(());
         };
 
         if provenance == OutlineProvenance::NoTitle || !has_h1 {
@@ -225,8 +252,7 @@ impl<'a> Validator<'a> {
             }
             let admitted =
                 admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
-            self.bind_sugar_sections(&admitted, rule, prepared, frontmatter, None);
-            return;
+            return self.bind_sugar_sections(&admitted, rule, prepared, frontmatter, plan, None);
         }
 
         // The titled scope: every `h1` occupies the synthesized rule, a
@@ -295,15 +321,20 @@ impl<'a> Validator<'a> {
         // path saying which subtree failed.
         let attribute = occurrences.len() > 1;
         for (index, occurrence) in occurrences.iter().enumerate() {
-            let mut children = child_sections(occurrence.section, &occurrence.path);
+            let mut children = child_sections(
+                occurrence.section,
+                &occurrence.path,
+                schema.options.allow_skipped_levels,
+            );
             if index == 0 && !admitted_strays.is_empty() {
                 let mut merged = std::mem::take(&mut admitted_strays);
                 merged.extend(children);
                 children = merged;
             }
             let owner = attribute.then_some((&occurrence.section.heading, &occurrence.path));
-            self.bind_sugar_sections(&children, rule, prepared, frontmatter, owner);
+            self.bind_sugar_sections(&children, rule, prepared, frontmatter, plan, owner)?;
         }
+        Ok(())
     }
 
     /// Binds one instance of a sugar schema's `sections` scope.
@@ -322,9 +353,10 @@ impl<'a> Validator<'a> {
         sections: &[PathedSection<'a>],
         rule: &'a SectionRule,
         prepared: &PreparedRule,
-        frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
+        frontmatter: &FrontmatterValues<'a>,
+        plan: &ValidationPlan,
         owner: Option<(&'a Heading, &HeaderPath)>,
-    ) {
+    ) -> Result<(), QueryLimitExceeded> {
         let scope = ScopePath(Vec::new());
         let (parent, path) = match owner {
             Some((heading, path)) => (Some(heading), path.clone()),
@@ -349,18 +381,73 @@ impl<'a> Validator<'a> {
                 root: &bound,
                 root_rules: &rule.sections,
                 frontmatter,
+                queries: &plan.queries,
                 match_case: self.schema.options.match_case,
             },
             &rule.constraints,
             &scope,
             parent,
             &path,
+        )
+    }
+
+    /// Evaluates every declared frontmatter capture once (§2.3).
+    ///
+    /// The retained states are the record §6.3 makes dependent checks read:
+    /// the diagnostics below may be filtered, and filtering one must not
+    /// change what `fm.<name>` concluded about the value it names.
+    fn evaluate_frontmatter_captures(&mut self) -> FrontmatterValues<'a> {
+        let (values, problems) = frontmatter_values::evaluate(
+            self.schema.frontmatter.captures(),
+            &self.document.frontmatter,
+            self.schema.frontmatter.is_required(),
         );
+        for problem in problems {
+            self.emit_capture_problem(&values, problem);
+        }
+        values
+    }
+
+    /// Places one capture primary at the entry it is about (§6.1, §6.2).
+    fn emit_capture_problem(&mut self, values: &FrontmatterValues<'_>, problem: CaptureProblem) {
+        let CaptureProblem {
+            name,
+            pointer,
+            anchor,
+            reason,
+        } = problem;
+        let (id, message) = match reason {
+            CaptureFailure::Invalid {
+                value_type,
+                source,
+                failure,
+            } => (
+                DiagnosticId::InvalidValue,
+                format!(
+                    "frontmatter capture `{name}` is not a valid `{}`: {}",
+                    value_type.as_str(),
+                    value_failure_reason(value_type, &source, &failure)
+                ),
+            ),
+            CaptureFailure::Missing => (
+                DiagnosticId::MissingValue,
+                format!("frontmatter capture `{name}` is required but selects no value"),
+            ),
+        };
+        let node = SchemaNode::FrontmatterCapture(name);
+        // No reference: §6.2 attributes a capture diagnostic to its
+        // declaration, and the schema node above already names that
+        // declaration exactly.
+        if let Some(diagnostic) =
+            values.entry_diagnostic(id, pointer, &anchor, node, message, Vec::new())
+        {
+            self.emit(diagnostic, None, false);
+        }
     }
 
     fn validate_frontmatter(&mut self, validator: Option<&jsonschema::Validator>) {
-        let required = matches!(self.schema.frontmatter, FrontmatterPolicy::Required { .. });
-        let forbidden = matches!(self.schema.frontmatter, FrontmatterPolicy::Forbidden { .. });
+        let required = self.schema.frontmatter.is_required();
+        let forbidden = self.schema.frontmatter.is_forbidden();
         match &self.document.frontmatter {
             DocumentFrontmatter::Absent => {
                 if required {
@@ -532,6 +619,7 @@ impl<'a> Validator<'a> {
             parent,
             parent_path,
         } = input;
+        let allow_skipped = self.schema.options.allow_skipped_levels;
         let mut counts = vec![0_usize; rules.len()];
         let mut occurrences = Vec::new();
         for pathed in sections {
@@ -578,7 +666,19 @@ impl<'a> Validator<'a> {
             if let Some(count) = counts.get_mut(rule_index) {
                 *count += 1;
             }
-            let child_refs = child_sections(section, &path);
+            // §8 parses a matched header's declared captures before visiting
+            // its children, and §3.3 makes that the moment every declared
+            // capture is parsed — the one place a value is read, so that
+            // ordering, locators, and dependency suppression all read the
+            // same result rather than each recomputing it.
+            let captures = self.bind_rule_captures(
+                rule,
+                prepared_rule,
+                section,
+                &path,
+                &rule_path(schema_scope, rule_index),
+            );
+            let child_refs = child_sections(section, &path, allow_skipped);
             let mut child_scope_path = schema_scope.clone();
             child_scope_path.0.push(RuleIndex(rule_index));
             let child = self.bind_scope(BindScopeInput {
@@ -596,6 +696,7 @@ impl<'a> Validator<'a> {
                 section,
                 path,
                 child,
+                captures,
             });
         }
 
@@ -624,7 +725,85 @@ impl<'a> Validator<'a> {
                 parent_path,
             });
         }
-        BoundScope { occurrences }
+        // §8 runs the typed order entries after cardinality and after the
+        // scope's own rule order, and §3.8 makes this mechanism "independent
+        // of the across-rule ordering in §3.7": it runs whether or not the
+        // scope is ordered, and it keeps every occurrence the cardinality
+        // check just complained about.
+        self.validate_value_order(ValueOrderCheck {
+            rules,
+            occurrences: &occurrences,
+            schema_scope,
+        });
+        // §4.4's runtime singularity, taken from the raw match counts. It is
+        // recorded here, beside the cardinality check that has just read the
+        // same counts, precisely so that a locator descent never has to ask
+        // whether a `too-many-sections` diagnostic survived §6.3 filtering.
+        let singular = counts.iter().map(|count| *count <= 1).collect();
+        BoundScope {
+            occurrences,
+            singular,
+        }
+    }
+
+    /// Parses every capture the matched rule declares (§3.3, §2.4).
+    ///
+    /// One pass over the declarations, reading each named group out of one
+    /// match of the matcher input. Each substring is parsed into an owned
+    /// value immediately, so no regex result outlives this call, and the
+    /// outcome — value or failure — is retained for every declaration whether
+    /// or not anything reads it. §6.3 puts dependency suppression before
+    /// `outlint-disable` filtering, so the retained state is the record a
+    /// dependent check consults; whether the diagnostic below survives
+    /// filtering says nothing about it.
+    fn bind_rule_captures(
+        &mut self,
+        rule: &SectionRule,
+        prepared_rule: &PreparedRule,
+        section: &Section,
+        path: &HeaderPath,
+        rule_path: &RulePath,
+    ) -> BTreeMap<CaptureName, BoundValueState> {
+        if rule.captures.is_empty() {
+            return BTreeMap::new();
+        }
+        let groups = prepared_rule.matcher.named_groups(&section.heading.text);
+        let mut bound = BTreeMap::new();
+        for (name, declaration) in &rule.captures {
+            let value_type = declaration.value_type();
+            let state = match groups.get(name.as_str()) {
+                Some(source) => match parse_header(value_type, source) {
+                    Ok(value) => BoundValueState::Valid(value),
+                    Err(failure) => {
+                        // §6.2: `invalid-value` from a rule capture targets
+                        // the header whose capture is invalid and is
+                        // "attributed to that capture declaration".
+                        let message = rule_capture_message(name, value_type, source, &failure);
+                        self.emit_present(
+                            DiagnosticId::InvalidValue,
+                            path.clone(),
+                            &section.heading,
+                            Some(SchemaNode::Capture(CapturePath {
+                                rule: rule_path.clone(),
+                                name: name.clone(),
+                            })),
+                            &message,
+                        );
+                        BoundValueState::Invalid
+                    }
+                },
+                // Unreachable by construction: §2.2 admits only
+                // mandatory-participation groups, and the loader refuses a
+                // declaration whose group is enclosed by an alternation or a
+                // zero-minimum repetition. Were that ever to change, nothing
+                // was looked at here, so nothing is concluded — which every
+                // dependent check reads as a reason to stand down rather than
+                // as a value.
+                None => BoundValueState::Unevaluated,
+            };
+            bound.insert(name.clone(), state);
+        }
+        bound
     }
 
     /// Checks an ordered scope: every header an earlier accepting rule
@@ -714,6 +893,47 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Reports every adjacent pair that violates a rule's `order` (§3.8).
+    ///
+    /// Which pairs those are is [`value_order`]'s answer; this places the
+    /// diagnostic §6.2 asks for: targeted and anchored at the pair's second
+    /// header, listing exactly the first and second headers in that order,
+    /// and attributed to the order entry rather than to the rule. Anchoring
+    /// at the second header is also what makes the pair's own
+    /// `outlint-disable` line the one that hides it.
+    fn validate_value_order(&mut self, check: ValueOrderCheck<'_, '_>) {
+        let ValueOrderCheck {
+            rules,
+            occurrences,
+            schema_scope,
+        } = check;
+        for violation in value_order::violations(rules, occurrences) {
+            let involved = [violation.first, violation.second]
+                .into_iter()
+                .map(|occurrence| InvolvedHeader {
+                    path: occurrence.path.clone(),
+                    location: heading_location(&occurrence.section.heading.location),
+                })
+                .collect();
+            self.emit(
+                Diagnostic {
+                    id: DiagnosticId::OrderViolation,
+                    target: DiagnosticTarget::Header(violation.second.path.clone()),
+                    location: heading_location(&violation.second.section.heading.location),
+                    schema_node: Some(SchemaNode::OrderEntry(OrderEntryPath {
+                        rule: rule_path(schema_scope, violation.rule_index),
+                        order_index: OrderIndex(violation.order_index),
+                    })),
+                    involved_headers: involved,
+                    references: Vec::new(),
+                    message: value_order::violation_message(&violation),
+                },
+                Some(&violation.second.section.heading),
+                true,
+            );
+        }
+    }
+
     fn validate_cardinality(&mut self, check: CardinalityCheck<'_, '_>) {
         let CardinalityCheck {
             cardinality,
@@ -792,14 +1012,29 @@ impl<'a> Validator<'a> {
         schema_scope: &ScopePath,
         parent: Option<&Heading>,
         parent_path: &HeaderPath,
-    ) {
+    ) -> Result<(), QueryLimitExceeded> {
         for (index, constraint) in constraints.iter().enumerate() {
-            if eval.constraint_satisfied(constraint) {
-                continue;
+            let node = ConstraintPath {
+                scope: schema_scope.clone(),
+                index: ConstraintIndex(index),
+            };
+            let evaluation = eval.constraint_evaluation(constraint, &node)?;
+            // The operands' own primaries stand whatever the constraint
+            // concluded, and they are emitted before that conclusion is
+            // acted on: §4.6 has one node both produce `invalid-value` and
+            // suppress its constraint, so neither replaces the other.
+            for pending in evaluation.pending {
+                self.emit(pending, None, false);
+            }
+            match evaluation.truth {
+                // §5.3: a suppressed constraint "produces no constraint
+                // diagnostic". Its operands' primaries have already gone out.
+                Truth::Satisfied | Truth::Suppressed => continue,
+                Truth::Unsatisfied => {}
             }
             let id = constraint_id(constraint);
-            let involved = eval
-                .constraint_occurrences(constraint)
+            let involved = evaluation
+                .occurrences
                 .into_iter()
                 .map(|occurrence| InvolvedHeader {
                     path: occurrence.path.clone(),
@@ -819,10 +1054,7 @@ impl<'a> Validator<'a> {
                     },
                     location: parent
                         .map_or_else(root_location, |heading| heading_location(&heading.location)),
-                    schema_node: Some(SchemaNode::Constraint(ConstraintPath {
-                        scope: schema_scope.clone(),
-                        index: ConstraintIndex(index),
-                    })),
+                    schema_node: Some(SchemaNode::Constraint(node)),
                     involved_headers: involved,
                     references: eval.constraint_references(constraint),
                     message: format!("the `{}` constraint is not satisfied", id.as_str()),
@@ -845,14 +1077,16 @@ impl<'a> Validator<'a> {
                     root: eval.root,
                     root_rules: eval.root_rules,
                     frontmatter: eval.frontmatter,
+                    queries: eval.queries,
                     match_case: eval.match_case,
                 },
                 &rule.constraints,
                 &child_schema_scope,
                 Some(&occurrence.section.heading),
                 &occurrence.path,
-            );
+            )?;
         }
+        Ok(())
     }
 
     /// Emits a diagnostic about a header that is present in the document.
@@ -893,6 +1127,28 @@ impl<'a> Validator<'a> {
 #[derive(Debug)]
 pub(super) struct BoundScope<'d> {
     pub(super) occurrences: Vec<BoundSection<'d>>,
+    /// Whether each rule of this scope, in rule-list order, matched at most
+    /// one header here.
+    ///
+    /// §4.4 makes an unnarrowed non-terminal locator step depend on exactly
+    /// this: a statically singular rule that matched several headers in a
+    /// cardinality-violating concrete scope suppresses every constraint
+    /// evaluation descending through it. The fact is computed from raw match
+    /// counts as the scope is bound, which is what puts it before the §6.3
+    /// filtering of the `too-many-sections` diagnostic that reports the same
+    /// counts.
+    singular: Vec<bool>,
+}
+
+impl BoundScope<'_> {
+    /// Whether the rule at `rule_index` matched at most one header here.
+    ///
+    /// A rule index this scope does not have cannot have matched anything, so
+    /// it is singular; treating the unknown as plural would suppress a
+    /// descent that never depended on anything.
+    pub(super) fn is_singular(&self, rule_index: usize) -> bool {
+        self.singular.get(rule_index).copied().unwrap_or(true)
+    }
 }
 
 #[derive(Debug)]
@@ -901,6 +1157,45 @@ pub(super) struct BoundSection<'d> {
     pub(super) section: &'d Section,
     path: HeaderPath,
     pub(super) child: BoundScope<'d>,
+    /// What each capture this section's rule declares evaluated to.
+    ///
+    /// Empty for a rule that declares none. It is stored on the bound section
+    /// rather than recomputed per check because §3.8 ordering, value
+    /// locators, and dependency suppression all read the same result and must
+    /// all read the *same* one.
+    pub(super) captures: BTreeMap<CaptureName, BoundValueState>,
+}
+
+/// What one capture evaluated to for one bound section.
+///
+/// This is the validator's own record, deliberately independent of the
+/// diagnostics it produces. §6.3 decides dependency suppression "before these
+/// comments filter diagnostics", so a dependent check must ask this state
+/// whether its input held — never whether an `invalid-value` diagnostic
+/// survived `outlint-disable`. Deriving suppression from emitted diagnostics
+/// would make hiding a diagnostic re-enable the check that depended on it,
+/// which §6.3 forbids in as many words.
+#[derive(Debug)]
+pub(super) enum BoundValueState {
+    /// The source parsed to a value of the declared type.
+    Valid(TypedValue),
+    /// The source failed the type's lexical, kind, calendar, SemVer, or bound
+    /// requirement, so a primary `invalid-value` reason exists whether or not
+    /// its diagnostic is later filtered.
+    ///
+    /// The reason itself is not retained: it is spent on that diagnostic at
+    /// the moment of failure, and what every dependent check asks of this
+    /// state is only whether a value came out of it.
+    Invalid,
+    /// The capture was evaluated and selected no usable value. For a
+    /// `required: true` frontmatter capture this is what `missing-value`
+    /// reports; for an optional one it is ordinary, valid absence.
+    Absent,
+    /// The capture was never evaluated because its prerequisite source was
+    /// itself absent or invalid — an absent frontmatter block, say, or a
+    /// header that did not match. Distinct from [`Self::Absent`]: nothing was
+    /// looked at, so nothing can be concluded about the value.
+    Unevaluated,
 }
 
 /// A document section paired with its complete document-tree path.
@@ -950,10 +1245,43 @@ fn admitted_at_root<'d>(
         .collect()
 }
 
-fn child_sections<'d>(section: &'d Section, path: &HeaderPath) -> Vec<PathedSection<'d>> {
+/// One bound section's bindable children.
+///
+/// §3.1: "A skipping subtree under the default of §1.5 is in no scope, so
+/// §3.2 through §3.8 never see it." A child more than one level below its
+/// parent is therefore dropped here rather than matched and then excused,
+/// which is what makes §1.5's "takes part in no rule" true of every rule
+/// mechanism at once: it matches none, counts toward no cardinality,
+/// satisfies no constraint locator, exports no capture, and joins no order
+/// sequence. Nor does anything below it, because the subtree is never
+/// entered — and dropping it is also what keeps a closed scope from calling
+/// it `unexpected-section`, which would be that scope having an opinion
+/// about a header §3.1 says it never sees.
+///
+/// §1.5 still reports it: the skipped-level walk covers the whole document
+/// and consults no scope, and its own recursion is what keeps a well-nested
+/// descendant from being blamed for its ancestor's misplacement.
+///
+/// With `allow_skipped_levels` there is nothing to drop — "the skip is
+/// admitted: the header becomes an ordinary member of the enclosing scope
+/// and is matched against that scope's rules like any sibling".
+///
+/// The virtual root has the same rule with its own stand-in level; see
+/// [`admitted_at_root`], which differs only in having no parent header to
+/// take the level from.
+fn child_sections<'d>(
+    section: &'d Section,
+    path: &HeaderPath,
+    allow_skipped: bool,
+) -> Vec<PathedSection<'d>> {
+    let child_level = section.heading.level as u8 + 1;
     section
         .children
         .iter()
+        .filter(|child| {
+            let level = child.heading.level as u8;
+            level == child_level || (allow_skipped && level > child_level)
+        })
         .map(|child| PathedSection {
             section: child,
             path: appended_path(path, &child.heading.diagnostic_text),
@@ -999,6 +1327,99 @@ fn matcher_label(matcher: &Matcher) -> String {
         Matcher::Glob(pattern) => pattern.0.clone(),
         Matcher::Regex(pattern) => format!("/{}/", pattern.0),
         Matcher::Any => "*".into(),
+    }
+}
+
+/// The `invalid-value` wording for a rule capture (§6.2).
+///
+/// §6.2 requires the message to "identify the expected type and the
+/// responsible capture", so both open it; the reason follows.
+fn rule_capture_message(
+    name: &CaptureName,
+    value_type: ValueType,
+    source: &str,
+    failure: &ParseFailure,
+) -> String {
+    format!(
+        "capture `{name}` is not a valid `{}`: {}",
+        value_type.as_str(),
+        value_failure_reason(value_type, source, failure)
+    )
+}
+
+/// Why one source failed its declared type, in §2.4's terms.
+///
+/// The reason is a fact about the value and is the same whichever source
+/// supplied it; only the sentence around it says where the value came from.
+/// `source` is the exact spelling that was read, and is unused by the kind
+/// failure, which is about the shape of the node rather than its text.
+fn value_failure_reason(value_type: ValueType, source: &str, failure: &ParseFailure) -> String {
+    match failure {
+        ParseFailure::KindMismatch { expected, actual } => {
+            // §2.4: "diagnostics SHOULD suggest quoting this common mistake"
+            // — the unquoted `version: 1.2` that reads as a YAML float where
+            // a string-kinded type was declared.
+            let hint = if *expected == ResolvedYamlKind::String
+                && matches!(actual, ResolvedYamlKind::Integer | ResolvedYamlKind::Float)
+            {
+                ", so quote it to make it a YAML string"
+            } else {
+                ""
+            };
+            format!(
+                "the value is a YAML {} where a `{}` needs a YAML {}{hint}",
+                yaml_kind_name(*actual),
+                value_type.as_str(),
+                yaml_kind_name(*expected)
+            )
+        }
+        ParseFailure::Lexical => format!(
+            "`{source}` does not have the form a `{}` is written in",
+            value_type.as_str()
+        ),
+        ParseFailure::BoundOverflow { component } => match component {
+            BoundComponent::Int => {
+                format!("`{source}` is outside the signed 64-bit range an `int` allows")
+            }
+            BoundComponent::SemverMajor => {
+                format!("the major identifier of `{source}` is outside the unsigned 64-bit range")
+            }
+            BoundComponent::SemverMinor => {
+                format!("the minor identifier of `{source}` is outside the unsigned 64-bit range")
+            }
+            BoundComponent::SemverPatch => {
+                format!("the patch identifier of `{source}` is outside the unsigned 64-bit range")
+            }
+            BoundComponent::SemverPrerelease { index } => format!(
+                "pre-release identifier {} of `{source}` is outside the unsigned 64-bit range",
+                index + 1
+            ),
+            BoundComponent::DottedComponent { index } => format!(
+                "component {} of `{source}` is outside the unsigned 32-bit range",
+                index + 1
+            ),
+        },
+        ParseFailure::InvalidDate => {
+            format!("`{source}` names no day in the proleptic Gregorian calendar")
+        }
+        // §2.4: a build-metadata failure "MUST identify that suffix as the
+        // reason", so the suffix is named rather than described.
+        ParseFailure::BuildMetadata { suffix } => format!(
+            "`{source}` carries the build metadata `{suffix}`, which a `semver` does not admit"
+        ),
+    }
+}
+
+/// The §1.6 YAML kind's name as a diagnostic spells it.
+fn yaml_kind_name(kind: ResolvedYamlKind) -> &'static str {
+    match kind {
+        ResolvedYamlKind::Null => "null",
+        ResolvedYamlKind::Boolean => "boolean",
+        ResolvedYamlKind::Integer => "integer",
+        ResolvedYamlKind::Float => "finite decimal",
+        ResolvedYamlKind::String => "string",
+        ResolvedYamlKind::Sequence => "sequence",
+        ResolvedYamlKind::Mapping => "mapping",
     }
 }
 

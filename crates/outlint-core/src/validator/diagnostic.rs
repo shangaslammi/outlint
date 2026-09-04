@@ -1,6 +1,9 @@
 //! Public diagnostic vocabulary produced by validation.
 
-use crate::{FrontmatterRef, Matcher, RuleRef, SchemaNode, TextRange};
+use crate::{
+    Matcher, ResolvedFrontmatterCapture, ResolvedFrontmatterQuery, ResolvedRuleLocator, SchemaNode,
+    TextRange,
+};
 use std::{error::Error, fmt};
 
 /// A stable identifier from the diagnostic vocabulary in specification §6.
@@ -30,6 +33,14 @@ pub enum DiagnosticId {
     InvalidFrontmatter,
     /// A frontmatter value fails its JSON Schema.
     FrontmatterSchema,
+    /// A capture's source fails its type's lexical, kind, calendar, SemVer,
+    /// or bound requirement (§2.4).
+    InvalidValue,
+    /// A capture declared `required: true` selected no usable value (§2.3).
+    MissingValue,
+    /// A rule's matches are not in the value order its `order` declares
+    /// (§3.8).
+    OrderViolation,
     /// An `one_of` constraint does not have exactly one satisfied ref.
     OneOf,
     /// An `any_of` constraint has no satisfied ref.
@@ -67,6 +78,9 @@ impl DiagnosticId {
             Self::ForbiddenFrontmatter => "forbidden-frontmatter",
             Self::InvalidFrontmatter => "invalid-frontmatter",
             Self::FrontmatterSchema => "frontmatter-schema",
+            Self::InvalidValue => "invalid-value",
+            Self::MissingValue => "missing-value",
+            Self::OrderViolation => "order-violation",
             Self::OneOf => "one_of",
             Self::AnyOf => "any_of",
             Self::AtMostOne => "at_most_one",
@@ -129,17 +143,29 @@ pub struct InvolvedHeader {
 }
 
 /// A normalized constraint reference retained for diagnostic presentation.
+///
+/// One variant per §11.3 reference kind, listed in the order §11.3 states —
+/// which is also the order §11.4's total key compares them in.
+///
+/// Each carries its locator source as a required part of the resolved
+/// locator, never as an `Option`: a reference §11.3 must quote a spelling for
+/// cannot exist without one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticReference {
-    /// A rule reference paired with its resolved target matcher.
+    /// A bound outline locator terminating at a rule, paired with that rule's
+    /// matcher. §11.3 renders this as reference kind `rule`.
     Rule {
-        /// The normalized relative or schema-root-anchored reference.
-        reference: RuleRef,
-        /// Matcher of the rule targeted by `reference`.
+        /// The bound locator, retaining its exact schema spelling.
+        locator: ResolvedRuleLocator,
+        /// Matcher of the rule the locator's terminal step named.
         matcher: Matcher,
     },
-    /// A document-level frontmatter proposition.
-    Frontmatter(FrontmatterRef),
+    /// An `fm[...]` proposition. §11.3 renders this as reference kind
+    /// `frontmatter_query`.
+    FrontmatterQuery(ResolvedFrontmatterQuery),
+    /// An `fm.<name>` reference to a declared frontmatter capture. §11.3
+    /// renders this as reference kind `frontmatter_capture`.
+    FrontmatterCapture(ResolvedFrontmatterCapture),
 }
 
 /// What a diagnostic is about.
@@ -232,3 +258,132 @@ impl fmt::Display for PrepareValidationError {
 }
 
 impl Error for PrepareValidationError {}
+
+/// Failure to complete validation of one document.
+///
+/// This is the runtime half of the validation error channel. It reports that
+/// validation did not finish, so no verdict exists for the document. It is
+/// never used to report a rule violation: those are [`Diagnostic`]s, and a
+/// document that validates successfully returns its complete diagnostic set
+/// however large that set is.
+///
+/// Returning this instead of a diagnostic list makes "partial diagnostics plus
+/// failure" unrepresentable. A document yields either every diagnostic it has
+/// or an operational failure, never a truncated list that reads as a clean
+/// document (specification §11.5).
+///
+/// One thing reaches it today: §4.6's resource limit on evaluating an
+/// `fm[...]` query. That section provides for it — "if an
+/// implementation-specific resource limit prevents completion, validation has
+/// not produced a document verdict and the CLI MUST surface an operational
+/// error (§11.5), not a partial diagnostic set" — and the limit cannot be
+/// reached by a guaranteed-core query at any document size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ValidationOperationalError {
+    /// Human-readable description of why validation could not complete.
+    pub message: String,
+}
+
+impl ValidationOperationalError {
+    /// Builds an operational failure from a human-readable description.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ValidationOperationalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for ValidationOperationalError {}
+
+/// Failure of the one-shot [`validate`] entry point.
+///
+/// [`validate`] both prepares a validator and runs it, so it can fail in either
+/// of two unrelated ways. Callers that prepare once and validate repeatedly use
+/// [`PrepareValidationError`] and [`ValidationOperationalError`] directly and
+/// never see this type.
+///
+/// [`validate`]: crate::validate
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValidationError {
+    /// The schema could not be compiled into a reusable validator.
+    Preparation(PrepareValidationError),
+    /// The schema compiled, but validating the document did not complete.
+    Operational(ValidationOperationalError),
+}
+
+impl fmt::Display for ValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preparation(error) => error.fmt(formatter),
+            Self::Operational(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ValidationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Preparation(error) => Some(error),
+            Self::Operational(error) => Some(error),
+        }
+    }
+}
+
+impl From<PrepareValidationError> for ValidationError {
+    fn from(error: PrepareValidationError) -> Self {
+        Self::Preparation(error)
+    }
+}
+
+impl From<ValidationOperationalError> for ValidationError {
+    fn from(error: ValidationOperationalError) -> Self {
+        Self::Operational(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DiagnosticId;
+
+    /// §6.3 fixes these spellings, and `outlint-disable` matches on them as
+    /// text, so a renamed variant that forgot its spelling would silently
+    /// stop being suppressible.
+    #[test]
+    fn diagnostic_ids_use_the_public_spellings() {
+        let expected = [
+            (DiagnosticId::SkippedLevel, "skipped-level"),
+            (DiagnosticId::NotAllowed, "not-allowed"),
+            (DiagnosticId::UnexpectedSection, "unexpected-section"),
+            (DiagnosticId::MissingSection, "missing-section"),
+            (DiagnosticId::TooFewSections, "too-few-sections"),
+            (DiagnosticId::TooManySections, "too-many-sections"),
+            (DiagnosticId::MissingTitle, "missing-title"),
+            (DiagnosticId::MissingFrontmatter, "missing-frontmatter"),
+            (DiagnosticId::ForbiddenFrontmatter, "forbidden-frontmatter"),
+            (DiagnosticId::InvalidFrontmatter, "invalid-frontmatter"),
+            (DiagnosticId::FrontmatterSchema, "frontmatter-schema"),
+            (DiagnosticId::InvalidValue, "invalid-value"),
+            (DiagnosticId::MissingValue, "missing-value"),
+            (DiagnosticId::OrderViolation, "order-violation"),
+            (DiagnosticId::OneOf, "one_of"),
+            (DiagnosticId::AnyOf, "any_of"),
+            (DiagnosticId::AtMostOne, "at_most_one"),
+            (DiagnosticId::AllOrNone, "all_or_none"),
+            (DiagnosticId::Requires, "requires"),
+            (DiagnosticId::Conflicts, "conflicts"),
+            (DiagnosticId::Ordered, "ordered"),
+        ];
+        for (id, spelling) in expected {
+            assert_eq!(id.as_str(), spelling);
+            assert_eq!(id.to_string(), spelling);
+        }
+    }
+}

@@ -1,0 +1,39 @@
+{
+  "absent.md": [
+    {
+      "id": "any_of",
+      "target": { "kind": "document" }
+    }
+  ],
+  "disabled-invalid.md": [],
+  "false-and-null.md": [
+    {
+      "id": "any_of",
+      "target": { "kind": "document" }
+    }
+  ],
+  "invalid-frontmatter.md": [
+    {
+      "id": "invalid-frontmatter",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 3 } }
+    }
+  ],
+  "multiple-invalid.md": [
+    {
+      "id": "invalid-value",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 10 }, "pointer": "/flags/1" }
+    },
+    {
+      "id": "invalid-value",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 10 }, "pointer": "/flags/2" }
+    },
+    {
+      "id": "invalid-value",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 10 }, "pointer": "/flags/3" }
+    },
+    {
+      "id": "invalid-value",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 10 }, "pointer": "/flags/4" }
+    }
+  ]
+}

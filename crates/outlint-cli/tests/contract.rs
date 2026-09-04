@@ -352,3 +352,130 @@ fn non_utf8_command_line_paths_are_an_explicit_usage_error() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("arguments must be valid UTF-8"));
 }
+
+/// Version 3 is a hard cut, so there is no `json-v2` escape hatch: §11.3 tells
+/// consumers to reject an envelope version they do not know, and a second
+/// format name would be exactly the older shape it tells them not to read.
+/// Only `human` and `json` are accepted.
+#[test]
+fn the_replaced_envelope_version_is_not_reachable_through_a_format_name() {
+    let directory = TempDir::new("no-json-v2");
+    directory.write("schema.yml", VALID_SCHEMA);
+    directory.write("doc.md", "## Required\n");
+
+    for rejected in ["json-v2", "json2", "v2"] {
+        let output = run(
+            &directory,
+            &["check", "doc.md", "-s", "schema.yml", "--format", rejected],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "`--format {rejected}` must be a usage error"
+        );
+        assert_eq!(stdout(&output), "");
+        assert!(
+            stderr(&output).contains("expected human or json"),
+            "`--format {rejected}` should name the accepted formats: {}",
+            stderr(&output)
+        );
+    }
+
+    // The two names that are accepted both still work, and `json` is v3.
+    let human = run(
+        &directory,
+        &["check", "doc.md", "-s", "schema.yml", "--format", "human"],
+    );
+    assert_eq!(human.status.code(), Some(0));
+    let json = run(
+        &directory,
+        &["check", "doc.md", "-s", "schema.yml", "--format", "json"],
+    );
+    assert_eq!(json.status.code(), Some(0));
+    assert_eq!(json_output(&json)["version"], 3);
+}
+
+/// §4.6 provides for an implementation-specific limit on evaluating a
+/// frontmatter query: "if an implementation-specific resource limit prevents
+/// completion, validation has not produced a document verdict and the CLI MUST
+/// surface an operational error (§11.5), not a partial diagnostic set."
+///
+/// Each `[0,0]` segment selects the same node twice, so the intermediate
+/// result doubles per segment; thirty of them is a billion nodes, and both the
+/// query and the document are things a document author can supply. The
+/// refusal is what keeps that from being a way to end the process.
+#[test]
+fn a_query_that_cannot_be_evaluated_is_an_operational_failure() {
+    let directory = TempDir::new("query-limit");
+    let query = format!("$.a{}", "[0,0]".repeat(30));
+    directory.write(
+        "schema.yml",
+        format!(
+            concat!(
+                "version: 1\n",
+                "title: null\n",
+                "sections:\n",
+                "  - id: body\n",
+                "    match: Body\n",
+                "    required: true\n",
+                "constraints:\n",
+                "  - requires: {{ if: body, then: \"fm[{}]\" }}\n"
+            ),
+            query
+        ),
+    );
+    directory.write(
+        "doc.md",
+        format!(
+            "---\na: {}1{}\n---\n\n## Body\n",
+            "[".repeat(34),
+            "]".repeat(34)
+        ),
+    );
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+
+    // §11.5's operational status, not the diagnostic one.
+    assert_eq!(output.status.code(), Some(2));
+    let reported = stderr(&output);
+    assert!(
+        reported.contains("cannot validate doc.md against schema.yml"),
+        "{reported}"
+    );
+    assert!(reported.contains(&query), "{reported}");
+    assert!(
+        reported.contains("the document has no verdict"),
+        "{reported}"
+    );
+    // No verdict means no result: the envelope carries nothing that could be
+    // read as this document having been checked and found clean.
+    let envelope = json_output(&output);
+    assert_eq!(envelope["results"], serde_json::json!([]));
+    assert_eq!(envelope["summary"]["documents"], 0);
+    assert_eq!(envelope["summary"]["diagnostics"], 0);
+
+    // §4.6 admits the full grammar and forbids rejecting a query "merely for
+    // falling outside the guaranteed core", so the same schema is a valid
+    // schema: the limit is reached when a document is evaluated against it,
+    // never when it is loaded.
+    let schema_check = run(
+        &directory,
+        &["schema", "check", "schema.yml", "--format", "json"],
+    );
+    assert_eq!(
+        schema_check.status.code(),
+        Some(0),
+        "{}",
+        stderr(&schema_check)
+    );
+}

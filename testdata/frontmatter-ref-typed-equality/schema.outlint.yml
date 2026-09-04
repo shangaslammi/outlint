@@ -2,4 +2,4 @@ version: 1
 title: null
 sections: []
 constraints:
-  - requires: { if: fm.count=1, then: fm.checked=true }
+  - requires: { if: "fm[$.count]=1", then: "fm[$.checked]=true" }

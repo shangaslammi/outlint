@@ -1,0 +1,57 @@
+{
+  "excess-still-ordered.md": [
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Bounded 2"] }
+    },
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Bounded 1"] }
+    },
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Bounded 1"] }
+    }
+  ],
+  "multiple-adjacent.md": [
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Number 2"] }
+    },
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Number 1"] }
+    }
+  ],
+  "pass-interleaved.md": [],
+  "per-ancestor.md": [
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Series A", "Point 1"] }
+    }
+  ],
+  "strict-typed-equality.md": [
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Dotted 1.2"] }
+    }
+  ],
+  "typed-comparators.md": [
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Flag false"] }
+    },
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Date 2024-02-29"] }
+    },
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Version 1.0.0"] }
+    },
+    {
+      "id": "order-violation",
+      "target": { "kind": "header", "path": ["Text B"] }
+    }
+  ]
+}

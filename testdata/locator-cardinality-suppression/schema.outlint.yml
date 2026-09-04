@@ -1,0 +1,31 @@
+version: 1
+# Dependency suppression for locator descent (spec 4.4, "Dependency
+# suppression").
+#
+# `group` is `required: false`, so its effective cardinality is `0..1` and it
+# is *statically* singular: a bare `group.ready` binds at schema load. When a
+# concrete document nevertheless matches it twice, `too-many-sections` stands
+# and every constraint evaluation that depends on descending through that step
+# is suppressed in that scope.
+#
+# The second constraint writes the same descent narrowed with `[0]`. 4.4: "A
+# step narrowed with `[i]` does not depend on the rule's cardinality holding
+# and remains evaluable." The two constraints therefore diverge exactly where
+# the cardinality bound is violated, and agree everywhere else.
+options:
+  ordered_sections: false
+title: null
+sections:
+  - id: group
+    match: '/Group .+/'
+    required: false
+    sections:
+      - id: ready
+        match: Ready
+        required: false
+  - id: notice
+    match: Notice
+    required: false
+constraints:
+  - requires: { if: group.ready, then: notice }
+  - requires: { if: "group[0].ready", then: notice }

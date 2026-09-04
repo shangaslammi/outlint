@@ -1,12 +1,12 @@
 //! The normalized, type-safe representation of an Outlint schema.
 //!
 //! These types intentionally do not mirror the YAML document one-for-one.
-//! Surface syntax such as `required`, dotted references, slash-delimited
-//! regular expressions, `fm.` propositions, and `"n"` repeat bounds is
+//! Surface syntax such as `required`, locator spellings, slash-delimited
+//! regular expressions, frontmatter propositions, and `"n"` repeat bounds is
 //! expected to be normalized by the schema loader before constructing this
 //! model.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde_json::Value as JsonValue;
 
@@ -115,10 +115,19 @@ pub enum OutlineProvenance {
 
 /// The document's normalized frontmatter policy.
 ///
-/// This representation makes the invalid `required: true, allow: false`
-/// combination unrepresentable while retaining a schema declared alongside
-/// `allow: false`; if forbidden frontmatter is nevertheless present, the
-/// validation algorithm still evaluates that schema.
+/// This representation makes two invalid combinations of §2.3 unrepresentable
+/// rather than merely rejected. `required: true, allow: false` has no variant,
+/// and neither does `allow: false` together with `captures`: the two
+/// capture-bearing variants are exactly the two allowed presence policies, so
+/// no value of this type can spell forbidden frontmatter that also exports
+/// typed captures. A schema declared alongside `allow: false` is still
+/// retained; if forbidden frontmatter is nevertheless present, the validation
+/// algorithm still evaluates that schema.
+///
+/// Match on the variants only when the distinction matters. [`Self::schema`],
+/// [`Self::captures`], [`Self::is_required`], and [`Self::is_forbidden`]
+/// answer the questions callers actually ask without repeating a five-way
+/// match at every site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FrontmatterPolicy {
@@ -138,6 +147,296 @@ pub enum FrontmatterPolicy {
         /// JSON Schema to apply if forbidden frontmatter is present.
         schema: Option<FrontmatterSchema>,
     },
+    /// [`Self::Optional`] with a non-empty `captures` declaration (§2.3).
+    OptionalWithCaptures {
+        /// JSON Schema to apply when frontmatter is present.
+        schema: Option<FrontmatterSchema>,
+        /// The declared typed exports, keyed by capture name.
+        captures: FrontmatterCaptures,
+    },
+    /// [`Self::Required`] with a non-empty `captures` declaration (§2.3).
+    RequiredWithCaptures {
+        /// JSON Schema to apply to the required frontmatter mapping.
+        schema: Option<FrontmatterSchema>,
+        /// The declared typed exports, keyed by capture name.
+        captures: FrontmatterCaptures,
+    },
+}
+
+impl FrontmatterPolicy {
+    /// The JSON Schema declared alongside this policy, if any.
+    pub fn schema(&self) -> Option<&FrontmatterSchema> {
+        match self {
+            Self::Optional { schema }
+            | Self::Required { schema }
+            | Self::Forbidden { schema }
+            | Self::OptionalWithCaptures { schema, .. }
+            | Self::RequiredWithCaptures { schema, .. } => schema.as_ref(),
+        }
+    }
+
+    /// The declared frontmatter captures, as an empty view when none exist.
+    ///
+    /// Every variant answers, so a caller iterating declarations never has to
+    /// know which presence policy carries them.
+    pub fn captures(&self) -> FrontmatterCaptureView<'_> {
+        match self {
+            Self::Optional { .. } | Self::Required { .. } | Self::Forbidden { .. } => {
+                FrontmatterCaptureView { declared: None }
+            }
+            Self::OptionalWithCaptures { captures, .. }
+            | Self::RequiredWithCaptures { captures, .. } => FrontmatterCaptureView {
+                declared: Some(captures),
+            },
+        }
+    }
+
+    /// Whether a frontmatter block must be present.
+    pub fn is_required(&self) -> bool {
+        matches!(
+            self,
+            Self::Required { .. } | Self::RequiredWithCaptures { .. }
+        )
+    }
+
+    /// Whether a frontmatter block is forbidden.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(self, Self::Forbidden { .. })
+    }
+}
+
+/// A validated capture name under the §2.2 grammar `[a-z][a-z0-9_]*`.
+///
+/// Construction is restricted to the schema loader, which checks the grammar
+/// and the §4.3 named-scope rules before a name reaches the semantic model.
+/// Ordering and hashing are derived so that capture-keyed collections have a
+/// deterministic iteration order independent of the source mapping's order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct CaptureName(pub(crate) String);
+
+impl CaptureName {
+    /// Returns the validated capture name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CaptureName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// One rule capture declaration: the §2.4 type a named regex group binds.
+///
+/// The capture's own name is the key of [`SectionRule::captures`], so it is
+/// not repeated here. The type is held in its resolved kernel form; public
+/// inspection exposes only the stable spelling, keeping the closed type set an
+/// implementation detail rather than a public enum every consumer must match.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RuleCapture {
+    value_type: crate::typed_value::ValueType,
+}
+
+impl RuleCapture {
+    /// Builds a declaration for an already-resolved capture type.
+    ///
+    /// The rule loader is the only caller: a declaration exists only where a
+    /// `captures` entry named a type the closed §2.4 set contains.
+    pub(crate) fn new(value_type: crate::typed_value::ValueType) -> Self {
+        Self { value_type }
+    }
+
+    /// The declared type's stable §2.4 spelling, such as `semver`.
+    pub fn type_name(&self) -> &'static str {
+        self.value_type.as_str()
+    }
+
+    /// The resolved capture type, for the loader and the validator.
+    ///
+    /// Capture extraction and value ordering parse against this; callers
+    /// outside the crate get the §2.4 spelling from [`Self::type_name`]
+    /// instead, so the kernel type stays behind the public surface.
+    pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
+        self.value_type
+    }
+}
+
+/// One frontmatter capture declaration (§2.3).
+///
+/// The capture's own name is the key of the owning [`FrontmatterCaptures`].
+/// The path is retained in parsed form together with its exact source, because
+/// §2.3 gives a declaration one absolute singular query and diagnostics quote
+/// that spelling back rather than reconstructing it. The provider-facing
+/// parsed form never appears in a public signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterCapture {
+    path: crate::locator::AbsoluteSingularPath,
+    value_type: crate::typed_value::ValueType,
+    required: bool,
+}
+
+impl FrontmatterCapture {
+    /// Builds a declaration from an already-parsed path and resolved type.
+    ///
+    /// Called by the frontmatter loader; see [`RuleCapture::new`].
+    pub(crate) fn new(
+        path: crate::locator::AbsoluteSingularPath,
+        value_type: crate::typed_value::ValueType,
+        required: bool,
+    ) -> Self {
+        Self {
+            path,
+            value_type,
+            required,
+        }
+    }
+
+    /// The declared or defaulted singular query, exactly as normalized.
+    pub fn path_source(&self) -> &str {
+        self.path.source()
+    }
+
+    /// The declared type's stable §2.4 spelling, such as `int`.
+    pub fn type_name(&self) -> &'static str {
+        self.value_type.as_str()
+    }
+
+    /// Whether an absent value produces `missing-value` (§2.3).
+    pub fn is_required(&self) -> bool {
+        self.required
+    }
+
+    /// The parsed singular query, for the loader and the validator.
+    ///
+    /// Frontmatter capture evaluation walks its components; [`Self::path_source`]
+    /// is what a caller outside the crate reads.
+    pub(crate) fn path(&self) -> &crate::locator::AbsoluteSingularPath {
+        &self.path
+    }
+
+    /// The resolved capture type, for the loader and the validator.
+    ///
+    /// Frontmatter capture evaluation checks a selected node's YAML kind
+    /// against it before parsing; see [`RuleCapture::value_type`].
+    pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
+        self.value_type
+    }
+}
+
+/// A non-empty, normalized set of frontmatter capture declarations.
+///
+/// §2.3 requires `frontmatter.captures` to be a non-empty mapping, so this
+/// collection is only ever built with at least one entry and construction is
+/// restricted to the loader. Entries are keyed by name rather than kept in
+/// source order: the source mapping's order is not semantic, and keying makes
+/// two schemas that spell the same declarations differently compare equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterCaptures {
+    entries: BTreeMap<CaptureName, FrontmatterCapture>,
+}
+
+impl FrontmatterCaptures {
+    /// Builds the collection, or `None` when it would be empty.
+    ///
+    /// Called by the frontmatter loader; see [`RuleCapture::new`].
+    pub(crate) fn new(entries: BTreeMap<CaptureName, FrontmatterCapture>) -> Option<Self> {
+        (!entries.is_empty()).then_some(Self { entries })
+    }
+
+    /// The declaration named `name`, if one exists.
+    pub fn get(&self, name: &CaptureName) -> Option<&FrontmatterCapture> {
+        self.entries.get(name)
+    }
+
+    /// Iterates declarations in capture-name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&CaptureName, &FrontmatterCapture)> {
+        self.entries.iter()
+    }
+
+    /// The number of declarations, which is never zero.
+    ///
+    /// There is deliberately no `is_empty`: it could only ever answer
+    /// `false`, and offering it would suggest the emptiness this collection's
+    /// construction rules out is worth testing for. A caller that may or may
+    /// not have declarations holds a [`FrontmatterCaptureView`], which does
+    /// have one.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// A read-only view of a policy's frontmatter captures, empty when none were
+/// declared.
+///
+/// [`FrontmatterPolicy::captures`] returns this for every variant so that
+/// "no captures" and "some captures" share one inspection surface. It borrows;
+/// it never allocates an empty collection, which would contradict
+/// [`FrontmatterCaptures`]'s non-empty invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrontmatterCaptureView<'a> {
+    declared: Option<&'a FrontmatterCaptures>,
+}
+
+impl<'a> FrontmatterCaptureView<'a> {
+    /// The declaration named `name`, if this policy declares one.
+    pub fn get(&self, name: &CaptureName) -> Option<&'a FrontmatterCapture> {
+        self.declared.and_then(|captures| captures.get(name))
+    }
+
+    /// Iterates declarations in capture-name order; empty when none exist.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a CaptureName, &'a FrontmatterCapture)> {
+        self.declared
+            .into_iter()
+            .flat_map(FrontmatterCaptures::iter)
+    }
+
+    /// The number of declarations, zero when none exist.
+    pub fn len(&self) -> usize {
+        self.declared.map_or(0, FrontmatterCaptures::len)
+    }
+
+    /// Whether this policy declares no frontmatter captures.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The underlying non-empty collection, if this policy declares captures.
+    pub fn declared(&self) -> Option<&'a FrontmatterCaptures> {
+        self.declared
+    }
+}
+
+/// One entry of a rule's `order` list (§3.8).
+///
+/// Entries are independent, not the components of one compound sort key:
+/// §3.8 says "each `order` entry on a rule independently orders the
+/// occurrences matched by that rule", so an entry never breaks a tie left by
+/// an earlier one and an invalid value suppresses only its own entry. What
+/// entry position still decides is where §6.3 anchors — a duplicate
+/// normalized entry is reported against the later of the two — and the
+/// deterministic order the diagnostics of one rule come out in, which is why
+/// these live in a [`Vec`] rather than a keyed collection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ValueOrderEntry {
+    /// The capture whose values this entry compares.
+    pub by: CaptureName,
+    /// The direction values must run in.
+    pub direction: ValueOrderDirection,
+    /// Whether equal neighbouring values violate the order.
+    pub strict: bool,
+}
+
+/// The direction one [`ValueOrderEntry`] sorts in; the normalized form of
+/// `dir: asc` and `dir: desc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValueOrderDirection {
+    /// Non-decreasing values, the default when `dir` is omitted.
+    Ascending,
+    /// Non-increasing values.
+    Descending,
 }
 
 /// An opaque, normalized JSON Schema resource graph.
@@ -255,7 +554,7 @@ impl TryFrom<u8> for HeaderLevel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SectionRule {
-    /// The explicit or generated identifier used by constraints.
+    /// The explicit or default identifier used by constraints.
     ///
     /// Non-exact matchers without an explicit identifier remain `None`.
     pub id: Option<RuleId>,
@@ -274,6 +573,18 @@ pub struct SectionRule {
     pub sections: Vec<SectionRule>,
     /// Presence and ordering constraints attached to the child scope.
     pub constraints: Vec<Constraint>,
+    /// Typed values this rule's matcher exports (§2.1, §2.4), keyed by name.
+    ///
+    /// Empty for a rule that declares no `captures`. The mapping's source
+    /// order is not semantic, so declarations are keyed rather than listed:
+    /// two schemas spelling the same captures in different orders normalize
+    /// to the same rule.
+    pub captures: BTreeMap<CaptureName, RuleCapture>,
+    /// The value ordering this rule's own matches must satisfy (§3.8).
+    ///
+    /// Empty for a rule that declares no `order`. Unlike `captures`, entry
+    /// order is semantic and therefore preserved.
+    pub order: Vec<ValueOrderEntry>,
 }
 
 /// The result of matching a header against a section rule.
@@ -396,44 +707,31 @@ pub enum Constraint {
         /// Propositions forbidden whenever the condition is satisfied.
         exclusions: NonEmpty<Proposition>,
     },
-    /// Every occurrence of each satisfied ref must precede every occurrence of
-    /// the next satisfied ref (`last(A) < first(B)`).
+    /// Every occurrence of each satisfied locator must precede every
+    /// occurrence of the next satisfied one (`last(A) < first(B)`).
     ///
-    /// Frontmatter propositions are excluded because they have no document
-    /// position among headers.
-    Ordered(AtLeastTwo<RuleRef>),
+    /// §5.1 requires every listed locator to terminate in a rule id within
+    /// one concrete scope: a frontmatter or typed-value terminal has no
+    /// header position, and two scopes have no order between them.
+    Ordered(AtLeastTwo<ResolvedRuleLocator>),
 }
 
 /// A proposition accepted by presence constraints.
+///
+/// One variant per proposition kind §4.5 and §4.6 define. The value locators
+/// §4.4 also admits — a declared capture, the `/text` intrinsic — are
+/// deliberately absent: "Locators ending in a capture or intrinsic value are
+/// value locators and are not propositions in this version", so this type
+/// cannot spell one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Proposition {
-    /// Presence of a concrete rule path in the section tree.
-    Rule(RuleRef),
-    /// Presence or typed equality of a value in document frontmatter.
-    Frontmatter(FrontmatterRef),
-}
-
-/// A normalized `fm.` frontmatter proposition.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FrontmatterRef {
-    /// One or more mapping keys below the frontmatter root.
-    pub path: NonEmpty<FrontmatterKey>,
-    /// A typed scalar for the equality form, or `None` for presence alone.
-    pub equals: Option<FrontmatterScalar>,
-}
-
-/// A frontmatter mapping key addressable by the `fm.` syntax.
-///
-/// The loader ensures this is non-empty and contains neither `.` nor `=`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct FrontmatterKey(pub(crate) String);
-
-impl FrontmatterKey {
-    /// Returns the mapping key as it appeared in the normalized reference.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+    /// An outline locator terminating at a rule id (§4.5), satisfied iff its
+    /// terminal node list is non-empty.
+    Rule(ResolvedRuleLocator),
+    /// An `fm[query]` boolean read or `fm[query]=literal` equality (§4.6).
+    FrontmatterQuery(ResolvedFrontmatterQuery),
+    /// An `fm.<name>` reference to a declared frontmatter capture (§4.6).
+    FrontmatterCapture(ResolvedFrontmatterCapture),
 }
 
 /// A scalar resolved according to the YAML 1.2 core schema.
@@ -485,13 +783,358 @@ impl CanonicalFloat {
     }
 }
 
-/// A normalized reference to a rule path.
+/// One bound name step of a resolved outline locator.
+///
+/// A step keeps three facts that only binding can pair: the id the locator
+/// spelled, the structural index the id resolved to in its scope, and the
+/// `[i]` subscript the author wrote, if any. Keeping the index alongside the
+/// id means a consumer can reach the rule without resolving the name a second
+/// time, and keeping the source id means a diagnostic quotes what was written
+/// rather than a spelling reconstructed from the index.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RuleRef {
-    /// The scope from which the first path segment is resolved.
-    pub anchor: RefAnchor,
-    /// One or more rule identifiers forming the path to the target.
-    pub path: NonEmpty<RuleId>,
+pub struct BoundRuleStep {
+    id: RuleId,
+    index: crate::RuleIndex,
+    position: Option<crate::locator::LocatorPosition>,
+}
+
+impl BoundRuleStep {
+    /// The rule id this step spelled.
+    pub fn id(&self) -> &RuleId {
+        &self.id
+    }
+
+    /// The zero-based index the id resolved to within its sibling scope.
+    pub fn index(&self) -> crate::RuleIndex {
+        self.index
+    }
+
+    /// The `[i]` subscript in canonical decimal, or `None` if unsubscripted.
+    ///
+    /// §4.4 gives `i` "no upper bound", so this is the mathematical integer's
+    /// decimal spelling rather than a machine integer. A consumer serializing
+    /// it must build a JSON number from these digits: §11.3 requires an
+    /// arbitrary-precision JSON integer, never a quoted string, and narrowing
+    /// the value to `u64` would silently change which node it selects.
+    pub fn position_digits(&self) -> Option<String> {
+        self.position.as_ref().map(ToString::to_string)
+    }
+}
+
+impl BoundRuleStep {
+    /// Builds a bound step, for the constraint binder.
+    pub(crate) fn new(
+        id: RuleId,
+        index: crate::RuleIndex,
+        position: Option<crate::locator::LocatorPosition>,
+    ) -> Self {
+        Self {
+            id,
+            index,
+            position,
+        }
+    }
+
+    /// The subscript as the arbitrary-precision kernel value.
+    pub(crate) fn position(&self) -> Option<&crate::locator::LocatorPosition> {
+        self.position.as_ref()
+    }
+}
+
+/// A schema-resident outline locator whose names have been bound (§4.4).
+///
+/// The terminal kind is the variant, so a consumer cannot mistake a declared
+/// capture for a rule id or for the intrinsic `/text`: each carries the data
+/// its own kind has and no other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResolvedOutlineLocator {
+    /// The locator ends at a rule id and is therefore a proposition (§4.5).
+    Rule(ResolvedRuleLocator),
+    /// The locator ends at a declared capture and is a value locator.
+    Capture(ResolvedRuleCaptureLocator),
+    /// The locator ends at the terminal `/text` intrinsic and is a value
+    /// locator.
+    IntrinsicText(ResolvedIntrinsicTextLocator),
+}
+
+impl ResolvedOutlineLocator {
+    /// The locator exactly as the schema spelled it.
+    pub fn locator(&self) -> &str {
+        match self {
+            Self::Rule(resolved) => resolved.locator(),
+            Self::Capture(resolved) => resolved.locator(),
+            Self::IntrinsicText(resolved) => resolved.locator(),
+        }
+    }
+
+    /// Where the locator's first name step resolves.
+    pub fn anchor(&self) -> RefAnchor {
+        match self {
+            Self::Rule(resolved) => resolved.anchor(),
+            Self::Capture(resolved) => resolved.anchor(),
+            Self::IntrinsicText(resolved) => resolved.anchor(),
+        }
+    }
+}
+
+/// A bound outline locator terminating at a rule id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedRuleLocator {
+    source: crate::locator::LocatorSource,
+    anchor: RefAnchor,
+    steps: NonEmpty<BoundRuleStep>,
+}
+
+impl ResolvedRuleLocator {
+    /// The locator exactly as the schema spelled it.
+    ///
+    /// §11.3 makes this spelling observable, so it is retained rather than
+    /// reconstructed from the bound steps: a locator that resolved through
+    /// `$.` and one that resolved relatively can name the same rule, and only
+    /// the source says which was written.
+    pub fn locator(&self) -> &str {
+        self.source.as_str()
+    }
+
+    /// Where the first name step resolves.
+    pub fn anchor(&self) -> RefAnchor {
+        self.anchor
+    }
+
+    /// The bound name steps, outermost first; never empty.
+    pub fn steps(&self) -> &NonEmpty<BoundRuleStep> {
+        &self.steps
+    }
+}
+
+impl ResolvedRuleLocator {
+    /// Builds a bound rule locator, for the constraint binder.
+    pub(crate) fn new(
+        source: crate::locator::LocatorSource,
+        anchor: RefAnchor,
+        steps: NonEmpty<BoundRuleStep>,
+    ) -> Self {
+        Self {
+            source,
+            anchor,
+            steps,
+        }
+    }
+}
+
+/// A bound outline locator terminating at a declared rule capture.
+///
+/// The rule steps may be empty: a bare capture name resolves in the scope the
+/// constraint is attached to, naming a capture of the rule that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRuleCaptureLocator {
+    source: crate::locator::LocatorSource,
+    anchor: RefAnchor,
+    rule_steps: Vec<BoundRuleStep>,
+    name: CaptureName,
+    value_type: crate::typed_value::ValueType,
+    position: Option<crate::locator::LocatorPosition>,
+}
+
+impl ResolvedRuleCaptureLocator {
+    /// The locator exactly as the schema spelled it.
+    pub fn locator(&self) -> &str {
+        self.source.as_str()
+    }
+
+    /// Where the first name step resolves.
+    pub fn anchor(&self) -> RefAnchor {
+        self.anchor
+    }
+
+    /// The bound rule steps preceding the capture, outermost first.
+    pub fn rule_steps(&self) -> &[BoundRuleStep] {
+        &self.rule_steps
+    }
+
+    /// The bound capture name.
+    pub fn name(&self) -> &CaptureName {
+        &self.name
+    }
+
+    /// The declared type's stable §2.4 spelling.
+    pub fn type_name(&self) -> &'static str {
+        self.value_type.as_str()
+    }
+
+    /// The terminal step's `[i]` subscript in canonical decimal, if any.
+    ///
+    /// See [`BoundRuleStep::position_digits`] for why this is decimal text.
+    pub fn position_digits(&self) -> Option<String> {
+        self.position.as_ref().map(ToString::to_string)
+    }
+}
+
+impl ResolvedRuleCaptureLocator {
+    /// Builds a bound capture locator, for the constraint binder.
+    pub(crate) fn new(
+        source: crate::locator::LocatorSource,
+        anchor: RefAnchor,
+        rule_steps: Vec<BoundRuleStep>,
+        name: CaptureName,
+        value_type: crate::typed_value::ValueType,
+        position: Option<crate::locator::LocatorPosition>,
+    ) -> Self {
+        Self {
+            source,
+            anchor,
+            rule_steps,
+            name,
+            value_type,
+            position,
+        }
+    }
+}
+
+/// A bound outline locator terminating at the `/text` intrinsic (§4.4).
+///
+/// The rule steps are non-empty because `/text` is a heading's own text: the
+/// locator must first reach a heading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedIntrinsicTextLocator {
+    source: crate::locator::LocatorSource,
+    anchor: RefAnchor,
+    rule_steps: NonEmpty<BoundRuleStep>,
+    position: Option<crate::locator::LocatorPosition>,
+}
+
+impl ResolvedIntrinsicTextLocator {
+    /// The locator exactly as the schema spelled it.
+    pub fn locator(&self) -> &str {
+        self.source.as_str()
+    }
+
+    /// Where the first name step resolves.
+    pub fn anchor(&self) -> RefAnchor {
+        self.anchor
+    }
+
+    /// The bound rule steps preceding `/text`, outermost first.
+    pub fn rule_steps(&self) -> &NonEmpty<BoundRuleStep> {
+        &self.rule_steps
+    }
+
+    /// The `/text` step's `[i]` subscript in canonical decimal, if any.
+    ///
+    /// See [`BoundRuleStep::position_digits`] for why this is decimal text.
+    pub fn position_digits(&self) -> Option<String> {
+        self.position.as_ref().map(ToString::to_string)
+    }
+}
+
+impl ResolvedIntrinsicTextLocator {
+    /// Builds a bound `/text` locator, for the constraint binder.
+    pub(crate) fn new(
+        source: crate::locator::LocatorSource,
+        anchor: RefAnchor,
+        rule_steps: NonEmpty<BoundRuleStep>,
+        position: Option<crate::locator::LocatorPosition>,
+    ) -> Self {
+        Self {
+            source,
+            anchor,
+            rule_steps,
+            position,
+        }
+    }
+}
+
+/// A bound `fm[query]` or `fm[query]=literal` proposition (§4.6).
+///
+/// Both the locator source and the query source are retained exactly: §5.4
+/// decides `duplicate-ref` on the query source, and §11.3 emits the query
+/// without its `fm[...]` wrapper, so neither text may be reconstructed from
+/// the other.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedFrontmatterQuery {
+    locator: crate::locator::FrontmatterQueryLocator,
+    equals: Option<FrontmatterScalar>,
+}
+
+impl ResolvedFrontmatterQuery {
+    /// The locator exactly as the schema spelled it, wrapper included.
+    pub fn locator(&self) -> &str {
+        self.locator.source().as_str()
+    }
+
+    /// The RFC 9535 query, exactly as written and without the wrapper.
+    pub fn query(&self) -> &str {
+        self.locator.query().as_str()
+    }
+
+    /// The normalized equality literal, or `None` for a bare boolean read.
+    ///
+    /// §4.6 keeps a bare read and an equality against the empty scalar
+    /// distinct, so `None` here is not the same locator as an `equals`
+    /// holding an empty string.
+    pub fn equals(&self) -> Option<&FrontmatterScalar> {
+        self.equals.as_ref()
+    }
+}
+
+impl ResolvedFrontmatterQuery {
+    /// Builds a bound query proposition, for the constraint binder.
+    pub(crate) fn new(
+        locator: crate::locator::FrontmatterQueryLocator,
+        equals: Option<FrontmatterScalar>,
+    ) -> Self {
+        Self { locator, equals }
+    }
+
+    /// The parsed locator, for preparing and evaluating the query.
+    pub(crate) fn parsed(&self) -> &crate::locator::FrontmatterQueryLocator {
+        &self.locator
+    }
+}
+
+/// A bound `fm.<name>` reference to a declared frontmatter capture (§4.6).
+///
+/// §4.6 keeps this apart from [`ResolvedFrontmatterQuery`] deliberately:
+/// `fm[$.x]` performs a document-time query while `fm.x` is the typo-safe
+/// reference to a declaration, checked at schema load.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedFrontmatterCapture {
+    locator: crate::locator::FrontmatterCaptureLocator,
+    name: CaptureName,
+    value_type: crate::typed_value::ValueType,
+}
+
+impl ResolvedFrontmatterCapture {
+    /// The locator exactly as the schema spelled it.
+    pub fn locator(&self) -> &str {
+        self.locator.source().as_str()
+    }
+
+    /// The bound capture name.
+    pub fn name(&self) -> &CaptureName {
+        &self.name
+    }
+
+    /// The declared type's stable §2.4 spelling.
+    pub fn type_name(&self) -> &'static str {
+        self.value_type.as_str()
+    }
+}
+
+impl ResolvedFrontmatterCapture {
+    /// Builds a bound capture reference, for the constraint binder.
+    pub(crate) fn new(
+        locator: crate::locator::FrontmatterCaptureLocator,
+        name: CaptureName,
+        value_type: crate::typed_value::ValueType,
+    ) -> Self {
+        Self {
+            locator,
+            name,
+            value_type,
+        }
+    }
 }
 
 /// The starting scope for resolving a rule reference.
@@ -502,6 +1145,18 @@ pub enum RefAnchor {
     /// Resolve from the schema's root scope; the normalized form of a leading
     /// `$.` in source. `$` alone is not a valid reference.
     SchemaRoot,
+}
+
+/// The semantic anchor a parsed locator's kernel anchor denotes.
+///
+/// The two enums say the same thing in two layers, and this is the one place
+/// that knows it. The binder converts here rather than matching the kernel
+/// enum itself, so the locator module's types stay behind its facade.
+pub(crate) fn resolved_anchor(anchor: crate::locator::LocatorAnchor) -> RefAnchor {
+    match anchor {
+        crate::locator::LocatorAnchor::CurrentScope => RefAnchor::CurrentScope,
+        crate::locator::LocatorAnchor::SchemaRoot => RefAnchor::SchemaRoot,
+    }
 }
 
 /// A collection statically guaranteed to contain at least one item.

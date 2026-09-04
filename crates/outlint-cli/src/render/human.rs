@@ -1,8 +1,8 @@
 //! Human-readable output: headlines, details, evidence, and escaping.
 
 use crate::diagnostics::{
-    RenderedDiagnostic, RenderedMatcher, RenderedReference, RenderedScalar, RenderedSchemaNode,
-    RenderedTarget, ValidationResult,
+    RenderedDiagnostic, RenderedMatcher, RenderedReference, RenderedSchemaNode, RenderedTarget,
+    ValidationResult,
 };
 
 pub(super) fn render_human(results: &[ValidationResult], use_color: bool) -> String {
@@ -107,10 +107,12 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
         }
     }
 
-    if diagnostic.id == "ordered" {
-        append_human_ordering_evidence(output, diagnostic);
-    } else {
-        append_human_constraint_evidence(output, diagnostic);
+    append_human_declaration_detail(output, diagnostic);
+
+    match diagnostic.id.as_str() {
+        "ordered" => append_human_ordering_evidence(output, diagnostic),
+        "order-violation" => append_human_violating_pair(output, diagnostic),
+        _ => append_human_constraint_evidence(output, diagnostic),
     }
 
     if let Some(location) = &diagnostic.schema_location {
@@ -118,9 +120,18 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
             && location.line == diagnostic.line
             && location.column == diagnostic.column;
         if !duplicates_primary {
+            // A capture and an order entry are already named above by the
+            // declaration detail, which spells them `capture:` and `order
+            // entry:`. Reusing those words here would print the same label
+            // twice for one diagnostic, once for a name and once for a file
+            // position, so the location line says what it is instead: where
+            // the thing just named was declared.
             let label = match diagnostic.schema_node.as_ref() {
                 Some(RenderedSchemaNode::Constraint { .. }) => "constraint",
                 Some(RenderedSchemaNode::Rule { .. }) => "rule",
+                Some(RenderedSchemaNode::Capture { .. })
+                | Some(RenderedSchemaNode::FrontmatterCapture { .. })
+                | Some(RenderedSchemaNode::OrderEntry { .. }) => "declared",
                 _ => "schema",
             };
             output.push_str(&format!(
@@ -130,6 +141,35 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
                 location.column
             ));
         }
+    }
+}
+
+/// Names the declaration a typed-value diagnostic is about.
+///
+/// `invalid-value`, `missing-value`, and `order-violation` all anchor on a
+/// declaration rather than on a section, and their messages read badly
+/// without one: which of a rule's captures failed, or which `order` entry was
+/// violated, is not recoverable from a line and column.
+///
+/// Not every such diagnostic reaches a branch here. A boolean-read
+/// `invalid-value` is attributed to its containing constraint rather than to
+/// a declaration (§6.2), so it falls through and names its query through
+/// reference data instead.
+///
+/// The capture name is schema-controlled text and goes through the same
+/// quoting and control-character escaping as every other untrusted value.
+fn append_human_declaration_detail(output: &mut String, diagnostic: &RenderedDiagnostic) {
+    match diagnostic.schema_node.as_ref() {
+        Some(RenderedSchemaNode::Capture { name, .. }) => {
+            append_human_quoted_detail(output, "capture", name);
+        }
+        Some(RenderedSchemaNode::FrontmatterCapture { name }) => {
+            append_human_quoted_detail(output, "capture", &format!("fm.{name}"));
+        }
+        Some(RenderedSchemaNode::OrderEntry { order_index, .. }) => {
+            output.push_str(&format!("  order entry: {order_index}\n"));
+        }
+        _ => {}
     }
 }
 
@@ -163,6 +203,33 @@ fn append_human_ordering_evidence(output: &mut String, diagnostic: &RenderedDiag
                 human_header_path(&header.header_path)
             ));
         }
+    }
+}
+
+/// Presents an `order-violation`'s two headers as the ordered pair they are.
+///
+/// §6.2 has an `order-violation` list "exactly the first and second headers of
+/// its violating adjacent pair, in that order", and which of the two is which
+/// is the whole of what the reader needs: the message names the values, the
+/// pair names the sections holding them. The generic `involved sections:`
+/// list of a constraint says only that these headers took part, which for an
+/// adjacent pair loses the one fact that makes it actionable — so this stays
+/// separate from both the `ordered` constraint's expected/observed listing
+/// and the constraint evidence every other id gets.
+fn append_human_violating_pair(output: &mut String, diagnostic: &RenderedDiagnostic) {
+    if diagnostic.involved_headers.is_empty() {
+        return;
+    }
+    output.push_str("  out-of-order pair:\n");
+    for (position, header) in diagnostic.involved_headers.iter().enumerate() {
+        output.push_str(&format!(
+            "    {}. {}:{}:{} \"{}\"\n",
+            position + 1,
+            escape_human(&diagnostic.source_path),
+            header.line,
+            header.column,
+            human_header_path(&header.header_path)
+        ));
     }
 }
 
@@ -267,45 +334,24 @@ fn human_header_path(path: &[String]) -> String {
 
 fn human_reference(reference: &RenderedReference) -> String {
     match reference {
+        // Every form quotes the author's own locator rather than rebuilding
+        // one from bound steps: it is the text they would edit, and it is
+        // retained precisely so it need not be reconstructed. It is
+        // schema-controlled, so it is escaped like every other untrusted
+        // value here.
         RenderedReference::Rule {
-            anchor,
-            path,
-            matcher,
+            locator, matcher, ..
         } => {
-            let prefix = if *anchor == "schema_root" { "$." } else { "" };
-            format!(
-                "{}{} ({})",
-                prefix,
-                path.iter()
-                    .map(|part| escape_human(part))
-                    .collect::<Vec<_>>()
-                    .join("."),
-                human_matcher(matcher)
-            )
+            format!("{} ({})", escape_human(locator), human_matcher(matcher))
         }
-        RenderedReference::Frontmatter { path, equals } => {
-            let mut display = format!(
-                "fm.{}",
-                path.iter()
-                    .map(|part| escape_human(part))
-                    .collect::<Vec<_>>()
-                    .join(".")
-            );
-            if let Some(value) = equals {
-                display.push('=');
-                display.push_str(&human_scalar(value));
-            }
-            display
-        }
-    }
-}
-
-fn human_scalar(scalar: &RenderedScalar) -> String {
-    match scalar {
-        RenderedScalar::Null => "null".to_owned(),
-        RenderedScalar::Boolean(value) => value.to_string(),
-        RenderedScalar::Integer(value) | RenderedScalar::Float(value) => escape_human(value),
-        RenderedScalar::String(value) => format!("\"{}\"", escape_human_quoted(value)),
+        // §4.6 makes the equality literal "the remainder of the locator", so
+        // the retained spelling already carries it and nothing is appended.
+        RenderedReference::FrontmatterQuery { locator, .. } => escape_human(locator),
+        RenderedReference::FrontmatterCapture {
+            locator,
+            value_type,
+            ..
+        } => format!("{} ({})", escape_human(locator), escape_human(value_type)),
     }
 }
 

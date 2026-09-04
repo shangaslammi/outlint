@@ -9,7 +9,7 @@
 
 use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 
-use crate::schema::{NonEmpty, Schema};
+use crate::schema::{CaptureName, NonEmpty, Schema};
 
 /// The result of parsing, validating, and normalizing a schema document.
 pub type LoadSchemaResult = Result<LoadedSchema, InvalidSchema>;
@@ -166,6 +166,16 @@ pub enum SchemaNode {
     FrontmatterSchemaDocument,
     /// A section rule at a structural path.
     Rule(RulePath),
+    /// One capture declared by a section rule (§2.1).
+    Capture(CapturePath),
+    /// One capture declared by `frontmatter.captures` (§2.3).
+    ///
+    /// Frontmatter captures occupy their own named scope rooted at `fm`
+    /// (§4.3), so a name alone addresses one; there are no owning rule
+    /// coordinates to carry.
+    FrontmatterCapture(CaptureName),
+    /// One entry of a section rule's `order` list (§2.1, §3.8).
+    OrderEntry(OrderEntryPath),
     /// A constraint at a structural path.
     Constraint(ConstraintPath),
 }
@@ -177,6 +187,31 @@ pub struct RulePath {
     pub scope: ScopePath,
     /// The rule's zero-based index within that scope.
     pub index: RuleIndex,
+}
+
+/// The structural address of one rule capture declaration.
+///
+/// A capture is addressed by its owning rule's coordinates plus its name,
+/// because a rule's `captures` mapping has no semantic order for an index to
+/// name (§2.1).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CapturePath {
+    /// The rule that declares the capture.
+    pub rule: RulePath,
+    /// The declared capture name.
+    pub name: CaptureName,
+}
+
+/// The structural address of one `order` entry.
+///
+/// Unlike a capture, an order entry is addressed positionally: `order` is a
+/// list whose entry order is semantic (§3.8).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OrderEntryPath {
+    /// The rule that declares the `order` list.
+    pub rule: RulePath,
+    /// The entry's zero-based index within that list.
+    pub order_index: OrderIndex,
 }
 
 /// The structural address of a constraint.
@@ -208,6 +243,11 @@ pub struct RuleIndex(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct ConstraintIndex(pub usize);
+
+/// A zero-based entry index within one rule's `order` list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct OrderIndex(pub usize);
 
 /// A half-open byte range in [`SchemaSource::text`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -286,6 +326,11 @@ pub enum SchemaErrorKind {
     InvalidMatcher,
     /// A repeat declaration is malformed or has inconsistent bounds.
     InvalidRepeat,
+    /// A capture declaration is malformed, repeated, unsupported, or declared
+    /// where §2.1 and §2.3 do not permit one.
+    InvalidCapture,
+    /// An `order` list, or one of its entries, is malformed (§2.1).
+    InvalidOrder,
     /// An ordered constraint uses a non-positional frontmatter proposition,
     /// mixes scopes, descends through a repeatable ancestor, or targets a
     /// scope already ordered by its rule list.
@@ -314,6 +359,8 @@ impl SchemaErrorKind {
             Self::ReservedId => "reserved-id",
             Self::InvalidMatcher => "invalid-matcher",
             Self::InvalidRepeat => "invalid-repeat",
+            Self::InvalidCapture => "invalid-capture",
+            Self::InvalidOrder => "invalid-order",
             Self::OrderedScopeMismatch => "ordered-scope-mismatch",
             Self::ConflictingCardinality => "conflicting-cardinality",
             Self::ConflictingFrontmatter => "conflicting-frontmatter",
@@ -349,6 +396,8 @@ mod tests {
             (SchemaErrorKind::ReservedId, "reserved-id"),
             (SchemaErrorKind::InvalidMatcher, "invalid-matcher"),
             (SchemaErrorKind::InvalidRepeat, "invalid-repeat"),
+            (SchemaErrorKind::InvalidCapture, "invalid-capture"),
+            (SchemaErrorKind::InvalidOrder, "invalid-order"),
             (
                 SchemaErrorKind::OrderedScopeMismatch,
                 "ordered-scope-mismatch",

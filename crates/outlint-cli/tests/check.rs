@@ -56,39 +56,55 @@ fn json_check_has_stable_fields_and_order() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stderr(&output), "");
+    // §11.3: JSON output carries no ANSI escapes whatever `--color` says.
     assert!(!output.stdout.contains(&0x1b));
-    let json = json_output(&output);
-    assert_eq!(json["version"], 2);
-    assert_eq!(json["results"][0]["path"], "first.md");
-    assert_eq!(json["results"][1]["path"], "second.md");
-    assert_eq!(json["results"][0]["schema"], "schema.yml");
+    // The whole envelope, compared as one value rather than field by field:
+    // an extra, missing, or renamed member cannot slip past an equality on
+    // the complete object the way it can past a member probe, and neither can
+    // a reordered *array* — which is what pins the argument order of
+    // `results` below. Object member order is not among the things this
+    // detects, and could not be: JSON leaves it insignificant and
+    // `serde_json::Map` does not retain it here. This is the version 3 shape
+    // of §11.3, including all four `summary` counts.
     assert_eq!(
-        json["results"][0]["diagnostics"][0]["id"],
-        "missing-section"
-    );
-    assert_eq!(
-        json["results"][0]["diagnostics"][0]["target"],
+        json_output(&output),
         serde_json::json!({
-            "kind": "missing_header",
-            "parent": [],
-            "matcher": "Required"
-        })
-    );
-    assert_eq!(
-        json["results"][0]["diagnostics"][0]["location"],
-        serde_json::json!({"line": 1, "column": 1})
-    );
-    assert_eq!(
-        json["results"][0]["diagnostics"][0]["schema_location"]["path"],
-        "schema.yml"
-    );
-    assert_eq!(
-        json["summary"],
-        serde_json::json!({
-            "files": 2,
-            "documents": 2,
-            "schemas": 0,
-            "diagnostics": 1
+            "version": 3,
+            "results": [
+                {
+                    "kind": "document",
+                    "path": "first.md",
+                    "schema": "schema.yml",
+                    "diagnostics": [{
+                        "id": "missing-section",
+                        "message": "matched 0 sections, but at least 1 are required",
+                        "location": {"line": 1, "column": 1},
+                        "target": {
+                            "kind": "missing_header",
+                            "parent": [],
+                            "matcher": "Required"
+                        },
+                        "schema_node": {"kind": "rule", "scope": [], "index": 0},
+                        "schema_location": {
+                            "path": "schema.yml",
+                            "line": 4,
+                            "column": 5
+                        }
+                    }]
+                },
+                {
+                    "kind": "document",
+                    "path": "second.md",
+                    "schema": "schema.yml",
+                    "diagnostics": []
+                }
+            ],
+            "summary": {
+                "files": 2,
+                "documents": 2,
+                "schemas": 0,
+                "diagnostics": 1
+            }
         })
     );
 }

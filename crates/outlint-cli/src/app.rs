@@ -149,8 +149,20 @@ fn execute_check(options: CheckOptions) -> u8 {
                         strip_inline_markup: loaded.schema.options.strip_inline_markup,
                     },
                 );
-                let mut diagnostics = validator
-                    .validate(&document)
+                // On an operational failure this document has no verdict, so
+                // no result is recorded and no partial diagnostic set is
+                // exposed. Remaining inputs are still checked.
+                let validated = match validator.validate(&document) {
+                    Ok(diagnostics) => diagnostics,
+                    Err(error) => {
+                        output.operational_errors.push(format!(
+                            "cannot validate {} against {}: {error}",
+                            input.path, group.display
+                        ));
+                        continue;
+                    }
+                };
+                let mut diagnostics = validated
                     .iter()
                     .map(|diagnostic| render_document_diagnostic(&input.path, diagnostic, loaded))
                     .collect::<Vec<_>>();
