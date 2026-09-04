@@ -5,6 +5,7 @@ mod constraints;
 mod dependency_suppression;
 mod engine;
 mod frontmatter;
+mod frontmatter_values;
 mod ordering;
 mod prepare;
 mod value_order;

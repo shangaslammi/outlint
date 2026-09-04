@@ -18,6 +18,7 @@ use super::diagnostic::{
     Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticTarget, FrontmatterBlock,
     FrontmatterLineRange, HeaderPath, InvolvedHeader,
 };
+use super::frontmatter_values::{self, CaptureFailure, CaptureProblem, FrontmatterValues};
 use super::prepare::{PreparedRule, ValidationPlan};
 use super::value_order;
 
@@ -83,6 +84,11 @@ impl<'a> Validator<'a> {
 
     fn run(mut self, plan: &ValidationPlan) -> Vec<Diagnostic> {
         self.validate_frontmatter(plan.frontmatter.as_ref());
+        // §8 evaluates the declared frontmatter captures once, straight after
+        // the block's own checks and before the outline walk. §2.3 keeps this
+        // independent of `frontmatter.schema`: a JSON Schema failure leaves a
+        // valid resolved mapping, so the captures are still read.
+        let values = self.evaluate_frontmatter_captures();
         let document = self.document;
         let top = top_level_sections(&document.sections);
         let has_h1 = top
@@ -110,17 +116,11 @@ impl<'a> Validator<'a> {
             // retired `detached-section` diagnostic used to name.
             self.validate_skipped_levels(&document.sections, root_level, &HeaderPath::default());
         }
-        let frontmatter = match &document.frontmatter {
-            DocumentFrontmatter::Mapping { value, .. } => Some(value),
-            DocumentFrontmatter::Absent | DocumentFrontmatter::Invalid { .. } => None,
-        };
         match self.schema.outline_provenance {
-            OutlineProvenance::Outline => self.validate_outline_root(&top, plan, frontmatter),
+            OutlineProvenance::Outline => self.validate_outline_root(&top, plan, &values),
             OutlineProvenance::Title
             | OutlineProvenance::BareSections
-            | OutlineProvenance::NoTitle => {
-                self.validate_sugar_root(&top, has_h1, plan, frontmatter)
-            }
+            | OutlineProvenance::NoTitle => self.validate_sugar_root(&top, has_h1, plan, &values),
         }
         self.diagnostics
     }
@@ -135,7 +135,7 @@ impl<'a> Validator<'a> {
         &mut self,
         top: &[PathedSection<'a>],
         plan: &ValidationPlan,
-        frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
+        frontmatter: &FrontmatterValues,
     ) {
         let schema = self.schema;
         let admitted = admitted_at_root(top, HeaderLevel::H1, schema.options.allow_skipped_levels);
@@ -186,7 +186,7 @@ impl<'a> Validator<'a> {
         top: &[PathedSection<'a>],
         has_h1: bool,
         plan: &ValidationPlan,
-        frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
+        frontmatter: &FrontmatterValues,
     ) {
         let schema = self.schema;
         let provenance = schema.outline_provenance;
@@ -335,7 +335,7 @@ impl<'a> Validator<'a> {
         sections: &[PathedSection<'a>],
         rule: &'a SectionRule,
         prepared: &PreparedRule,
-        frontmatter: Option<&'a serde_json::Map<String, serde_json::Value>>,
+        frontmatter: &FrontmatterValues,
         owner: Option<(&'a Heading, &HeaderPath)>,
     ) {
         let scope = ScopePath(Vec::new());
@@ -368,6 +368,85 @@ impl<'a> Validator<'a> {
             &scope,
             parent,
             &path,
+        );
+    }
+
+    /// Evaluates every declared frontmatter capture once (§2.3).
+    ///
+    /// The retained states are the record §6.3 makes dependent checks read:
+    /// the diagnostics below may be filtered, and filtering one must not
+    /// change what `fm.<name>` concluded about the value it names.
+    fn evaluate_frontmatter_captures(&mut self) -> FrontmatterValues {
+        let (values, problems) = frontmatter_values::evaluate(
+            self.schema.frontmatter.captures(),
+            &self.document.frontmatter,
+            self.schema.frontmatter.is_required(),
+        );
+        for problem in problems {
+            self.emit_capture_problem(problem);
+        }
+        values
+    }
+
+    /// Places one capture primary at the entry it is about (§6.1, §6.2).
+    fn emit_capture_problem(&mut self, problem: CaptureProblem) {
+        let CaptureProblem {
+            name,
+            pointer,
+            anchor,
+            reason,
+        } = problem;
+        let (location, anchors) = match &self.document.frontmatter {
+            DocumentFrontmatter::Mapping {
+                location, anchors, ..
+            } => (*location, anchors),
+            // A capture is evaluated only against a valid mapping, so there
+            // is always a block to name.
+            DocumentFrontmatter::Absent | DocumentFrontmatter::Invalid { .. } => return,
+        };
+        let (id, message) = match reason {
+            CaptureFailure::Invalid {
+                value_type,
+                source,
+                failure,
+            } => (
+                DiagnosticId::InvalidValue,
+                format!(
+                    "frontmatter capture `{name}` is not a valid `{}`: {}",
+                    value_type.as_str(),
+                    value_failure_reason(value_type, &source, &failure)
+                ),
+            ),
+            CaptureFailure::Missing => (
+                DiagnosticId::MissingValue,
+                format!("frontmatter capture `{name}` is required but selects no value"),
+            ),
+        };
+        self.emit(
+            Diagnostic {
+                id,
+                target: DiagnosticTarget::Frontmatter {
+                    block: Some(FrontmatterBlock {
+                        line_range: FrontmatterLineRange {
+                            start_line: location.start_line,
+                            end_line: location.end_line,
+                        },
+                        json_pointer: pointer,
+                    }),
+                },
+                location: DiagnosticLocation {
+                    range: location.range,
+                    line: enclosing_anchor(anchors, &anchor)
+                        .map_or(location.start_line, |anchor| anchor.line),
+                    column: enclosing_anchor(anchors, &anchor).map_or(1, |anchor| anchor.column),
+                },
+                schema_node: Some(SchemaNode::FrontmatterCapture(name)),
+                involved_headers: Vec::new(),
+                references: Vec::new(),
+                message,
+            },
+            None,
+            false,
         );
     }
 
@@ -1305,6 +1384,30 @@ fn yaml_kind_name(kind: ResolvedYamlKind) -> &'static str {
         ResolvedYamlKind::String => "string",
         ResolvedYamlKind::Sequence => "sequence",
         ResolvedYamlKind::Mapping => "mapping",
+    }
+}
+
+/// The position of the entry `pointer` names, or of the nearest enclosing
+/// entry that has one.
+///
+/// §6.2 permits exactly this fallback — "the nearest enclosing entry that has
+/// a position of its own — `/list/0` to `/list`, and `/list` to the block" —
+/// and it is what makes an absent path anchor at its deepest resolving
+/// ancestor and an entry with no spelling of its own anchor at its container
+/// rather than at some neighbour's text.
+fn enclosing_anchor(
+    anchors: &crate::FrontmatterAnchors,
+    pointer: &str,
+) -> Option<FrontmatterAnchor> {
+    let mut candidate = pointer;
+    loop {
+        if let Some(anchor) = anchors.get(candidate) {
+            return Some(anchor);
+        }
+        match candidate.rsplit_once('/') {
+            Some((parent, _)) => candidate = parent,
+            None => return None,
+        }
     }
 }
 

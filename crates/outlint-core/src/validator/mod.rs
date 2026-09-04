@@ -6,6 +6,7 @@
 mod constraints;
 mod diagnostic;
 mod engine;
+mod frontmatter_values;
 mod prepare;
 mod value_order;
 

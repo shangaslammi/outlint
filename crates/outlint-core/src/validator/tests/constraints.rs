@@ -21,11 +21,14 @@ fn fm_query(locator: &str) -> ResolvedFrontmatterQuery {
 /// frontmatter, typed by the real reader.
 fn fm_satisfied(markdown: &str, locator: &str, match_case: bool) -> bool {
     let document = parse_markdown(markdown, MarkdownOptions::default());
-    let frontmatter = match &document.frontmatter {
-        DocumentFrontmatter::Mapping { value, .. } => Some(value),
+    // The §1.6 JSON root the validator builds once per document.
+    let root = match &document.frontmatter {
+        DocumentFrontmatter::Mapping { value, .. } => {
+            Some(serde_json::Value::Object(value.clone()))
+        }
         DocumentFrontmatter::Absent | DocumentFrontmatter::Invalid { .. } => None,
     };
-    frontmatter_query_satisfied(frontmatter, &fm_query(locator), match_case)
+    frontmatter_query_satisfied(root.as_ref(), &fm_query(locator), match_case)
 }
 
 #[test]

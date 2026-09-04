@@ -8,6 +8,7 @@ use crate::{
 
 use super::diagnostic::{Diagnostic, DiagnosticReference};
 use super::engine::{BoundScope, BoundSection};
+use super::frontmatter_values::FrontmatterValues;
 
 /// What one proposition, or one whole constraint, evaluated to (§5.3).
 ///
@@ -25,7 +26,7 @@ pub(super) enum Truth {
 }
 
 impl Truth {
-    fn from_bool(value: bool) -> Self {
+    pub(super) fn from_bool(value: bool) -> Self {
         if value {
             Self::Satisfied
         } else {
@@ -63,7 +64,7 @@ pub(super) struct ConstraintEvaluation<'s, 'd> {
 /// equality form is complete: it is existential over non-null result nodes
 /// with §4.6's typed scalar equality, and nothing about it is deferred.
 pub(super) fn frontmatter_query_satisfied(
-    frontmatter: Option<&serde_json::Map<String, serde_json::Value>>,
+    root: Option<&serde_json::Value>,
     proposition: &ResolvedFrontmatterQuery,
     match_case: bool,
 ) -> bool {
@@ -71,7 +72,7 @@ pub(super) fn frontmatter_query_satisfied(
     // bare boolean read is unsatisfied, and an equality proposition is
     // unsatisfied." An `invalid-frontmatter` block arrives here as `None` too;
     // suppressing its containing constraint is 4A's.
-    let Some(frontmatter) = frontmatter else {
+    let Some(document) = root else {
         return false;
     };
     let Ok(prepared) = proposition.parsed().query().prepare() else {
@@ -79,12 +80,7 @@ pub(super) fn frontmatter_query_satisfied(
         // now refuses it is a provider bug, not an authoring one.
         return false;
     };
-    // PHASE 4A DEBT: the frontmatter view is rebuilt per proposition because
-    // the engine carries the mapping rather than a JSON document. Frontmatter
-    // is small and this is temporary; evaluation moves behind a prepared
-    // document in 4A.
-    let document = serde_json::Value::Object(frontmatter.clone());
-    let nodes = prepared.evaluate(&document);
+    let nodes = prepared.evaluate(document);
     match proposition.equals() {
         // §4.6: "A bare `fm[...]` is a typed boolean read, not a presence
         // test. It is satisfied iff at least one result node is the YAML/JSON
@@ -141,10 +137,10 @@ pub(super) struct EvalCtx<'s, 'd> {
     pub(super) current_rules: &'s [SectionRule],
     pub(super) root: &'s BoundScope<'d>,
     pub(super) root_rules: &'s [SectionRule],
-    /// The document's frontmatter mapping, when one parsed. `fm.` propositions
-    /// address the document rather than a scope, so this is the same from
-    /// every constraint node.
-    pub(super) frontmatter: Option<&'d serde_json::Map<String, serde_json::Value>>,
+    /// The document's frontmatter runtime view. `fm.` propositions address
+    /// the document rather than a scope, so this is the same from every
+    /// constraint node.
+    pub(super) frontmatter: &'s FrontmatterValues,
     pub(super) match_case: bool,
 }
 
@@ -436,19 +432,19 @@ impl<'s, 'd> Resolved<'s, 'd> {
                 Some(found) => Truth::from_bool(!found.is_empty()),
                 None => Truth::Suppressed,
             },
-            Proposition::FrontmatterQuery(proposition) => Truth::from_bool(
-                frontmatter_query_satisfied(context.frontmatter, proposition, context.match_case),
-            ),
-            // PHASE 4A DEBT: capture evaluation does not exist yet, so a
-            // declared `fm.<name>` reads as unsatisfied. §4.6 makes it
-            // "satisfied iff the capture is valid and bound, except that a
-            // bound `bool` capture contributes its boolean value", and makes
-            // an invalid value, a missing required capture, invalid
-            // frontmatter, or an absent required block suppress the whole
-            // containing constraint after its primary diagnostic. None of
-            // that is implemented here; nothing observable depends on it
-            // until the lane that evaluates typed values lands.
-            Proposition::FrontmatterCapture(_) => Truth::Unsatisfied,
+            Proposition::FrontmatterQuery(proposition) => {
+                Truth::from_bool(frontmatter_query_satisfied(
+                    context.frontmatter.root(),
+                    proposition,
+                    context.match_case,
+                ))
+            }
+            // §4.6's `fm.<name>`, answered from the state the capture
+            // evaluation retained rather than from the diagnostics it
+            // produced.
+            Proposition::FrontmatterCapture(reference) => {
+                context.frontmatter.truth(reference.name())
+            }
         }
     }
 
