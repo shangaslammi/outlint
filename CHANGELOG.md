@@ -28,10 +28,12 @@ output shape, and the library API may all change in a minor release. See
   a typed boolean read, `=literal` as type-preserving existential equality —
   with a portable guaranteed core of child name, index, and wildcard segments
   and non-surrogate quoted-name escapes, and a provider-dependent vendor tier
-  beyond it that includes surrogate escape pairs, while `fm.<name>` now
-  refers only to a declared frontmatter capture: the former dynamic-key
-  meaning is gone and legacy `fm.key=value` is invalid. CLI machine output is
-  envelope version 3, whose diagnostics carry tagged `rule`,
+  beyond it that includes surrogate escape pairs. `fm[...]` evaluation is
+  resource-bounded; exceeding the bound is an operational failure with exit
+  code 2 and no partial verdict. Meanwhile, `fm.<name>` now refers only to a
+  declared frontmatter capture: the former dynamic-key meaning is gone and
+  legacy `fm.key=value` is invalid. CLI machine output is envelope version 3,
+  whose diagnostics carry tagged `rule`,
   `frontmatter_query`, and `frontmatter_capture` references preserving the
   written locator and its typed-value metadata; there is no version 2 mode,
   so consumers must reject envelope versions they do not support (spec
