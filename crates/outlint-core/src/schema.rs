@@ -725,6 +725,14 @@ pub enum Proposition {
 }
 
 /// A normalized `fm.` frontmatter proposition.
+///
+/// This is the pre-Typed-Values reference form and is **transitional**. Its
+/// dotted key path is neither of the two forms §4.6 defines: it cannot spell
+/// an RFC 9535 query, and it does not name a declared capture.
+/// [`ResolvedFrontmatterQuery`] and [`ResolvedFrontmatterCapture`] are its
+/// replacements, one per form. Constraints still store this form until the
+/// lane that owns constraint binding cuts them over; nothing new should be
+/// built against it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FrontmatterRef {
     /// One or more mapping keys below the frontmatter root.
@@ -796,7 +804,414 @@ impl CanonicalFloat {
     }
 }
 
+/// One bound name step of a resolved outline locator.
+///
+/// A step keeps three facts that only binding can pair: the id the locator
+/// spelled, the structural index the id resolved to in its scope, and the
+/// `[i]` subscript the author wrote, if any. Keeping the index alongside the
+/// id means a consumer can reach the rule without resolving the name a second
+/// time, and keeping the source id means a diagnostic quotes what was written
+/// rather than a spelling reconstructed from the index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BoundRuleStep {
+    id: RuleId,
+    index: crate::RuleIndex,
+    position: Option<crate::locator::LocatorPosition>,
+}
+
+impl BoundRuleStep {
+    /// The rule id this step spelled.
+    pub fn id(&self) -> &RuleId {
+        &self.id
+    }
+
+    /// The zero-based index the id resolved to within its sibling scope.
+    pub fn index(&self) -> crate::RuleIndex {
+        self.index
+    }
+
+    /// The `[i]` subscript in canonical decimal, or `None` if unsubscripted.
+    ///
+    /// §4.4 gives `i` "no upper bound", so this is the mathematical integer's
+    /// decimal spelling rather than a machine integer. A consumer serializing
+    /// it must build a JSON number from these digits: §11.3 requires an
+    /// arbitrary-precision JSON integer, never a quoted string, and narrowing
+    /// the value to `u64` would silently change which node it selects.
+    pub fn position_digits(&self) -> Option<String> {
+        self.position.as_ref().map(ToString::to_string)
+    }
+}
+
+#[allow(dead_code)]
+impl BoundRuleStep {
+    /// Builds a bound step. Called by the constraint binder, in a later lane.
+    pub(crate) fn new(
+        id: RuleId,
+        index: crate::RuleIndex,
+        position: Option<crate::locator::LocatorPosition>,
+    ) -> Self {
+        Self {
+            id,
+            index,
+            position,
+        }
+    }
+
+    /// The subscript as the arbitrary-precision kernel value.
+    pub(crate) fn position(&self) -> Option<&crate::locator::LocatorPosition> {
+        self.position.as_ref()
+    }
+}
+
+/// A schema-resident outline locator whose names have been bound (§4.4).
+///
+/// This is the replacement for [`RuleRef`], which can spell only a rule path
+/// and therefore cannot represent the two value locators §4.4 adds. The
+/// terminal kind is the variant, so a consumer cannot mistake a declared
+/// capture for a rule id or for the intrinsic `/text`: each carries the data
+/// its own kind has and no other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResolvedOutlineLocator {
+    /// The locator ends at a rule id and is therefore a proposition (§4.5).
+    Rule(ResolvedRuleLocator),
+    /// The locator ends at a declared capture and is a value locator.
+    Capture(ResolvedRuleCaptureLocator),
+    /// The locator ends at the terminal `/text` intrinsic and is a value
+    /// locator.
+    IntrinsicText(ResolvedIntrinsicTextLocator),
+}
+
+impl ResolvedOutlineLocator {
+    /// The locator exactly as the schema spelled it.
+    pub fn locator(&self) -> &str {
+        match self {
+            Self::Rule(resolved) => resolved.locator(),
+            Self::Capture(resolved) => resolved.locator(),
+            Self::IntrinsicText(resolved) => resolved.locator(),
+        }
+    }
+
+    /// Where the locator's first name step resolves.
+    pub fn anchor(&self) -> RefAnchor {
+        match self {
+            Self::Rule(resolved) => resolved.anchor(),
+            Self::Capture(resolved) => resolved.anchor(),
+            Self::IntrinsicText(resolved) => resolved.anchor(),
+        }
+    }
+}
+
+/// A bound outline locator terminating at a rule id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRuleLocator {
+    source: crate::locator::LocatorSource,
+    anchor: RefAnchor,
+    steps: NonEmpty<BoundRuleStep>,
+}
+
+impl ResolvedRuleLocator {
+    /// The locator exactly as the schema spelled it.
+    ///
+    /// §11.3 makes this spelling observable, so it is retained rather than
+    /// reconstructed from the bound steps: a locator that resolved through
+    /// `$.` and one that resolved relatively can name the same rule, and only
+    /// the source says which was written.
+    pub fn locator(&self) -> &str {
+        self.source.as_str()
+    }
+
+    /// Where the first name step resolves.
+    pub fn anchor(&self) -> RefAnchor {
+        self.anchor
+    }
+
+    /// The bound name steps, outermost first; never empty.
+    pub fn steps(&self) -> &NonEmpty<BoundRuleStep> {
+        &self.steps
+    }
+}
+
+#[allow(dead_code)]
+impl ResolvedRuleLocator {
+    /// Builds a bound rule locator. Called by the constraint binder.
+    pub(crate) fn new(
+        source: crate::locator::LocatorSource,
+        anchor: RefAnchor,
+        steps: NonEmpty<BoundRuleStep>,
+    ) -> Self {
+        Self {
+            source,
+            anchor,
+            steps,
+        }
+    }
+
+    /// The retained locator source as the kernel value.
+    pub(crate) fn source(&self) -> &crate::locator::LocatorSource {
+        &self.source
+    }
+}
+
+/// A bound outline locator terminating at a declared rule capture.
+///
+/// The rule steps may be empty: a bare capture name resolves in the scope the
+/// constraint is attached to, naming a capture of the rule that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRuleCaptureLocator {
+    source: crate::locator::LocatorSource,
+    anchor: RefAnchor,
+    rule_steps: Vec<BoundRuleStep>,
+    name: CaptureName,
+    value_type: crate::typed_value::ValueType,
+    position: Option<crate::locator::LocatorPosition>,
+}
+
+impl ResolvedRuleCaptureLocator {
+    /// The locator exactly as the schema spelled it.
+    pub fn locator(&self) -> &str {
+        self.source.as_str()
+    }
+
+    /// Where the first name step resolves.
+    pub fn anchor(&self) -> RefAnchor {
+        self.anchor
+    }
+
+    /// The bound rule steps preceding the capture, outermost first.
+    pub fn rule_steps(&self) -> &[BoundRuleStep] {
+        &self.rule_steps
+    }
+
+    /// The bound capture name.
+    pub fn name(&self) -> &CaptureName {
+        &self.name
+    }
+
+    /// The declared type's stable §2.4 spelling.
+    pub fn type_name(&self) -> &'static str {
+        self.value_type.as_str()
+    }
+
+    /// The terminal step's `[i]` subscript in canonical decimal, if any.
+    ///
+    /// See [`BoundRuleStep::position_digits`] for why this is decimal text.
+    pub fn position_digits(&self) -> Option<String> {
+        self.position.as_ref().map(ToString::to_string)
+    }
+}
+
+#[allow(dead_code)]
+impl ResolvedRuleCaptureLocator {
+    /// Builds a bound capture locator. Called by the constraint binder.
+    pub(crate) fn new(
+        source: crate::locator::LocatorSource,
+        anchor: RefAnchor,
+        rule_steps: Vec<BoundRuleStep>,
+        name: CaptureName,
+        value_type: crate::typed_value::ValueType,
+        position: Option<crate::locator::LocatorPosition>,
+    ) -> Self {
+        Self {
+            source,
+            anchor,
+            rule_steps,
+            name,
+            value_type,
+            position,
+        }
+    }
+
+    /// The retained locator source as the kernel value.
+    pub(crate) fn source(&self) -> &crate::locator::LocatorSource {
+        &self.source
+    }
+
+    /// The bound capture type.
+    pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
+        self.value_type
+    }
+
+    /// The terminal subscript as the arbitrary-precision kernel value.
+    pub(crate) fn position(&self) -> Option<&crate::locator::LocatorPosition> {
+        self.position.as_ref()
+    }
+}
+
+/// A bound outline locator terminating at the `/text` intrinsic (§4.4).
+///
+/// The rule steps are non-empty because `/text` is a heading's own text: the
+/// locator must first reach a heading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedIntrinsicTextLocator {
+    source: crate::locator::LocatorSource,
+    anchor: RefAnchor,
+    rule_steps: NonEmpty<BoundRuleStep>,
+    position: Option<crate::locator::LocatorPosition>,
+}
+
+impl ResolvedIntrinsicTextLocator {
+    /// The locator exactly as the schema spelled it.
+    pub fn locator(&self) -> &str {
+        self.source.as_str()
+    }
+
+    /// Where the first name step resolves.
+    pub fn anchor(&self) -> RefAnchor {
+        self.anchor
+    }
+
+    /// The bound rule steps preceding `/text`, outermost first.
+    pub fn rule_steps(&self) -> &NonEmpty<BoundRuleStep> {
+        &self.rule_steps
+    }
+
+    /// The `/text` step's `[i]` subscript in canonical decimal, if any.
+    ///
+    /// See [`BoundRuleStep::position_digits`] for why this is decimal text.
+    pub fn position_digits(&self) -> Option<String> {
+        self.position.as_ref().map(ToString::to_string)
+    }
+}
+
+#[allow(dead_code)]
+impl ResolvedIntrinsicTextLocator {
+    /// Builds a bound `/text` locator. Called by the constraint binder.
+    pub(crate) fn new(
+        source: crate::locator::LocatorSource,
+        anchor: RefAnchor,
+        rule_steps: NonEmpty<BoundRuleStep>,
+        position: Option<crate::locator::LocatorPosition>,
+    ) -> Self {
+        Self {
+            source,
+            anchor,
+            rule_steps,
+            position,
+        }
+    }
+
+    /// The retained locator source as the kernel value.
+    pub(crate) fn source(&self) -> &crate::locator::LocatorSource {
+        &self.source
+    }
+
+    /// The terminal subscript as the arbitrary-precision kernel value.
+    pub(crate) fn position(&self) -> Option<&crate::locator::LocatorPosition> {
+        self.position.as_ref()
+    }
+}
+
+/// A bound `fm[query]` or `fm[query]=literal` proposition (§4.6).
+///
+/// This is one half of the replacement for [`FrontmatterRef`], whose dotted
+/// key path cannot spell an RFC 9535 query. Both the locator source and the
+/// query source are retained exactly: §5.4 decides `duplicate-ref` on the
+/// query source, and §11.3 emits the query without its `fm[...]` wrapper, so
+/// neither text may be reconstructed from the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedFrontmatterQuery {
+    locator: crate::locator::FrontmatterQueryLocator,
+    equals: Option<FrontmatterScalar>,
+}
+
+impl ResolvedFrontmatterQuery {
+    /// The locator exactly as the schema spelled it, wrapper included.
+    pub fn locator(&self) -> &str {
+        self.locator.source().as_str()
+    }
+
+    /// The RFC 9535 query, exactly as written and without the wrapper.
+    pub fn query(&self) -> &str {
+        self.locator.query().as_str()
+    }
+
+    /// The normalized equality literal, or `None` for a bare boolean read.
+    ///
+    /// §4.6 keeps a bare read and an equality against the empty scalar
+    /// distinct, so `None` here is not the same locator as an `equals`
+    /// holding an empty string.
+    pub fn equals(&self) -> Option<&FrontmatterScalar> {
+        self.equals.as_ref()
+    }
+}
+
+#[allow(dead_code)]
+impl ResolvedFrontmatterQuery {
+    /// Builds a bound query proposition. Called by the constraint binder.
+    pub(crate) fn new(
+        locator: crate::locator::FrontmatterQueryLocator,
+        equals: Option<FrontmatterScalar>,
+    ) -> Self {
+        Self { locator, equals }
+    }
+
+    /// The parsed locator, for preparing and evaluating the query.
+    pub(crate) fn parsed(&self) -> &crate::locator::FrontmatterQueryLocator {
+        &self.locator
+    }
+}
+
+/// A bound `fm.<name>` reference to a declared frontmatter capture (§4.6).
+///
+/// This is the other half of the replacement for [`FrontmatterRef`]. §4.6
+/// keeps it apart from [`ResolvedFrontmatterQuery`] deliberately: `fm[$.x]`
+/// performs a document-time query while `fm.x` is the typo-safe reference to
+/// a declaration, checked at schema load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedFrontmatterCapture {
+    locator: crate::locator::FrontmatterCaptureLocator,
+    name: CaptureName,
+    value_type: crate::typed_value::ValueType,
+}
+
+impl ResolvedFrontmatterCapture {
+    /// The locator exactly as the schema spelled it.
+    pub fn locator(&self) -> &str {
+        self.locator.source().as_str()
+    }
+
+    /// The bound capture name.
+    pub fn name(&self) -> &CaptureName {
+        &self.name
+    }
+
+    /// The declared type's stable §2.4 spelling.
+    pub fn type_name(&self) -> &'static str {
+        self.value_type.as_str()
+    }
+}
+
+#[allow(dead_code)]
+impl ResolvedFrontmatterCapture {
+    /// Builds a bound capture reference. Called by the constraint binder.
+    pub(crate) fn new(
+        locator: crate::locator::FrontmatterCaptureLocator,
+        name: CaptureName,
+        value_type: crate::typed_value::ValueType,
+    ) -> Self {
+        Self {
+            locator,
+            name,
+            value_type,
+        }
+    }
+
+    /// The bound capture type.
+    pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
+        self.value_type
+    }
+}
+
 /// A normalized reference to a rule path.
+///
+/// This is the pre-Typed-Values reference form and is **transitional**. It
+/// can spell only a dotted path of rule ids: it has no positional narrowing,
+/// no bound structural index, and no way to end at a capture or at the
+/// intrinsic `/text`. [`ResolvedOutlineLocator`] is its replacement and can
+/// spell all of those. Constraints still store this form until the lane that
+/// owns constraint binding cuts them over; nothing new should be built
+/// against it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RuleRef {
     /// The scope from which the first path segment is resolved.
@@ -813,6 +1228,19 @@ pub enum RefAnchor {
     /// Resolve from the schema's root scope; the normalized form of a leading
     /// `$.` in source. `$` alone is not a valid reference.
     SchemaRoot,
+}
+
+/// The semantic anchor a parsed locator's kernel anchor denotes.
+///
+/// The two enums say the same thing in two layers, and this is the one place
+/// that knows it. Binding lanes convert here rather than matching the kernel
+/// enum themselves, so the locator module's types stay behind its facade.
+#[allow(dead_code)]
+pub(crate) fn resolved_anchor(anchor: crate::locator::LocatorAnchor) -> RefAnchor {
+    match anchor {
+        crate::locator::LocatorAnchor::CurrentScope => RefAnchor::CurrentScope,
+        crate::locator::LocatorAnchor::SchemaRoot => RefAnchor::SchemaRoot,
+    }
 }
 
 /// A collection statically guaranteed to contain at least one item.

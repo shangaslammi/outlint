@@ -50,7 +50,10 @@ mod syntax;
 // module-level allowance above still covers everything the facade does not
 // mention. It grows one item at a time as later lanes wire themselves up,
 // rather than being opened wholesale.
-pub(crate) use self::jsonpath::AbsoluteSingularPath;
+pub(crate) use self::jsonpath::{AbsoluteSingularPath, FrontmatterQueryLocator};
+pub(crate) use self::syntax::{
+    FrontmatterCaptureLocator, LocatorAnchor, LocatorPosition, LocatorSource,
+};
 
 #[cfg(test)]
 mod tests;

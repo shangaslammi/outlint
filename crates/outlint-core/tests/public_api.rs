@@ -308,3 +308,73 @@ sections:
     assert!(loaded.schema.outline[0].sections[0].order.is_empty());
     assert!(loaded.schema.frontmatter.captures().is_empty());
 }
+
+/// Pins the resolved-locator inspection surface by coercing each accessor to
+/// a function pointer. Nothing is constructed: the current loader produces no
+/// resolved locator, and pretending otherwise would test a binder that does
+/// not exist. What this does hold is the shape — that the terminal kinds are
+/// distinct types, that every form yields its original spelling, and that a
+/// position leaves the model as arbitrary-precision decimal text rather than
+/// a machine integer.
+#[test]
+fn the_resolved_locator_inspection_surface_is_pinned() {
+    use outlint_core::{
+        BoundRuleStep, CaptureName, NonEmpty, RefAnchor, ResolvedFrontmatterCapture,
+        ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator, ResolvedOutlineLocator,
+        ResolvedRuleCaptureLocator, ResolvedRuleLocator, RuleId, RuleIndex,
+    };
+
+    let _: fn(&ResolvedOutlineLocator) -> &str = ResolvedOutlineLocator::locator;
+    let _: fn(&ResolvedOutlineLocator) -> RefAnchor = ResolvedOutlineLocator::anchor;
+
+    let _: fn(&ResolvedRuleLocator) -> &str = ResolvedRuleLocator::locator;
+    let _: fn(&ResolvedRuleLocator) -> RefAnchor = ResolvedRuleLocator::anchor;
+    let _: fn(&ResolvedRuleLocator) -> &NonEmpty<BoundRuleStep> = ResolvedRuleLocator::steps;
+
+    let _: fn(&BoundRuleStep) -> &RuleId = BoundRuleStep::id;
+    let _: fn(&BoundRuleStep) -> RuleIndex = BoundRuleStep::index;
+    // Decimal text, never `u64`: §4.4 gives `[i]` no upper bound.
+    let _: fn(&BoundRuleStep) -> Option<String> = BoundRuleStep::position_digits;
+
+    let _: fn(&ResolvedRuleCaptureLocator) -> &str = ResolvedRuleCaptureLocator::locator;
+    let _: fn(&ResolvedRuleCaptureLocator) -> &[BoundRuleStep] =
+        ResolvedRuleCaptureLocator::rule_steps;
+    let _: fn(&ResolvedRuleCaptureLocator) -> &CaptureName = ResolvedRuleCaptureLocator::name;
+    let _: fn(&ResolvedRuleCaptureLocator) -> &'static str = ResolvedRuleCaptureLocator::type_name;
+    let _: fn(&ResolvedRuleCaptureLocator) -> Option<String> =
+        ResolvedRuleCaptureLocator::position_digits;
+
+    let _: fn(&ResolvedIntrinsicTextLocator) -> &str = ResolvedIntrinsicTextLocator::locator;
+    let _: fn(&ResolvedIntrinsicTextLocator) -> &NonEmpty<BoundRuleStep> =
+        ResolvedIntrinsicTextLocator::rule_steps;
+    let _: fn(&ResolvedIntrinsicTextLocator) -> Option<String> =
+        ResolvedIntrinsicTextLocator::position_digits;
+
+    let _: fn(&ResolvedFrontmatterQuery) -> &str = ResolvedFrontmatterQuery::locator;
+    let _: fn(&ResolvedFrontmatterQuery) -> &str = ResolvedFrontmatterQuery::query;
+    let _: fn(&ResolvedFrontmatterQuery) -> Option<&outlint_core::FrontmatterScalar> =
+        ResolvedFrontmatterQuery::equals;
+
+    let _: fn(&ResolvedFrontmatterCapture) -> &str = ResolvedFrontmatterCapture::locator;
+    let _: fn(&ResolvedFrontmatterCapture) -> &CaptureName = ResolvedFrontmatterCapture::name;
+    let _: fn(&ResolvedFrontmatterCapture) -> &'static str = ResolvedFrontmatterCapture::type_name;
+}
+
+/// Pins the intended opacity of the kernel-backed model. None of these types
+/// can be built from outside the crate, so no caller can construct a schema
+/// that skips the loader's checks — and none of them exposes a JSONPath
+/// provider type or an arbitrary-precision integer type in a signature.
+#[test]
+fn kernel_backed_values_stay_opaque_to_callers() {
+    fn assert_inspectable<T: std::fmt::Debug + Clone + PartialEq>() {}
+
+    assert_inspectable::<outlint_core::CaptureName>();
+    assert_inspectable::<outlint_core::RuleCapture>();
+    assert_inspectable::<outlint_core::FrontmatterCapture>();
+    assert_inspectable::<outlint_core::FrontmatterCaptures>();
+    assert_inspectable::<outlint_core::ValueOrderEntry>();
+    assert_inspectable::<outlint_core::BoundRuleStep>();
+    assert_inspectable::<outlint_core::ResolvedOutlineLocator>();
+    assert_inspectable::<outlint_core::ResolvedFrontmatterQuery>();
+    assert_inspectable::<outlint_core::ResolvedFrontmatterCapture>();
+}
