@@ -13,6 +13,28 @@ output shape, and the library API may all change in a minor release. See
 
 ### Added
 
+- **Typed Values and unified locators.** Regex rules and frontmatter may now
+  declare `int`, `bool`, `date`, `semver`, `dotted`, and `text` captures:
+  `captures` on a regex rule binds its named groups, `frontmatter.captures`
+  exports values addressed by a singular RFC 9535 JSONPath and may mark them
+  `required`, and values are parsed without coercion, reporting
+  `invalid-value` and `missing-value`. A rule's `order` list orders that
+  rule's own repeated headings by a captured value, ascending or descending
+  and optionally strict, reporting `order-violation` per offending adjacent
+  pair. Constraint operands are now unified locators: relative and
+  `$.`-absolute name paths, `[i]` positional narrowing, structural steps, and
+  a singularity requirement on every non-terminal step. Frontmatter document
+  queries are written `fm[...]` and take a complete RFC 9535 query — bare as
+  a typed boolean read, `=literal` as type-preserving existential equality —
+  with a portable guaranteed core of child name, index, and wildcard segments
+  and a provider-dependent vendor tier beyond it, while `fm.<name>` now
+  refers only to a declared frontmatter capture: the former dynamic-key
+  meaning is gone and legacy `fm.key=value` is invalid. CLI machine output is
+  envelope version 3, whose diagnostics carry tagged `rule`,
+  `frontmatter_query`, and `frontmatter_capture` references preserving the
+  written locator and its typed-value metadata; there is no version 2 mode,
+  so consumers must reject envelope versions they do not support (spec
+  §§2.3–2.4, 3.8, 4.4–4.6, 6, 11.3–11.4).
 - **Per-document schema discovery.** Without `--schema`, discovery now checks
   each ancestor directory for `<stem>.outlint.yml` — the document's file name
   with its final extension removed, so `CHANGELOG.md` discovers
