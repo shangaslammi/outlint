@@ -417,8 +417,14 @@ impl<'a> FrontmatterCaptureView<'a> {
 
 /// One entry of a rule's `order` list (§3.8).
 ///
-/// Entry order is semantic — the list is a sort key read most significant
-/// first — so these live in a [`Vec`] rather than a keyed collection.
+/// Entries are independent, not the components of one compound sort key:
+/// §3.8 says "each `order` entry on a rule independently orders the
+/// occurrences matched by that rule", so an entry never breaks a tie left by
+/// an earlier one and an invalid value suppresses only its own entry. What
+/// entry position still decides is where §6.3 anchors — a duplicate
+/// normalized entry is reported against the later of the two — and the
+/// deterministic order the diagnostics of one rule come out in, which is why
+/// these live in a [`Vec`] rather than a keyed collection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ValueOrderEntry {
     /// The capture whose values this entry compares.

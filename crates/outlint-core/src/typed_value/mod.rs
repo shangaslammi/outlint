@@ -321,6 +321,28 @@ impl TypedValue {
             .map(|ordering| ordering == Ordering::Equal)
     }
 
+    /// The boolean a `bool` value carries, or `None` for every other type.
+    ///
+    /// §4.6 makes `fm.<name>` "satisfied iff the capture is valid and bound,
+    /// except that a bound `bool` capture contributes its boolean value: a
+    /// valid bound `false` is unsatisfied". A proposition therefore has to
+    /// read that boolean out of an otherwise opaque value, and has to do so
+    /// without deciding anything about the other five types — which is why
+    /// this projects rather than converts, answering `None` for every value
+    /// that is not a `bool` however it is spelled.
+    ///
+    /// [`Self::canonical`] cannot stand in for it. That spelling allocates a
+    /// `String`, and it renders a `text` value holding the characters `false`
+    /// exactly as it renders the boolean `false`, so reading truth from it
+    /// would let a string capture's contents decide a constraint. This
+    /// projection is exact and allocates nothing.
+    pub(crate) fn as_bool(&self) -> Option<bool> {
+        match self.value {
+            NormalizedValue::Bool(value) => Some(value),
+            _ => None,
+        }
+    }
+
     /// The canonical spelling of this value.
     ///
     /// This is what a message about an order violation should show: it names

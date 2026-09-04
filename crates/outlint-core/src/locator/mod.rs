@@ -50,6 +50,15 @@ mod syntax;
 // item at a time as later lanes wire themselves up, rather than being opened
 // wholesale.
 pub(crate) use self::jsonpath::{AbsoluteSingularPath, FrontmatterQueryLocator};
+// The two items the validator's typed-value lane names, kept on a line of
+// their own so that the allowance below covers nothing else and comes out
+// with the first consumer. `PreparedQuery` is what a validation plan stores
+// per distinct §4.6 query, so that a query compiles once per schema rather
+// than once per proposition per document; `SingularComponent` is what
+// frontmatter capture evaluation walks, and re-exporting it is what keeps
+// that walk from reparsing a §2.3 path's RFC escapes for itself.
+#[allow(unused_imports)]
+pub(crate) use self::jsonpath::{PreparedQuery, SingularComponent};
 pub(crate) use self::syntax::{
     parse_locator, FrontmatterCaptureLocator, LocatorAnchor, LocatorPosition, LocatorSource,
     ParsedLocator, UnboundOutlineLocator,

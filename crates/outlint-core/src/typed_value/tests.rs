@@ -426,6 +426,62 @@ fn text_preserves_its_source_scalar_for_scalar() {
     }
 }
 
+#[test]
+fn as_bool_projects_only_a_bool_value() {
+    // §4.6: "a bound `bool` capture contributes its boolean value: a valid
+    // bound `false` is unsatisfied". Both booleans have to be readable, and
+    // they have to be readable apart from each other.
+    assert_eq!(
+        parse_header(ValueType::Bool, "true")
+            .expect("`true` is a bool")
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        parse_header(ValueType::Bool, "false")
+            .expect("`false` is a bool")
+            .as_bool(),
+        Some(false)
+    );
+    // A YAML boolean reaches the same projection through the other source.
+    let yes = Value::Bool(true);
+    assert_eq!(
+        parse_frontmatter(
+            ValueType::Bool,
+            FrontmatterValue::new(&yes, ResolvedYamlKind::Boolean)
+        )
+        .expect("a YAML boolean is a bool")
+        .as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn as_bool_refuses_every_other_type_including_boolean_looking_text() {
+    // The projection is a type test, not a reading of the spelling: a `text`
+    // capture whose characters are `false` is not a false boolean, and a
+    // proposition that treated it as one would let a string decide a
+    // constraint.
+    for (value_type, source) in [
+        (ValueType::Text, "true"),
+        (ValueType::Text, "false"),
+        (ValueType::Text, "yes"),
+        (ValueType::Int, "0"),
+        (ValueType::Int, "1"),
+        (ValueType::Date, "2024-02-29"),
+        (ValueType::Semver, "1.0.0"),
+        (ValueType::Dotted, "1.2"),
+    ] {
+        let parsed = parse_header(value_type, source).expect("the source parses as its type");
+        assert_eq!(
+            parsed.as_bool(),
+            None,
+            "{} `{source}` must not project to a boolean",
+            value_type.as_str()
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Normalized-value accessors
 //
