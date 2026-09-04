@@ -60,6 +60,9 @@ impl OutlintNormalizedPath {
         )
     }
 
+    /// Awaiting the §6.1 `pointer` and normalized-path rendering that
+    /// `invalid-value` on a frontmatter query node needs.
+    #[allow(dead_code)]
     pub(crate) fn components(&self) -> &[PathComponent] {
         &self.0
     }
@@ -68,6 +71,7 @@ impl OutlintNormalizedPath {
     ///
     /// The result is always a valid JSONPath query selecting exactly the node
     /// it names, which is the property the round-trip tests check.
+    #[allow(dead_code)]
     pub(crate) fn render_normalized(&self) -> String {
         let mut out = String::from("$");
         for component in &self.0 {
@@ -91,6 +95,7 @@ impl OutlintNormalizedPath {
     ///
     /// The root is the empty pointer; every other path is a sequence of
     /// `/`-prefixed reference tokens.
+    #[allow(dead_code)]
     pub(crate) fn render_pointer(&self) -> String {
         let mut out = String::new();
         for component in &self.0 {
@@ -111,6 +116,7 @@ impl OutlintNormalizedPath {
 /// lowercase `\u00xx` form. Everything else is literal — including a double
 /// quote, which needs no escape inside a single-quoted name, and every
 /// non-ASCII character, which §2.7 leaves as itself.
+#[allow(dead_code)]
 fn push_normalized_name(out: &mut String, name: &str) {
     for character in name.chars() {
         match character {
@@ -134,6 +140,7 @@ fn push_normalized_name(out: &mut String, name: &str) {
 /// Only `~` and `/` are escaped, as `~0` and `~1`. Quotes, backslashes, C0
 /// controls, and non-ASCII characters are literal token characters; escaping
 /// them for transport is the job of whatever serializes the pointer into JSON.
+#[allow(dead_code)]
 fn push_pointer_token(out: &mut String, name: &str) {
     for character in name.chars() {
         match character {
@@ -186,10 +193,14 @@ impl<'a> LocatedNodeSet<'a> {
         Self { nodes }
     }
 
+    // Proposition truth is existential, so it asks only `any`. A node count
+    // is what the `invalid-value` reporting of §4.6 will want.
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }

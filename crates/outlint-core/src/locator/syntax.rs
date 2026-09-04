@@ -226,6 +226,10 @@ impl StructuralStep {
         &self.kind
     }
 
+    /// Unread while this version allocates no structural kind: binding
+    /// refuses the step before its subscript could matter. The feature that
+    /// allocates such kinds is what reads this.
+    #[allow(dead_code)]
     pub(crate) fn position(&self) -> Option<&LocatorPosition> {
         self.position.as_ref()
     }
@@ -318,6 +322,10 @@ pub(crate) enum ParsedLocator {
 }
 
 impl ParsedLocator {
+    /// Unread by the binder, which classifies first and then takes the
+    /// source from the form it matched. This is for a caller that wants the
+    /// spelling without classifying.
+    #[allow(dead_code)]
     pub(crate) fn source(&self) -> &LocatorSource {
         match self {
             ParsedLocator::Outline(locator) => locator.source(),
@@ -357,16 +365,22 @@ impl LocatorParseError {
         }
     }
 
+    // §4.4 gives every locator fault one diagnostic id, so the loader quotes
+    // the whole failure through `Display` rather than branching. These stay
+    // for a caller that wants to highlight the fault inside the locator.
+    #[allow(dead_code)]
     pub(crate) fn kind(&self) -> LocatorParseErrorKind {
         self.kind
     }
 
     /// The byte offset into the original locator where the problem starts.
+    #[allow(dead_code)]
     pub(crate) fn offset(&self) -> usize {
         self.offset
     }
 
     /// The provider's own message, when the failure came from the provider.
+    #[allow(dead_code)]
     pub(crate) fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
     }

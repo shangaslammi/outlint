@@ -590,6 +590,96 @@ fn ordered_compares_concrete_parent_scopes() {
     );
 }
 
+/// A repeatable owner whose child scope is unordered, carrying one constraint.
+fn repeatable_owner(constraint: &str) -> String {
+    format!(
+        "version: 1\nsections:\n  - id: owner\n    match: Owner\n    ordered: false\n    \
+         sections:\n      - id: x\n        match: X\n      - id: y\n        match: Y\n    \
+         constraints:\n      - {constraint}\n"
+    )
+}
+
+#[test]
+fn ordered_binds_per_instance_inside_a_repeatable_owner() {
+    // §3.1 binds a rule's constraints per instance and §5.1 says an `ordered`
+    // inside one owner's `constraints` "compares occurrences within each
+    // [owner]'s own scope and never reaches across two". Every operand of one
+    // instance therefore sits in the same occurrence of that owner, even
+    // though the owner itself is repeatable and no operand narrows it.
+    valid(&repeatable_owner("ordered: [x, y]"));
+
+    // Naming a *specific* occurrence is a different concrete scope from "the
+    // one this instance is in", so the two do not compare.
+    let mixed = invalid(&repeatable_owner("ordered: [x, \"$.owner[0].y\"]"));
+    assert_eq!(mixed.errors.rest.len(), 0);
+    assert_eq!(
+        mixed.errors.first.kind,
+        SchemaErrorKind::OrderedScopeMismatch
+    );
+    assert!(mixed.errors.first.message.contains("same concrete scope"));
+
+    // An absolute spelling that narrows nothing fails earlier, on §4.4's
+    // singular-non-terminal rule, and says so.
+    let unnarrowed = invalid(&repeatable_owner("ordered: [x, \"$.owner.y\"]"));
+    assert_eq!(
+        unnarrowed.errors.first.kind,
+        SchemaErrorKind::OrderedScopeMismatch
+    );
+    assert!(unnarrowed
+        .errors
+        .first
+        .message
+        .contains("repeatable rule `owner`"));
+
+    // The same distinction decides §5.4 identity: "this instance's `x`" and
+    // "occurrence zero's `x`" carry different subscripts and are two
+    // propositions.
+    valid(&repeatable_owner("any_of: [x, \"$.owner[0].x\"]"));
+
+    // What none of this pins is the *label* the key gives a repeatable
+    // attachment ancestor: spelling it "the current occurrence" rather than
+    // "implicitly singular" changes no answer here, because the only operand
+    // that could reach that ancestor from outside must narrow it and so
+    // carries an explicit index, which differs from either. The distinction
+    // is documented at `ScopeSelector::CurrentOccurrence` and waits on a
+    // consumer that can traverse a repeatable ancestor unnarrowed.
+}
+
+/// A statically singular owner, otherwise identical to [`repeatable_owner`].
+fn singular_owner(constraint: &str) -> String {
+    format!(
+        "version: 1\nsections:\n  - id: owner\n    match: Owner\n    required: false\n    \
+         ordered: false\n    sections:\n      - id: x\n        match: X\n      - id: y\n        \
+         match: Y\n    constraints:\n      - {constraint}\n"
+    )
+}
+
+#[test]
+fn a_singular_owner_gives_relative_and_absolute_spellings_one_scope() {
+    // With an owner whose effective maximum is one there is only ever one
+    // occurrence to be in, so the scope a relative locator inherits and the
+    // scope an unnarrowed absolute locator walks to are the same one.
+    valid(&singular_owner("ordered: [x, \"$.owner.y\"]"));
+
+    // Being one scope, the two spellings of one rule are §5.4-identical.
+    assert_eq!(
+        error_kinds(&singular_owner("any_of: [x, \"$.owner.x\"]")),
+        vec![SchemaErrorKind::DuplicateRef]
+    );
+    assert_eq!(
+        error_kinds(&singular_owner("ordered: [x, \"$.owner.x\"]")),
+        vec![SchemaErrorKind::DuplicateRef]
+    );
+
+    // A subscript still narrows to a named occurrence rather than to "the
+    // current one", so it remains a separate scope and a separate identity.
+    assert_eq!(
+        error_kinds(&singular_owner("ordered: [x, \"$.owner[0].y\"]")),
+        vec![SchemaErrorKind::OrderedScopeMismatch]
+    );
+    valid(&singular_owner("any_of: [x, \"$.owner[0].x\"]"));
+}
+
 #[test]
 fn an_explicit_ordered_constraint_over_an_ordered_scope_is_refused() {
     // Redundant or contradictory, the fix is the same: the message says

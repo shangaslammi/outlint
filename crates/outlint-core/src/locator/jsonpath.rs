@@ -338,6 +338,9 @@ impl AbsoluteSingularPath {
         &self.source
     }
 
+    /// Awaiting frontmatter capture evaluation, which walks these to find
+    /// the node a declaration's path names.
+    #[allow(dead_code)]
     pub(crate) fn components(&self) -> &[SingularComponent] {
         &self.components
     }
@@ -368,15 +371,21 @@ impl SingularPathError {
         }
     }
 
+    // The capture loader reports a refused path through `Display`, which
+    // already carries all three of these. They are kept for a caller that
+    // wants to branch on the fault or highlight it inside the path.
+    #[allow(dead_code)]
     pub(crate) fn kind(&self) -> SingularPathErrorKind {
         self.kind
     }
 
+    #[allow(dead_code)]
     pub(crate) fn offset(&self) -> usize {
         self.offset
     }
 
     /// The provider's own message, when the failure came from the provider.
+    #[allow(dead_code)]
     pub(crate) fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
     }

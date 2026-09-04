@@ -648,6 +648,15 @@ enum ScopeSelector {
     /// A repeatable ancestor of the constraint itself. §3.1 binds a rule's
     /// constraints per instance, so every operand of one constraint instance
     /// sits inside the same occurrence of that ancestor.
+    ///
+    /// No comparison can currently tell this from
+    /// [`Self::ImplicitSingular`]: only the attachment path can put a
+    /// repeatable ancestor in a key, every operand of one constraint shares
+    /// that path, and an absolute operand reaching the same ancestor must
+    /// narrow it — which yields [`Self::ExplicitIndex`], distinct from both.
+    /// It is kept apart anyway, because recording a repeatable ancestor as
+    /// "singular" would make the key say something false the moment a
+    /// consumer can traverse one without a subscript.
     CurrentOccurrence,
 }
 

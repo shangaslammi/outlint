@@ -34,12 +34,11 @@
 
 // The wiring into `lib.rs` lands one lane at a time: constraint binding names
 // the outline and frontmatter forms, capture declarations name the singular
-// path, and evaluation names the prepared query. Until the last of those
-// arrives, some items here are dead in a non-test build. The allowance is
-// stated once, for this private module, rather than sprinkled over individual
-// items — and never for the crate, whose other modules must keep failing on
-// genuinely dead code. It comes out when the wiring is complete.
-#![allow(dead_code)]
+// path, and evaluation names the prepared query. A handful of items are still
+// waiting on the last of those, and each one says so at its own definition.
+// There is deliberately no module-wide dead-code allowance: one would silence
+// the next genuinely dead item as readily as these, and this module is where
+// an unused kernel path is most likely to go unnoticed.
 
 mod jsonpath;
 mod path;
@@ -47,10 +46,9 @@ mod syntax;
 
 // The facade: exactly the kernel items the rest of the crate names, and
 // nothing more. Everything reachable through it is `pub(crate)`, so no
-// provider type escapes this module by being re-exported here, and the
-// module-level allowance above still covers everything the facade does not
-// mention. It grows one item at a time as later lanes wire themselves up,
-// rather than being opened wholesale.
+// provider type escapes this module by being re-exported here. It grows one
+// item at a time as later lanes wire themselves up, rather than being opened
+// wholesale.
 pub(crate) use self::jsonpath::{AbsoluteSingularPath, FrontmatterQueryLocator};
 pub(crate) use self::syntax::{
     parse_locator, FrontmatterCaptureLocator, LocatorAnchor, LocatorPosition, LocatorSource,
