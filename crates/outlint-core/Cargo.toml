@@ -22,7 +22,7 @@ regex = "1"
 regex-syntax = { version = "=0.8.11", default-features = false, features = ["std", "unicode"] }
 # Pinned exactly: every `0.0.z` release is a breaking change under Cargo's
 # semver rules, and upstream ships breaking changes in them.
-saphyr-parser = "=0.0.11"
+saphyr-parser = "=0.0.12"
 semver = { version = "=1.0.28", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
