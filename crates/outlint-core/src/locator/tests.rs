@@ -1418,3 +1418,381 @@ mod singular_capture_paths {
         assert!(AbsoluteSingularPath::parse(singular).is_ok());
     }
 }
+
+/// Owned result paths, their two renderings, and the §4.6 node set.
+mod located_paths {
+    use proptest::prelude::*;
+    use serde_json::{json, Map, Value};
+    use serde_json_path::JsonPath;
+
+    use super::proven_jsonpath_path::{render_json_pointer, render_normalized_path};
+    use crate::locator::jsonpath::FullQuerySource;
+    use crate::locator::path::{LocatedNodeSet, OutlintNormalizedPath, PathComponent};
+
+    /// Evaluates `query` the way production does: source, prepared, evaluated.
+    fn evaluate<'a>(query: &str, document: &'a Value) -> LocatedNodeSet<'a> {
+        FullQuerySource::parse(query)
+            .expect("a valid query")
+            .prepare()
+            .expect("a query that parsed must prepare")
+            .evaluate(document)
+    }
+
+    /// The node set as `(normalized path, value)` pairs, sorted by path.
+    ///
+    /// Sorting here is what keeps every expectation below independent of the
+    /// order the set happens to iterate in, which §4.6 makes unobservable.
+    fn pairs(query: &str, document: &Value) -> Vec<(String, Value)> {
+        let mut pairs: Vec<(String, Value)> = evaluate(query, document)
+            .iter()
+            .map(|(path, value)| (path.render_normalized(), value.clone()))
+            .collect();
+        pairs.sort_by(|left, right| left.0.cmp(&right.0));
+        pairs
+    }
+
+    /// The owned components of the one node `query` selects.
+    fn only_components(query: &str, document: &Value) -> Vec<PathComponent> {
+        let nodes = evaluate(query, document);
+        assert_eq!(nodes.len(), 1, "`{query}` must select exactly one node");
+        let (path, _) = nodes.iter().next().expect("one node");
+        path.components().to_vec()
+    }
+
+    /// Both renderings of the path of the one node `query` selects.
+    fn render_only(query: &str, document: &Value) -> (String, String) {
+        let nodes = evaluate(query, document);
+        assert_eq!(nodes.len(), 1, "`{query}` must select exactly one node");
+        let path = nodes.iter().next().expect("one node").0;
+        (path.render_normalized(), path.render_pointer())
+    }
+
+    fn name(text: &str) -> PathComponent {
+        PathComponent::Name(text.into())
+    }
+
+    /// Builds a one-member object and the query selecting that member.
+    fn single_member(member: &str) -> (String, Value) {
+        let mut object = Map::new();
+        object.insert(member.to_owned(), Value::from(1));
+        let query = format!(
+            "$[{}]",
+            serde_json::to_string(member).expect("a JSON string")
+        );
+        (query, Value::Object(object))
+    }
+
+    // --- the node set §4.6 describes ---------------------------------------
+
+    /// §4.6: "duplicate references to the same result node are collapsed".
+    #[test]
+    fn duplicate_references_to_one_node_collapse() {
+        let document = json!({ "a": 1 });
+        assert_eq!(
+            pairs("$['a','a']", &document),
+            vec![("$['a']".to_owned(), json!(1))]
+        );
+        assert_eq!(
+            pairs("$['a','a','a']", &document),
+            vec![("$['a']".to_owned(), json!(1))]
+        );
+    }
+
+    /// The converse, and the reason identity is the path: two distinct nodes
+    /// may hold equal JSON, and collapsing them would lose one.
+    #[test]
+    fn equal_values_at_different_paths_stay_separate() {
+        let document = json!({ "a": 1, "b": 1 });
+        assert_eq!(
+            pairs("$['a','b']", &document),
+            vec![
+                ("$['a']".to_owned(), json!(1)),
+                ("$['b']".to_owned(), json!(1))
+            ]
+        );
+    }
+
+    /// §4.6: "Implementations MUST evaluate the complete result and MUST NOT
+    /// silently truncate it." There is no limit and no early exit to test
+    /// around, so the test is that a wide result arrives whole.
+    #[test]
+    fn a_wide_result_is_evaluated_completely() {
+        let document = Value::Array((0..64).map(Value::from).collect());
+        let nodes = evaluate("$[*]", &document);
+        assert_eq!(nodes.len(), 64);
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>()
+                .len(),
+            64
+        );
+    }
+
+    #[test]
+    fn a_wildcard_over_an_object_owns_every_member_path() {
+        let document = json!({ "a": 1, "b": 2 });
+        assert_eq!(
+            pairs("$.*", &document),
+            vec![
+                ("$['a']".to_owned(), json!(1)),
+                ("$['b']".to_owned(), json!(2))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_member_or_index_selects_nothing() {
+        let document = json!({ "a": [1, 2] });
+        assert!(evaluate("$.missing", &document).is_empty());
+        assert!(evaluate("$.a[5]", &document).is_empty());
+        assert!(evaluate("$.a[-5]", &document).is_empty());
+    }
+
+    /// §4.6: "a selector applied to the wrong container kind selects nothing".
+    #[test]
+    fn the_wrong_container_kind_selects_nothing() {
+        let document = json!({ "a": [1, 2], "b": { "c": 1 }, "d": "text" });
+        assert!(evaluate("$.a.c", &document).is_empty());
+        assert!(evaluate("$.b[0]", &document).is_empty());
+        assert!(evaluate("$.d[0]", &document).is_empty());
+        assert!(evaluate("$.d.anything", &document).is_empty());
+    }
+
+    // --- owned components --------------------------------------------------
+
+    #[test]
+    fn the_root_has_no_components() {
+        assert_eq!(only_components("$", &json!(1)), Vec::new());
+    }
+
+    #[test]
+    fn nested_names_and_indices_become_owned_components() {
+        let document = json!({ "a": [{ "b": 1 }] });
+        assert_eq!(
+            only_components("$.a[0].b", &document),
+            vec![name("a"), PathComponent::Index(0), name("b")]
+        );
+    }
+
+    /// A negative index is already resolved by the time it reaches a
+    /// component, so a rendered path never spells one.
+    #[test]
+    fn a_negative_index_is_normalized_to_its_position() {
+        let document = json!(["x", "y", "z"]);
+        assert_eq!(
+            only_components("$[-1]", &document),
+            vec![PathComponent::Index(2)]
+        );
+        assert_eq!(render_only("$[-1]", &document).0, "$[2]");
+    }
+
+    // --- normalized paths, RFC 9535 section 2.7 ----------------------------
+
+    #[test]
+    fn the_root_renders_as_a_bare_dollar() {
+        assert_eq!(render_only("$", &json!(1)).0, "$");
+    }
+
+    #[test]
+    fn ordinary_names_and_indices_render_as_the_rfc_spells_them() {
+        assert_eq!(render_only("$.foo", &json!({ "foo": 1 })).0, "$['foo']");
+        assert_eq!(render_only("$[0]", &json!(["a"])).0, "$[0]");
+        assert_eq!(
+            render_only("$.a[1].b", &json!({ "a": [{ "b": 0 }, { "b": 1 }] })).0,
+            "$['a'][1]['b']"
+        );
+    }
+
+    #[test]
+    fn an_apostrophe_and_a_reverse_solidus_are_escaped() {
+        let (query, document) = single_member("it's");
+        assert_eq!(render_only(&query, &document).0, r"$['it\'s']");
+        let (query, document) = single_member(r"back\slash");
+        assert_eq!(render_only(&query, &document).0, r"$['back\\slash']");
+    }
+
+    #[test]
+    fn a_double_quote_and_non_ascii_characters_stay_literal() {
+        let (query, document) = single_member(r#"say "hi""#);
+        assert_eq!(render_only(&query, &document).0, r#"$['say "hi"']"#);
+        let (query, document) = single_member("Mälardalen");
+        assert_eq!(render_only(&query, &document).0, "$['Mälardalen']");
+        let (query, document) = single_member("😀");
+        assert_eq!(render_only(&query, &document).0, "$['😀']");
+    }
+
+    #[test]
+    fn the_five_short_control_escapes_are_used() {
+        for (code_point, escaped) in [
+            (0x08_u32, r"\b"),
+            (0x09, r"\t"),
+            (0x0A, r"\n"),
+            (0x0C, r"\f"),
+            (0x0D, r"\r"),
+        ] {
+            let member = char::from_u32(code_point)
+                .expect("a scalar value")
+                .to_string();
+            let (query, document) = single_member(&member);
+            assert_eq!(
+                render_only(&query, &document).0,
+                format!("$['{escaped}']"),
+                "U+{code_point:04X}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_c0_controls_use_four_digit_lowercase_hex() {
+        for code_point in [0x00_u32, 0x01, 0x07, 0x0B, 0x0E, 0x1F] {
+            let member = char::from_u32(code_point)
+                .expect("a scalar value")
+                .to_string();
+            let (query, document) = single_member(&member);
+            assert_eq!(
+                render_only(&query, &document).0,
+                format!("$['\\u{code_point:04x}']"),
+                "U+{code_point:04X}"
+            );
+        }
+    }
+
+    /// The property that makes a normalized path useful: it is itself a query
+    /// selecting exactly the node it names.
+    #[test]
+    fn a_rendered_normalized_path_selects_the_node_it_names() {
+        for member in [
+            "plain",
+            "it's",
+            r"back\slash",
+            r#"say "hi""#,
+            "a~b",
+            "c/d",
+            "😀",
+        ] {
+            let (query, document) = single_member(member);
+            let (normalized, _) = render_only(&query, &document);
+            assert!(
+                JsonPath::parse(&normalized).is_ok(),
+                "`{normalized}` must be a valid query"
+            );
+            assert_eq!(
+                pairs(&normalized, &document),
+                vec![(normalized.clone(), json!(1))],
+                "`{normalized}` must reselect its own node"
+            );
+        }
+    }
+
+    // --- pointers, RFC 6901 ------------------------------------------------
+
+    #[test]
+    fn the_root_pointer_is_empty() {
+        assert_eq!(render_only("$", &json!(1)).1, "");
+    }
+
+    #[test]
+    fn pointers_prefix_every_token_with_a_solidus() {
+        assert_eq!(render_only("$.a", &json!({ "a": 1 })).1, "/a");
+        assert_eq!(render_only("$[0]", &json!(["x"])).1, "/0");
+        assert_eq!(
+            render_only("$.a[1].b", &json!({ "a": [{ "b": 0 }, { "b": 1 }] })).1,
+            "/a/1/b"
+        );
+    }
+
+    #[test]
+    fn pointers_escape_tilde_and_solidus_and_nothing_else() {
+        for (member, token) in [
+            ("a~b", "/a~0b"),
+            ("c/d", "/c~1d"),
+            ("~/", "/~0~1"),
+            ("/~", "/~1~0"),
+            ("it's", "/it's"),
+            (r"back\slash", r"/back\slash"),
+            (r#"say "hi""#, r#"/say "hi""#),
+        ] {
+            let (query, document) = single_member(member);
+            let (_, pointer) = render_only(&query, &document);
+            assert_eq!(pointer, token, "{member:?}");
+            assert_eq!(document.pointer(&pointer), Some(&json!(1)), "{member:?}");
+        }
+    }
+
+    // --- parity with the proven Phase 0 renderer ---------------------------
+
+    /// The production renderers must agree with the implementation the
+    /// integration suites already pin, for the same provider components.
+    #[test]
+    fn the_production_renderers_match_the_proven_ones() {
+        let document = json!({
+            "plain": 1,
+            "it's": 1,
+            "back\\slash": 1,
+            "say \"hi\"": 1,
+            "a~b": 1,
+            "c/d": 1,
+            "Mälardalen": 1,
+            "😀": 1,
+            "nested": [{ "deep": 1 }]
+        });
+        let path = JsonPath::parse("$..*").expect("a valid query");
+        let located = path.query_located(&document);
+        assert!(located.len() > 8, "the fixture must reach many paths");
+        for node in located.iter() {
+            let owned = OutlintNormalizedPath::from_provider(node.location());
+            assert_eq!(
+                owned.render_normalized(),
+                render_normalized_path(node.location())
+            );
+            assert_eq!(owned.render_pointer(), render_json_pointer(node.location()));
+        }
+    }
+
+    proptest! {
+        /// The same parity, over generated names rather than chosen ones.
+        #[test]
+        fn the_renderers_agree_on_arbitrary_unicode_names(
+            member in proptest::collection::vec(any::<char>(), 0..6)
+                .prop_map(|characters| characters.into_iter().collect::<String>())
+        ) {
+            let (query, document) = single_member(&member);
+            let path = JsonPath::parse(&query).expect("a generated query must parse");
+            let located = path.query_located(&document);
+            prop_assert_eq!(located.len(), 1);
+            let location = located.iter().next().expect("one node").location();
+            let owned = OutlintNormalizedPath::from_provider(location);
+
+            prop_assert_eq!(
+                owned.render_normalized(),
+                render_normalized_path(location)
+            );
+            prop_assert_eq!(owned.render_pointer(), render_json_pointer(location));
+        }
+
+        /// And the two properties each rendering must have on its own.
+        #[test]
+        fn a_rendered_path_round_trips_and_its_pointer_resolves(
+            member in proptest::collection::vec(any::<char>(), 0..6)
+                .prop_map(|characters| characters.into_iter().collect::<String>())
+        ) {
+            let (query, document) = single_member(&member);
+            let nodes = evaluate(&query, &document);
+            prop_assert_eq!(nodes.len(), 1);
+            let path = nodes.iter().next().expect("one node").0;
+
+            let normalized = path.render_normalized();
+            let reselected = evaluate(&normalized, &document);
+            prop_assert_eq!(reselected.len(), 1);
+            prop_assert_eq!(
+                reselected.iter().next().expect("one node").0.render_normalized(),
+                normalized
+            );
+
+            let expected = json!(1);
+            prop_assert_eq!(document.pointer(&path.render_pointer()), Some(&expected));
+        }
+    }
+}

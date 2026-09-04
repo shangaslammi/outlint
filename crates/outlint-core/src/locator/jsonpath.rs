@@ -26,8 +26,10 @@
 
 use std::fmt;
 
+use serde_json::Value;
 use serde_json_path::JsonPath;
 
+use super::path::LocatedNodeSet;
 use super::syntax::{LocatorParseError, LocatorParseErrorKind, LocatorSource};
 
 /// The source of one complete RFC 9535 query, validated and retained.
@@ -85,6 +87,20 @@ impl fmt::Display for FullQuerySource {
 /// `to_json_pointer`, or any other provider rendering.
 #[derive(Debug)]
 pub(crate) struct PreparedQuery(JsonPath);
+
+impl PreparedQuery {
+    /// Evaluates the query against one frontmatter view.
+    ///
+    /// §4.6: "Implementations MUST evaluate the complete result and MUST NOT
+    /// silently truncate it." The provider's located result is taken whole and
+    /// converted whole; there is no limit, no `take`, and no early exit, so a
+    /// caller that only needs to know whether *some* node is `true` still
+    /// evaluates every node — which is what makes §4.6's `invalid-value`
+    /// suppression reachable rather than short-circuited away.
+    pub(crate) fn evaluate<'a>(&self, document: &'a Value) -> LocatedNodeSet<'a> {
+        LocatedNodeSet::from_provider(&self.0.query_located(document))
+    }
+}
 
 /// An Outlint-owned copy of a provider parse failure.
 ///
