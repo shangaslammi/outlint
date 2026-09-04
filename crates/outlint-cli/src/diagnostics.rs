@@ -4,11 +4,14 @@
 //! `Rendered*` shapes both output formats consume, together with schema source
 //! locations and the total per-file ordering the JSON contract promises.
 
+use std::cmp::Ordering;
+
 use outlint_core::{
     Diagnostic, DiagnosticReference, DiagnosticTarget, FrontmatterScalar, InvalidSchema,
     LoadedSchema, Matcher, RefAnchor, SchemaError, SchemaLocations, SchemaNode, SchemaSources,
     SourceRange,
 };
+use serde_json::Number;
 
 #[derive(Debug)]
 pub(crate) struct InvocationOutput {
@@ -142,12 +145,11 @@ pub(crate) enum RenderedReference {
         path: Vec<String>,
         /// Aligned with `path`, present only when some step is subscripted.
         ///
-        /// Each entry is a `[i]` subscript in canonical decimal, or `None`
-        /// for an unsubscripted step. Decimal text rather than an integer
-        /// because §4.4 gives `i` no upper bound; §11.3 requires it to be
-        /// serialized as an arbitrary-precision JSON *number*, never a
-        /// quoted string.
-        positions: Option<Vec<Option<String>>>,
+        /// Each entry is a `[i]` subscript, or `None` for an unsubscripted
+        /// step. §11.3 requires the subscript to be serialized as an
+        /// arbitrary-precision JSON *number*, never a quoted string, so it is
+        /// carried as one; see [`RenderedPosition`].
+        positions: Option<Vec<Option<RenderedPosition>>>,
         matcher: RenderedMatcher,
     },
     /// §11.3 kind `frontmatter_query`, with its members in declaration order.
@@ -165,6 +167,64 @@ pub(crate) enum RenderedReference {
         /// One of the §2.4 type names.
         value_type: String,
     },
+}
+
+/// One `[i]` subscript, carried as the JSON number that is emitted for it.
+///
+/// §4.4 gives a locator position "no upper bound" and §11.3 says the emitted
+/// values "are arbitrary-precision JSON integers; consumers MUST NOT assume
+/// they fit a 64-bit integer type". The value therefore never passes through
+/// `usize`, `u64`, or a float on its way out: it is built straight from the
+/// locator kernel's canonical decimal spelling into a [`Number`] that
+/// serializes back to exactly that spelling.
+///
+/// The wrapper exists for the ordering. [`Number`] has no [`Ord`] of its own,
+/// and §11.4 requires aligned positions to compare *mathematically* — lexical
+/// decimal order would put `10` before `2`. For the canonical non-negative
+/// spelling this type holds, comparing digit *count* first and only then the
+/// digits themselves is that mathematical order exactly: a longer
+/// leading-zero-free numeral is the larger integer, and equal-length numerals
+/// compare digit by digit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenderedPosition(Number);
+
+impl RenderedPosition {
+    /// Wraps `digits`, which MUST match §4.4's `0|[1-9][0-9]*`.
+    ///
+    /// That is the whole invariant this type rests on, and the only producer
+    /// is `BoundRuleStep::position_digits`, which spells a checked
+    /// arbitrary-precision integer. Nothing is re-validated here, and there is
+    /// deliberately no failure path: a malformed spelling would mean the
+    /// locator kernel had been changed to emit one, and silently rendering
+    /// such a value as JSON null would hide that rather than surface it.
+    pub(crate) fn from_canonical_digits(digits: String) -> Self {
+        Self(Number::from_string_unchecked(digits))
+    }
+
+    /// The number to emit, borrowed rather than reconstructed.
+    pub(crate) fn as_number(&self) -> &Number {
+        &self.0
+    }
+
+    /// The canonical decimal spelling this position was built from.
+    fn digits(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl Ord for RenderedPosition {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (left, right) = (self.digits(), other.digits());
+        left.len()
+            .cmp(&right.len())
+            .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+    }
+}
+
+impl PartialOrd for RenderedPosition {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -305,7 +365,10 @@ fn render_reference(reference: &DiagnosticReference) -> RenderedReference {
             let steps = locator.steps().iter().collect::<Vec<_>>();
             let positions = steps
                 .iter()
-                .map(|step| step.position_digits())
+                .map(|step| {
+                    step.position_digits()
+                        .map(RenderedPosition::from_canonical_digits)
+                })
                 .collect::<Vec<_>>();
             RenderedReference::Rule {
                 locator: locator.locator().to_owned(),

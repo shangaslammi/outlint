@@ -200,6 +200,18 @@ fn frontmatter_schema_diagnostics_anchor_to_the_failing_entry() {
             "pointer": "/count"
         })
     );
+    // §6.1: "`\"\"` is the root pointer, naming the frontmatter mapping
+    // itself, while no `pointer` member at all means the diagnostic is about
+    // the block rather than any value in it." The empty string is therefore
+    // emitted, not treated as nothing to say.
+    assert_eq!(
+        json["results"][0]["diagnostics"][0]["target"],
+        serde_json::json!({
+            "kind": "frontmatter",
+            "line_range": {"start_line": 1, "end_line": 11},
+            "pointer": ""
+        })
+    );
 }
 
 #[test]
@@ -275,6 +287,14 @@ fn block_level_frontmatter_diagnostics_stay_anchored_to_the_block() {
         missing["location"],
         serde_json::json!({"line": 1, "column": 1})
     );
+    // §6.1: `line_range` is "absent exactly when the document has no
+    // frontmatter block at all", and an absent optional member "MUST be
+    // omitted rather than emitted as null". With no block and no value, the
+    // target is the bare kind and nothing else.
+    assert_eq!(
+        missing["target"],
+        serde_json::json!({"kind": "frontmatter"})
+    );
 
     let present = run(
         &directory,
@@ -308,6 +328,17 @@ fn block_level_frontmatter_diagnostics_stay_anchored_to_the_block() {
             ("invalid-frontmatter", 1, 1)
         ]
     );
+    // A block that exists carries its span; neither diagnostic is about a
+    // value inside it, so neither carries a `pointer` at all.
+    for index in 0..2 {
+        assert_eq!(
+            present["results"][0]["diagnostics"][index]["target"],
+            serde_json::json!({
+                "kind": "frontmatter",
+                "line_range": {"start_line": 1, "end_line": 3}
+            })
+        );
+    }
 }
 
 #[test]
@@ -315,7 +346,7 @@ fn frontmatter_reference_details_retain_typed_equality() {
     let directory = TempDir::new("frontmatter-reference");
     directory.write(
         "schema.yml",
-        "version: 1\ntitle: null\nsections:\n  - id: a\n    match: A\nconstraints:\n  - one_of: [\"fm[$.status]=true\", a]\n",
+        "version: 1\ntitle: null\nsections:\n  - id: a\n    match: A\nconstraints:\n  - one_of: [\"fm[$.status]=true\", \"fm[$.status]\", a]\n",
     );
     directory.write("doc.md", "plain text\n");
 
@@ -331,12 +362,29 @@ fn frontmatter_reference_details_retain_typed_equality() {
         ],
     );
     assert_eq!(output.status.code(), Some(1));
-    let reference = &json_output(&output)["results"][0]["diagnostics"][0]["references"][0];
-    assert_eq!(reference["kind"], "frontmatter_query");
-    assert_eq!(reference["locator"], "fm[$.status]=true");
-    assert_eq!(reference["query"], "$.status");
+    let references = &json_output(&output)["results"][0]["diagnostics"][0]["references"];
+    // Whole-object equality, so an extra or renamed member cannot pass: the
+    // §11.3 members in declaration order, with `query` carrying the RFC 9535
+    // query stripped of its `fm[...]` wrapper while `locator` keeps the
+    // spelling the author wrote, equality literal and all.
     assert_eq!(
-        reference["equals"],
-        serde_json::json!({"type": "boolean", "value": true})
+        references[0],
+        serde_json::json!({
+            "kind": "frontmatter_query",
+            "locator": "fm[$.status]=true",
+            "query": "$.status",
+            "equals": {"type": "boolean", "value": true}
+        })
+    );
+    // The same query without an equality is a bare boolean read (§4.6). Its
+    // `equals` is absent rather than null, and the two locators stay distinct
+    // even though the query behind them is identical.
+    assert_eq!(
+        references[1],
+        serde_json::json!({
+            "kind": "frontmatter_query",
+            "locator": "fm[$.status]",
+            "query": "$.status"
+        })
     );
 }
