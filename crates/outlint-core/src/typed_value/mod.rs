@@ -153,7 +153,11 @@ pub(crate) enum ResolvedYamlKind {
 ///   failure rather than being confused with a lexical one.
 ///
 /// Supplying a `value` whose shape disagrees with `yaml_kind` is a producer
-/// bug; the kernel reports it as a kind failure and never panics.
+/// bug; the kernel reports it as a kind failure and never panics. A number
+/// is judged by its spelling there: the JSON view cannot name the YAML kind
+/// a scalar resolved to, but a fraction or an exponent still rules out a
+/// whole number, so `1.2` supplied as an integer is reported as the float it
+/// was written as rather than as a malformed integer.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FrontmatterValue<'a> {
     value: &'a Value,
@@ -478,6 +482,21 @@ impl DottedValue {
 // string was reached.
 // ---------------------------------------------------------------------------
 
+/// Whether `text` is a non-empty run of ASCII decimal digits.
+fn is_ascii_decimal(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether `text` is `-?[0-9]+`, which is the `int` grammar and also the
+/// spelling of a whole number in the §1.6 JSON view.
+fn is_signed_ascii_decimal(text: &str) -> bool {
+    let digits = match text.strip_prefix('-') {
+        Some(rest) => rest,
+        None => text,
+    };
+    is_ascii_decimal(digits)
+}
+
 /// Parses `-?[0-9]+` into a signed 64-bit integer.
 ///
 /// ASCII digits only. A `+` sign, surrounding whitespace, digit separators,
@@ -485,11 +504,7 @@ impl DottedValue {
 /// spellings. Leading zeros are allowed and carry no meaning, so `-01` is
 /// `-1` and `-0` is `0`.
 fn parse_int(source: &str) -> Result<i64, ParseFailure> {
-    let digits = match source.strip_prefix('-') {
-        Some(rest) => rest,
-        None => source,
-    };
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !is_signed_ascii_decimal(source) {
         return Err(ParseFailure::Lexical);
     }
     // The grammar held, so the only remaining way to fail is the bound. That
@@ -693,11 +708,6 @@ fn semver_bound_failure(numeric_part: &str) -> Option<ParseFailure> {
     None
 }
 
-/// Whether `text` is a non-empty run of ASCII decimal digits.
-fn is_ascii_decimal(text: &str) -> bool {
-    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
-}
-
 // ---------------------------------------------------------------------------
 // Source entry points
 // ---------------------------------------------------------------------------
@@ -710,7 +720,10 @@ fn is_ascii_decimal(text: &str) -> bool {
 /// grammar applies to it exactly as written: a header `bool` is `true` or
 /// `false` and nothing else, because no YAML resolver stands between the
 /// document and this call.
-fn parse_header(value_type: ValueType, source: &str) -> Result<TypedValue, ParseFailure> {
+pub(crate) fn parse_header(
+    value_type: ValueType,
+    source: &str,
+) -> Result<TypedValue, ParseFailure> {
     parse_lexical(value_type, source)
 }
 
@@ -732,7 +745,7 @@ fn parse_header(value_type: ValueType, source: &str) -> Result<TypedValue, Parse
 /// A `value` whose shape disagrees with `yaml_kind` is a producer bug; it is
 /// reported as a kind failure against the shape actually supplied, and never
 /// panics.
-fn parse_frontmatter(
+pub(crate) fn parse_frontmatter(
     value_type: ValueType,
     supplied: FrontmatterValue<'_>,
 ) -> Result<TypedValue, ParseFailure> {
@@ -747,9 +760,23 @@ fn parse_frontmatter(
     match (expected, supplied.value()) {
         // `as_str` is the arbitrary-precision spelling, which this crate
         // enables so that §1.6's exact mathematical value survives.
-        (ResolvedYamlKind::Integer, Value::Number(number)) => Ok(TypedValue::from_normalized(
-            NormalizedValue::Int(parse_int(number.as_str())?),
-        )),
+        (ResolvedYamlKind::Integer, Value::Number(number)) => {
+            let spelling = number.as_str();
+            // A fraction or an exponent says the node was never a whole
+            // number, whichever kind was supplied beside it. That is the two
+            // disagreeing about kind rather than a malformed integer, and it
+            // is reported as such; a whole-number spelling that exceeds the
+            // bound is still the latter.
+            if !is_signed_ascii_decimal(spelling) {
+                return Err(ParseFailure::KindMismatch {
+                    expected: ResolvedYamlKind::Integer,
+                    actual: ResolvedYamlKind::Float,
+                });
+            }
+            Ok(TypedValue::from_normalized(NormalizedValue::Int(
+                parse_int(spelling)?,
+            )))
+        }
         (ResolvedYamlKind::Boolean, Value::Bool(resolved)) => Ok(TypedValue::from_normalized(
             NormalizedValue::Bool(*resolved),
         )),
@@ -782,14 +809,20 @@ fn parse_lexical(value_type: ValueType, source: &str) -> Result<TypedValue, Pars
 ///
 /// Used only to report a `value`/`yaml_kind` pair that disagrees, which is a
 /// producer bug. A JSON number cannot say which YAML scalar produced it —
-/// that is the whole reason the kind travels separately — so a number is
-/// reported as an integer here; the accurate kind was the one the producer
-/// failed to supply.
+/// that is the whole reason the kind travels separately — but it can still
+/// say whether it was written as a whole number, and that much is read here
+/// so the kind reported is the honest one either way.
 fn json_shape_kind(value: &Value) -> ResolvedYamlKind {
     match value {
         Value::Null => ResolvedYamlKind::Null,
         Value::Bool(_) => ResolvedYamlKind::Boolean,
-        Value::Number(_) => ResolvedYamlKind::Integer,
+        Value::Number(number) => {
+            if is_signed_ascii_decimal(number.as_str()) {
+                ResolvedYamlKind::Integer
+            } else {
+                ResolvedYamlKind::Float
+            }
+        }
         Value::String(_) => ResolvedYamlKind::String,
         Value::Array(_) => ResolvedYamlKind::Sequence,
         Value::Object(_) => ResolvedYamlKind::Mapping,

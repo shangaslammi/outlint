@@ -1531,3 +1531,110 @@ proptest! {
         prop_assert_eq!(left.value_type(), right.value_type());
     }
 }
+
+#[test]
+fn frontmatter_integer_kind_with_a_non_integral_number_is_a_kind_mismatch() {
+    // The handoff contract says a disagreeing `value`/`yaml_kind` pair comes
+    // back as a kind failure. A number carrying a fraction or an exponent
+    // was never a whole number, so the disagreement is real and is reported
+    // against the float the node was actually written as, rather than
+    // arriving as a malformed integer.
+    for spelling in [
+        "1.2", "1.0", "-0.5", "0.0", "1e3", "1.5e2", "1E+3", "-2.5e-3",
+    ] {
+        let json = exact_json_number(spelling);
+        assert_eq!(
+            frontmatter_outcome(
+                ValueType::Int,
+                FrontmatterValue::new(&json, ResolvedYamlKind::Integer)
+            ),
+            Err(ParseFailure::KindMismatch {
+                expected: ResolvedYamlKind::Integer,
+                actual: ResolvedYamlKind::Float
+            }),
+            "frontmatter int {spelling}"
+        );
+    }
+}
+
+#[test]
+fn frontmatter_integer_kind_still_separates_the_bound_from_a_kind_failure() {
+    // A whole-number spelling past the bound is a bound failure, not a kind
+    // one: the node really was an integer, just not one that fits.
+    let json = exact_json_number("9223372036854775808");
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Int,
+            FrontmatterValue::new(&json, ResolvedYamlKind::Integer)
+        ),
+        Err(ParseFailure::BoundOverflow {
+            component: BoundComponent::Int
+        })
+    );
+}
+
+#[test]
+fn a_disagreeing_number_is_reported_by_its_spelling_for_every_type() {
+    // The same reading applies wherever a number reaches the shape check,
+    // not only on the `int` path: `bool` sees the kind it was handed.
+    let integral = exact_json_number("42");
+    let fractional = exact_json_number("4.2");
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Bool,
+            FrontmatterValue::new(&integral, ResolvedYamlKind::Boolean)
+        ),
+        Err(ParseFailure::KindMismatch {
+            expected: ResolvedYamlKind::Boolean,
+            actual: ResolvedYamlKind::Integer
+        })
+    );
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Bool,
+            FrontmatterValue::new(&fractional, ResolvedYamlKind::Boolean)
+        ),
+        Err(ParseFailure::KindMismatch {
+            expected: ResolvedYamlKind::Boolean,
+            actual: ResolvedYamlKind::Float
+        })
+    );
+    // A string type reached with a number reports the same distinction.
+    assert_eq!(
+        frontmatter_outcome(
+            ValueType::Semver,
+            FrontmatterValue::new(&fractional, ResolvedYamlKind::String)
+        ),
+        Err(ParseFailure::KindMismatch {
+            expected: ResolvedYamlKind::String,
+            actual: ResolvedYamlKind::Float
+        })
+    );
+}
+
+#[test]
+fn the_contract_operations_are_reachable_from_the_rest_of_the_crate() {
+    // The kernel is consumed by sibling modules, so the entry points and the
+    // operations on a parsed value are crate-visible rather than private to
+    // this module. This test exists to state that: it uses each of them the
+    // way a caller outside the module would.
+    let value_type = ValueType::from_name("dotted").expect("`dotted` is a capture type");
+    assert_eq!(value_type.as_str(), "dotted");
+    assert_eq!(value_type.frontmatter_kind(), ResolvedYamlKind::String);
+
+    let from_header = parse_header(value_type, "1.02").expect("a valid dotted header capture");
+    let json = Value::String("1.2".to_owned());
+    let from_frontmatter = parse_frontmatter(
+        value_type,
+        FrontmatterValue::new(&json, ResolvedYamlKind::String),
+    )
+    .expect("a valid dotted frontmatter capture");
+
+    assert_eq!(from_header.value_type(), ValueType::Dotted);
+    assert_eq!(from_header.equals(&from_frontmatter), Some(true));
+    assert_eq!(
+        from_header.compare(&from_frontmatter),
+        Some(Ordering::Equal)
+    );
+    assert_eq!(from_header.canonical(), "1.2");
+}
