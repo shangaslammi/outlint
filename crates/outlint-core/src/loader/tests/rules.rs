@@ -674,11 +674,21 @@ fn ordered_must_be_a_bool_and_the_option_must_be_known() {
 }
 
 proptest! {
+    /// The property is about sources that carry no backslash of their own, so
+    /// the strategy removes them rather than rejecting the strings that have
+    /// one. Rejection would make the property's cost depend on how often
+    /// `any::<String>()` happens to produce a backslash, and a raised
+    /// `PROPTEST_CASES` would eventually exhaust the global rejection budget
+    /// and fail the run for a reason that is not about `regex_body`. Removal
+    /// leaves every already-qualifying string reachable and spelled the same,
+    /// and maps the rest onto neighbours in the same set.
     #[test]
     fn regex_body_round_trips_delimiter_escaping_without_other_escapes(
-        source in any::<String>(),
+        source in any::<String>().prop_map(|mut source| {
+            source.retain(|character| character != '\\');
+            source
+        }),
     ) {
-        prop_assume!(!source.contains('\\'));
         let encoded = source
             .chars()
             .flat_map(|character| {
@@ -693,9 +703,18 @@ proptest! {
         prop_assert_eq!(decoded.as_deref(), Some(source.as_str()));
     }
 
+    /// §2.1 admits a finite `a..b` when `b >= a` and `b >= 1`, so the bounds
+    /// are derived from two arbitrary integers rather than filtered for that
+    /// pair of conditions: sorting them satisfies the first and raising the
+    /// larger to at least one satisfies the second. Every valid `(min, max)`
+    /// is still reachable — a target pair drawn in either order sorts back to
+    /// itself, and its maximum is already at least one — while no draw is
+    /// rejected, so raising `PROPTEST_CASES` cannot exhaust the global
+    /// rejection budget.
     #[test]
-    fn parse_repeat_normalizes_valid_finite_bounds(min in any::<u32>(), max in any::<u32>()) {
-        prop_assume!(max >= min && max > 0);
+    fn parse_repeat_normalizes_valid_finite_bounds(a in any::<u32>(), b in any::<u32>()) {
+        let min = a.min(b);
+        let max = a.max(b).max(1);
         let source = format!("{min}..{max}");
         prop_assert_eq!(
             parse_repeat(&source),
