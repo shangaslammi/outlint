@@ -1031,3 +1031,195 @@ fn linked_json_schema_loads_beside_a_captures_declaration() {
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
 }
+
+// ---------------------------------------------------------------------------
+// Frontmatter capture normalization
+// ---------------------------------------------------------------------------
+
+/// Loads one frontmatter capture declaration and returns the policy's view.
+fn captures_of(declarations: &str) -> crate::Schema {
+    valid(&format!(
+        "version: 1\nfrontmatter:\n  captures:\n{declarations}sections: []\n"
+    ))
+}
+
+/// §2.4's type set is closed and its spellings are stable, so each of the six
+/// resolves and reports itself back by the name the source used.
+#[test]
+fn every_declared_capture_type_normalizes() {
+    let schema = captures_of(concat!(
+        "    a:\n      type: int\n",
+        "    b:\n      type: bool\n",
+        "    c:\n      type: date\n",
+        "    d:\n      type: semver\n",
+        "    e:\n      type: dotted\n",
+        "    f:\n      type: text\n",
+    ));
+    let captures = schema.frontmatter.captures();
+    assert_eq!(captures.len(), 6);
+    assert_eq!(
+        captures
+            .iter()
+            .map(|(name, capture)| (name.as_str(), capture.type_name()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("a", "int"),
+            ("b", "bool"),
+            ("c", "date"),
+            ("d", "semver"),
+            ("e", "dotted"),
+            ("f", "text"),
+        ]
+    );
+}
+
+/// §2.3 gives `required` the default `false`; an explicit value of either
+/// polarity is kept. The default is what decides whether an absent value is
+/// `missing-value`, so it is pinned rather than left to the reader.
+#[test]
+fn an_omitted_capture_required_flag_defaults_to_false() {
+    let schema = captures_of(concat!(
+        "    plain:\n      type: text\n",
+        "    yes_flag:\n      type: text\n      required: true\n",
+        "    no_flag:\n      type: text\n      required: false\n",
+    ));
+    let captures = schema.frontmatter.captures();
+    assert_eq!(
+        captures
+            .iter()
+            .map(|(name, capture)| (name.as_str(), capture.is_required()))
+            .collect::<Vec<_>>(),
+        vec![("no_flag", false), ("plain", false), ("yes_flag", true)]
+    );
+}
+
+/// §2.3: "When omitted, it defaults to the capture name as one name segment;
+/// for capture `version`, the default is equivalent to `$['version']`." The
+/// default is spelled in bracket-quoted form so that one normalized spelling
+/// serves every name the grammar admits.
+#[test]
+fn an_omitted_capture_path_defaults_to_the_bracketed_name() {
+    let schema = captures_of("    version:\n      type: semver\n");
+    let captures = schema.frontmatter.captures();
+    let (name, _) = captures.iter().next().expect("the declaration normalized");
+    assert_eq!(name.as_str(), "version");
+    let capture = captures
+        .get(&name.clone())
+        .expect("the collection is keyed by that name");
+    assert_eq!(capture.path_source(), "$['version']");
+}
+
+/// The default path is not merely equivalent to the explicit spelling, it is
+/// that spelling: two schemas differing only in whether the author wrote it
+/// compare equal, so no consumer can tell the defaulted one apart.
+#[test]
+fn a_defaulted_capture_path_equals_the_explicit_spelling() {
+    let defaulted = captures_of("    version:\n      type: semver\n");
+    let explicit = captures_of("    version:\n      type: semver\n      path: \"$['version']\"\n");
+    assert_eq!(defaulted.frontmatter, explicit.frontmatter);
+}
+
+/// §2.3's presence policies and its capture declaration are independent, and
+/// the model makes the two allowed combinations the only representable ones.
+/// Both are reached here so neither variant can be produced by accident.
+#[test]
+fn capture_bearing_policies_follow_the_presence_policy() {
+    let optional = captures_of("    version:\n      type: semver\n");
+    assert!(matches!(
+        optional.frontmatter,
+        FrontmatterPolicy::OptionalWithCaptures { schema: None, .. }
+    ));
+    assert!(!optional.frontmatter.is_required());
+
+    let required = valid(concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  required: true\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "sections: []\n",
+    ));
+    assert!(matches!(
+        required.frontmatter,
+        FrontmatterPolicy::RequiredWithCaptures { schema: None, .. }
+    ));
+    assert!(required.frontmatter.is_required());
+    assert!(!required.frontmatter.is_forbidden());
+}
+
+/// The collection is keyed rather than ordered, so several declarations
+/// arrive in capture-name order however the source spelled them, and each
+/// keeps its own type, path, and flag.
+#[test]
+fn several_capture_declarations_normalize_into_one_keyed_collection() {
+    let schema = captures_of(concat!(
+        "    status:\n      type: text\n      path: \"$.meta['status']\"\n",
+        "    version:\n      type: semver\n      required: true\n",
+        "    build:\n      type: int\n      path: \"$.builds[-1]\"\n",
+    ));
+    let captures = schema.frontmatter.captures();
+    assert_eq!(captures.len(), 3);
+    assert_eq!(
+        captures
+            .iter()
+            .map(|(name, capture)| (
+                name.as_str(),
+                capture.type_name(),
+                capture.path_source(),
+                capture.is_required()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("build", "int", "$.builds[-1]", false),
+            ("status", "text", "$.meta['status']", false),
+            ("version", "semver", "$['version']", true),
+        ]
+    );
+    assert!(captures
+        .declared()
+        .is_some_and(|declared| declared.len() == 3));
+}
+
+/// §6.3 anchors `invalid-capture` "at the offending capture declaration", so
+/// the node the loader records has to be that whole entry — key through the
+/// end of its value — and not just the name or just the declaration body.
+#[test]
+fn a_frontmatter_capture_node_covers_its_complete_declaration() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "      required: true\n",
+        "sections: []\n",
+    );
+    let loaded = load_schema(source).expect("the declaration normalizes");
+    let captures = loaded.schema.frontmatter.captures();
+    let (name, _) = captures.iter().next().expect("the declaration normalized");
+    let range = loaded.locations.nodes[&SchemaNode::FrontmatterCapture(name.clone())];
+    assert_eq!(range.source, SourceId(0));
+    assert_eq!(
+        source_slice(source, range),
+        "version:\n      type: semver\n      required: true\n"
+    );
+}
+
+/// §4.3: "Frontmatter captures occupy a separate named scope rooted at `fm`;
+/// they do not collide with names at the schema root." A capture sharing a
+/// root rule's default id is therefore an ordinary schema, not `duplicate-id`.
+#[test]
+fn frontmatter_captures_do_not_collide_with_outline_names() {
+    let schema = valid(concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    overview:\n",
+        "      type: text\n",
+        "outline:\n",
+        "  - match: Overview\n",
+    ));
+    assert_eq!(schema.frontmatter.captures().len(), 1);
+    assert_eq!(schema.outline.len(), 1);
+}

@@ -338,7 +338,21 @@ sections:
 
     assert!(loaded.schema.outline[0].sections[0].captures.is_empty());
     assert!(loaded.schema.outline[0].sections[0].order.is_empty());
-    assert!(loaded.schema.frontmatter.captures().is_empty());
+
+    // The frontmatter half is no longer merely admitted: §2.3's declaration
+    // now normalizes, so what the public surface shows is the typed export
+    // itself, with `path` defaulted to the capture name and `required` to
+    // false. The rule half above is still awaiting its own loader.
+    let captures = loaded.schema.frontmatter.captures();
+    assert_eq!(captures.len(), 1);
+    let (name, capture) = captures
+        .iter()
+        .next()
+        .expect("the frontmatter declaration normalized");
+    assert_eq!(name.as_str(), "version");
+    assert_eq!(capture.type_name(), "semver");
+    assert_eq!(capture.path_source(), "$['version']");
+    assert!(!capture.is_required());
 }
 
 /// Pins the resolved-locator inspection surface by coercing each accessor to

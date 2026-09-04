@@ -1,15 +1,20 @@
-//! Inline and linked frontmatter JSON Schema preparation.
+//! The frontmatter policy: its presence rules, its typed capture
+//! declarations (§2.3), and its inline or linked JSON Schema.
 
 use std::collections::{BTreeMap, HashSet};
 
 use serde_json::Value;
 
+use crate::locator::AbsoluteSingularPath;
+use crate::typed_value::ValueType;
 use crate::{
-    ByteOffset, FrontmatterPolicy, JsonSchemaResourceContents, LinkedJsonSchemaInput, NonEmpty,
-    SchemaErrorKind, SchemaNode, SourceId, SourceRange, TextRange,
+    ByteOffset, CaptureName, FrontmatterCapture, FrontmatterCaptures, FrontmatterPolicy,
+    JsonSchemaResourceContents, LinkedJsonSchemaInput, NonEmpty, SchemaErrorKind, SchemaNode,
+    SourceId, SourceRange, TextRange,
 };
 
 use super::constraints::non_empty;
+use super::shape::CAPTURES_FIELD;
 use super::yaml::{parse_schema_yaml, schema_yaml_to_json};
 use super::{JsonMap, Loader, RangeKey, RawFrontmatter, RawFrontmatterSchema};
 
@@ -500,6 +505,27 @@ impl Loader {
             );
             return None;
         }
+        // Presence of the key, not of a value: §2.3 makes `captures` with
+        // `allow: false` a conflict however the declaration itself reads, and
+        // an explicit `captures: null` is a declaration the loader must
+        // refuse rather than a field nobody wrote. Serde folds both nulls
+        // into `None`, so the range index is what still knows the difference.
+        let captures_declared = self
+            .ranges
+            .ranges
+            .contains_key(&RangeKey::FrontmatterField(CAPTURES_FIELD.into()));
+        let forbidden_captures = captures_declared && !allow;
+        if forbidden_captures {
+            self.error_at(
+                SchemaErrorKind::ConflictingFrontmatter,
+                self.range(RangeKey::FrontmatterField(CAPTURES_FIELD.into())),
+                "frontmatter cannot declare captures and be forbidden",
+            );
+        }
+        // Independent of the conflict above, and reported alongside it: a
+        // declaration that is also malformed has two faults, and §6.3 asks
+        // for both.
+        let captures = self.build_frontmatter_captures(raw.captures.as_ref(), captures_declared);
         let schema = match raw.schema {
             None => None,
             Some(RawFrontmatterSchema::Path(_path)) => {
@@ -572,12 +598,264 @@ impl Loader {
                 }
             }
         };
-        Some(if required {
-            FrontmatterPolicy::Required { schema }
-        } else if allow {
-            FrontmatterPolicy::Optional { schema }
-        } else {
-            FrontmatterPolicy::Forbidden { schema }
+        // A forbidden policy has no capture-bearing variant, so a conflict is
+        // not something this function can return a value for; neither is a
+        // collection whose entries did not normalize.
+        let captures = match captures {
+            DeclaredCaptures::Absent => None,
+            DeclaredCaptures::Valid(captures) => Some(captures),
+            DeclaredCaptures::Invalid => return None,
+        };
+        if forbidden_captures {
+            return None;
+        }
+        Some(match captures {
+            Some(captures) if required => {
+                FrontmatterPolicy::RequiredWithCaptures { schema, captures }
+            }
+            Some(captures) => FrontmatterPolicy::OptionalWithCaptures { schema, captures },
+            None if required => FrontmatterPolicy::Required { schema },
+            None if allow => FrontmatterPolicy::Optional { schema },
+            None => FrontmatterPolicy::Forbidden { schema },
         })
     }
+
+    /// Normalizes `frontmatter.captures` into the §2.3 collection.
+    ///
+    /// Each entry is checked on its own and its faults are reported at its own
+    /// declaration, so one bad declaration does not hide the next. Nothing
+    /// partially built escapes: a collection with any rejected entry is
+    /// [`DeclaredCaptures::Invalid`] as a whole, which fails the load.
+    fn build_frontmatter_captures(
+        &mut self,
+        raw: Option<&Value>,
+        declared: bool,
+    ) -> DeclaredCaptures {
+        if !declared {
+            return DeclaredCaptures::Absent;
+        }
+        let captures_range = self.range(RangeKey::FrontmatterField(CAPTURES_FIELD.into()));
+        // §2.3: "A frontmatter `captures` value MUST be a non-empty mapping."
+        // §6.3 anchors a whole-collection fault at the `captures` key.
+        let Some(entries) = raw
+            .and_then(Value::as_object)
+            .filter(|entries| !entries.is_empty())
+        else {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                captures_range,
+                "frontmatter.captures must be a non-empty mapping of capture declarations",
+            );
+            return DeclaredCaptures::Invalid;
+        };
+        let mut normalized = BTreeMap::new();
+        let mut rejected = false;
+        for (raw_name, declaration) in entries {
+            let range = self.range(RangeKey::FrontmatterCapture(raw_name.clone()));
+            match self.build_frontmatter_capture(raw_name, declaration, range) {
+                Some((name, capture)) => {
+                    self.nodes
+                        .insert(SchemaNode::FrontmatterCapture(name.clone()), range);
+                    normalized.insert(name, capture);
+                }
+                None => rejected = true,
+            }
+        }
+        if rejected {
+            return DeclaredCaptures::Invalid;
+        }
+        // The mapping was non-empty and every entry normalized, so the
+        // collection's own non-empty invariant is already established; the
+        // constructor is still the only way to state it.
+        FrontmatterCaptures::new(normalized)
+            .map_or(DeclaredCaptures::Invalid, DeclaredCaptures::Valid)
+    }
+
+    /// Normalizes one `frontmatter.captures` entry, or reports why it cannot
+    /// be normalized.
+    ///
+    /// Every fault is reported at `range`, the declaration §6.3 anchors at,
+    /// and the faults are independent of one another: a declaration with an
+    /// unknown type and an unusable path reports both.
+    fn build_frontmatter_capture(
+        &mut self,
+        raw_name: &str,
+        declaration: &Value,
+        range: SourceRange,
+    ) -> Option<(CaptureName, FrontmatterCapture)> {
+        // The name is checked before the body so that a declaration whose key
+        // is not a capture name still has its body's faults reported.
+        let name = capture_name(raw_name);
+        if name.is_none() {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("capture name `{raw_name}` must match `[a-z][a-z0-9_]*`"),
+            );
+        }
+        let Some(fields) = declaration.as_object() else {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("frontmatter capture `{raw_name}` must be a mapping declaring a `type`"),
+            );
+            return None;
+        };
+        let mut known = true;
+        for field in fields.keys() {
+            if !CAPTURE_DECLARATION_FIELDS.contains(&field.as_str()) {
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    range,
+                    format!("unknown field `{field}` in frontmatter capture `{raw_name}`"),
+                );
+                known = false;
+            }
+        }
+        let value_type = self.capture_value_type(raw_name, fields.get("type"), range);
+        let required = self.capture_required_flag(raw_name, fields.get("required"), range);
+        let path = self.capture_path(raw_name, name.as_ref(), fields.get("path"), range);
+        let (Some(name), Some(value_type), Some(required), Some(path)) =
+            (name, value_type, required, path)
+        else {
+            return None;
+        };
+        known.then(|| (name, FrontmatterCapture::new(path, value_type, required)))
+    }
+
+    /// Resolves a declaration's required `type` through §2.4's closed set.
+    fn capture_value_type(
+        &mut self,
+        raw_name: &str,
+        declared: Option<&Value>,
+        range: SourceRange,
+    ) -> Option<ValueType> {
+        let message = match declared {
+            None => format!("frontmatter capture `{raw_name}` is missing required field `type`"),
+            Some(Value::String(spelling)) => match ValueType::from_name(spelling) {
+                Some(value_type) => return Some(value_type),
+                None => format!(
+                    "unknown capture type `{spelling}` in frontmatter capture `{raw_name}`; \
+                     expected one of {}",
+                    capture_type_names()
+                ),
+            },
+            Some(_) => format!(
+                "frontmatter capture `{raw_name}` `type` must be a string and cannot be null"
+            ),
+        };
+        self.error_at(SchemaErrorKind::InvalidCapture, range, message);
+        None
+    }
+
+    /// Reads a declaration's optional `required` flag, which defaults to false.
+    fn capture_required_flag(
+        &mut self,
+        raw_name: &str,
+        declared: Option<&Value>,
+        range: SourceRange,
+    ) -> Option<bool> {
+        match declared {
+            None => Some(false),
+            Some(Value::Bool(flag)) => Some(*flag),
+            Some(_) => {
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    range,
+                    format!(
+                        "frontmatter capture `{raw_name}` `required` must be a bool and \
+                         cannot be null"
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    /// Parses a declaration's `path`, or the §2.3 default built from its name.
+    ///
+    /// The default is the name as one bracket-quoted name segment, which the
+    /// §2.2 grammar leaves nothing to escape in. It goes through the same
+    /// parser as an authored path so that both forms yield one spelling and
+    /// one decoded form, and a schema cannot be told apart by which was used.
+    fn capture_path(
+        &mut self,
+        raw_name: &str,
+        name: Option<&CaptureName>,
+        declared: Option<&Value>,
+        range: SourceRange,
+    ) -> Option<AbsoluteSingularPath> {
+        let (source, spelled) = match declared {
+            Some(Value::String(source)) => (source.clone(), true),
+            Some(_) => {
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    range,
+                    format!(
+                        "frontmatter capture `{raw_name}` `path` must be a string and \
+                         cannot be null"
+                    ),
+                );
+                return None;
+            }
+            // Without a valid name there is no default to build, and the name
+            // has already been refused: §6.3 forbids attempting a check whose
+            // input could not be built.
+            None => (format!("$['{}']", name?.as_str()), false),
+        };
+        match AbsoluteSingularPath::parse(&source) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                let message = if spelled {
+                    format!(
+                        "frontmatter capture `{raw_name}` path `{source}` is not an absolute \
+                         singular JSONPath query: {error}"
+                    )
+                } else {
+                    format!("frontmatter capture `{raw_name}` has no usable default path")
+                };
+                self.error_at(SchemaErrorKind::InvalidCapture, range, message);
+                None
+            }
+        }
+    }
+}
+
+/// What `frontmatter.captures` resolved to.
+///
+/// A declared-but-unusable collection is deliberately not folded into
+/// "absent": the first must fail the load and the second must produce an
+/// ordinary policy, and an `Option` would let `captures: null` load as though
+/// nothing had been written.
+enum DeclaredCaptures {
+    /// No `captures` key was written.
+    Absent,
+    /// A non-empty collection whose every entry normalized.
+    Valid(FrontmatterCaptures),
+    /// A collection that was refused; its faults are already reported.
+    Invalid,
+}
+
+/// The keys §2.3 permits inside one capture declaration.
+const CAPTURE_DECLARATION_FIELDS: &[&str] = &["type", "path", "required"];
+
+/// The §2.4 type spellings, for the message that lists what was expected.
+fn capture_type_names() -> String {
+    ValueType::ALL
+        .iter()
+        .map(|value_type| format!("`{}`", value_type.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Validates a capture name against §2.2's grammar `[a-z][a-z0-9_]*`.
+///
+/// The grammar is ASCII, so the check reads bytes and allocates only once the
+/// name is known to be one.
+fn capture_name(name: &str) -> Option<CaptureName> {
+    let mut bytes = name.bytes();
+    let first = bytes.next()?;
+    let admitted = first.is_ascii_lowercase()
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    admitted.then(|| CaptureName(name.to_owned()))
 }
