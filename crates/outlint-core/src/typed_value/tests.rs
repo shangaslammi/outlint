@@ -901,7 +901,8 @@ fn boundary_header_int_negative_leading_zero_equals_negative_one() {
     let padded = parse_header(ValueType::Int, "-01").expect("`-01` is a valid int");
     let plain = parse_header(ValueType::Int, "-1").expect("`-1` is a valid int");
     assert_eq!(expect_int(&padded), -1);
-    assert_eq!(expect_int(&padded), expect_int(&plain));
+    assert_eq!(padded.equals(&plain), Some(true));
+    assert_eq!(padded.compare(&plain), Some(Ordering::Equal));
 }
 
 #[test]
@@ -986,7 +987,8 @@ fn boundary_dotted_leading_zero_components_are_equal() {
     let padded = parse_header(ValueType::Dotted, "1.02.0").expect("leading zeros are allowed");
     let plain = parse_header(ValueType::Dotted, "1.2.0").expect("`1.2.0` is a valid dotted");
     assert_eq!(expect_dotted(&padded), vec![1, 2, 0]);
-    assert_eq!(expect_dotted(&padded), expect_dotted(&plain));
+    assert_eq!(padded.equals(&plain), Some(true));
+    assert_eq!(padded.compare(&plain), Some(Ordering::Equal));
 }
 
 #[test]
@@ -1012,4 +1014,284 @@ fn boundary_frontmatter_text_does_not_coerce_integer_kind() {
             actual: ResolvedYamlKind::Integer
         })
     );
+}
+
+// ---------------------------------------------------------------------------
+// Equality and ordering
+// ---------------------------------------------------------------------------
+
+fn header(value_type: ValueType, source: &str) -> TypedValue {
+    parse_header(value_type, source)
+        .unwrap_or_else(|failure| panic!("{source:?} should parse: {failure:?}"))
+}
+
+/// Asserts that every source in `ascending` compares strictly below the ones
+/// after it, and equal only to itself.
+fn assert_strictly_ascending(value_type: ValueType, ascending: &[&str]) {
+    for (left_index, left_source) in ascending.iter().enumerate() {
+        for (right_index, right_source) in ascending.iter().enumerate() {
+            let left = header(value_type, left_source);
+            let right = header(value_type, right_source);
+            let expected = left_index.cmp(&right_index);
+            assert_eq!(
+                left.compare(&right),
+                Some(expected),
+                "{left_source:?} against {right_source:?}"
+            );
+            assert_eq!(
+                left.equals(&right),
+                Some(expected == Ordering::Equal),
+                "{left_source:?} against {right_source:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn int_orders_mathematically() {
+    assert_strictly_ascending(
+        ValueType::Int,
+        &[
+            "-9223372036854775808",
+            "-100",
+            "-2",
+            "-1",
+            "0",
+            "1",
+            "2",
+            "100",
+            "9223372036854775807",
+        ],
+    );
+}
+
+#[test]
+fn int_ignores_redundant_zeros_and_the_sign_of_zero() {
+    let padded = header(ValueType::Int, "-01");
+    let plain = header(ValueType::Int, "-1");
+    assert_eq!(padded.equals(&plain), Some(true));
+
+    let negative_zero = header(ValueType::Int, "-0");
+    let zero = header(ValueType::Int, "0");
+    let padded_zero = header(ValueType::Int, "0000");
+    assert_eq!(negative_zero.equals(&zero), Some(true));
+    assert_eq!(padded_zero.equals(&zero), Some(true));
+}
+
+#[test]
+fn bool_orders_false_below_true() {
+    assert_strictly_ascending(ValueType::Bool, &["false", "true"]);
+}
+
+#[test]
+fn date_orders_chronologically() {
+    assert_strictly_ascending(
+        ValueType::Date,
+        &[
+            "0000-01-01",
+            "0000-02-29",
+            "0001-01-01",
+            "1900-02-28",
+            "1900-03-01",
+            "2000-02-29",
+            "2024-01-31",
+            "2024-02-01",
+            "2024-02-29",
+            "9999-12-31",
+        ],
+    );
+}
+
+#[test]
+fn semver_orders_by_precedence() {
+    // The precedence chain from the SemVer 2.0.0 specification, including
+    // numeric identifiers comparing as numbers rather than as text.
+    assert_strictly_ascending(
+        ValueType::Semver,
+        &[
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+            "1.0.1",
+            "1.1.0",
+            "2.0.0",
+        ],
+    );
+}
+
+#[test]
+fn semver_prerelease_case_is_retained_in_comparison() {
+    let upper = header(ValueType::Semver, "1.0.0-RC");
+    let lower = header(ValueType::Semver, "1.0.0-rc");
+    assert_eq!(upper.equals(&lower), Some(false));
+    // ASCII order, which is what SemVer specifies for alphanumeric
+    // identifiers; nothing here folds case.
+    assert_eq!(upper.compare(&lower), Some(Ordering::Less));
+}
+
+#[test]
+fn semver_build_metadata_cannot_reach_a_comparison() {
+    // §2.4 rejects build metadata outright, so there is no value carrying it
+    // for a comparison to have to ignore.
+    for source in ["1.0.0+build", "1.0.0+build.7", "1.0.0-rc.1+build"] {
+        assert!(
+            parse_header(ValueType::Semver, source).is_err(),
+            "{source} should not become a value at all"
+        );
+    }
+}
+
+#[test]
+fn dotted_orders_components_numerically_with_shorter_prefixes_first() {
+    assert_strictly_ascending(
+        ValueType::Dotted,
+        &["0", "1", "1.0", "1.2", "1.2.0", "1.2.1", "1.10", "2", "10"],
+    );
+}
+
+#[test]
+fn dotted_equality_ignores_redundant_zeros() {
+    let padded = header(ValueType::Dotted, "1.02");
+    let plain = header(ValueType::Dotted, "1.2");
+    assert_eq!(padded.equals(&plain), Some(true));
+    assert_eq!(padded.compare(&plain), Some(Ordering::Equal));
+
+    let heavily_padded = header(ValueType::Dotted, "0001.0000002.000");
+    let terse = header(ValueType::Dotted, "1.2.0");
+    assert_eq!(heavily_padded.equals(&terse), Some(true));
+
+    // And the spelling still does not make `1.2` and `1.2.0` the same value.
+    assert_eq!(plain.compare(&terse), Some(Ordering::Less));
+}
+
+#[test]
+fn text_orders_by_code_point_and_distinguishes_case() {
+    assert_strictly_ascending(ValueType::Text, &["", "A", "B", "a", "b", "é", "😀"]);
+
+    let upper = header(ValueType::Text, "Version");
+    let lower = header(ValueType::Text, "version");
+    assert_eq!(upper.equals(&lower), Some(false));
+    assert_eq!(upper.compare(&lower), Some(Ordering::Less));
+}
+
+#[test]
+fn text_distinguishes_canonically_equivalent_spellings() {
+    // Composed and decomposed e-acute mean the same to a reader and are
+    // different values here, because §2.4 compares code points and nothing
+    // in this module normalizes them.
+    let composed = header(ValueType::Text, "\u{00e9}");
+    let decomposed = header(ValueType::Text, "e\u{0301}");
+    assert_eq!(composed.equals(&decomposed), Some(false));
+    assert_eq!(composed.compare(&decomposed), Some(Ordering::Greater));
+
+    // Code points crossing UTF-8 length boundaries still order by code
+    // point, which is where a byte comparison could have diverged.
+    assert_strictly_ascending(
+        ValueType::Text,
+        &[
+            "\u{7f}",
+            "\u{80}",
+            "\u{7ff}",
+            "\u{800}",
+            "\u{ffff}",
+            "\u{10000}",
+        ],
+    );
+}
+
+#[test]
+fn values_of_different_types_are_never_compared() {
+    let values = [
+        header(ValueType::Int, "1"),
+        header(ValueType::Bool, "true"),
+        header(ValueType::Date, "2024-01-01"),
+        header(ValueType::Semver, "1.0.0"),
+        header(ValueType::Dotted, "1"),
+        header(ValueType::Text, "1"),
+    ];
+    for left in &values {
+        for right in &values {
+            if left.value_type() == right.value_type() {
+                assert!(left.compare(right).is_some());
+                continue;
+            }
+            assert_eq!(
+                left.compare(right),
+                None,
+                "{} against {}",
+                left.value_type().as_str(),
+                right.value_type().as_str()
+            );
+            assert_eq!(left.equals(right), None);
+        }
+    }
+}
+
+#[test]
+fn a_frontmatter_value_compares_with_a_header_value_of_the_same_type() {
+    // Both sources normalize to the same value, so a capture from one can be
+    // ordered against a capture from the other.
+    let from_header = header(ValueType::Dotted, "1.02.0");
+    let from_frontmatter =
+        frontmatter_string(ValueType::Dotted, "1.2.0").expect("a valid dotted string");
+    assert_eq!(from_header.equals(&from_frontmatter), Some(true));
+
+    let json = exact_json_number("-1");
+    let integer = parse_frontmatter(
+        ValueType::Int,
+        FrontmatterValue::new(&json, ResolvedYamlKind::Integer),
+    )
+    .expect("a valid frontmatter integer");
+    assert_eq!(header(ValueType::Int, "-01").equals(&integer), Some(true));
+}
+
+#[test]
+fn canonical_spelling_drops_what_normalization_dropped() {
+    for (value_type, source, expected) in [
+        (ValueType::Int, "-01", "-1"),
+        (ValueType::Int, "-0", "0"),
+        (ValueType::Int, "0000042", "42"),
+        (ValueType::Bool, "true", "true"),
+        (ValueType::Bool, "false", "false"),
+        (ValueType::Date, "0000-02-29", "0000-02-29"),
+        (ValueType::Date, "9999-12-31", "9999-12-31"),
+        (ValueType::Semver, "1.0.0-RC.1", "1.0.0-RC.1"),
+        (ValueType::Dotted, "0001.0002.000", "1.2.0"),
+        (ValueType::Dotted, "7", "7"),
+        (ValueType::Text, "  0001  ", "  0001  "),
+        (ValueType::Text, "MiXeD", "MiXeD"),
+    ] {
+        assert_eq!(
+            header(value_type, source).canonical(),
+            expected,
+            "{} {source:?}",
+            value_type.as_str()
+        );
+    }
+}
+
+#[test]
+fn canonically_equal_spellings_reparse_to_the_same_value() {
+    for (value_type, source) in [
+        (ValueType::Int, "-01"),
+        (ValueType::Int, "-0"),
+        (ValueType::Date, "0000-02-29"),
+        (ValueType::Semver, "1.0.0-RC.1"),
+        (ValueType::Dotted, "0001.0002.000"),
+        (ValueType::Text, "  kept  "),
+    ] {
+        let parsed = header(value_type, source);
+        let reparsed = header(value_type, &parsed.canonical());
+        assert_eq!(
+            parsed.equals(&reparsed),
+            Some(true),
+            "{} {source:?}",
+            value_type.as_str()
+        );
+    }
 }

@@ -26,6 +26,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::cmp::Ordering;
+
 use serde_json::Value;
 
 /// The closed set of capture types (§2.4).
@@ -257,6 +259,85 @@ impl TypedValue {
             NormalizedValue::Text(_) => ValueType::Text,
         }
     }
+
+    /// Orders two values of the same type, or `None` if their types differ.
+    ///
+    /// This is the one comparison relation the kernel has. It is a method
+    /// rather than an `Ord` implementation because §2.4 leaves values of
+    /// different types incomparable, and `Ord` would have to invent an
+    /// answer: a total order across types would let a `date` sort against a
+    /// `semver`, which no rule in the specification asks for and no reader
+    /// would be able to predict.
+    ///
+    /// Each type gets the relation §2.4 names for it, and normalization has
+    /// already made those relations structural: leading zeros are gone from
+    /// `int` and `dotted`, a `date` is three numbers, and build metadata
+    /// could not enter a `semver`. Nothing is canonicalized here.
+    pub(crate) fn compare(&self, other: &TypedValue) -> Option<Ordering> {
+        let ordering = match (&self.value, &other.value) {
+            // Mathematical order on the signed integer.
+            (NormalizedValue::Int(left), NormalizedValue::Int(right)) => left.cmp(right),
+            // `false < true`.
+            (NormalizedValue::Bool(left), NormalizedValue::Bool(right)) => left.cmp(right),
+            // Chronological, because the fields are stored year first.
+            (NormalizedValue::Date(left), NormalizedValue::Date(right)) => left.cmp(right),
+            // SemVer precedence, which the crate implements and which
+            // ignores build metadata anyway.
+            (NormalizedValue::Semver(left), NormalizedValue::Semver(right)) => {
+                left.version().cmp(right.version())
+            }
+            // Numeric component by component; an equal prefix sorts shorter
+            // first, which is what makes `1.2` precede `1.2.0`.
+            (NormalizedValue::Dotted(left), NormalizedValue::Dotted(right)) => {
+                left.components().cmp(right.components())
+            }
+            // Code point by code point. Comparing `chars` rather than the
+            // strings themselves says which relation is meant; UTF-8 orders
+            // bytes the same way, but the intent should not have to be
+            // inferred from the encoding. No folding, no normalization:
+            // `options.match_case` does not reach this module and canonically
+            // equivalent spellings are different values.
+            (NormalizedValue::Text(left), NormalizedValue::Text(right)) => {
+                left.chars().cmp(right.chars())
+            }
+            _ => return None,
+        };
+        Some(ordering)
+    }
+
+    /// Whether two values of the same type are equal, or `None` if their
+    /// types differ.
+    ///
+    /// Defined from [`TypedValue::compare`] rather than from a second pass
+    /// over the representations, so equality and ordering cannot disagree.
+    pub(crate) fn equals(&self, other: &TypedValue) -> Option<bool> {
+        self.compare(other)
+            .map(|ordering| ordering == Ordering::Equal)
+    }
+
+    /// The canonical spelling of this value.
+    ///
+    /// This is what a message about an order violation should show: it names
+    /// the value that was compared rather than the characters that produced
+    /// it, so `-01` and `1.02.0` appear as the `-1` and `1.2.0` they compare
+    /// as. `text` is the exception and is shown unchanged, because for that
+    /// type the characters are the value.
+    pub(crate) fn canonical(&self) -> String {
+        match &self.value {
+            NormalizedValue::Int(value) => value.to_string(),
+            NormalizedValue::Bool(value) => {
+                if *value {
+                    "true".to_owned()
+                } else {
+                    "false".to_owned()
+                }
+            }
+            NormalizedValue::Date(value) => value.canonical(),
+            NormalizedValue::Semver(value) => value.version().to_string(),
+            NormalizedValue::Dotted(value) => value.canonical(),
+            NormalizedValue::Text(value) => value.clone(),
+        }
+    }
 }
 
 /// The normalized representation behind a [`TypedValue`].
@@ -297,6 +378,11 @@ impl DateValue {
             return None;
         }
         Some(DateValue { year, month, day })
+    }
+
+    /// The fixed-width `YYYY-MM-DD` spelling.
+    fn canonical(&self) -> String {
+        format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
     }
 }
 
@@ -366,6 +452,18 @@ impl DottedValue {
     /// The components, outermost first.
     fn components(&self) -> &[u32] {
         &self.components
+    }
+
+    /// The components joined by dots, each without redundant zeros.
+    fn canonical(&self) -> String {
+        let mut spelled = String::new();
+        for (index, component) in self.components.iter().enumerate() {
+            if index > 0 {
+                spelled.push('.');
+            }
+            spelled.push_str(&component.to_string());
+        }
+        spelled
     }
 }
 
