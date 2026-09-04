@@ -403,3 +403,513 @@ mod provider_boundary {
         assert_eq!(render_only("$", &json!(1)).1, "");
     }
 }
+
+/// The §4.4 outline grammar, parsed with no schema in hand.
+///
+/// Everything here is about what a locator *says*. Nothing asserts what a
+/// name denotes, because parsing runs before binding and cannot know.
+mod outline_syntax {
+    use proptest::prelude::*;
+
+    use crate::locator::syntax::{
+        parse_locator, LocatorAnchor, LocatorParseErrorKind, ParsedLocator, UnboundOutlineLocator,
+    };
+
+    /// Parses `source`, requiring the outline form.
+    fn outline(source: &str) -> UnboundOutlineLocator {
+        match parse_locator(source) {
+            Ok(ParsedLocator::Outline(locator)) => locator,
+            Ok(other) => panic!("`{source}` must parse as an outline locator, not {other:?}"),
+            Err(error) => panic!("`{source}` must parse: {error}"),
+        }
+    }
+
+    /// The name path, as `(spelling, subscript)` pairs.
+    fn names(locator: &UnboundOutlineLocator) -> Vec<(&str, Option<String>)> {
+        locator
+            .name_steps()
+            .iter()
+            .map(|step| {
+                (
+                    step.name().as_str(),
+                    step.position().map(ToString::to_string),
+                )
+            })
+            .collect()
+    }
+
+    /// The structural path, as `(kind, subscript)` pairs.
+    fn structure(locator: &UnboundOutlineLocator) -> Vec<(&str, Option<String>)> {
+        locator
+            .structural_steps()
+            .iter()
+            .map(|step| {
+                (
+                    step.kind().as_str(),
+                    step.position().map(ToString::to_string),
+                )
+            })
+            .collect()
+    }
+
+    /// Parses `source`, requiring rejection, and returns why.
+    fn rejection(source: &str) -> LocatorParseErrorKind {
+        match parse_locator(source) {
+            Err(error) => error.kind(),
+            Ok(parsed) => panic!("`{source}` must be rejected, but parsed as {parsed:?}"),
+        }
+    }
+
+    // --- the forms §4.4 spells out -----------------------------------------
+
+    #[test]
+    fn a_bare_name_is_one_relative_step() {
+        let locator = outline("rollback-plan");
+        assert_eq!(locator.anchor(), LocatorAnchor::CurrentScope);
+        assert_eq!(names(&locator), vec![("rollback-plan", None)]);
+        assert!(structure(&locator).is_empty());
+        assert!(locator.intrinsic_text().is_none());
+    }
+
+    #[test]
+    fn a_dotted_relative_path_is_a_sequence_of_name_steps() {
+        let locator = outline("deployment.rollback-plan");
+        assert_eq!(locator.anchor(), LocatorAnchor::CurrentScope);
+        assert_eq!(
+            names(&locator),
+            vec![("deployment", None), ("rollback-plan", None)]
+        );
+    }
+
+    #[test]
+    fn a_leading_dollar_dot_anchors_at_the_outermost_scope() {
+        let locator = outline("$.overview.goals");
+        assert_eq!(locator.anchor(), LocatorAnchor::SchemaRoot);
+        assert_eq!(names(&locator), vec![("overview", None), ("goals", None)]);
+    }
+
+    #[test]
+    fn a_subscript_may_narrow_any_name_step() {
+        let locator = outline("$.release[0].notes[2]");
+        assert_eq!(
+            names(&locator),
+            vec![
+                ("release", Some("0".to_owned())),
+                ("notes", Some("2".to_owned())),
+            ]
+        );
+    }
+
+    /// §4.4 admits structural traversal "when those kinds exist"; none does in
+    /// this version, so the tokens are retained and left unallocated.
+    #[test]
+    fn structural_steps_are_retained_without_being_allocated() {
+        let locator = outline("$.section/list[0]/item[2]");
+        assert_eq!(names(&locator), vec![("section", None)]);
+        assert_eq!(
+            structure(&locator),
+            vec![
+                ("list", Some("0".to_owned())),
+                ("item", Some("2".to_owned()))
+            ]
+        );
+        assert!(locator.intrinsic_text().is_none());
+    }
+
+    #[test]
+    fn the_text_intrinsic_terminates_a_locator() {
+        let locator = outline("$.release[0]/text");
+        assert_eq!(names(&locator), vec![("release", Some("0".to_owned()))]);
+        assert!(structure(&locator).is_empty());
+        let text = locator.intrinsic_text().expect("`/text` was written");
+        assert!(text.position().is_none());
+    }
+
+    /// A subscript on `/text` itself narrows the texts a plural prior step
+    /// produced; it is the following *step* that §4.4 forbids, not a
+    /// subscript on the terminal one.
+    #[test]
+    fn the_text_intrinsic_may_carry_its_own_subscript() {
+        let locator = outline("$.release/text[1]");
+        let text = locator.intrinsic_text().expect("`/text` was written");
+        assert_eq!(
+            text.position().map(ToString::to_string),
+            Some("1".to_owned())
+        );
+    }
+
+    #[test]
+    fn text_may_follow_structural_traversal() {
+        let locator = outline("$.section/list[0]/text");
+        assert_eq!(structure(&locator), vec![("list", Some("0".to_owned()))]);
+        assert!(locator.intrinsic_text().is_some());
+    }
+
+    /// A capture name is admitted wherever a rule id is, because §4.4 makes
+    /// which one a step denotes a question about the scope it lands in.
+    #[test]
+    fn a_terminal_name_may_be_spelled_as_a_capture_name() {
+        let locator = outline("$.release[0].schema_version");
+        assert_eq!(
+            names(&locator),
+            vec![("release", Some("0".to_owned())), ("schema_version", None),]
+        );
+    }
+
+    // --- the original spelling is kept -------------------------------------
+
+    #[test]
+    fn the_original_spelling_is_retained_byte_for_byte() {
+        for source in [
+            "rollback-plan",
+            "$.overview.goals",
+            "$.release[0].notes[2]",
+            "$.section/list[0]/item[2]",
+            "$.release[0]/text",
+            "fm.version",
+        ] {
+            let parsed = parse_locator(source).expect("a valid locator");
+            assert_eq!(parsed.source().as_str(), source);
+        }
+    }
+
+    // --- subscripts --------------------------------------------------------
+
+    #[test]
+    fn zero_and_an_arbitrarily_long_digit_run_are_both_indices() {
+        assert_eq!(names(&outline("a[0]")), vec![("a", Some("0".to_owned()))]);
+        let long = "1".to_owned() + &"0".repeat(200);
+        let locator = outline(&format!("a[{long}]"));
+        assert_eq!(names(&locator), vec![("a", Some(long))]);
+    }
+
+    #[test]
+    fn malformed_subscripts_are_rejected() {
+        for source in ["a[00]", "a[01]", "a[-1]", "a[+1]", "a[]", "a[ 0]", "a[0 ]"] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::InvalidPosition,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unterminated_subscript_is_rejected() {
+        for source in ["a[", "a[0", "$.a[12"] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::UnterminatedPosition,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn one_step_takes_at_most_one_subscript() {
+        for source in ["a[0][1]", "$.a/list[0][1]", "$.a/text[0][1]"] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::RepeatedPosition,
+                "`{source}`"
+            );
+        }
+    }
+
+    // --- anchors -----------------------------------------------------------
+
+    #[test]
+    fn a_bare_dollar_is_not_a_locator() {
+        assert_eq!(rejection("$"), LocatorParseErrorKind::BareSchemaRoot);
+    }
+
+    #[test]
+    fn a_dangling_dollar_dot_has_no_first_step() {
+        assert_eq!(rejection("$."), LocatorParseErrorKind::EmptyStep);
+    }
+
+    /// §4.4: "The former `@` prefix is not part of the locator language."
+    #[test]
+    fn the_at_prefix_is_gone() {
+        assert_eq!(rejection("@"), LocatorParseErrorKind::MalformedAnchor);
+        assert_eq!(rejection("@.x"), LocatorParseErrorKind::MalformedAnchor);
+    }
+
+    #[test]
+    fn a_dollar_not_followed_by_a_dot_is_malformed() {
+        for source in ["$x", "$[0]", "$/text", "$$"] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::MalformedAnchor,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_empty_locator_is_rejected() {
+        assert_eq!(rejection(""), LocatorParseErrorKind::Empty);
+    }
+
+    // --- separators and steps ----------------------------------------------
+
+    #[test]
+    fn leading_and_trailing_separators_leave_an_empty_step() {
+        for source in [".a", "/a", "a.", "a/", "a..b", "a//b", "$..a"] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::EmptyStep,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_outside_both_grammars_is_rejected() {
+        for source in [
+            "Foo", "a b", "a-", "-a", "a--b", "_a", "a-b_c", "föö", "a=b",
+        ] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::InvalidName,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_structural_kind_outside_the_slug_grammar_is_rejected() {
+        for source in ["a/List", "a/my_kind", "a/x-", "a/x y"] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::InvalidStructuralKind,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn whitespace_is_never_part_of_a_locator() {
+        for source in [" a", "a ", "a . b", "$. a", "a\tb", "a\nb"] {
+            assert!(parse_locator(source).is_err(), "`{source}` must not parse");
+        }
+    }
+
+    // --- the two shape rules the types enforce -----------------------------
+
+    /// §4.4: "A locator may move from names to structure but MUST NOT use a
+    /// name step after a structural step."
+    #[test]
+    fn a_name_step_cannot_follow_a_structural_step() {
+        for source in ["a/list.name", "$.a/list[0].name", "a/list/item.x"] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::NameAfterStructure,
+                "`{source}`"
+            );
+        }
+    }
+
+    /// §4.4 makes `/text` "a terminal intrinsic value", so nothing continues
+    /// past it — not a name, not another structural step, not another `/text`.
+    #[test]
+    fn nothing_may_follow_the_text_intrinsic() {
+        for source in [
+            "$.a/text.b",
+            "$.a/text/label",
+            "$.a/text/text",
+            "$.a/text[0]/text",
+            "$.a/text[0].b",
+        ] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::StepAfterIntrinsicText,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_character_where_a_separator_belongs_is_rejected() {
+        for source in ["a[0]b", "a[0]]", "$.a[0]="] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::UnexpectedCharacter,
+                "`{source}`"
+            );
+        }
+    }
+
+    // --- the `fm` forms ----------------------------------------------------
+
+    #[test]
+    fn a_frontmatter_capture_is_its_own_form() {
+        let parsed = parse_locator("fm.version").expect("a valid capture reference");
+        let ParsedLocator::FrontmatterCapture(capture) = parsed else {
+            panic!("`fm.version` must not parse as an outline locator");
+        };
+        assert_eq!(capture.name().as_str(), "version");
+        assert_eq!(capture.source().as_str(), "fm.version");
+    }
+
+    #[test]
+    fn a_malformed_frontmatter_capture_is_rejected() {
+        for source in [
+            "fm.",
+            "fm.Version",
+            "fm.decision-makers",
+            "fm.0version",
+            "fm.version.minor",
+            "fm.version[0]",
+            "fm.version/text",
+        ] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::MalformedFrontmatterCapture,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_fm_names_nothing() {
+        assert_eq!(rejection("fm"), LocatorParseErrorKind::BareFrontmatterRoot);
+    }
+
+    /// `fm[` opens the §4.6 query form. It must not fall through to the
+    /// outline grammar, where `fm` would look like an ordinary name with a
+    /// subscript that happens not to be an index.
+    #[test]
+    fn the_query_form_is_reserved_rather_than_read_as_a_name() {
+        assert_eq!(
+            rejection("fm[$.draft]"),
+            LocatorParseErrorKind::FrontmatterQueryUnsupported
+        );
+    }
+
+    /// §4.1 reserves `fm` as a *leading* name only, so an ordinary name that
+    /// merely starts with those letters is untouched.
+    #[test]
+    fn a_name_beginning_with_fm_is_an_ordinary_name() {
+        assert_eq!(names(&outline("fmt")), vec![("fmt", None)]);
+        assert_eq!(names(&outline("fm-plan")), vec![("fm-plan", None)]);
+        assert_eq!(
+            names(&outline("deployment.fm")),
+            vec![("deployment", None), ("fm", None)]
+        );
+    }
+
+    // --- totality ----------------------------------------------------------
+
+    proptest! {
+        /// Locators come out of schema files, which are untrusted input, and
+        /// the library "must not panic on malformed input".
+        #[test]
+        fn parsing_arbitrary_text_never_panics(source in ".*") {
+            let _ = parse_locator(&source);
+        }
+
+        /// The same, over strings drawn from the locator alphabet, so the
+        /// generator actually reaches the branches the grammar has.
+        #[test]
+        fn parsing_locator_shaped_text_never_panics(
+            source in "[$@a-zA-Z0-9._/\\[\\]=+-]{0,24}"
+        ) {
+            let _ = parse_locator(&source);
+        }
+
+        /// Whatever parses, parses to itself.
+        #[test]
+        fn a_parsed_locator_still_spells_its_source(source in "[$a-z0-9._/\\[\\]-]{0,24}") {
+            if let Ok(parsed) = parse_locator(&source) {
+                prop_assert_eq!(parsed.source().as_str(), source.as_str());
+            }
+        }
+    }
+}
+
+/// An index far larger than any node list, which §4.4 requires to be cheap.
+///
+/// §4.4: an out-of-range index "selects nothing and produces the empty list;
+/// its magnitude is never an error", and "implementations MUST NOT allocate
+/// memory or perform work proportional to an index's numeric value; processing
+/// an index may be proportional only to the length of its spelling".
+///
+/// The assertions below are on memory and on the answer, never on elapsed
+/// time: a wall-clock bound would be flaky, and the property that matters is
+/// structural. The code side of the guarantee is [`LocatorPosition::select`],
+/// which converts once and indexes once, with no loop over the value.
+mod oversized_positions {
+    use num_bigint::BigUint;
+
+    use crate::locator::syntax::{parse_locator, ParsedLocator};
+
+    /// Decimal spellings far beyond any array length, at several sizes.
+    const OVERSIZED_DIGIT_COUNTS: [usize; 4] = [20, 100, 1_000, 10_000];
+
+    #[test]
+    fn an_oversized_index_costs_only_what_its_spelling_costs() {
+        for digits in OVERSIZED_DIGIT_COUNTS {
+            let spelling = "9".repeat(digits);
+            let source = format!("$.release[{spelling}]");
+
+            let Ok(ParsedLocator::Outline(locator)) = parse_locator(&source) else {
+                panic!("a {digits}-digit index must parse");
+            };
+            let position = locator
+                .name_steps()
+                .first
+                .position()
+                .expect("the step is subscripted");
+            let value: &BigUint = position.value();
+
+            // Round-tripping proves the bounds below are not measuring a
+            // truncated or saturated parse.
+            assert_eq!(value.to_string(), spelling);
+
+            // log2(10) < 10/3, so a `digits`-digit number needs fewer than
+            // ceil(digits * 10 / 3) bits: bounded by the spelling, not by the
+            // magnitude the spelling denotes.
+            let bit_bound = (digits as u64 * 10).div_ceil(3);
+            assert!(
+                value.bits() <= bit_bound,
+                "a {digits}-digit value used {} bits, above the {bit_bound}-bit spelling bound",
+                value.bits()
+            );
+            let byte_bound = bit_bound.div_ceil(8) as usize;
+            assert!(
+                value.to_bytes_be().len() <= byte_bound,
+                "a {digits}-digit value used {} bytes, above the {byte_bound}-byte bound",
+                value.to_bytes_be().len()
+            );
+
+            // The real lookup helper, against a list far shorter than the
+            // index: the empty result, reached without counting to it.
+            let nodes = ["first", "second", "third"];
+            assert_eq!(position.select(&nodes), None);
+        }
+    }
+
+    /// The same helper, on the indices that do address something.
+    #[test]
+    fn an_in_range_index_selects_the_element_it_names() {
+        let nodes = ["first", "second", "third"];
+        for (spelling, expected) in [
+            ("0", Some("first")),
+            ("1", Some("second")),
+            ("2", Some("third")),
+            ("3", None),
+        ] {
+            let Ok(ParsedLocator::Outline(locator)) = parse_locator(&format!("a[{spelling}]"))
+            else {
+                panic!("`a[{spelling}]` must parse");
+            };
+            let position = locator
+                .name_steps()
+                .first
+                .position()
+                .expect("the step is subscripted");
+            assert_eq!(position.select(&nodes).copied(), expected, "[{spelling}]");
+        }
+    }
+}
