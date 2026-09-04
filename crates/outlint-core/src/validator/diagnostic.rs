@@ -1,6 +1,9 @@
 //! Public diagnostic vocabulary produced by validation.
 
-use crate::{FrontmatterRef, Matcher, RuleRef, SchemaNode, TextRange};
+use crate::{
+    FrontmatterRef, Matcher, ResolvedFrontmatterCapture, ResolvedFrontmatterQuery,
+    ResolvedRuleLocator, RuleRef, SchemaNode, TextRange,
+};
 use std::{error::Error, fmt};
 
 /// A stable identifier from the diagnostic vocabulary in specification §6.
@@ -30,6 +33,14 @@ pub enum DiagnosticId {
     InvalidFrontmatter,
     /// A frontmatter value fails its JSON Schema.
     FrontmatterSchema,
+    /// A capture's source fails its type's lexical, kind, calendar, SemVer,
+    /// or bound requirement (§2.4).
+    InvalidValue,
+    /// A capture declared `required: true` selected no usable value (§2.3).
+    MissingValue,
+    /// A rule's matches are not in the value order its `order` declares
+    /// (§3.8).
+    OrderViolation,
     /// An `one_of` constraint does not have exactly one satisfied ref.
     OneOf,
     /// An `any_of` constraint has no satisfied ref.
@@ -67,6 +78,9 @@ impl DiagnosticId {
             Self::ForbiddenFrontmatter => "forbidden-frontmatter",
             Self::InvalidFrontmatter => "invalid-frontmatter",
             Self::FrontmatterSchema => "frontmatter-schema",
+            Self::InvalidValue => "invalid-value",
+            Self::MissingValue => "missing-value",
+            Self::OrderViolation => "order-violation",
             Self::OneOf => "one_of",
             Self::AnyOf => "any_of",
             Self::AtMostOne => "at_most_one",
@@ -129,17 +143,47 @@ pub struct InvolvedHeader {
 }
 
 /// A normalized constraint reference retained for diagnostic presentation.
+///
+/// The enum currently holds two generations at once. [`Self::Rule`] and
+/// [`Self::Frontmatter`] are the **compatibility** forms: they are what the
+/// constraint model still stores, and they are what validation still emits.
+/// [`Self::ResolvedRule`], [`Self::FrontmatterQuery`], and
+/// [`Self::FrontmatterCapture`] are the **final** forms — one per §11.3
+/// reference kind — and nothing produces them yet. The lane that binds
+/// constraints cuts production over to the final forms atomically and removes
+/// the compatibility pair; until then the two are kept apart rather than
+/// merged, so that no consumer mistakes one for a complete v3 reference.
+///
+/// The final forms carry their locator source as a required part of the
+/// resolved locator, never as an `Option`: a reference §11.3 must quote a
+/// spelling for cannot exist without one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticReference {
-    /// A rule reference paired with its resolved target matcher.
+    /// Compatibility: a rule reference paired with its resolved target
+    /// matcher, in the pre-Typed-Values [`RuleRef`] form.
     Rule {
         /// The normalized relative or schema-root-anchored reference.
         reference: RuleRef,
         /// Matcher of the rule targeted by `reference`.
         matcher: Matcher,
     },
-    /// A document-level frontmatter proposition.
+    /// Compatibility: a document-level frontmatter proposition, in the
+    /// pre-Typed-Values [`FrontmatterRef`] form.
     Frontmatter(FrontmatterRef),
+    /// Final: a bound outline locator terminating at a rule, paired with that
+    /// rule's matcher. §11.3 renders this as reference kind `rule`.
+    ResolvedRule {
+        /// The bound locator, retaining its exact schema spelling.
+        locator: ResolvedRuleLocator,
+        /// Matcher of the rule the locator's terminal step named.
+        matcher: Matcher,
+    },
+    /// Final: an `fm[...]` proposition. §11.3 renders this as reference kind
+    /// `frontmatter_query`.
+    FrontmatterQuery(ResolvedFrontmatterQuery),
+    /// Final: an `fm.<name>` reference to a declared frontmatter capture.
+    /// §11.3 renders this as reference kind `frontmatter_capture`.
+    FrontmatterCapture(ResolvedFrontmatterCapture),
 }
 
 /// What a diagnostic is about.
@@ -318,5 +362,44 @@ impl From<PrepareValidationError> for ValidationError {
 impl From<ValidationOperationalError> for ValidationError {
     fn from(error: ValidationOperationalError) -> Self {
         Self::Operational(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DiagnosticId;
+
+    /// §6.3 fixes these spellings, and `outlint-disable` matches on them as
+    /// text, so a renamed variant that forgot its spelling would silently
+    /// stop being suppressible.
+    #[test]
+    fn diagnostic_ids_use_the_public_spellings() {
+        let expected = [
+            (DiagnosticId::SkippedLevel, "skipped-level"),
+            (DiagnosticId::NotAllowed, "not-allowed"),
+            (DiagnosticId::UnexpectedSection, "unexpected-section"),
+            (DiagnosticId::MissingSection, "missing-section"),
+            (DiagnosticId::TooFewSections, "too-few-sections"),
+            (DiagnosticId::TooManySections, "too-many-sections"),
+            (DiagnosticId::MissingTitle, "missing-title"),
+            (DiagnosticId::MissingFrontmatter, "missing-frontmatter"),
+            (DiagnosticId::ForbiddenFrontmatter, "forbidden-frontmatter"),
+            (DiagnosticId::InvalidFrontmatter, "invalid-frontmatter"),
+            (DiagnosticId::FrontmatterSchema, "frontmatter-schema"),
+            (DiagnosticId::InvalidValue, "invalid-value"),
+            (DiagnosticId::MissingValue, "missing-value"),
+            (DiagnosticId::OrderViolation, "order-violation"),
+            (DiagnosticId::OneOf, "one_of"),
+            (DiagnosticId::AnyOf, "any_of"),
+            (DiagnosticId::AtMostOne, "at_most_one"),
+            (DiagnosticId::AllOrNone, "all_or_none"),
+            (DiagnosticId::Requires, "requires"),
+            (DiagnosticId::Conflicts, "conflicts"),
+            (DiagnosticId::Ordered, "ordered"),
+        ];
+        for (id, spelling) in expected {
+            assert_eq!(id.as_str(), spelling);
+            assert_eq!(id.to_string(), spelling);
+        }
     }
 }

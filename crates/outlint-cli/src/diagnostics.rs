@@ -129,6 +129,15 @@ pub(crate) struct RenderedInvolvedHeader {
     pub(crate) column: u64,
 }
 
+/// The rendering of [`DiagnosticReference`], compatibility forms first.
+///
+/// [`Self::Rule`] and [`Self::Frontmatter`] render the pre-Typed-Values
+/// references validation still emits; the three that follow render the final
+/// §11.3 reference kinds and are unreachable until constraint binding cuts
+/// over. Keeping them apart is what stops a half-migrated reference from
+/// being emitted as if it were complete. The variant order is the derived
+/// [`Ord`] the JSON total ordering compares references by, so the
+/// compatibility pair keeps its position rather than being reshuffled.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RenderedReference {
     Rule {
@@ -139,6 +148,36 @@ pub(crate) enum RenderedReference {
     Frontmatter {
         path: Vec<String>,
         equals: Option<RenderedScalar>,
+    },
+    /// §11.3 kind `rule`, with its members in declaration order.
+    ResolvedRule {
+        locator: String,
+        anchor: &'static str,
+        path: Vec<String>,
+        /// Aligned with `path`, present only when some step is subscripted.
+        ///
+        /// Each entry is a `[i]` subscript in canonical decimal, or `None`
+        /// for an unsubscripted step. Decimal text rather than an integer
+        /// because §4.4 gives `i` no upper bound; §11.3 requires it to be
+        /// serialized as an arbitrary-precision JSON *number*, never a
+        /// quoted string.
+        positions: Option<Vec<Option<String>>>,
+        matcher: RenderedMatcher,
+    },
+    /// §11.3 kind `frontmatter_query`, with its members in declaration order.
+    FrontmatterQuery {
+        locator: String,
+        /// The RFC 9535 query without its `fm[...]` wrapper.
+        query: String,
+        equals: Option<RenderedScalar>,
+    },
+    /// §11.3 kind `frontmatter_capture`, with its members in declaration
+    /// order.
+    FrontmatterCapture {
+        locator: String,
+        name: String,
+        /// One of the §2.4 type names.
+        value_type: String,
     },
 }
 
@@ -277,10 +316,7 @@ fn render_schema_node(node: &SchemaNode) -> RenderedSchemaNode {
 fn render_reference(reference: &DiagnosticReference) -> RenderedReference {
     match reference {
         DiagnosticReference::Rule { reference, matcher } => RenderedReference::Rule {
-            anchor: match reference.anchor {
-                RefAnchor::CurrentScope => "current_scope",
-                RefAnchor::SchemaRoot => "schema_root",
-            },
+            anchor: render_anchor(reference.anchor),
             path: non_empty_rule_path(reference),
             matcher: render_matcher(matcher),
         },
@@ -288,6 +324,44 @@ fn render_reference(reference: &DiagnosticReference) -> RenderedReference {
             path: non_empty_frontmatter_path(reference),
             equals: reference.equals.as_ref().map(render_scalar),
         },
+        DiagnosticReference::ResolvedRule { locator, matcher } => {
+            let steps = locator.steps().iter().collect::<Vec<_>>();
+            let positions = steps
+                .iter()
+                .map(|step| step.position_digits())
+                .collect::<Vec<_>>();
+            RenderedReference::ResolvedRule {
+                locator: locator.locator().to_owned(),
+                anchor: render_anchor(locator.anchor()),
+                path: steps
+                    .iter()
+                    .map(|step| step.id().as_str().to_owned())
+                    .collect(),
+                // §11.3: the array is present only when some step carries a
+                // subscript, and is then aligned with `path` throughout.
+                positions: positions.iter().any(Option::is_some).then_some(positions),
+                matcher: render_matcher(matcher),
+            }
+        }
+        DiagnosticReference::FrontmatterQuery(reference) => RenderedReference::FrontmatterQuery {
+            locator: reference.locator().to_owned(),
+            query: reference.query().to_owned(),
+            equals: reference.equals().map(render_scalar),
+        },
+        DiagnosticReference::FrontmatterCapture(reference) => {
+            RenderedReference::FrontmatterCapture {
+                locator: reference.locator().to_owned(),
+                name: reference.name().as_str().to_owned(),
+                value_type: reference.type_name().to_owned(),
+            }
+        }
+    }
+}
+
+fn render_anchor(anchor: RefAnchor) -> &'static str {
+    match anchor {
+        RefAnchor::CurrentScope => "current_scope",
+        RefAnchor::SchemaRoot => "schema_root",
     }
 }
 

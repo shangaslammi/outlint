@@ -297,6 +297,31 @@ fn human_reference(reference: &RenderedReference) -> String {
             }
             display
         }
+        // The final forms quote the author's own locator rather than
+        // rebuilding one from bound steps: it is the text they would edit,
+        // and it is retained precisely so it need not be reconstructed. It is
+        // schema-controlled, so it is escaped like every other untrusted
+        // value here.
+        RenderedReference::ResolvedRule {
+            locator, matcher, ..
+        } => {
+            format!("{} ({})", escape_human(locator), human_matcher(matcher))
+        }
+        RenderedReference::FrontmatterQuery {
+            locator, equals, ..
+        } => {
+            let mut display = escape_human(locator);
+            if let Some(value) = equals {
+                display.push('=');
+                display.push_str(&human_scalar(value));
+            }
+            display
+        }
+        RenderedReference::FrontmatterCapture {
+            locator,
+            value_type,
+            ..
+        } => format!("{} ({})", escape_human(locator), escape_human(value_type)),
     }
 }
 

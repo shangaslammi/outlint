@@ -1,7 +1,10 @@
 //! The validation walk: level admission, scope binding, and diagnostics.
 
+use std::collections::BTreeMap;
+
+use crate::typed_value::{ParseFailure, TypedValue};
 use crate::{
-    ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
+    ByteOffset, CaptureName, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
     DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, HeaderLevel, Heading,
     HeadingLocation, Matcher, OutlineProvenance, RuleIndex, RuleOutcome, Schema, SchemaNode,
     ScopePath, Section, SectionRule, TextRange, UpperBound,
@@ -596,6 +599,9 @@ impl<'a> Validator<'a> {
                 section,
                 path,
                 child,
+                // Populated by the capture-extraction lane; nothing is
+                // evaluated here.
+                captures: BTreeMap::new(),
             });
         }
 
@@ -901,6 +907,43 @@ pub(super) struct BoundSection<'d> {
     pub(super) section: &'d Section,
     path: HeaderPath,
     pub(super) child: BoundScope<'d>,
+    /// What each capture this section's rule declares evaluated to.
+    ///
+    /// Empty here and populated by the lane that extracts capture values:
+    /// nothing is extracted, parsed, or compared yet. It is stored on the
+    /// bound section rather than recomputed per check because §3.8 ordering,
+    /// value locators, and dependency suppression all read the same result
+    /// and must all read the *same* one.
+    #[allow(dead_code)]
+    pub(super) captures: BTreeMap<CaptureName, BoundValueState>,
+}
+
+/// What one capture evaluated to for one bound section.
+///
+/// This is the validator's own record, deliberately independent of the
+/// diagnostics it produces. §6.3 decides dependency suppression "before these
+/// comments filter diagnostics", so a dependent check must ask this state
+/// whether its input held — never whether an `invalid-value` diagnostic
+/// survived `outlint-disable`. Deriving suppression from emitted diagnostics
+/// would make hiding a diagnostic re-enable the check that depended on it,
+/// which §6.3 forbids in as many words.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(super) enum BoundValueState {
+    /// The source parsed to a value of the declared type.
+    Valid(TypedValue),
+    /// A primary `invalid-value` reason exists, whether or not its diagnostic
+    /// is later filtered.
+    Invalid(ParseFailure),
+    /// The capture was evaluated and selected no usable value. For a
+    /// `required: true` frontmatter capture this is what `missing-value`
+    /// reports; for an optional one it is ordinary, valid absence.
+    Absent,
+    /// The capture was never evaluated because its prerequisite source was
+    /// itself absent or invalid — an absent frontmatter block, say, or a
+    /// header that did not match. Distinct from [`Self::Absent`]: nothing was
+    /// looked at, so nothing can be concluded about the value.
+    Unevaluated,
 }
 
 /// A document section paired with its complete document-tree path.

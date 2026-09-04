@@ -182,6 +182,68 @@ fn reference_json(reference: &RenderedReference) -> Value {
             }
             Value::Object(object)
         }
+        RenderedReference::ResolvedRule {
+            locator,
+            anchor,
+            path,
+            positions,
+            matcher,
+        } => {
+            let mut object = Map::new();
+            object.insert("kind".into(), json!("rule"));
+            object.insert("locator".into(), json!(locator));
+            object.insert("anchor".into(), json!(anchor));
+            object.insert("path".into(), json!(path));
+            if let Some(positions) = positions {
+                object.insert(
+                    "positions".into(),
+                    Value::Array(positions.iter().map(position_json).collect()),
+                );
+            }
+            object.insert("matcher".into(), matcher_json(matcher));
+            Value::Object(object)
+        }
+        RenderedReference::FrontmatterQuery {
+            locator,
+            query,
+            equals,
+        } => {
+            let mut object = Map::new();
+            object.insert("kind".into(), json!("frontmatter_query"));
+            object.insert("locator".into(), json!(locator));
+            object.insert("query".into(), json!(query));
+            if let Some(equals) = equals {
+                object.insert("equals".into(), scalar_json(equals));
+            }
+            Value::Object(object)
+        }
+        RenderedReference::FrontmatterCapture {
+            locator,
+            name,
+            value_type,
+        } => json!({
+            "kind": "frontmatter_capture",
+            "locator": locator,
+            "name": name,
+            "type": value_type
+        }),
+    }
+}
+
+/// One `positions` entry: an arbitrary-precision JSON integer, or null.
+///
+/// §11.3 is explicit that "position values are arbitrary-precision JSON
+/// integers; consumers MUST NOT assume they fit a 64-bit integer type", so
+/// the decimal text becomes a JSON *number* and never a quoted string. It is
+/// parsed rather than converted through a machine integer because a value
+/// wider than `u64` must survive intact. The lane that finalizes the version
+/// 3 envelope pins this against the contract tests; well-formed digits are
+/// all that ever reach it, so a refusal here can only mean the model was
+/// built wrong, and null is the honest rendering of that.
+fn position_json(digits: &Option<String>) -> Value {
+    match digits {
+        Some(digits) => serde_json::from_str(digits).unwrap_or(Value::Null),
+        None => Value::Null,
     }
 }
 
