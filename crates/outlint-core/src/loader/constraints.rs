@@ -454,7 +454,8 @@ impl Loader {
         let mut identity = prefix.clone();
         let mut scope_key = prefix;
 
-        let mut steps: Vec<BoundRuleStep> = Vec::new();
+        let mut first_step = None;
+        let mut rest_steps = Vec::new();
         let mut singular: Vec<bool> = Vec::new();
         let mut denied = false;
         let mut capture = None;
@@ -465,22 +466,16 @@ impl Loader {
             // §4.4: a name step inspects the rule ids of the current named
             // scope and the captures declared by the rule that opened it, and
             // nothing else. §4.3 makes those two sets disjoint within a scope.
-            if let Some((index, rule)) = rules
-                .iter()
-                .enumerate()
-                .find(|(_, rule)| rule.id.as_ref().is_some_and(|id| id.as_str() == name))
-            {
-                let id = rule
-                    .id
-                    .clone()
-                    .expect("the rule was found by its declared id");
-                steps.push(BoundRuleStep::new(
-                    id,
-                    RuleIndex(index),
-                    step.position().cloned(),
-                ));
+            if let Some((index, rule, id)) = rules.iter().enumerate().find_map(|(index, rule)| {
+                rule.id
+                    .as_ref()
+                    .filter(|id| id.as_str() == name)
+                    .cloned()
+                    .map(|id| (index, rule, id))
+            }) {
                 let singular_rule = is_statically_singular(rule);
-                let selector = match step.position() {
+                let bound_position = step.position().cloned();
+                let selector = match &bound_position {
                     Some(subscript) => ScopeSelector::ExplicitIndex(subscript.value().clone()),
                     None => ScopeSelector::ImplicitSingular,
                 };
@@ -492,7 +487,13 @@ impl Loader {
                     index,
                     selector: scope_equivalent(selector, singular_rule),
                 });
-                singular.push(step.position().is_some() || singular_rule);
+                singular.push(bound_position.is_some() || singular_rule);
+                let bound_step = BoundRuleStep::new(id, RuleIndex(index), bound_position);
+                if first_step.is_some() {
+                    rest_steps.push(bound_step);
+                } else {
+                    first_step = Some(bound_step);
+                }
                 denied |= matches!(rule.outcome, RuleOutcome::Deny);
                 captures = Some(&rule.captures);
                 rules = &rule.sections;
@@ -563,12 +564,19 @@ impl Loader {
         // terminal step may remain plural." A capture and `/text` are terminal
         // values, so the rule step in front of either is itself non-terminal
         // and takes the same check.
+        let step_count = usize::from(first_step.is_some()) + rest_steps.len();
         let non_terminal = if capture.is_some() || parsed.intrinsic_text().is_some() {
-            steps.len()
+            step_count
         } else {
-            steps.len().saturating_sub(1)
+            step_count.saturating_sub(1)
         };
-        if let Some(plural) = (0..non_terminal).find(|index| !singular[*index]) {
+        let bound_steps = first_step.iter().chain(&rest_steps);
+        if let Some((_, plural)) = singular
+            .iter()
+            .zip(bound_steps)
+            .take(non_terminal)
+            .find(|(singular, _)| !**singular)
+        {
             // §5.1 gives `ordered` its own, more specific error for the same
             // condition.
             let kind = match context {
@@ -581,13 +589,14 @@ impl Loader {
                 format!(
                     "ref `{source}` descends through the repeatable rule `{}`; narrow that step \
                      with `[i]`",
-                    steps[plural].id().as_str()
+                    plural.id().as_str()
                 ),
             );
             return None;
         }
 
         if let Some((name, value_type, subscript)) = capture {
+            let steps = first_step.into_iter().chain(rest_steps).collect();
             return Some(BoundOperand::Capture(ResolvedRuleCaptureLocator::new(
                 source.clone(),
                 anchor,
@@ -597,7 +606,19 @@ impl Loader {
                 subscript,
             )));
         }
-        let steps = non_empty(steps).expect("the locator grammar requires one name step");
+        let Some(first) = first_step else {
+            // The parsed locator has a non-empty name path. Every name either
+            // bound a rule step, returned an error above, or terminated at a
+            // capture (also returned above), so this state cannot arise from
+            // schema input. Keep the fallback structured if those cases ever
+            // change instead of turning an internal mismatch into a panic.
+            self.shape_error_at(range, format!("ref `{source}` has no bound name step"));
+            return None;
+        };
+        let steps = NonEmpty {
+            first,
+            rest: rest_steps,
+        };
         if let Some(text) = parsed.intrinsic_text() {
             return Some(BoundOperand::IntrinsicText(
                 ResolvedIntrinsicTextLocator::new(

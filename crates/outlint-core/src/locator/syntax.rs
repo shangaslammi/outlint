@@ -513,7 +513,13 @@ fn parse_frontmatter_form(source: &str) -> Result<Option<ParsedLocator>, Locator
             0,
         )),
         Some('.') => {
-            let name = CaptureName::parse(&rest['.'.len_utf8()..]).ok_or_else(|| {
+            let name_source = rest.strip_prefix('.').ok_or_else(|| {
+                LocatorParseError::new(
+                    LocatorParseErrorKind::MalformedFrontmatterCapture,
+                    "fm".len(),
+                )
+            })?;
+            let name = CaptureName::parse(name_source).ok_or_else(|| {
                 LocatorParseError::new(
                     LocatorParseErrorKind::MalformedFrontmatterCapture,
                     "fm.".len(),
@@ -548,7 +554,7 @@ fn parse_outline(source: &str) -> Result<UnboundOutlineLocator, LocatorParseErro
     let mut text = None;
     while scanner.eat('/') {
         let start = scanner.offset();
-        let token = scanner.take_token();
+        let token = scanner.take_token()?;
         if token == INTRINSIC_TEXT {
             text = Some(IntrinsicTextStep {
                 position: scanner.take_position()?,
@@ -620,7 +626,7 @@ fn parse_anchor(scanner: &mut Scanner<'_>) -> Result<LocatorAnchor, LocatorParse
 
 fn parse_name_step(scanner: &mut Scanner<'_>) -> Result<NameStep, LocatorParseError> {
     let start = scanner.offset();
-    let token = scanner.take_token();
+    let token = scanner.take_token()?;
     let name = StepName::parse(token).ok_or_else(|| {
         let kind = if token.is_empty() {
             LocatorParseErrorKind::EmptyStep
@@ -658,13 +664,16 @@ fn is_capture_name(text: &str) -> bool {
 /// Every offset it reports is a byte offset into the whole locator, so a parse
 /// error points at the original spelling and not at some suffix of it.
 struct Scanner<'a> {
-    source: &'a str,
+    remaining: &'a str,
     offset: usize,
 }
 
 impl<'a> Scanner<'a> {
     fn new(source: &'a str) -> Self {
-        Self { source, offset: 0 }
+        Self {
+            remaining: source,
+            offset: 0,
+        }
     }
 
     fn offset(&self) -> usize {
@@ -672,7 +681,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn rest(&self) -> &'a str {
-        &self.source[self.offset..]
+        self.remaining
     }
 
     fn peek(&self) -> Option<char> {
@@ -681,7 +690,10 @@ impl<'a> Scanner<'a> {
 
     /// Consumes `expected`, which the caller has already peeked.
     fn advance(&mut self, expected: char) {
-        self.offset += expected.len_utf8();
+        if let Some(remaining) = self.remaining.strip_prefix(expected) {
+            self.remaining = remaining;
+            self.offset += expected.len_utf8();
+        }
     }
 
     fn eat(&mut self, expected: char) -> bool {
@@ -699,11 +711,18 @@ impl<'a> Scanner<'a> {
     /// is what lets `Föö` fail as an invalid *name* instead of as a stray
     /// character after a zero-length one. The three delimiters are ASCII, so
     /// the split is always on a character boundary.
-    fn take_token(&mut self) -> &'a str {
+    fn take_token(&mut self) -> Result<&'a str, LocatorParseError> {
         let rest = self.rest();
-        let end = rest.find(['.', '/', '[']).unwrap_or(rest.len());
+        let end = rest.find(['.', '/', '[']).map_or(rest.len(), |end| end);
+        let Some((token, remaining)) = rest.split_at_checked(end) else {
+            return Err(LocatorParseError::new(
+                LocatorParseErrorKind::UnexpectedCharacter,
+                self.offset,
+            ));
+        };
+        self.remaining = remaining;
         self.offset += end;
-        &rest[..end]
+        Ok(token)
     }
 
     /// Takes one optional `[i]`.
@@ -720,7 +739,19 @@ impl<'a> Scanner<'a> {
                 open,
             ));
         };
-        let digits = &rest[..end];
+        let Some((digits, close_and_after)) = rest.split_at_checked(end) else {
+            return Err(LocatorParseError::new(
+                LocatorParseErrorKind::InvalidPosition,
+                open + '['.len_utf8(),
+            ));
+        };
+        let Some(remaining) = close_and_after.strip_prefix(']') else {
+            return Err(LocatorParseError::new(
+                LocatorParseErrorKind::UnterminatedPosition,
+                open,
+            ));
+        };
+        self.remaining = remaining;
         self.offset += end + ']'.len_utf8();
         let position = LocatorPosition::parse(digits).ok_or_else(|| {
             LocatorParseError::new(

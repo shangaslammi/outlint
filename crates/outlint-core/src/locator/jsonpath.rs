@@ -605,7 +605,13 @@ pub(crate) fn parse_frontmatter_query(
         LocatorParseError::new(LocatorParseErrorKind::UnterminatedQueryWrapper, open)
     })?;
 
-    let query_source = &source[open..close];
+    let query_source = source.get(open..close).ok_or_else(|| {
+        LocatorParseError::detailed(
+            LocatorParseErrorKind::InvalidQuery,
+            open,
+            "query wrapper boundaries are not UTF-8 boundaries",
+        )
+    })?;
     if query_source.is_empty() {
         return Err(LocatorParseError::new(
             LocatorParseErrorKind::EmptyQuery,
@@ -620,7 +626,14 @@ pub(crate) fn parse_frontmatter_query(
         )
     })?;
 
-    let after = &source[close + ']'.len_utf8()..];
+    let after_offset = close + ']'.len_utf8();
+    let after = source.get(after_offset..).ok_or_else(|| {
+        LocatorParseError::detailed(
+            LocatorParseErrorKind::InvalidQuery,
+            close,
+            "query wrapper close is outside the locator",
+        )
+    })?;
     let equality = match after.strip_prefix('=') {
         // §4.6: the literal is "the remainder of the locator", so every
         // trailing character belongs to it, `=` and `]` included.
@@ -658,7 +671,8 @@ fn find_wrapper_close(source: &str, open: usize) -> Option<usize> {
     // counted, so a `]` at zero depth is the one that closes it.
     let mut depth = 0_usize;
 
-    for (offset, character) in source[open..].char_indices() {
+    let rest = source.get(open..)?;
+    for (offset, character) in rest.char_indices() {
         state = match (state, character) {
             (State::Quoted(quote), '\\') => State::Escaped(quote),
             (State::Escaped(quote), _) => State::Quoted(quote),

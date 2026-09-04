@@ -218,27 +218,17 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                 condition,
                 consequences,
             } => {
-                let values = resolved
-                    .propositions(self, std::iter::once(condition).chain(consequences.iter()))?;
-                combine(&values, |satisfied| {
-                    let (condition, consequences) = satisfied
-                        .split_first()
-                        .expect("a `requires` always evaluates its condition");
-                    !*condition || consequences.iter().all(|value| *value)
-                })
+                let condition = resolved.proposition(self, condition)?;
+                let consequences = resolved.propositions(self, consequences.iter())?;
+                implication(condition, &consequences, Truth::Satisfied)
             }
             Constraint::Conflicts {
                 condition,
                 exclusions,
             } => {
-                let values = resolved
-                    .propositions(self, std::iter::once(condition).chain(exclusions.iter()))?;
-                combine(&values, |satisfied| {
-                    let (condition, exclusions) = satisfied
-                        .split_first()
-                        .expect("a `conflicts` always evaluates its condition");
-                    !*condition || exclusions.iter().all(|value| !*value)
-                })
+                let condition = resolved.proposition(self, condition)?;
+                let exclusions = resolved.propositions(self, exclusions.iter())?;
+                implication(condition, &exclusions, Truth::Unsatisfied)
             }
             // §5.1's pairwise `last(A) < first(B)` over the locators whose
             // terminal lists are non-empty.
@@ -578,4 +568,17 @@ fn combine(values: &[Truth], decide: impl Fn(&[bool]) -> bool) -> Truth {
 
 fn count(satisfied: &[bool]) -> usize {
     satisfied.iter().filter(|value| **value).count()
+}
+
+/// Evaluates an implication after its condition and every consequent have
+/// been evaluated, preserving whole-constraint suppression (§5.3).
+fn implication(condition: Truth, consequents: &[Truth], required: Truth) -> Truth {
+    if condition == Truth::Suppressed || consequents.contains(&Truth::Suppressed) {
+        Truth::Suppressed
+    } else if condition == Truth::Unsatisfied || consequents.iter().all(|value| *value == required)
+    {
+        Truth::Satisfied
+    } else {
+        Truth::Unsatisfied
+    }
 }

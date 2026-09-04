@@ -218,44 +218,44 @@ impl Loader {
         // twice — keep the order they were collected in.
         declarations.sort_by_key(|(_, range, _)| (range.source, range.range.start));
 
-        let mut earliest: HashMap<&str, usize> = HashMap::new();
-        let mut collisions = Vec::new();
-        for (position, (name, _, _)) in declarations.iter().enumerate() {
+        let mut earliest: HashMap<&str, (SourceRange, Option<usize>)> = HashMap::new();
+        let mut free = true;
+        for (name, range, origin) in &declarations {
             match earliest.get(name.as_str()) {
-                Some(&first) => collisions.push((first, position)),
+                Some((first_range, first_origin)) => {
+                    free = false;
+                    let (message, related) = match (first_origin, origin) {
+                        (Some(first_index), Some(_)) => (
+                            format!("duplicate rule id `{name}` in one scope"),
+                            format!("first declared by sibling rule {first_index}"),
+                        ),
+                        (Some(first_index), None) => (
+                            format!(
+                                "capture `{name}` collides with a rule id in the same named scope"
+                            ),
+                            format!("first declared by sibling rule {first_index}"),
+                        ),
+                        (None, _) => (
+                            format!(
+                                "rule id `{name}` collides with a capture in the same named scope"
+                            ),
+                            format!("capture `{name}` declared here"),
+                        ),
+                    };
+                    self.error_with_related_at(
+                        SchemaErrorKind::DuplicateId,
+                        *range,
+                        message,
+                        vec![RelatedLocation {
+                            range: *first_range,
+                            message: related,
+                        }],
+                    );
+                }
                 None => {
-                    earliest.insert(name, position);
+                    earliest.insert(name, (*range, *origin));
                 }
             }
-        }
-
-        let free = collisions.is_empty();
-        for (first, later) in collisions {
-            let (name, range, origin) = &declarations[later];
-            let (_, first_range, first_origin) = &declarations[first];
-            let (message, related) = match (first_origin, origin) {
-                (Some(first_index), Some(_)) => (
-                    format!("duplicate rule id `{name}` in one scope"),
-                    format!("first declared by sibling rule {first_index}"),
-                ),
-                (Some(first_index), None) => (
-                    format!("capture `{name}` collides with a rule id in the same named scope"),
-                    format!("first declared by sibling rule {first_index}"),
-                ),
-                (None, _) => (
-                    format!("rule id `{name}` collides with a capture in the same named scope"),
-                    format!("capture `{name}` declared here"),
-                ),
-            };
-            self.error_with_related_at(
-                SchemaErrorKind::DuplicateId,
-                *range,
-                message,
-                vec![RelatedLocation {
-                    range: *first_range,
-                    message: related,
-                }],
-            );
         }
         free
     }
@@ -593,26 +593,26 @@ impl Loader {
         }
 
         let mut complete = captures_known;
-        for report in &reports {
-            complete &= report.entry.is_some() && report.faults.is_empty();
+        let mut entries = Vec::with_capacity(reports.len());
+        for report in reports {
             for fault in &report.faults {
                 self.error_at(SchemaErrorKind::InvalidOrder, report.range, fault.clone());
             }
+            match report {
+                OrderEntryReport {
+                    entry: Some(entry),
+                    faults,
+                    ..
+                } if faults.is_empty() => entries.push(ValueOrderEntry {
+                    by: CaptureName(entry.by),
+                    direction: entry.direction,
+                    strict: entry.strict,
+                }),
+                _ => complete = false,
+            }
         }
 
-        complete.then(|| {
-            reports
-                .into_iter()
-                .map(|report| {
-                    let entry = report.entry.expect("a complete collection has every entry");
-                    ValueOrderEntry {
-                        by: CaptureName(entry.by),
-                        direction: entry.direction,
-                        strict: entry.strict,
-                    }
-                })
-                .collect()
-        })
+        complete.then_some(entries)
     }
 
     /// The range of one capture declaration — its key through its value —

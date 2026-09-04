@@ -876,32 +876,25 @@ fn report_duplicate_keys(
     scope: DuplicateScope,
     errors: &mut Vec<SchemaYamlError>,
 ) {
-    let texts = entries
-        .iter()
-        .map(|(key, _)| resolved_key_text(key))
-        .collect::<Vec<_>>();
-    let mut declared: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-    for (index, (key, _)) in entries.iter().enumerate() {
-        let digest = match &texts[index] {
+    let mut declared: BTreeMap<u64, Vec<(&SchemaYamlNode, Option<String>)>> = BTreeMap::new();
+    for (key, _) in entries {
+        let text = resolved_key_text(key);
+        let digest = match &text {
             Some(text) => schema_yaml_key_digest(&(0_u8, text.as_str())),
             None => schema_yaml_key_digest(&(1_u8, key)),
         };
         let alike = declared.entry(digest).or_default();
         let repeated = alike
             .iter()
-            .any(|&prior| match (&texts[index], &texts[prior]) {
+            .any(|(prior_key, prior_text)| match (&text, prior_text) {
                 (Some(current), Some(earlier)) => current == earlier,
-                (None, None) => entries[prior].0 == *key,
+                (None, None) => *prior_key == key,
                 _ => false,
             });
         if repeated {
-            errors.push(duplicate_schema_key_error(
-                key,
-                texts[index].as_deref(),
-                scope,
-            ));
+            errors.push(duplicate_schema_key_error(key, text.as_deref(), scope));
         } else {
-            alike.push(index);
+            alike.push((key, text));
         }
     }
 }
