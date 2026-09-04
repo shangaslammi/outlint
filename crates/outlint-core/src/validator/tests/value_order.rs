@@ -62,32 +62,61 @@ fn order_node(order_index: usize) -> SchemaNode {
 fn every_type_orders_in_both_directions_and_both_strictnesses() {
     // §2.4 gives each type its relation and §3.8 applies that relation to
     // adjacent pairs: ascending requires `A ≤ B`, descending `A ≥ B`, and
-    // `strict: true` replaces the inclusive relation with `<` or `>`.
-    for (declared, sorted) in [
-        ("int", ["-01", "1", "2"]),
-        ("bool", ["false", "false", "true"]),
-        ("date", ["0000-02-29", "2024-02-29", "2024-03-01"]),
-        ("semver", ["1.0.0-rc.1", "1.0.0", "1.0.1"]),
-        ("dotted", ["1.02", "1.2.0", "2"]),
-        ("text", ["a", "b", "c"]),
+    // "`strict: true` replaces the inclusive relation with `<` or `>`".
+    //
+    // Exactly one case tells the two strictnesses apart: adjacent values
+    // equal under §2.4's typed equality, which the inclusive relation admits
+    // and the strict one refuses. So each type brings both a sequence with no
+    // ties, which every combination must agree about, and a tied pair, which
+    // only strictness decides — spelled differently from its neighbour
+    // wherever the type has a second spelling for one value, so that the tie
+    // is the typed one rather than a textual one.
+    for (declared, increasing, tied) in [
+        ("int", &["-01", "1", "2"][..], &["1", "01"][..]),
+        ("bool", &["false", "true"][..], &["true", "true"][..]),
+        (
+            "date",
+            &["0000-02-29", "2024-02-29", "2024-03-01"][..],
+            &["2024-02-29", "2024-02-29"][..],
+        ),
+        (
+            "semver",
+            &["1.0.0-rc.1", "1.0.0", "1.0.1"][..],
+            &["1.0.0", "1.0.0"][..],
+        ),
+        ("dotted", &["1.02", "1.2.0", "2"][..], &["1.02", "1.2"][..]),
+        ("text", &["a", "b", "c"][..], &["a", "a"][..]),
     ] {
-        let descending = sorted.iter().rev().copied().collect::<Vec<_>>();
-        for (direction, ordered, reversed) in [
-            ("asc", sorted.to_vec(), descending.clone()),
-            ("desc", descending, sorted.to_vec()),
-        ] {
-            let schema = ordered_schema(declared, &entry("v", direction, false));
-            assert_eq!(
-                order_violations(&schema, &document(&ordered)),
-                [],
-                "{declared} {direction} {ordered:?}"
-            );
-            // Reversing a sorted sequence of three breaks both adjacent
-            // pairs, except where the sequence repeats a value: `false`
-            // twice is a legal non-strict neighbour either way round.
-            let broken = order_violations(&schema, &document(&reversed));
-            let expected = if declared == "bool" { 1 } else { 2 };
-            assert_eq!(broken.len(), expected, "{declared} {direction} reversed");
+        let decreasing = increasing.iter().rev().copied().collect::<Vec<_>>();
+        for strict in [false, true] {
+            for (direction, ordered, reversed) in [
+                ("asc", increasing.to_vec(), decreasing.clone()),
+                ("desc", decreasing.clone(), increasing.to_vec()),
+            ] {
+                let schema = ordered_schema(declared, &entry("v", direction, strict));
+                let label = format!("{declared} {direction} strict:{strict}");
+                // A sequence with no ties runs in the declared direction
+                // under either strictness.
+                assert_eq!(
+                    order_violations(&schema, &document(&ordered)),
+                    [],
+                    "{label} {ordered:?}"
+                );
+                // Reversed, every adjacent pair is out of order, again under
+                // either strictness.
+                assert_eq!(
+                    order_violations(&schema, &document(&reversed)).len(),
+                    reversed.len() - 1,
+                    "{label} {reversed:?}"
+                );
+                // The tie is the whole of the difference between them, and
+                // it reads the same way in both directions.
+                assert_eq!(
+                    order_violations(&schema, &document(tied)).len(),
+                    usize::from(strict),
+                    "{label} {tied:?}"
+                );
+            }
         }
     }
 }

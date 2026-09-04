@@ -246,6 +246,14 @@ fn query_ids(schema: &str, frontmatter: &str) -> Vec<DiagnosticId> {
     ids(&diagnostics(schema, &format!("{frontmatter}## Body\n")))
 }
 
+/// The JSON pointer a frontmatter diagnostic named, if it named one.
+fn query_pointer(diagnostic: &Diagnostic) -> Option<&str> {
+    match &diagnostic.target {
+        DiagnosticTarget::Frontmatter { block: Some(block) } => block.json_pointer.as_deref(),
+        other => panic!("expected a frontmatter target, got {other:?}"),
+    }
+}
+
 #[test]
 fn a_bare_read_is_satisfied_only_by_a_true_among_boolean_and_null_nodes() {
     // §4.6: "It is satisfied iff at least one result node is the YAML/JSON
@@ -288,13 +296,29 @@ fn every_non_boolean_non_null_node_is_invalid_and_suppresses_the_constraint() {
         query_ids(&schema, "---\nflags: [true, \"text\"]\n---\n"),
         [DiagnosticId::InvalidValue]
     );
-    // One primary per distinct offending node.
+    // One primary per distinct offending node, and each one about the node
+    // it is about: §6.1 gives it "the failing value's pointer" and §6.2
+    // anchors it at that entry, so three diagnostics that agreed on either
+    // would be three copies of one complaint rather than three findings.
+    let block = "---\nflags:\n  - 1\n  - \"text\"\n  - a: 1\n---\n";
+    let reported = diagnostics(&schema, &format!("{block}## Body\n"));
     assert_eq!(
-        query_ids(&schema, "---\nflags: [1, \"text\", {a: 1}]\n---\n"),
+        ids(&reported),
         [
             DiagnosticId::InvalidValue,
             DiagnosticId::InvalidValue,
             DiagnosticId::InvalidValue
+        ]
+    );
+    assert_eq!(
+        reported
+            .iter()
+            .map(|diagnostic| (query_pointer(diagnostic), diagnostic.location.line))
+            .collect::<Vec<_>>(),
+        [
+            (Some("/flags/0"), 3),
+            (Some("/flags/1"), 4),
+            (Some("/flags/2"), 5),
         ]
     );
 
@@ -434,6 +458,42 @@ fn a_decisive_earlier_operand_does_not_prevent_a_later_query_diagnostic() {
             "{constraints}"
         );
     }
+}
+
+#[test]
+fn an_already_suppressed_operand_does_not_prevent_a_later_query_diagnostic() {
+    // §5.3 forbids three-valued short-circuiting in both directions. A
+    // suppressed earlier operand already decides the constraint — nothing the
+    // later operands say can change a suppressed answer — and it must no more
+    // stop them being evaluated than a decisive true one does. §4.6's
+    // primaries are what makes that observable: the invalid query node still
+    // names itself, even though the constraint's answer was settled before it
+    // was reached.
+    let schema = descent_schema("  - any_of: [\"$.part.goal\", \"fm[$.flag]\"]\n");
+    let markdown = "---\nflag: \"text\"\n---\n# Part\n# Part\n";
+    let reported = diagnostics(&schema, markdown);
+    assert_eq!(
+        ids(&reported),
+        [DiagnosticId::TooManySections, DiagnosticId::InvalidValue]
+    );
+    assert_eq!(query_pointer(&reported[1]), Some("/flag"));
+
+    // The same constraint with its descent evaluable isolates what the case
+    // above is about: the query primary is not what the suppression adds.
+    assert_eq!(
+        ids(&diagnostics(&schema, "---\nflag: \"text\"\n---\n# Part\n")),
+        [DiagnosticId::InvalidValue]
+    );
+
+    // Filtering variant: §6.3 — hiding the upstream cardinality primary
+    // leaves both the query primary and the suppression as they were. The
+    // directive follows the block, since frontmatter starts at line one.
+    let hidden = "---\nflag: \"text\"\n---\n\
+                  <!-- outlint-disable-file too-many-sections -->\n\n# Part\n# Part\n";
+    assert_eq!(
+        ids(&diagnostics(&schema, hidden)),
+        [DiagnosticId::InvalidValue]
+    );
 }
 
 #[test]
