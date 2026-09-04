@@ -670,14 +670,52 @@ fn a_singular_owner_gives_relative_and_absolute_spellings_one_scope() {
         error_kinds(&singular_owner("ordered: [x, \"$.owner.x\"]")),
         vec![SchemaErrorKind::DuplicateRef]
     );
+}
 
-    // A subscript still narrows to a named occurrence rather than to "the
-    // current one", so it remains a separate scope and a separate identity.
+#[test]
+fn zero_on_a_singular_step_names_the_scope_it_already_named() {
+    // §4.4 permits `[i]` "after any step that produces a node list", and a
+    // statically singular rule produces at most one node — so `[0]` on such a
+    // step selects whatever the unsubscripted step selects. §5.1 compares
+    // concrete scopes, not spellings, so the two share one.
+    valid(&singular_owner("ordered: [x, \"$.owner[0].y\"]"));
+    valid(&singular_owner(
+        "ordered: [\"$.owner[0].x\", \"$.owner.y\"]",
+    ));
+
+    // §5.4 is unmoved: it compares "the same declared rule steps with the
+    // same positional subscripts", and these two spellings differ in one, so
+    // they are two operands — legal together in the one scope they share.
+    valid(&singular_owner("ordered: [x, \"$.owner[0].x\"]"));
+    valid(&singular_owner("any_of: [x, \"$.owner[0].x\"]"));
+    valid(&singular_owner("any_of: [\"$.owner.x\", \"$.owner[0].x\"]"));
+    // Written the same way twice, they still duplicate.
     assert_eq!(
-        error_kinds(&singular_owner("ordered: [x, \"$.owner[0].y\"]")),
+        error_kinds(&singular_owner(
+            "any_of: [\"$.owner[0].x\", \"$.owner[0].x\"]"
+        )),
+        vec![SchemaErrorKind::DuplicateRef]
+    );
+
+    // An index of one or more names a position a singular rule can never
+    // occupy, so its scope is not the singular occurrence's scope.
+    assert_eq!(
+        error_kinds(&singular_owner("ordered: [x, \"$.owner[1].y\"]")),
         vec![SchemaErrorKind::OrderedScopeMismatch]
     );
-    valid(&singular_owner("any_of: [x, \"$.owner[0].x\"]"));
+    // And on a repeatable owner `[0]` still narrows to one occurrence among
+    // several, which is not the occurrence a relative locator is bound in.
+    //
+    // That last case does not isolate the reduction's singular-rule guard:
+    // dropping it would label a repeatable `[0]` "implicitly singular", which
+    // still differs from the relative operand's `CurrentOccurrence`, for the
+    // same reason those two are indistinguishable elsewhere. The guard is
+    // written anyway, because a key that called a repeatable occurrence
+    // singular would be saying something false.
+    assert_eq!(
+        error_kinds(&repeatable_owner("ordered: [x, \"$.owner[0].y\"]")),
+        vec![SchemaErrorKind::OrderedScopeMismatch]
+    );
 }
 
 #[test]

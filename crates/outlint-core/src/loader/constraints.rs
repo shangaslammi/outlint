@@ -205,7 +205,12 @@ impl Loader {
                 complete = false;
                 continue;
             };
-            let BoundOperand::Rule { locator, identity } = operand else {
+            let BoundOperand::Rule {
+                locator,
+                identity,
+                scope: scope_key,
+            } = operand
+            else {
                 // §5.1: every listed locator must terminate in a rule id;
                 // anything else has no header position at all.
                 self.error_at(
@@ -220,10 +225,11 @@ impl Loader {
                 complete = false;
                 continue;
             };
-            // §5.1: the locators must share one *concrete* scope, so the key
-            // compared here keeps every non-terminal subscript and drops only
-            // the terminal rule step.
-            let Some((_, parent)) = identity.split_last() else {
+            // §5.1: the locators must share one *concrete* scope. The key
+            // compared here keeps every non-terminal subscript that narrows
+            // anything, and drops only the terminal rule step — the scope a
+            // locator resolves *in* is everything above its target.
+            let Some((_, parent)) = scope_key.split_last() else {
                 continue;
             };
             let parent = parent.to_vec();
@@ -321,9 +327,9 @@ impl Loader {
         range: SourceRange,
     ) -> Option<(Proposition, ResolvedIdentity)> {
         match self.bind_operand(schema, scope, value, Context::Proposition, range)? {
-            BoundOperand::Rule { locator, identity } => {
-                Some((Proposition::Rule(locator), ResolvedIdentity::Rule(identity)))
-            }
+            BoundOperand::Rule {
+                locator, identity, ..
+            } => Some((Proposition::Rule(locator), ResolvedIdentity::Rule(identity))),
             BoundOperand::FrontmatterQuery(proposition) => {
                 let identity = query_identity(&proposition, schema.options.match_case);
                 Some((Proposition::FrontmatterQuery(proposition), identity))
@@ -435,7 +441,7 @@ impl Loader {
         // synthesized title rule is transparent and declares no captures. A
         // bare name starts in the scope the constraint is attached to, which
         // also exposes the captures of the rule that owns that scope.
-        let (mut rules, mut identity, mut captures) = match anchor {
+        let (mut rules, prefix, mut captures) = match anchor {
             RefAnchor::SchemaRoot => (schema.addressed_root_rules(), Vec::new(), None),
             RefAnchor::CurrentScope => (
                 rules_at_scope(schema, scope)?,
@@ -443,6 +449,10 @@ impl Loader {
                 rule_at_scope(schema, scope).map(|rule| &rule.captures),
             ),
         };
+        // The two keys start alike and part company only where a subscript is
+        // written: an attachment ancestor carries none.
+        let mut identity = prefix.clone();
+        let mut scope_key = prefix;
 
         let mut steps: Vec<BoundRuleStep> = Vec::new();
         let mut singular: Vec<bool> = Vec::new();
@@ -469,14 +479,20 @@ impl Loader {
                     RuleIndex(index),
                     step.position().cloned(),
                 ));
+                let singular_rule = is_statically_singular(rule);
+                let selector = match step.position() {
+                    Some(subscript) => ScopeSelector::ExplicitIndex(subscript.value().clone()),
+                    None => ScopeSelector::ImplicitSingular,
+                };
                 identity.push(CanonicalStep {
                     index,
-                    selector: match step.position() {
-                        Some(subscript) => ScopeSelector::ExplicitIndex(subscript.value().clone()),
-                        None => ScopeSelector::ImplicitSingular,
-                    },
+                    selector: selector.clone(),
                 });
-                singular.push(step.position().is_some() || is_statically_singular(rule));
+                scope_key.push(CanonicalStep {
+                    index,
+                    selector: scope_equivalent(selector, singular_rule),
+                });
+                singular.push(step.position().is_some() || singular_rule);
                 denied |= matches!(rule.outcome, RuleOutcome::Deny);
                 captures = Some(&rule.captures);
                 rules = &rule.sections;
@@ -595,6 +611,7 @@ impl Loader {
         Some(BoundOperand::Rule {
             locator: ResolvedRuleLocator::new(source.clone(), anchor, steps),
             identity,
+            scope: scope_key,
         })
     }
 }
@@ -618,7 +635,11 @@ enum Context {
 enum BoundOperand {
     Rule {
         locator: ResolvedRuleLocator,
+        /// The §5.4 duplicate identity: every subscript exactly as written.
         identity: Vec<CanonicalStep>,
+        /// The §5.1 concrete-scope key: the same steps with each subscript
+        /// reduced to the occurrence it can actually denote.
+        scope: Vec<CanonicalStep>,
     },
     Capture(ResolvedRuleCaptureLocator),
     IntrinsicText(ResolvedIntrinsicTextLocator),
@@ -626,12 +647,18 @@ enum BoundOperand {
     FrontmatterCapture(ResolvedFrontmatterCapture),
 }
 
-/// One step of a locator's canonical §5.4 identity.
+/// One step of a locator's canonical key.
 ///
 /// The index is the *declared* rule's position in its sibling scope, so a
 /// relative and an absolute spelling of one rule produce the same step and
-/// duplicate as §5.4 requires. The selector is what §5.1 compares to decide
-/// whether two `ordered` locators share one concrete scope.
+/// duplicate as §5.4 requires.
+///
+/// Two keys are built from these, and they answer different questions.
+/// §5.4's duplicate identity is about *spelling*: `owner.x` and
+/// `owner[0].x` are two ways of writing one locator and stay two locators.
+/// §5.1's scope key is about *denotation*: it asks which concrete scope a
+/// locator resolves in, so a subscript that narrows nothing is reduced away
+/// by [`scope_equivalent`] before the comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CanonicalStep {
     index: usize,
@@ -639,6 +666,11 @@ struct CanonicalStep {
 }
 
 /// Which occurrence of a rule a step's scope belongs to.
+///
+/// [`ImplicitSingular`](Self::ImplicitSingular) and
+/// [`ExplicitIndex`](Self::ExplicitIndex) are not simply "unsubscripted" and
+/// "subscripted": on a statically singular rule the two can name the same
+/// single occurrence, which is what [`scope_equivalent`] settles.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ScopeSelector {
     /// No `[i]`: the rule is statically singular, so it opens one scope.
@@ -706,6 +738,29 @@ fn is_statically_singular(rule: &SectionRule) -> bool {
             ..
         })
     )
+}
+
+/// Reduces a step's selector to the occurrence it can actually denote.
+///
+/// §4.4 permits `[i]` "after any step that produces a node list", and a
+/// statically singular rule produces a list of at most one node — so `[0]` on
+/// such a step selects that one node whenever it exists and nothing when it
+/// does not, which is exactly what the unsubscripted step does. The two
+/// spellings therefore denote one concrete scope, and §5.1 compares concrete
+/// scopes rather than spellings.
+///
+/// An index of one or more is left alone. On a singular rule it names a
+/// position that rule can never occupy, so its scope is not the singular
+/// occurrence's scope and never shares one with it; on a repeatable rule it
+/// names a specific occurrence among several, which is the whole point of
+/// writing it.
+fn scope_equivalent(selector: ScopeSelector, singular_rule: bool) -> ScopeSelector {
+    match selector {
+        ScopeSelector::ExplicitIndex(index) if singular_rule && index == BigUint::from(0_u8) => {
+            ScopeSelector::ImplicitSingular
+        }
+        other => other,
+    }
 }
 
 /// The canonical prefix a relative locator inherits from its attachment path.

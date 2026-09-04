@@ -629,10 +629,10 @@ fn a_frontmatter_missing_value_names_its_block_pointer_and_declaration() {
     assert!(diagnostic.references.is_empty());
 }
 
-/// Pins the shape of an `order-violation`: §6.2 targets and anchors "the
-/// violating adjacent pair's second header", §6.3 attributes it to the order
-/// entry, and §6.2 requires it to list "exactly the first and second headers
-/// of its violating adjacent pair, in that order".
+/// Pins the shape of an `order-violation`. §6.2 targets and anchors "the
+/// violating adjacent pair's second header", attributes it to its order
+/// entry, and requires it to list "exactly the first and second headers of
+/// its violating adjacent pair, in that order".
 #[test]
 fn an_order_violation_names_its_entry_and_exactly_its_adjacent_pair() {
     use outlint_core::{DiagnosticTarget, OrderIndex, RuleIndex, SchemaNode};
