@@ -1,5 +1,7 @@
 //! Tests for the typed-value kernel.
 
+use proptest::prelude::*;
+
 use super::*;
 
 #[test]
@@ -1293,5 +1295,239 @@ fn canonically_equal_spellings_reparse_to_the_same_value() {
             "{} {source:?}",
             value_type.as_str()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Properties
+//
+// The deterministic tests above pin the cases §2.4 names. These state what
+// must hold for every value: that no input can panic a parser, and that the
+// single comparison relation really is an ordering rather than six ad-hoc
+// answers that happen to agree on the examples.
+// ---------------------------------------------------------------------------
+
+/// Parses generated source strings, keeping only what the type admits.
+///
+/// Values are generated through the parsers rather than assembled from
+/// normalized parts, so every generated value is one the kernel can actually
+/// produce.
+fn parsed_as(
+    value_type: ValueType,
+    sources: impl Strategy<Value = String>,
+) -> impl Strategy<Value = TypedValue> {
+    sources.prop_filter_map("the source parses", move |source| {
+        parse_header(value_type, &source).ok()
+    })
+}
+
+fn arbitrary_int() -> impl Strategy<Value = TypedValue> {
+    let sources = prop_oneof![
+        // A narrow range so independent draws collide, which is what makes
+        // equality and transitivity worth checking.
+        (-4i64..=4).prop_map(|value| value.to_string()),
+        any::<i64>().prop_map(|value| value.to_string()),
+        // Redundant spellings of values the narrow range also produces.
+        (0usize..=6, -4i64..=4).prop_map(|(zeros, value)| {
+            let sign = if value < 0 { "-" } else { "" };
+            format!("{sign}{}{}", "0".repeat(zeros), value.abs())
+        }),
+        Just(i64::MIN.to_string()),
+        Just(i64::MAX.to_string()),
+    ];
+    parsed_as(ValueType::Int, sources)
+}
+
+fn arbitrary_bool() -> impl Strategy<Value = TypedValue> {
+    let sources = any::<bool>().prop_map(|value| value.to_string());
+    parsed_as(ValueType::Bool, sources)
+}
+
+fn arbitrary_date() -> impl Strategy<Value = TypedValue> {
+    // The whole range including year zero, with impossible days filtered by
+    // the parser rather than by a second calendar written here.
+    let sources = (0u16..=9999, 1u8..=12, 1u8..=31)
+        .prop_map(|(year, month, day)| format!("{year:04}-{month:02}-{day:02}"));
+    parsed_as(ValueType::Date, sources)
+}
+
+fn arbitrary_semver() -> impl Strategy<Value = TypedValue> {
+    let identifier = prop_oneof![
+        Just("alpha".to_owned()),
+        Just("beta".to_owned()),
+        Just("rc".to_owned()),
+        Just("RC".to_owned()),
+        Just("0".to_owned()),
+        Just("1".to_owned()),
+        Just("2".to_owned()),
+        Just("11".to_owned()),
+        Just(u64::MAX.to_string()),
+    ];
+    let prerelease = prop::option::of(prop::collection::vec(identifier, 1..=3));
+    let sources =
+        (0u64..=3, 0u64..=3, 0u64..=3, prerelease).prop_map(|(major, minor, patch, prerelease)| {
+            let version = format!("{major}.{minor}.{patch}");
+            match prerelease {
+                Some(identifiers) => format!("{version}-{}", identifiers.join(".")),
+                None => version,
+            }
+        });
+    parsed_as(ValueType::Semver, sources)
+}
+
+fn arbitrary_dotted() -> impl Strategy<Value = TypedValue> {
+    let component = prop_oneof![
+        (0u32..=3, 0usize..=3).prop_map(|(value, zeros)| format!("{}{value}", "0".repeat(zeros))),
+        any::<u32>().prop_map(|value| value.to_string()),
+    ];
+    let sources =
+        prop::collection::vec(component, 1..=4).prop_map(|components| components.join("."));
+    parsed_as(ValueType::Dotted, sources)
+}
+
+fn arbitrary_text() -> impl Strategy<Value = TypedValue> {
+    let sources = prop_oneof![
+        // A small alphabet, so distinct draws are sometimes equal and
+        // sometimes differ only by case or by combining marks.
+        "[aAbBé\u{0301}e]{0,4}".prop_map(String::from),
+        any::<String>(),
+    ];
+    parsed_as(ValueType::Text, sources)
+}
+
+fn values_of_type(value_type: ValueType) -> BoxedStrategy<TypedValue> {
+    match value_type {
+        ValueType::Int => arbitrary_int().boxed(),
+        ValueType::Bool => arbitrary_bool().boxed(),
+        ValueType::Date => arbitrary_date().boxed(),
+        ValueType::Semver => arbitrary_semver().boxed(),
+        ValueType::Dotted => arbitrary_dotted().boxed(),
+        ValueType::Text => arbitrary_text().boxed(),
+    }
+}
+
+fn arbitrary_value() -> impl Strategy<Value = TypedValue> {
+    prop::sample::select(ValueType::ALL.to_vec()).prop_flat_map(values_of_type)
+}
+
+fn same_type_pair() -> impl Strategy<Value = (TypedValue, TypedValue)> {
+    prop::sample::select(ValueType::ALL.to_vec())
+        .prop_flat_map(|value_type| (values_of_type(value_type), values_of_type(value_type)))
+}
+
+fn same_type_triple() -> impl Strategy<Value = (TypedValue, TypedValue, TypedValue)> {
+    prop::sample::select(ValueType::ALL.to_vec()).prop_flat_map(|value_type| {
+        (
+            values_of_type(value_type),
+            values_of_type(value_type),
+            values_of_type(value_type),
+        )
+    })
+}
+
+proptest! {
+    /// No string, however malformed, can panic a header parser: every one
+    /// either becomes a value of the requested type or a structured failure.
+    #[test]
+    fn header_parsers_are_total_for_arbitrary_strings(source in any::<String>()) {
+        for value_type in ValueType::ALL {
+            if let Ok(parsed) = parse_header(value_type, &source) {
+                prop_assert_eq!(parsed.value_type(), value_type);
+            }
+        }
+    }
+
+    /// The same holds through the frontmatter entry point, which also has to
+    /// agree with the header one: given the same string, the two either both
+    /// succeed on the same value or both fail the same way.
+    #[test]
+    fn frontmatter_string_parsers_are_total_for_arbitrary_strings(source in any::<String>()) {
+        let json = Value::String(source.clone());
+        for value_type in ValueType::ALL {
+            let supplied = FrontmatterValue::new(&json, ResolvedYamlKind::String);
+            let from_frontmatter = parse_frontmatter(value_type, supplied);
+            match value_type {
+                // A YAML string is not an integer or a boolean, whatever it
+                // happens to spell.
+                ValueType::Int | ValueType::Bool => {
+                    prop_assert_eq!(
+                        from_frontmatter.map(|_| ()),
+                        Err(ParseFailure::KindMismatch {
+                            expected: value_type.frontmatter_kind(),
+                            actual: ResolvedYamlKind::String,
+                        })
+                    );
+                }
+                _ => match (from_frontmatter, parse_header(value_type, &source)) {
+                    (Ok(frontmatter_value), Ok(header_value)) => {
+                        prop_assert_eq!(frontmatter_value.equals(&header_value), Some(true));
+                    }
+                    (Err(frontmatter_failure), Err(header_failure)) => {
+                        prop_assert_eq!(frontmatter_failure, header_failure);
+                    }
+                    _ => prop_assert!(false, "the two sources disagreed on {:?}", source),
+                },
+            }
+        }
+    }
+
+    /// Reversing the arguments reverses the answer, so no pair has two
+    /// stories about which of them is larger.
+    #[test]
+    fn comparison_is_antisymmetric_on_normalized_values((left, right) in same_type_pair()) {
+        prop_assert_eq!(
+            left.compare(&right),
+            right.compare(&left).map(Ordering::reverse)
+        );
+    }
+
+    /// A chain of comparisons cannot fold back on itself.
+    #[test]
+    fn comparison_is_transitive_on_normalized_values(
+        (first, second, third) in same_type_triple()
+    ) {
+        let first_to_second = first.compare(&second);
+        let second_to_third = second.compare(&third);
+        let ascending = |ordering: Option<Ordering>| {
+            matches!(ordering, Some(Ordering::Less | Ordering::Equal))
+        };
+        if ascending(first_to_second) && ascending(second_to_third) {
+            prop_assert!(
+                ascending(first.compare(&third)),
+                "{:?} <= {:?} <= {:?} did not order the ends",
+                first.canonical(),
+                second.canonical(),
+                third.canonical()
+            );
+        }
+    }
+
+    /// Equality is the comparison relation reaching `Equal`, and nothing
+    /// else: there is no pair the two disagree about.
+    #[test]
+    fn equality_is_exactly_comparison_equality(
+        (left, right) in (arbitrary_value(), arbitrary_value())
+    ) {
+        prop_assert_eq!(
+            left.equals(&right),
+            left.compare(&right).map(|ordering| ordering == Ordering::Equal)
+        );
+        if left.value_type() != right.value_type() {
+            prop_assert_eq!(left.compare(&right), None);
+            prop_assert_eq!(left.equals(&right), None);
+        }
+    }
+
+    /// Within a type the relation is total and every value equals itself, so
+    /// a `None` from `compare` always means the types differed.
+    #[test]
+    fn comparison_is_reflexive_and_total_within_each_type(
+        (left, right) in same_type_pair()
+    ) {
+        prop_assert_eq!(left.compare(&left), Some(Ordering::Equal));
+        prop_assert_eq!(left.equals(&left), Some(true));
+        prop_assert!(left.compare(&right).is_some());
+        prop_assert!(left.equals(&right).is_some());
+        prop_assert_eq!(left.value_type(), right.value_type());
     }
 }

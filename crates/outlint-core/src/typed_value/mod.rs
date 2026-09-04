@@ -19,9 +19,11 @@
 
 // The kernel is deliberately unwired: the loader, validator, and diagnostic
 // layers begin consuming it in a later phase. Until then every item here is
-// reachable only from this module's tests, so the crate build sees the whole
-// module as dead. Remove this attribute when the spine starts calling in.
-#![allow(dead_code)]
+// reachable only from this module's own tests, so the ordinary build sees
+// the whole module as dead. The allow is scoped to `not(test)` so that the
+// test build still reports anything the tests do not reach, and it comes out
+// entirely when the spine starts calling in.
+#![cfg_attr(not(test), allow(dead_code))]
 
 #[cfg(test)]
 mod tests;
