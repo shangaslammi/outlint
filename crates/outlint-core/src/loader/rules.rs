@@ -2,15 +2,19 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use serde_json::Value;
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
+use crate::regex_capture;
+use crate::typed_value::ValueType;
 use crate::{
-    Cardinality, ExactText, GlobPattern, Matcher, Options, RegexPattern, RelatedLocation, RuleId,
-    RuleIndex, RuleOutcome, RulePath, SchemaErrorKind, SchemaNode, ScopePath, SectionRule,
-    SourceRange, UpperBound,
+    CaptureName, CapturePath, Cardinality, ExactText, GlobPattern, Matcher, Options, RegexPattern,
+    RelatedLocation, RuleCapture, RuleId, RuleIndex, RuleOutcome, RulePath, SchemaErrorKind,
+    SchemaNode, ScopePath, SectionRule, SourceRange, UpperBound,
 };
 
+use super::shape::CAPTURES_FIELD;
 use super::{Loader, RangeKey, RawOptions, RawRule};
 
 impl Loader {
@@ -103,10 +107,16 @@ impl Loader {
                 raw.repeat.as_deref(),
                 outcome_range,
             );
+            let captures = self.build_rule_captures(
+                raw.captures.as_ref(),
+                &rule_path,
+                matcher.as_ref(),
+                raw.allow,
+            );
             let children =
                 self.build_scope(raw.sections, &child_scope, match_case, ordered_default);
-            match (matcher, outcome, children) {
-                (Some(matcher), Some(outcome), Some(sections)) => {
+            match (matcher, outcome, children, captures) {
+                (Some(matcher), Some(outcome), Some(sections), Some(captures)) => {
                     semantic_indices.push(index);
                     semantic.push(SectionRule {
                         id,
@@ -116,11 +126,9 @@ impl Loader {
                         ordered: raw.ordered.unwrap_or(ordered_default),
                         sections,
                         constraints: Vec::new(),
-                        // Lane 2A wires the shape through; declaration
-                        // normalization belongs to the rule loader lane, so
-                        // every rule still normalizes to no captures and no
-                        // value order.
-                        captures: BTreeMap::new(),
+                        captures,
+                        // The value-order lane normalizes `order`; until it
+                        // does, every rule normalizes to no value order.
                         order: Vec::new(),
                     });
                 }
@@ -156,6 +164,230 @@ impl Loader {
         }
 
         complete.then_some(semantic)
+    }
+
+    /// Normalizes one rule's `captures` mapping (§2.1, §2.2, §2.4).
+    ///
+    /// Three outcomes are kept apart, because §6.3 makes them mean different
+    /// things downstream: an absent mapping and a fully valid one both yield
+    /// `Some` — the absent one empty — while a mapping that failed anywhere
+    /// yields `None`. `None` is not "no captures": it says the mapping never
+    /// became a collection at all, so no name from it enters the named scope
+    /// (§4.3), no `order` entry may resolve against it, and the rule cannot be
+    /// built. Every reason for `None` has already reported itself here, except
+    /// the one case §6.3 requires be left silent: a matcher that never
+    /// compiled says nothing about the groups its captures would have named.
+    fn build_rule_captures(
+        &mut self,
+        raw: Option<&Value>,
+        rule_path: &RulePath,
+        matcher: Option<&Matcher>,
+        allow: bool,
+    ) -> Option<BTreeMap<CaptureName, RuleCapture>> {
+        let field = self.range(RangeKey::RuleField(
+            rule_path.clone(),
+            CAPTURES_FIELD.into(),
+        ));
+        let Some(raw) = raw else {
+            if self.field_is_spelled(rule_path, CAPTURES_FIELD) {
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    field,
+                    "rule `captures` must be a non-empty mapping and cannot be null",
+                );
+                return None;
+            }
+            return Some(BTreeMap::new());
+        };
+        let Some(declared) = raw.as_object() else {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                field,
+                "rule `captures` must be a mapping from capture names to types",
+            );
+            return None;
+        };
+        if declared.is_empty() {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                field,
+                "rule `captures` must declare at least one capture",
+            );
+            return None;
+        }
+
+        // The JSON object sorted the mapping's keys, and a reader meets the
+        // declarations in the order the document spells them; the retained
+        // declaration ranges put that order back.
+        let mut ordered = declared
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str(),
+                    value,
+                    self.capture_declaration_range(rule_path, name, field),
+                )
+            })
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|(name, _, range)| (range.source, range.range.start, *name));
+
+        // One analysis serves every declaration: it reports the ancestor facts
+        // of all named groups at once, and the pattern does not change between
+        // declarations.
+        let groups = match matcher {
+            Some(Matcher::Regex(pattern)) => regex_capture::analyze(&pattern.0).ok(),
+            _ => None,
+        };
+
+        let mut entries = BTreeMap::new();
+        let mut valid = true;
+        for (name, value, range) in ordered {
+            let Some(value_type) = self.build_rule_capture(name, value, range, matcher, allow)
+            else {
+                valid = false;
+                continue;
+            };
+            let Some(analysis) = groups.as_ref() else {
+                // Unreachable by construction: `compile_anchored_pattern` and
+                // `regex_capture::analyze` share one pinned `regex-syntax`, so
+                // a body the matcher accepted parses here too. Were that ever
+                // to diverge, the group facts would be unknown rather than
+                // favourable, so the declaration is refused rather than
+                // credited with a participation it was never shown to have.
+                valid = false;
+                continue;
+            };
+            let Some(ancestors) = analysis.get(name) else {
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    range,
+                    format!("capture `{name}` names no group in this rule's regex"),
+                );
+                valid = false;
+                continue;
+            };
+            if ancestors.alternation || ancestors.min_zero_repetition {
+                let cause = match (ancestors.alternation, ancestors.min_zero_repetition) {
+                    (true, true) => "an alternation and a zero-minimum repetition",
+                    (true, false) => "an alternation",
+                    _ => "a zero-minimum repetition",
+                };
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    range,
+                    format!(
+                        "capture `{name}` is enclosed by {cause}, so its group does not \
+                         participate in every match"
+                    ),
+                );
+                valid = false;
+                continue;
+            }
+            let name = CaptureName(name.to_owned());
+            self.nodes.insert(
+                SchemaNode::Capture(CapturePath {
+                    rule: rule_path.clone(),
+                    name: name.clone(),
+                }),
+                range,
+            );
+            entries.insert(name, RuleCapture::new(value_type));
+        }
+        valid.then_some(entries)
+    }
+
+    /// Checks one capture declaration's name, type, and rule context.
+    ///
+    /// Returns the resolved type when the declaration is admissible so far;
+    /// the group facts of §2.2 are checked by the caller, which holds the one
+    /// analysis they all read.
+    fn build_rule_capture(
+        &mut self,
+        name: &str,
+        value: &Value,
+        range: SourceRange,
+        matcher: Option<&Matcher>,
+        allow: bool,
+    ) -> Option<ValueType> {
+        if !is_capture_name(name) {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("capture name `{name}` must match `[a-z][a-z0-9_]*`"),
+            );
+            return None;
+        }
+        let Some(declared) = value.as_str() else {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("capture `{name}` must declare its type as a string"),
+            );
+            return None;
+        };
+        let Some(value_type) = ValueType::from_name(declared) else {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("capture `{name}` declares unknown type `{declared}`"),
+            );
+            return None;
+        };
+        match matcher {
+            // §6.3: a matcher that never compiled is already an
+            // `invalid-matcher`, and it left no form to judge this
+            // declaration against. The capture collection still fails, so
+            // nothing partial reaches the model, but silently.
+            None => return None,
+            Some(Matcher::Regex(_)) => {}
+            Some(_) => {
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    range,
+                    format!(
+                        "capture `{name}` needs a regex matcher; only a regex declares the \
+                         named groups a capture binds"
+                    ),
+                );
+                return None;
+            }
+        }
+        if !allow {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("capture `{name}` cannot be declared on an `allow: false` rule"),
+            );
+            return None;
+        }
+        Some(value_type)
+    }
+
+    /// The range of one capture declaration — its key through its value —
+    /// falling back to the `captures` collection when the key had no scalar
+    /// spelling of its own to anchor at.
+    fn capture_declaration_range(
+        &self,
+        rule_path: &RulePath,
+        name: &str,
+        fallback: SourceRange,
+    ) -> SourceRange {
+        self.ranges.get(
+            &self.source_key(RangeKey::RuleCapture(rule_path.clone(), name.to_owned())),
+            fallback,
+        )
+    }
+
+    /// Whether a rule spelled `field:` at all.
+    ///
+    /// Serde cannot answer this for `captures` and `order`: an explicit null
+    /// deserializes to the same `None` an absent key does. The range index
+    /// keeps a range for every key the source wrote, so presence there is the
+    /// distinction the two need.
+    fn field_is_spelled(&self, rule_path: &RulePath, field: &str) -> bool {
+        self.ranges
+            .ranges
+            .contains_key(&self.source_key(RangeKey::RuleField(rule_path.clone(), field.into())))
     }
 
     fn build_rule_id(
@@ -305,6 +537,19 @@ impl Loader {
         };
         Some(RuleOutcome::Allow(cardinality))
     }
+}
+
+/// Whether a string is a capture name under the §2.2 grammar
+/// `[a-z][a-z0-9_]*`.
+///
+/// Deliberately distinct from [`is_slug`]: a rule id separates words with
+/// `-`, a capture name with `_`, and neither spelling is admissible as the
+/// other. The test is over bytes, so every non-ASCII scalar is rejected by
+/// the same arm that rejects an ASCII one outside the set.
+pub(super) fn is_capture_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 pub(super) fn is_slug(value: &str) -> bool {

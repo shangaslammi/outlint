@@ -1,10 +1,10 @@
 use super::{error_kinds, invalid, source_slice, valid};
 use crate::loader::load_schema;
-use crate::loader::rules::{auto_id, parse_repeat, regex_body};
+use crate::loader::rules::{auto_id, is_capture_name, parse_repeat, regex_body};
 use crate::{
-    Cardinality, ConstraintIndex, ConstraintPath, ExactText, InvalidSchema, Matcher,
-    OutlineProvenance, RegexPattern, RuleId, RuleIndex, RuleOutcome, RulePath, SchemaError,
-    SchemaErrorKind, SchemaNode, ScopePath, UpperBound,
+    CaptureName, Cardinality, ConstraintIndex, ConstraintPath, ExactText, InvalidSchema,
+    LoadedSchema, Matcher, OutlineProvenance, RegexPattern, RuleId, RuleIndex, RuleOutcome,
+    RulePath, SchemaError, SchemaErrorKind, SchemaNode, ScopePath, UpperBound,
 };
 use proptest::prelude::*;
 
@@ -863,4 +863,403 @@ sections:
         match: Major
 "#;
     assert_errors(source, &[(SchemaErrorKind::InvalidCapture, "major")]);
+}
+
+// --- §2.1/§2.2/§2.4 capture normalization ---------------------------------
+
+/// Every type name of the closed §2.4 set resolves, and each capture keeps the
+/// spelling it was declared with.
+#[test]
+fn every_capture_type_normalizes_to_its_declared_name() {
+    let schema = valid(
+        r#"version: 1
+sections:
+  - match: "/(?<a>.)(?<b>.)(?<c>.)(?<d>.)(?<e>.)(?<f>.)/"
+    captures:
+      a: int
+      b: bool
+      c: date
+      d: semver
+      e: dotted
+      f: text
+"#,
+    );
+    let declared = schema.addressed_root_rules()[0]
+        .captures
+        .iter()
+        .map(|(name, capture)| (name.as_str(), capture.type_name()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declared,
+        vec![
+            ("a", "int"),
+            ("b", "bool"),
+            ("c", "date"),
+            ("d", "semver"),
+            ("e", "dotted"),
+            ("f", "text"),
+        ]
+    );
+}
+
+/// §2.1 makes the mapping's source order non-semantic, so two schemas that
+/// spell one set of captures in different orders normalize to one rule.
+#[test]
+fn capture_mapping_source_order_is_not_semantic() {
+    let first = valid(
+        "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)\\\\.(?<minor>[0-9]+)/\"\n\
+         \x20   captures:\n      major: int\n      minor: int\n",
+    );
+    let second = valid(
+        "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)\\\\.(?<minor>[0-9]+)/\"\n\
+         \x20   captures:\n      minor: int\n      major: int\n",
+    );
+    assert_eq!(first, second);
+}
+
+/// §2.2 admits named groups in either spelling the dialect defines.
+#[test]
+fn both_named_group_spellings_bind_a_capture() {
+    for pattern in ["/v(?<major>[0-9]+)/", "/v(?P<major>[0-9]+)/"] {
+        let schema = valid(&format!(
+            "version: 1\nsections:\n  - match: \"{pattern}\"\n    captures:\n      major: int\n"
+        ));
+        assert_eq!(schema.addressed_root_rules()[0].captures.len(), 1);
+    }
+}
+
+/// The mandatory-participation restriction of §2.2 is about *ancestors*: an
+/// alternation written inside the declared group leaves it participating in
+/// every match, while one written above it does not.
+#[test]
+fn alternation_below_a_declared_group_is_legal_and_above_it_is_not() {
+    let schema = valid(
+        r#"version: 1
+sections:
+  - match: "/Release (?<kind>alpha|beta)/"
+    captures:
+      kind: text
+"#,
+    );
+    assert_eq!(schema.addressed_root_rules()[0].captures.len(), 1);
+
+    let source = r#"version: 1
+sections:
+  - match: "/(?<kind>alpha)|beta/"
+    captures:
+      kind: text
+"#;
+    let error = assert_anchored(source, SchemaErrorKind::InvalidCapture, "kind: text");
+    assert_eq!(
+        error.message,
+        "capture `kind` is enclosed by an alternation, so its group does not participate in \
+         every match"
+    );
+}
+
+/// Every zero-minimum repetition spelling of §2.2 defeats participation when
+/// it encloses the declared group, in greedy and lazy form alike.
+#[test]
+fn declared_group_must_participate() {
+    for quantifier in [
+        "?", "??", "*", "*?", "{0}", "{0}?", "{0,}", "{0,}?", "{0,3}", "{0,3}?",
+    ] {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/a(?:(?<n>[0-9]+))\
+             {quantifier}/\"\n    captures:\n      n: int\n"
+        );
+        let error = assert_anchored(&source, SchemaErrorKind::InvalidCapture, "n: int");
+        assert!(
+            error.message.contains("zero-minimum repetition"),
+            "`{quantifier}` must be reported as a zero-minimum repetition, got {:?}",
+            error.message
+        );
+    }
+}
+
+/// A repetition whose minimum is at least one keeps the group participating,
+/// so it stays a legal declaration target.
+#[test]
+fn positive_minimum_repetitions_keep_a_capture_legal() {
+    for quantifier in ["+", "+?", "{1}", "{1,}", "{2,4}"] {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/a(?:(?<n>[0-9]))\
+             {quantifier}/\"\n    captures:\n      n: int\n"
+        );
+        assert_eq!(valid(&source).addressed_root_rules()[0].captures.len(), 1);
+    }
+}
+
+/// §2.2 constrains only the groups a rule declares. An undeclared group —
+/// named or not — stays an ordinary regex group, optional or otherwise.
+#[test]
+fn undeclared_groups_are_unconstrained() {
+    let schema = valid(
+        r#"version: 1
+sections:
+  - match: "/(?<major>[0-9]+)(?:-(?<tag>[a-z]+))?( draft)?/"
+    captures:
+      major: int
+"#,
+    );
+    assert_eq!(schema.addressed_root_rules()[0].captures.len(), 1);
+}
+
+/// A declaration must name a group that exists (§2.2).
+#[test]
+fn declared_group_must_exist() {
+    let source = r#"version: 1
+sections:
+  - match: "/(?<major>[0-9]+)/"
+    captures:
+      minor: int
+"#;
+    let error = assert_anchored(source, SchemaErrorKind::InvalidCapture, "minor: int");
+    assert_eq!(
+        error.message,
+        "capture `minor` names no group in this rule's regex"
+    );
+}
+
+/// The `captures` collection itself must be a non-empty mapping (§2.1). Each
+/// malformed collection anchors at the `captures` value, not at any entry.
+#[test]
+fn captures_require_a_mapping() {
+    for spelling in ["null", "semver", "[major]"] {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n    captures: {spelling}\n"
+        );
+        assert_anchored(&source, SchemaErrorKind::InvalidCapture, spelling);
+    }
+}
+
+#[test]
+fn captures_must_be_nonempty() {
+    let source = "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n    captures: {}\n";
+    let error = assert_anchored(source, SchemaErrorKind::InvalidCapture, "{}");
+    assert_eq!(
+        error.message,
+        "rule `captures` must declare at least one capture"
+    );
+}
+
+/// §2.2 gives capture names their own grammar, distinct from the §4.1 rule-id
+/// slug: lowercase-initial, then lowercase, digits, and `_`.
+#[test]
+fn capture_names_follow_exact_grammar() {
+    for name in ["Major", "_major", "9major", "ma-jor", "mäjor", "\"\""] {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n\
+             \x20   captures:\n      {name}: int\n"
+        );
+        let error = invalid(&source)
+            .errors
+            .iter()
+            .find(|error| error.kind == SchemaErrorKind::InvalidCapture)
+            .cloned()
+            .unwrap_or_else(|| panic!("`{name}` must be refused as a capture name"));
+        assert!(
+            error.message.contains("must match `[a-z][a-z0-9_]*`"),
+            "unexpected message for `{name}`: {:?}",
+            error.message
+        );
+    }
+    // `_` and digits are legal after the first character.
+    let schema = valid(
+        "version: 1\nsections:\n  - match: \"/(?<major_2>[0-9]+)/\"\n\
+         \x20   captures:\n      major_2: int\n",
+    );
+    assert_eq!(schema.addressed_root_rules()[0].captures.len(), 1);
+}
+
+#[test]
+fn capture_type_must_be_a_string() {
+    for spelling in ["null", "1", "true", "[text]", "{a: b}"] {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n\
+             \x20   captures:\n      major: {spelling}\n"
+        );
+        let error = assert_anchored(
+            &source,
+            SchemaErrorKind::InvalidCapture,
+            &format!("major: {spelling}"),
+        );
+        assert_eq!(
+            error.message,
+            "capture `major` must declare its type as a string"
+        );
+    }
+}
+
+/// §2.4's type set is closed: an unknown name is a load-time error, never an
+/// extension point.
+#[test]
+fn capture_type_set_is_closed() {
+    let source = r#"version: 1
+sections:
+  - match: "/(?<major>[0-9]+)/"
+    captures:
+      major: integer
+"#;
+    let error = assert_anchored(source, SchemaErrorKind::InvalidCapture, "major: integer");
+    assert_eq!(
+        error.message,
+        "capture `major` declares unknown type `integer`"
+    );
+}
+
+/// Only a regex declares named groups, so only a regex rule can capture
+/// (§2.1). Each offending declaration is reported.
+#[test]
+fn captures_require_regex_matcher() {
+    for matcher in ["Release", "Release *", "\"*\""] {
+        let source = format!(
+            "version: 1\nsections:\n  - match: {matcher}\n\
+             \x20   captures:\n      major: int\n      minor: int\n"
+        );
+        assert_errors(
+            &source,
+            &[
+                (SchemaErrorKind::InvalidCapture, "major: int"),
+                (SchemaErrorKind::InvalidCapture, "minor: int"),
+            ],
+        );
+    }
+}
+
+/// A denied rule exports nothing, so it cannot declare a capture (§2.1).
+#[test]
+fn deny_rules_cannot_capture() {
+    let source = r#"version: 1
+sections:
+  - match: "/(?<major>[0-9]+)/"
+    allow: false
+    captures:
+      major: int
+      minor: text
+"#;
+    let errors = invalid(source)
+        .errors
+        .iter()
+        .map(|error| (error.kind, error.message.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        errors,
+        vec![
+            (
+                SchemaErrorKind::InvalidCapture,
+                "capture `major` cannot be declared on an `allow: false` rule".to_owned()
+            ),
+            (
+                SchemaErrorKind::InvalidCapture,
+                "capture `minor` cannot be declared on an `allow: false` rule".to_owned()
+            ),
+        ]
+    );
+}
+
+/// §2.2: capture names have no reserved words. `fm` and `linkdefs` are
+/// reserved only as top-level rule ids (§4.1), and a capture is not one.
+#[test]
+fn reserved_rule_ids_are_ordinary_capture_names() {
+    let schema = valid(
+        r#"version: 1
+sections:
+  - match: "/(?<fm>[a-z]+) (?<linkdefs>[a-z]+)/"
+    captures:
+      fm: text
+      linkdefs: text
+"#,
+    );
+    let declared = schema.addressed_root_rules()[0]
+        .captures
+        .keys()
+        .map(CaptureName::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(declared, vec!["fm", "linkdefs"]);
+}
+
+/// Capture declarations are addressable, in every form a rule is spelled in.
+#[test]
+fn capture_nodes_are_addressable_in_every_rule_form() {
+    let sugar = r#"version: 1
+title: Doc
+sections:
+  - match: "/(?<major>[0-9]+)/"
+    captures:
+      major: int
+    sections:
+      - match: "/(?<minor>[0-9]+)/"
+        captures:
+          minor: int
+"#;
+    let loaded = load_schema(sugar).expect("the sugar schema loads");
+    assert_eq!(
+        capture_slice(&loaded, sugar, ScopePath(Vec::new()), 0, "major"),
+        "major: int"
+    );
+    assert_eq!(
+        capture_slice(&loaded, sugar, ScopePath(vec![RuleIndex(0)]), 0, "minor"),
+        "minor: int"
+    );
+
+    let outline = r#"version: 1
+outline:
+  - match: "/(?<major>[0-9]+)/"
+    captures:
+      major: int
+    sections:
+      - match: "/(?<minor>[0-9]+)/"
+        captures:
+          minor: int
+"#;
+    let loaded = load_schema(outline).expect("the outline schema loads");
+    assert_eq!(
+        capture_slice(&loaded, outline, ScopePath(Vec::new()), 0, "major"),
+        "major: int"
+    );
+    assert_eq!(
+        capture_slice(&loaded, outline, ScopePath(vec![RuleIndex(0)]), 0, "minor"),
+        "minor: int"
+    );
+}
+
+/// The source text one rule's capture node addresses.
+#[track_caller]
+fn capture_slice<'a>(
+    loaded: &LoadedSchema,
+    source: &'a str,
+    scope: ScopePath,
+    index: usize,
+    name: &str,
+) -> &'a str {
+    let rule = RulePath {
+        scope,
+        index: RuleIndex(index),
+    };
+    let (_, range) = loaded
+        .locations
+        .nodes
+        .iter()
+        .find(|(node, _)| match node {
+            SchemaNode::Capture(path) => path.rule == rule && path.name.as_str() == name,
+            _ => false,
+        })
+        .unwrap_or_else(|| panic!("missing capture node `{name}` for {rule:?}"));
+    source_slice(source, *range)
+}
+
+proptest! {
+    /// The §2.2 grammar is decided for every string, not just the ones a
+    /// schema is likely to spell: the check never panics, and it accepts
+    /// exactly `[a-z][a-z0-9_]*`.
+    #[test]
+    fn capture_name_grammar_accepts_exactly_its_language(candidate in any::<String>()) {
+        let mut characters = candidate.chars();
+        let expected = characters.next().is_some_and(|first| first.is_ascii_lowercase())
+            && characters.all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+            });
+        prop_assert_eq!(is_capture_name(&candidate), expected);
+    }
 }

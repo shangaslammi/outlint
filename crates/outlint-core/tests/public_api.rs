@@ -311,13 +311,15 @@ fn non_string_capture_keys_fail_the_shape_rule_before_duplicate_classification()
         .all(|error| error.kind.to_string() != "invalid-capture"));
 }
 
-/// Pins that `captures` and `order` are admitted as rule and frontmatter
-/// fields rather than refused as unknown keys. Their contents are still
-/// unvalidated and unnormalized here: the loader lanes that read them land
-/// later, and this test exists so that admission is a deliberate state rather
-/// than an accident nobody noticed.
+/// Pins that a rule's `captures` declarations reach the public model with
+/// their §2.4 types resolved, and that `order` and `frontmatter.captures`
+/// remain admitted as fields rather than refused as unknown keys.
+///
+/// Those two are still unvalidated and unnormalized here: the loader lanes
+/// that read them land later, and pinning their admission keeps it a
+/// deliberate state rather than an accident nobody noticed.
 #[test]
-fn capture_and_order_declarations_are_admitted_without_being_normalized() {
+fn rule_captures_reach_the_public_model() {
     let loaded = load_schema(
         r#"
 version: 1
@@ -336,8 +338,14 @@ sections:
     )
     .expect("captures and order are known fields");
 
-    assert!(loaded.schema.outline[0].sections[0].captures.is_empty());
-    assert!(loaded.schema.outline[0].sections[0].order.is_empty());
+    let rule = &loaded.schema.outline[0].sections[0];
+    let captures = rule
+        .captures
+        .iter()
+        .map(|(name, capture)| (name.as_str(), capture.type_name()))
+        .collect::<Vec<_>>();
+    assert_eq!(captures, vec![("version", "semver")]);
+    assert!(rule.order.is_empty());
     assert!(loaded.schema.frontmatter.captures().is_empty());
 }
 
