@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{error_kinds, valid};
+use super::{error_kinds, invalid, source_slice, valid};
 use crate::loader::frontmatter_schema::{external_source_id, invalid_inline_references};
 use crate::loader::{
     json_schema_external_references, json_schema_reference_budget_message,
-    json_schema_reference_count, load_schema, load_schema_with_resources,
-    MAX_JSON_SCHEMA_REFERENCES,
+    json_schema_reference_count, linked_frontmatter_schema_path, load_schema,
+    load_schema_with_resources, MAX_JSON_SCHEMA_REFERENCES,
 };
 use crate::{
     ByteOffset, FrontmatterPolicy, LinkedJsonSchemaInput, LoadSchemaResult, SchemaErrorKind,
@@ -825,4 +825,209 @@ fn the_reference_budget_spans_the_graph_and_names_where_it_runs_out() {
         json_schema_reference_budget_message()
     );
     assert_eq!(invalid.errors.first.range.source, SourceId(2));
+}
+
+// ---------------------------------------------------------------------------
+// Frontmatter capture guardrails
+// ---------------------------------------------------------------------------
+//
+// These pin the answers a `frontmatter.captures` declaration already gets from
+// the reader and the shape rule, before the frontmatter loader normalizes one.
+// They belong here rather than beside the duplicate-classification walk because
+// what they hold is the frontmatter loader's contract with that walk: the
+// classification and its anchor are what the loader must not restate, and the
+// JSON Schema behaviour is what declaring captures must not disturb.
+
+/// §2.3 makes a key repeated inside `captures` `invalid-capture` rather than
+/// `syntax`, and §6.3 anchors it at the later spelling: the one an author
+/// would delete. Nothing downstream re-checks this, so the classification and
+/// the anchor are pinned from the side that depends on them.
+#[test]
+fn repeated_frontmatter_capture_names_anchor_the_later_key() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "    version:\n",
+        "      type: text\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(refused.errors.first.kind, SchemaErrorKind::InvalidCapture);
+    assert_eq!(
+        refused.errors.first.message,
+        "duplicate capture name `version`"
+    );
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    assert_eq!(source_slice(source, refused.errors.first.range), "version");
+    let later = source
+        .rfind("    version:\n")
+        .expect("the source spells the name twice")
+        + "    ".len();
+    assert_eq!(
+        refused.errors.first.range.range,
+        TextRange {
+            start: ByteOffset(later),
+            end: ByteOffset(later + "version".len()),
+        }
+    );
+}
+
+/// §2.1's special classification covers the `captures` mapping's own keys and
+/// stops there: a key repeated *inside* one declaration is ordinary duplicate
+/// YAML and stays `syntax`. Pinned because the two mappings are one line apart
+/// in the source and a widened scope would silently reclassify this one.
+#[test]
+fn capture_declaration_duplicates_remain_syntax() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "      type: text\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
+    assert_eq!(
+        refused.errors.first.message,
+        "invalid YAML: duplicate mapping key `type`"
+    );
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    assert_eq!(source_slice(source, refused.errors.first.range), "type");
+    let later = source
+        .rfind("      type:")
+        .expect("the declaration spells the key twice")
+        + "      ".len();
+    assert_eq!(
+        refused.errors.first.range.range,
+        TextRange {
+            start: ByteOffset(later),
+            end: ByteOffset(later + "type".len()),
+        }
+    );
+}
+
+/// A capture name is `[a-z][a-z0-9_]*` under §2.2, so the name checks the
+/// frontmatter loader performs take string keys. A non-string key has already
+/// failed the upstream rule that mapping keys are strings, and §6.3 forbids
+/// attempting a check whose input could not be built, so the refusal stays
+/// `invalid-document-shape` and never becomes a second `invalid-capture`.
+#[test]
+fn non_string_frontmatter_capture_keys_fail_shape_first() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    1:\n",
+        "      type: int\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(
+        refused.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
+    assert_eq!(refused.errors.first.message, "mapping keys must be strings");
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    assert_eq!(source_slice(source, refused.errors.first.range), "1");
+    assert!(refused
+        .errors
+        .iter()
+        .all(|error| error.kind != SchemaErrorKind::InvalidCapture));
+}
+
+/// The linked-schema path is read off the outer YAML before anything is
+/// loaded, so the I/O shell can perform its reads first. A sibling `captures`
+/// key is not on that path and must not change what it returns.
+#[test]
+fn a_captures_declaration_does_not_disturb_the_linked_schema_path() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  schema: linked.json\n",
+        "sections: []\n",
+    );
+    assert_eq!(
+        linked_frontmatter_schema_path(source).as_deref(),
+        Some("linked.json")
+    );
+}
+
+/// §2.3: "`frontmatter.schema` and `frontmatter.captures` are complementary."
+/// Declaring captures must therefore leave inline schema preparation exactly
+/// as it was — same declaration and document nodes, same primary source.
+#[test]
+fn inline_json_schema_loads_beside_a_captures_declaration() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  schema:\n",
+        "    type: object\n",
+        "title: null\n",
+        "sections: []\n",
+    );
+    let loaded = load_schema(source).expect("captures do not disturb an inline schema");
+    assert!(loaded.schema.frontmatter.schema().is_some());
+    let declaration = loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDeclaration];
+    let document = loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDocument];
+    assert_eq!(declaration, document);
+    assert_eq!(declaration.source, SourceId(0));
+    assert_eq!(source_slice(source, declaration), "type: object\n");
+}
+
+/// The linked half of the same guarantee: external source ids, the external
+/// document node, and the compiled schema all survive a sibling `captures`
+/// declaration untouched.
+#[test]
+fn linked_json_schema_loads_beside_a_captures_declaration() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  schema: root.json\n",
+        "title: null\n",
+        "sections: []\n",
+    );
+    let loaded = load_schema_with_resources(
+        source,
+        Some(SourceLabel("schema.yml".into())),
+        Some(LinkedJsonSchemaInput {
+            root_uri: "https://outlint.invalid/root.json".into(),
+            resources: vec![resource(
+                "https://outlint.invalid/root.json",
+                r#"{"type":"object","required":["status"]}"#,
+            )],
+        }),
+    )
+    .expect("captures do not disturb a linked schema");
+    assert!(loaded.schema.frontmatter.schema().is_some());
+    assert!(loaded.sources.documents.contains_key(&SourceId(1)));
+    assert_eq!(
+        loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDocument].source,
+        SourceId(1)
+    );
+    assert_eq!(
+        loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDeclaration].source,
+        SourceId(0)
+    );
+    let document = crate::parse_markdown("---\ntitle: x\n---\n", crate::MarkdownOptions::default());
+    let diagnostics =
+        crate::validate(&loaded.schema, &document).expect("the linked schema compiles again");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].id, crate::DiagnosticId::FrontmatterSchema);
 }
