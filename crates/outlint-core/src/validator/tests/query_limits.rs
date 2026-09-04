@@ -85,6 +85,67 @@ fn a_doubling_query_fails_operationally_instead_of_exhausting_memory() {
 }
 
 #[test]
+fn a_doubling_chain_inside_a_function_argument_is_refused_too() {
+    // The same doubling, hidden one level down. A function argument is a
+    // query of its own, and RFC 9535 lets its segments carry several
+    // selectors, so `count(@[0,0][0,0]...)` doubles inside `count()` exactly
+    // as the bare chain doubles outside it — and the provider materializes
+    // every one of those nodes before returning a single number.
+    //
+    // Charging only what appears outside a function would therefore bound
+    // nothing: the estimate would sit below the budget while the evaluation
+    // ran to the same billion nodes. The invariant is that query text is
+    // charged wherever it appears.
+    let document = nested_arrays(34);
+    for query in [
+        // Relative argument.
+        format!("fm[$[?count(@{})>0]]", "[0,0]".repeat(30)),
+        // Absolute argument, re-run against the whole document per candidate.
+        format!("fm[$[?count($.a{})>0]]", "[0,0]".repeat(30)),
+        // A descendant chain and a union chain in one argument.
+        format!("fm[$[?count(@..*{})>0]]", "[0,0]".repeat(30)),
+        // A filter inside a function argument inside a filter: the doubling
+        // is two groupings deep, where a rule about the outermost function
+        // would still have missed it.
+        format!("fm[$[?count(@[?count(@{})>0])>0]]", "[0,0]".repeat(30)),
+    ] {
+        let started = Instant::now();
+        let message = outcome(&query_schema(&query), &document)
+            .expect_err(&format!("{query} must be refused"));
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "{query}: the refusal must not evaluate anything"
+        );
+        assert!(message.contains("result nodes"), "{query}: {message}");
+    }
+}
+
+#[test]
+fn a_function_argument_separator_still_multiplies_nothing() {
+    // The comma between `match`'s two arguments separates arguments, not
+    // selectors, and neither does a comma inside a quoted name or a string
+    // literal. Charging those would make ordinary filters unevaluatable,
+    // which is a limit on the language rather than on exhaustion.
+    let markdown = concat!(
+        "---\n",
+        "owners:\n",
+        "  - name: ada\n",
+        "    'a,b': true\n",
+        "---\n\n## Body\n"
+    );
+    for query in [
+        "fm[$.owners[?match(@.name, 'a,d,a')]]",
+        "fm[$.owners[?search(@.name, 'a,.*')]]",
+        "fm[$.owners[?count(@.name) > 0]]",
+        "fm[$.owners[?@['a,b']]]",
+        "fm[$.owners[?count(@['a,b']) > 0]]",
+    ] {
+        outcome(&query_schema(query), markdown)
+            .unwrap_or_else(|error| panic!("{query} must evaluate: {error}"));
+    }
+}
+
+#[test]
 fn a_guaranteed_core_query_is_never_limited() {
     // §4.6 promises core queries: "for every valid core query, implementations
     // MUST apply RFC 9535 child-segment semantics". A core segment carries one

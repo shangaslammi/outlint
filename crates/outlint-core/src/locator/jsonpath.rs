@@ -299,6 +299,22 @@ impl QueryFanout {
             absolute: bool,
         }
 
+        /// One open grouping.
+        ///
+        /// Brackets and parentheses share a stack rather than counting
+        /// separately, because what a comma means is decided by the *nearest*
+        /// of the two and not by whether either is open. A comma directly
+        /// inside a parenthesis separates function arguments and multiplies
+        /// nothing; a comma inside a bracket separates selectors and doubles
+        /// the segment — and a bracket nested inside a function argument is
+        /// still a segment. Two independent depths cannot tell those apart,
+        /// which is how `count(@[0,0][0,0]...)` came to be charged nothing at
+        /// all while the provider materialized every one of its nodes.
+        enum Group {
+            Bracket(Segment),
+            Parenthesis,
+        }
+
         let mut fanout = Self {
             selectors: 1,
             descendants: 0,
@@ -306,11 +322,56 @@ impl QueryFanout {
             absolute_filters: 0,
         };
         let mut state = State::Bare;
-        let mut segments: Vec<Segment> = Vec::new();
-        // Function arguments are comma-separated too, and their commas
-        // separate no selectors.
-        let mut parentheses = 0_u32;
+        let mut groups: Vec<Group> = Vec::new();
         let mut after_dot = false;
+
+        /// Applies one closed segment's charges.
+        fn charge(fanout: &mut QueryFanout, segment: Segment) {
+            fanout.selectors = fanout
+                .selectors
+                .saturating_mul(segment.commas.saturating_add(1));
+            if segment.filter {
+                if segment.absolute {
+                    fanout.absolute_filters = fanout.absolute_filters.saturating_add(1);
+                } else {
+                    fanout.relative_filters = fanout.relative_filters.saturating_add(1);
+                }
+            }
+        }
+
+        /// Closes groups down to and including the innermost one of `kind`,
+        /// charging every segment that closes on the way.
+        ///
+        /// The source has already been accepted by the provider, so the
+        /// innermost group is always the matching one and the loop runs once.
+        /// It is a loop rather than a single pop so that a mis-nesting could
+        /// only ever *over*-charge: no segment is dropped uncounted.
+        fn close(fanout: &mut QueryFanout, groups: &mut Vec<Group>, bracket: bool) {
+            while let Some(group) = groups.pop() {
+                match group {
+                    Group::Bracket(segment) => {
+                        charge(fanout, segment);
+                        if bracket {
+                            return;
+                        }
+                    }
+                    Group::Parenthesis => {
+                        if !bracket {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        /// The segment a filter marker or an absolute root belongs to: the
+        /// nearest enclosing bracket, past any function parentheses between.
+        fn enclosing_segment(groups: &mut [Group]) -> Option<&mut Segment> {
+            groups.iter_mut().rev().find_map(|group| match group {
+                Group::Bracket(segment) => Some(segment),
+                Group::Parenthesis => None,
+            })
+        }
 
         for character in source.chars() {
             state = match (state, character) {
@@ -324,7 +385,8 @@ impl QueryFanout {
                         '.' => {
                             // `..` is the only place two dots meet: a float
                             // literal has one, and no other construct spells
-                            // a dot at all.
+                            // a dot at all. Counted wherever it appears, a
+                            // function argument included.
                             if after_dot {
                                 fanout.descendants = fanout.descendants.saturating_add(1);
                                 after_dot = false;
@@ -335,49 +397,39 @@ impl QueryFanout {
                         }
                         '[' => {
                             after_dot = false;
-                            segments.push(Segment::default());
+                            groups.push(Group::Bracket(Segment::default()));
                             State::Bare
                         }
                         ']' => {
                             after_dot = false;
-                            if let Some(segment) = segments.pop() {
-                                fanout.selectors = fanout
-                                    .selectors
-                                    .saturating_mul(segment.commas.saturating_add(1));
-                                if segment.filter {
-                                    if segment.absolute {
-                                        fanout.absolute_filters =
-                                            fanout.absolute_filters.saturating_add(1);
-                                    } else {
-                                        fanout.relative_filters =
-                                            fanout.relative_filters.saturating_add(1);
-                                    }
-                                }
-                            }
+                            close(&mut fanout, &mut groups, true);
                             State::Bare
                         }
                         '(' => {
                             after_dot = false;
-                            parentheses = parentheses.saturating_add(1);
+                            groups.push(Group::Parenthesis);
                             State::Bare
                         }
                         ')' => {
                             after_dot = false;
-                            parentheses = parentheses.saturating_sub(1);
+                            close(&mut fanout, &mut groups, false);
                             State::Bare
                         }
                         ',' => {
                             after_dot = false;
-                            if parentheses == 0 {
-                                if let Some(segment) = segments.last_mut() {
-                                    segment.commas = segment.commas.saturating_add(1);
-                                }
+                            // Only the nearest grouping decides. A bracket
+                            // makes this a selector separator, whatever
+                            // encloses that bracket; a parenthesis makes it
+                            // an argument separator, which multiplies
+                            // nothing.
+                            if let Some(Group::Bracket(segment)) = groups.last_mut() {
+                                segment.commas = segment.commas.saturating_add(1);
                             }
                             State::Bare
                         }
                         '?' => {
                             after_dot = false;
-                            if let Some(segment) = segments.last_mut() {
+                            if let Some(segment) = enclosing_segment(&mut groups) {
                                 segment.filter = true;
                             }
                             State::Bare
@@ -386,8 +438,9 @@ impl QueryFanout {
                             after_dot = false;
                             // The query's own root `$` is outside every
                             // bracket; one inside a bracket is an absolute
-                            // query nested in a filter.
-                            if let Some(segment) = segments.last_mut() {
+                            // query nested in a filter, re-run against the
+                            // whole document per candidate.
+                            if let Some(segment) = enclosing_segment(&mut groups) {
                                 segment.absolute = true;
                             }
                             State::Bare
@@ -399,6 +452,12 @@ impl QueryFanout {
                     }
                 }
             };
+        }
+        // A source the provider accepted closes every group it opens, so
+        // nothing is left here. Charging whatever is keeps the invariant that
+        // no segment the scan saw goes uncounted.
+        while !groups.is_empty() {
+            close(&mut fanout, &mut groups, true);
         }
         fanout
     }

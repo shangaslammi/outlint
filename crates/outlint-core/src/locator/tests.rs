@@ -1874,6 +1874,43 @@ mod query_limits {
         // The escape keeps the quote inside the name rather than closing it,
         // so the comma after it is still name text.
         assert_eq!(estimate(r"$['a\',b']", shape), 10);
+        // A quoted name inside a function argument keeps both properties at
+        // once: the argument separator multiplies nothing, and neither does
+        // the comma inside the name it is passed.
+        assert_eq!(estimate("$[?match(@['a,b'], 'x,y')]", shape), 40);
+    }
+
+    #[test]
+    fn a_selector_comma_inside_a_function_argument_is_charged() {
+        // A function argument is a query of its own, and RFC 9535 lets its
+        // segments carry several selectors. `count(@[0,0])` therefore doubles
+        // inside `count()` exactly as `[0,0]` doubles outside it, and the
+        // provider materializes every one of those nodes before returning a
+        // number. What decides a comma is the nearest enclosing grouping, not
+        // whether a parenthesis is open anywhere: a bracket makes it a
+        // selector separator wherever that bracket sits.
+        let shape = DocumentShape::new(10, 4);
+        // The filter alone, for the baseline the charges multiply.
+        assert_eq!(estimate("$[?count(@.a)>0]", shape), 40);
+        // One doubling segment in the argument doubles the estimate, and each
+        // further one doubles it again.
+        assert_eq!(estimate("$[?count(@[0,0])>0]", shape), 80);
+        assert_eq!(estimate("$[?count(@[0,0][0,0])>0]", shape), 160);
+        assert_eq!(estimate("$[?count(@[0,0][0,0][0,0])>0]", shape), 320);
+        // An absolute argument is charged its re-evaluation as well.
+        assert!(estimate("$[?count($.a[0,0])>0]", shape) > estimate("$[?count(@[0,0])>0]", shape));
+        // A descendant inside an argument was already charged; the union
+        // beside it now is too.
+        assert!(estimate("$[?count(@..*[0,0])>0]", shape) > estimate("$[?count(@..*)>0]", shape));
+        // And the attack the whole limit exists for stays over budget when it
+        // hides in an argument, at any of the three nestings.
+        for query in [
+            format!("$[?count(@{})>0]", "[0,0]".repeat(30)),
+            format!("$[?count($.a{})>0]", "[0,0]".repeat(30)),
+            format!("$[?count(@[?count(@{})>0])>0]", "[0,0]".repeat(30)),
+        ] {
+            assert!(estimate(&query, shape) > shape.budget(), "{query}");
+        }
     }
 
     #[test]
