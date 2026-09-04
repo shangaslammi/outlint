@@ -398,6 +398,31 @@ mod provider_boundary {
         assert_eq!(document.pointer(&pointer), Some(&json!(1)));
     }
 
+    /// A limitation of the pinned provider, recorded rather than worked
+    /// around.
+    ///
+    /// RFC 9535's `hexchar` admits a high surrogate followed by a `\u` low
+    /// surrogate, so `$['\ud83d\ude00']` is a valid query naming a single
+    /// astral character. `serde_json_path = 0.7.2` refuses it, while plain
+    /// BMP escapes — including C0 controls — parse. §4.6 admits the full RFC
+    /// grammar, so this is a gap between the spec and the provider, not a
+    /// choice Outlint gets to make: nothing here rewrites the query or
+    /// bypasses the provider to close it. The test states the gap so a
+    /// provider bump that fixes it fails here and the exclusion can be
+    /// lifted deliberately.
+    #[test]
+    fn the_provider_refuses_rfc_surrogate_pair_escapes() {
+        assert!(JsonPath::parse(r"$['\u0041']").is_ok());
+        assert!(JsonPath::parse(r"$['\u00e4']").is_ok());
+        assert!(JsonPath::parse(r"$['\u001f']").is_ok());
+
+        assert!(
+            JsonPath::parse(r"$['\ud83d\ude00']").is_err(),
+            "a provider that now accepts a surrogate pair makes this exclusion \
+             stale; lift it deliberately"
+        );
+    }
+
     #[test]
     fn the_root_pointer_is_empty() {
         assert_eq!(render_only("$", &json!(1)).1, "");
@@ -776,14 +801,15 @@ mod outline_syntax {
         assert_eq!(rejection("fm"), LocatorParseErrorKind::BareFrontmatterRoot);
     }
 
-    /// `fm[` opens the §4.6 query form. It must not fall through to the
-    /// outline grammar, where `fm` would look like an ordinary name with a
-    /// subscript that happens not to be an index.
+    /// `fm[` opens the §4.6 query form, which is its own variant. It must
+    /// never fall through to the outline grammar, where `fm` would look like
+    /// an ordinary name with a subscript that happens not to be an index.
     #[test]
-    fn the_query_form_is_reserved_rather_than_read_as_a_name() {
-        assert_eq!(
-            rejection("fm[$.draft]"),
-            LocatorParseErrorKind::FrontmatterQueryUnsupported
+    fn the_query_form_is_not_read_as_a_name_with_a_subscript() {
+        let parsed = parse_locator("fm[$.draft]").expect("a valid query locator");
+        assert!(
+            matches!(parsed, ParsedLocator::FrontmatterQuery(_)),
+            "`fm[$.draft]` must parse as the query form, not as {parsed:?}"
         );
     }
 
@@ -911,5 +937,484 @@ mod oversized_positions {
                 .expect("the step is subscripted");
             assert_eq!(position.select(&nodes).copied(), expected, "[{spelling}]");
         }
+    }
+}
+
+/// The §4.6 `fm[...]` wrapper: finding the query's end, and what follows it.
+mod frontmatter_queries {
+    use crate::locator::jsonpath::FrontmatterQueryLocator;
+    use crate::locator::syntax::{parse_locator, LocatorParseErrorKind, ParsedLocator};
+
+    /// Parses `source`, requiring the query form.
+    fn query(source: &str) -> FrontmatterQueryLocator {
+        match parse_locator(source) {
+            Ok(ParsedLocator::FrontmatterQuery(locator)) => locator,
+            Ok(other) => panic!("`{source}` must parse as a query locator, not {other:?}"),
+            Err(error) => panic!("`{source}` must parse: {error}"),
+        }
+    }
+
+    /// The enclosed query source and the raw equality remainder.
+    fn parts(source: &str) -> (String, Option<String>) {
+        let locator = query(source);
+        (
+            locator.query().as_str().to_owned(),
+            locator.equality().map(ToOwned::to_owned),
+        )
+    }
+
+    fn rejection(source: &str) -> LocatorParseErrorKind {
+        match parse_locator(source) {
+            Err(error) => error.kind(),
+            Ok(parsed) => panic!("`{source}` must be rejected, but parsed as {parsed:?}"),
+        }
+    }
+
+    // --- the forms §4.6 spells out -----------------------------------------
+
+    #[test]
+    fn a_bare_query_is_a_boolean_read() {
+        assert_eq!(parts("fm[$.draft]"), ("$.draft".to_owned(), None));
+    }
+
+    #[test]
+    fn an_equality_suffix_is_kept_raw() {
+        assert_eq!(
+            parts("fm[$.status]=deprecated"),
+            ("$.status".to_owned(), Some("deprecated".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_quoted_member_name_is_part_of_the_query() {
+        assert_eq!(
+            parts("fm[$['decision-makers']]"),
+            ("$['decision-makers']".to_owned(), None)
+        );
+    }
+
+    // --- the wrapper ends after the query, not at the first `]` or `=` -----
+
+    #[test]
+    fn a_bracket_inside_a_quoted_name_does_not_close_the_wrapper() {
+        assert_eq!(parts("fm[$['a]b']]"), ("$['a]b']".to_owned(), None));
+    }
+
+    #[test]
+    fn an_equals_sign_inside_a_quoted_name_does_not_start_the_literal() {
+        assert_eq!(
+            parts("fm[$['a=b']]=wanted"),
+            ("$['a=b']".to_owned(), Some("wanted".to_owned()))
+        );
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_the_string_it_is_in() {
+        assert_eq!(parts(r"fm[$['it\'s']]"), (r"$['it\'s']".to_owned(), None));
+        assert_eq!(
+            parts(r#"fm[$["say \"hi\""]]"#),
+            (r#"$["say \"hi\""]"#.to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn an_escaped_reverse_solidus_does_not_escape_the_closing_quote() {
+        assert_eq!(
+            parts(r"fm[$['back\\']]=yes"),
+            (r"$['back\\']".to_owned(), Some("yes".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_filter_holding_nested_selectors_brackets_and_equals_survives() {
+        assert_eq!(
+            parts(r"fm[$.items[?@['name'] == 'a]=b']]"),
+            (r"$.items[?@['name'] == 'a]=b']".to_owned(), None)
+        );
+        assert_eq!(
+            parts(r"fm[$[?@['k]='] == 'v]']]=hit"),
+            (r"$[?@['k]='] == 'v]']".to_owned(), Some("hit".to_owned()))
+        );
+    }
+
+    /// §4.6: "the literal is the remainder of the locator". Every trailing
+    /// character belongs to it, `=` and `]` included.
+    #[test]
+    fn the_equality_literal_keeps_every_trailing_character() {
+        assert_eq!(
+            parts("fm[$.x]=a=b]c"),
+            ("$.x".to_owned(), Some("a=b]c".to_owned()))
+        );
+    }
+
+    /// A bare read and an equality against the empty literal are different
+    /// §4.6 forms, and collapsing them would silently turn one into the other.
+    #[test]
+    fn an_absent_equality_differs_from_an_empty_one() {
+        assert_eq!(parts("fm[$.x]"), ("$.x".to_owned(), None));
+        assert_eq!(parts("fm[$.x]="), ("$.x".to_owned(), Some(String::new())));
+        assert_ne!(query("fm[$.x]"), query("fm[$.x]="));
+    }
+
+    // --- rejections --------------------------------------------------------
+
+    #[test]
+    fn an_unclosed_wrapper_is_rejected() {
+        for source in ["fm[", "fm[$.x", "fm[$['a]b']", r"fm[$['a\']]"] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::UnterminatedQueryWrapper,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_wrapper_is_rejected() {
+        assert_eq!(rejection("fm[]"), LocatorParseErrorKind::EmptyQuery);
+        assert_eq!(rejection("fm[]=x"), LocatorParseErrorKind::EmptyQuery);
+    }
+
+    #[test]
+    fn trailing_text_without_an_equals_is_rejected() {
+        for source in ["fm[$.x]junk", "fm[$.x] ", "fm[$.x]]"] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::TrailingTextAfterQuery,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_the_provider_refuses_is_rejected() {
+        for source in [
+            "fm[@.x]",              // relative: no current node at this site
+            "fm[$.]",               // malformed
+            "fm[nonsense]",         // no root identifier
+            "fm[$[?unknown(@.a)]]", // outside the admitted function registry
+        ] {
+            assert_eq!(
+                rejection(source),
+                LocatorParseErrorKind::InvalidQuery,
+                "`{source}`"
+            );
+        }
+    }
+
+    /// The provider's own message survives the boundary so an author can be
+    /// told what was wrong, without any provider type crossing it.
+    #[test]
+    fn a_provider_failure_carries_its_message_and_an_offset_into_the_locator() {
+        let error = parse_locator("fm[$.]").expect_err("`$.` is malformed");
+        assert_eq!(error.kind(), LocatorParseErrorKind::InvalidQuery);
+        assert!(error.detail().is_some_and(|detail| !detail.is_empty()));
+        // The offset is into the whole locator, past the `fm[` wrapper.
+        assert!(error.offset() >= "fm[".len());
+    }
+
+    // --- non-core is not a reason to refuse --------------------------------
+
+    /// §4.6: a query outside the guaranteed core "MUST NOT be rejected merely
+    /// for falling outside" it. Admission is delegation to the provider, so
+    /// there is no core classifier on this path at all.
+    #[test]
+    fn vendor_tier_constructs_are_admitted() {
+        for source in [
+            "fm[$.a[1:3]]",
+            "fm[$.a[::-1]]",
+            "fm[$..status]",
+            "fm[$['draft','published']]",
+            "fm[$[?@.enabled]]",
+            "fm[$[?length(@.a) > 1]]",
+            "fm[$[?count(@.a[*]) > 1]]",
+            r"fm[$[?match(@.a, 'x.*')]]",
+            r"fm[$[?search(@.a, 'x')]]",
+            "fm[$[?value(@.a) == 1]]",
+            "fm[$.targets[*].enabled]=true",
+        ] {
+            let locator = query(source);
+            assert!(
+                source.contains(locator.query().as_str()),
+                "`{source}` must retain its query source"
+            );
+        }
+    }
+
+    // --- identity ----------------------------------------------------------
+
+    /// §5.4 decides `duplicate-ref` on whether "their query source is
+    /// identical", and adds that "syntactically different JSONPath queries are
+    /// not treated as duplicates merely because they may select the same
+    /// nodes".
+    #[test]
+    fn query_identity_is_the_exact_source() {
+        assert_eq!(query("fm[$.a]").query(), query("fm[$.a]").query());
+        assert_ne!(query("fm[$.a]").query(), query("fm[$['a']]").query());
+        assert_ne!(query("fm[$['a']]").query(), query(r#"fm[$["a"]]"#).query());
+        assert_ne!(query("fm[$.a]").query(), query("fm[$ .a]").query());
+    }
+
+    #[test]
+    fn the_whole_locator_spelling_is_retained() {
+        for source in [
+            "fm[$.draft]",
+            "fm[$.status]=deprecated",
+            "fm[$['a=b']]=wanted",
+            "fm[$.x]=a=b]c",
+        ] {
+            assert_eq!(query(source).source().as_str(), source);
+        }
+    }
+
+    /// A prepared form is compiled from the retained source, not carried
+    /// inside it, so the semantic value holds no provider state.
+    #[test]
+    fn a_retained_query_can_be_prepared_again() {
+        assert!(query("fm[$.a[*].b]").query().prepare().is_ok());
+    }
+}
+
+/// §2.3's absolute singular capture path.
+///
+/// The recognizer here is independent of both the provider's parser and the
+/// test-side core classifier: `serde_json_path` exposes no parsed query, and
+/// §2.3 is stricter than §4.6's guaranteed core in ways a core classifier
+/// would not catch.
+mod singular_capture_paths {
+    use crate::locator::jsonpath::{
+        decode_singular_segments, AbsoluteSingularPath, SingularComponent, SingularPathErrorKind,
+    };
+
+    fn components(source: &str) -> Vec<SingularComponent> {
+        AbsoluteSingularPath::parse(source)
+            .unwrap_or_else(|error| panic!("`{source}` must parse: {error}"))
+            .components()
+            .to_vec()
+    }
+
+    fn name(text: &str) -> SingularComponent {
+        SingularComponent::Name(text.into())
+    }
+
+    fn rejection(source: &str) -> SingularPathErrorKind {
+        match AbsoluteSingularPath::parse(source) {
+            Err(error) => error.kind(),
+            Ok(path) => panic!("`{source}` must be rejected, but parsed as {path:?}"),
+        }
+    }
+
+    // --- what §2.3 admits --------------------------------------------------
+
+    #[test]
+    fn the_root_alone_is_a_singular_path() {
+        assert_eq!(components("$"), Vec::new());
+    }
+
+    #[test]
+    fn dot_and_bracket_name_segments_decode_to_the_same_component() {
+        assert_eq!(components("$.version"), vec![name("version")]);
+        assert_eq!(components("$['version']"), vec![name("version")]);
+        assert_eq!(components(r#"$["version"]"#), vec![name("version")]);
+    }
+
+    #[test]
+    fn segments_nest_in_order() {
+        assert_eq!(
+            components("$.release[0]['decision-makers'][-1].name"),
+            vec![
+                name("release"),
+                SingularComponent::Index(0),
+                name("decision-makers"),
+                SingularComponent::Index(-1),
+                name("name"),
+            ]
+        );
+    }
+
+    #[test]
+    fn whitespace_between_segments_is_allowed() {
+        assert_eq!(
+            components("$ .a ['b'] [0]"),
+            vec![name("a"), name("b"), SingularComponent::Index(0)]
+        );
+    }
+
+    #[test]
+    fn a_shorthand_name_may_be_unicode() {
+        assert_eq!(components("$.mälardalen"), vec![name("mälardalen")]);
+        assert_eq!(components("$._private"), vec![name("_private")]);
+        assert_eq!(components("$.a1"), vec![name("a1")]);
+    }
+
+    #[test]
+    fn indices_span_the_i_json_exact_range() {
+        assert_eq!(components("$[0]"), vec![SingularComponent::Index(0)]);
+        assert_eq!(components("$[-1]"), vec![SingularComponent::Index(-1)]);
+        assert_eq!(
+            components("$[9007199254740991]"),
+            vec![SingularComponent::Index(9_007_199_254_740_991)]
+        );
+        assert_eq!(
+            components("$[-9007199254740991]"),
+            vec![SingularComponent::Index(-9_007_199_254_740_991)]
+        );
+    }
+
+    // --- escapes -----------------------------------------------------------
+
+    #[test]
+    fn a_quoted_name_decodes_every_rfc_escape() {
+        assert_eq!(components(r"$['it\'s']"), vec![name("it's")]);
+        assert_eq!(components(r#"$["say \"hi\""]"#), vec![name(r#"say "hi""#)]);
+        assert_eq!(components(r"$['back\\slash']"), vec![name(r"back\slash")]);
+        assert_eq!(components(r"$['a\/b']"), vec![name("a/b")]);
+        assert_eq!(
+            components(r"$['\b\f\n\r\t']"),
+            vec![name("\u{8}\u{c}\n\r\t")]
+        );
+        assert_eq!(components(r"$['\u0041\u001f']"), vec![name("A\u{1f}")]);
+    }
+
+    /// RFC 9535's `hexchar` admits a high surrogate only when a `\u` low
+    /// surrogate follows it. The recognizer joins the pair itself, because a
+    /// Rust `char` cannot hold either half alone — and it is exercised here
+    /// through [`decode_singular_segments`] rather than through
+    /// `AbsoluteSingularPath::parse`, because the pinned provider refuses the
+    /// spelling before the recognizer ever sees it. See
+    /// [`the_provider_refuses_rfc_surrogate_pair_escapes`].
+    ///
+    /// [`the_provider_refuses_rfc_surrogate_pair_escapes`]:
+    ///     super::provider_boundary::the_provider_refuses_rfc_surrogate_pair_escapes
+    #[test]
+    fn a_surrogate_pair_decodes_to_one_scalar_value() {
+        assert_eq!(
+            decode_singular_segments(r"$['\ud83d\ude00']").expect("a singular path"),
+            vec![name("\u{1f600}")]
+        );
+        // The same character written literally needs no escape, and that
+        // spelling does reach the recognizer through the provider.
+        assert_eq!(components(r"$['😀']"), vec![name("\u{1f600}")]);
+        // An unpaired half is not a `hexchar`.
+        for source in [r"$['\ud83d']", r"$['\ude00']", r"$['\ud83dx']"] {
+            assert_eq!(
+                decode_singular_segments(source)
+                    .expect_err("a lone surrogate is not a scalar value")
+                    .kind(),
+                SingularPathErrorKind::InvalidEscape,
+                "`{source}`"
+            );
+        }
+    }
+
+    /// A string may escape only the quote that delimits it: `escapable` lists
+    /// neither quote character.
+    #[test]
+    fn only_the_delimiting_quote_may_be_escaped() {
+        assert_eq!(components(r#"$['say "hi"']"#), vec![name(r#"say "hi""#)]);
+        assert_eq!(components(r#"$["it's"]"#), vec![name("it's")]);
+        // `\'` in a double-quoted name is not an escape RFC 9535 defines; the
+        // provider's parser refuses it before singularity is asked.
+        assert_eq!(
+            rejection(r#"$["it\'s"]"#),
+            SingularPathErrorKind::InvalidQuery
+        );
+    }
+
+    #[test]
+    fn an_undefined_escape_is_rejected() {
+        for source in [r"$['\q']", r"$['\u00']", r"$['\']"] {
+            assert!(
+                AbsoluteSingularPath::parse(source).is_err(),
+                "`{source}` must be rejected"
+            );
+        }
+    }
+
+    // --- what §2.3 refuses -------------------------------------------------
+
+    /// §2.3: "A relative, `@`-rooted query is `invalid-capture` because this
+    /// binding site supplies no current node."
+    #[test]
+    fn a_relative_path_is_rejected_for_being_relative() {
+        assert_eq!(rejection("@"), SingularPathErrorKind::NotAbsolute);
+        assert_eq!(rejection("@.version"), SingularPathErrorKind::NotAbsolute);
+        assert_eq!(rejection(".version"), SingularPathErrorKind::NotAbsolute);
+        assert_eq!(rejection(""), SingularPathErrorKind::NotAbsolute);
+    }
+
+    /// Everything RFC 9535 §2.3.5.1 leaves out of a singular query. Each is
+    /// refused by falling off the name/index grammar rather than by being
+    /// listed, so a construct nobody enumerated is refused too.
+    #[test]
+    fn plural_constructs_are_rejected() {
+        for source in [
+            "$.*",
+            "$[*]",
+            "$['a','b']",
+            "$[0,1]",
+            "$[1:3]",
+            "$[::2]",
+            "$..a",
+            "$..*",
+            "$[?@.enabled]",
+            "$[?length(@.a) > 1]",
+            "$.a[*].b",
+        ] {
+            assert_eq!(
+                rejection(source),
+                SingularPathErrorKind::NotSingular,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_index_is_rejected() {
+        // The provider refuses these outright, before singularity is asked.
+        for source in ["$[01]", "$[-0]", "$[+1]", "$[9007199254740992]"] {
+            assert_eq!(
+                rejection(source),
+                SingularPathErrorKind::InvalidQuery,
+                "`{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_query_is_rejected_as_a_query() {
+        for source in ["$.", "$[", "$['a", "$.a extra"] {
+            assert_eq!(
+                rejection(source),
+                SingularPathErrorKind::InvalidQuery,
+                "`{source}`"
+            );
+        }
+    }
+
+    // --- identity ----------------------------------------------------------
+
+    #[test]
+    fn the_exact_source_is_retained_alongside_the_components() {
+        for source in ["$", "$.version", "$['decision-makers'][-1]", r"$['it\'s']"] {
+            let path = AbsoluteSingularPath::parse(source).expect("a valid capture path");
+            assert_eq!(path.source(), source);
+        }
+    }
+
+    /// The two query types are not interchangeable: every capture path is a
+    /// valid full query, but the reverse fails, and no constructor crosses
+    /// between them.
+    #[test]
+    fn the_full_and_singular_forms_are_different_types() {
+        use crate::locator::jsonpath::FullQuerySource;
+
+        let plural = "$.a[*].b";
+        assert!(FullQuerySource::parse(plural).is_ok());
+        assert!(AbsoluteSingularPath::parse(plural).is_err());
+
+        let singular = "$['decision-makers'][-1]";
+        assert!(FullQuerySource::parse(singular).is_ok());
+        assert!(AbsoluteSingularPath::parse(singular).is_ok());
     }
 }

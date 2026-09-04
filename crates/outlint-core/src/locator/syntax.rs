@@ -25,6 +25,7 @@ use std::fmt;
 
 use num_bigint::BigUint;
 
+use super::jsonpath::{parse_frontmatter_query, FrontmatterQueryLocator};
 use crate::schema::NonEmpty;
 
 /// A locator exactly as it was supplied.
@@ -312,6 +313,8 @@ pub(crate) enum ParsedLocator {
     Outline(UnboundOutlineLocator),
     /// `fm.<name>`.
     FrontmatterCapture(FrontmatterCaptureLocator),
+    /// `fm[query]` or `fm[query]=literal`.
+    FrontmatterQuery(FrontmatterQueryLocator),
 }
 
 impl ParsedLocator {
@@ -319,6 +322,7 @@ impl ParsedLocator {
         match self {
             ParsedLocator::Outline(locator) => locator.source(),
             ParsedLocator::FrontmatterCapture(locator) => locator.source(),
+            ParsedLocator::FrontmatterQuery(locator) => locator.source(),
         }
     }
 }
@@ -332,11 +336,25 @@ impl ParsedLocator {
 pub(crate) struct LocatorParseError {
     kind: LocatorParseErrorKind,
     offset: usize,
+    detail: Option<Box<str>>,
 }
 
 impl LocatorParseError {
-    fn new(kind: LocatorParseErrorKind, offset: usize) -> Self {
-        Self { kind, offset }
+    pub(super) fn new(kind: LocatorParseErrorKind, offset: usize) -> Self {
+        Self {
+            kind,
+            offset,
+            detail: None,
+        }
+    }
+
+    /// The same, carrying a message from the JSONPath provider.
+    pub(super) fn detailed(kind: LocatorParseErrorKind, offset: usize, detail: &str) -> Self {
+        Self {
+            kind,
+            offset,
+            detail: Some(detail.into()),
+        }
     }
 
     pub(crate) fn kind(&self) -> LocatorParseErrorKind {
@@ -347,11 +365,20 @@ impl LocatorParseError {
     pub(crate) fn offset(&self) -> usize {
         self.offset
     }
+
+    /// The provider's own message, when the failure came from the provider.
+    pub(crate) fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
 }
 
 impl fmt::Display for LocatorParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{} at offset {}", self.kind, self.offset)
+        write!(formatter, "{} at offset {}", self.kind, self.offset)?;
+        if let Some(detail) = &self.detail {
+            write!(formatter, ": {detail}")?;
+        }
+        Ok(())
     }
 }
 
@@ -386,9 +413,14 @@ pub(crate) enum LocatorParseErrorKind {
     BareFrontmatterRoot,
     /// `fm.` followed by something that is not one capture name.
     MalformedFrontmatterCapture,
-    /// `fm[`, whose query form is not parsed yet.
-    // Removed in the commit that adds the `fm[...]` wrapper.
-    FrontmatterQueryUnsupported,
+    /// `fm[` with no `]` closing the wrapper.
+    UnterminatedQueryWrapper,
+    /// `fm[]`, which encloses no query.
+    EmptyQuery,
+    /// The JSONPath provider refused the enclosed query.
+    InvalidQuery,
+    /// Text after the wrapper that is not an `=` equality remainder.
+    TrailingTextAfterQuery,
 }
 
 impl fmt::Display for LocatorParseErrorKind {
@@ -412,8 +444,11 @@ impl fmt::Display for LocatorParseErrorKind {
             LocatorParseErrorKind::MalformedFrontmatterCapture => {
                 "`fm.` takes exactly one capture name"
             }
-            LocatorParseErrorKind::FrontmatterQueryUnsupported => {
-                "the `fm[...]` query form is not supported yet"
+            LocatorParseErrorKind::UnterminatedQueryWrapper => "unterminated `fm[...]`",
+            LocatorParseErrorKind::EmptyQuery => "`fm[]` encloses no query",
+            LocatorParseErrorKind::InvalidQuery => "invalid JSONPath query",
+            LocatorParseErrorKind::TrailingTextAfterQuery => {
+                "expected `=` or the end after `fm[...]`"
             }
         };
         formatter.write_str(message)
@@ -467,10 +502,8 @@ fn parse_frontmatter_form(source: &str) -> Result<Option<ParsedLocator>, Locator
                 },
             )))
         }
-        Some('[') => Err(LocatorParseError::new(
-            LocatorParseErrorKind::FrontmatterQueryUnsupported,
-            "fm".len(),
-        )),
+        Some('[') => parse_frontmatter_query(source)
+            .map(|query| Some(ParsedLocator::FrontmatterQuery(query))),
         Some(_) => Ok(None),
     }
 }

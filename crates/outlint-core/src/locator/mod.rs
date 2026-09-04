@@ -30,6 +30,7 @@
 // with nothing outside this module importing from it, would need a second
 // suppression on top of the one above. The lane that wires this module up
 // picks the surface it actually needs and re-exports exactly that.
+mod jsonpath;
 mod syntax;
 
 #[cfg(test)]
