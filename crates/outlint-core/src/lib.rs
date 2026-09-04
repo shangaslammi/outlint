@@ -14,11 +14,12 @@ mod validator;
 mod yaml;
 
 pub use load_result::{
-    ByteOffset, ConstraintIndex, ConstraintPath, InvalidSchema, JsonSchemaExternalReference,
-    JsonSchemaResourceContents, JsonSchemaResourceInput, LinkedJsonSchemaInput, LoadSchemaResult,
-    LoadedSchema, RelatedLocation, RuleIndex, RulePath, SchemaError, SchemaErrorKind,
-    SchemaLocations, SchemaNode, SchemaSource, SchemaSources, ScopePath, SourceId, SourceLabel,
-    SourceRange, TextRange,
+    ByteOffset, CapturePath, ConstraintIndex, ConstraintPath, InvalidSchema,
+    JsonSchemaExternalReference, JsonSchemaResourceContents, JsonSchemaResourceInput,
+    LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, OrderEntryPath, OrderIndex,
+    RelatedLocation, RuleIndex, RulePath, SchemaError, SchemaErrorKind, SchemaLocations,
+    SchemaNode, SchemaSource, SchemaSources, ScopePath, SourceId, SourceLabel, SourceRange,
+    TextRange,
 };
 pub use loader::{
     json_schema_external_references, linked_frontmatter_schema_path, load_schema,

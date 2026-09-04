@@ -24,7 +24,7 @@ pub(super) const OPTION_FIELDS: &[&str] = &[
     "allow_skipped_levels",
     "ordered_sections",
 ];
-pub(super) const FRONTMATTER_FIELDS: &[&str] = &["required", "allow", "schema"];
+pub(super) const FRONTMATTER_FIELDS: &[&str] = &["required", "allow", "schema", "captures"];
 pub(super) const RULE_FIELDS: &[&str] = &[
     "id",
     "match",
@@ -35,7 +35,19 @@ pub(super) const RULE_FIELDS: &[&str] = &[
     "ordered",
     "sections",
     "constraints",
+    "captures",
+    "order",
 ];
+
+/// The key whose mapping declares captures, in a rule or in `frontmatter`.
+///
+/// §2.1 gives repeated keys of *this* mapping their own classification, and
+/// the range walk addresses each of its entries, so the spelling is named
+/// once here rather than repeated at each of those sites.
+pub(super) const CAPTURES_FIELD: &str = "captures";
+
+/// The key whose list declares a rule's value ordering (§3.8).
+pub(super) const ORDER_FIELD: &str = "order";
 
 impl Loader {
     pub(super) fn validate_document_shape(&mut self, value: &Value) {

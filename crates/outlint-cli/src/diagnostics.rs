@@ -83,14 +83,43 @@ pub(crate) struct RenderedLocation {
     pub(crate) column: u64,
 }
 
+/// The rendering of [`SchemaNode`], in the §11.3 `kind` declaration order.
+///
+/// The variant order is load-bearing twice over: it is the order §11.3 lists
+/// the `kind` spellings in, and the derived [`Ord`] is what the JSON total
+/// ordering compares schema nodes by. New variants belong where §11.3 puts
+/// them, never appended for convenience.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RenderedSchemaNode {
     Title,
     Frontmatter,
     FrontmatterSchemaDeclaration,
     FrontmatterSchemaDocument,
-    Rule { scope: Vec<usize>, index: usize },
-    Constraint { scope: Vec<usize>, index: usize },
+    Rule {
+        scope: Vec<usize>,
+        index: usize,
+    },
+    /// A rule capture: its owning rule's coordinates plus the capture name.
+    Capture {
+        scope: Vec<usize>,
+        index: usize,
+        name: String,
+    },
+    /// A frontmatter capture, which has a name and no rule coordinates: its
+    /// named scope is rooted at `fm` rather than at any rule.
+    FrontmatterCapture {
+        name: String,
+    },
+    /// One `order` entry: its owning rule's coordinates plus its position.
+    OrderEntry {
+        scope: Vec<usize>,
+        index: usize,
+        order_index: usize,
+    },
+    Constraint {
+        scope: Vec<usize>,
+        index: usize,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -224,6 +253,19 @@ fn render_schema_node(node: &SchemaNode) -> RenderedSchemaNode {
         SchemaNode::Rule(path) => RenderedSchemaNode::Rule {
             scope: path.scope.0.iter().map(|index| index.0).collect(),
             index: path.index.0,
+        },
+        SchemaNode::Capture(path) => RenderedSchemaNode::Capture {
+            scope: path.rule.scope.0.iter().map(|index| index.0).collect(),
+            index: path.rule.index.0,
+            name: path.name.as_str().to_owned(),
+        },
+        SchemaNode::FrontmatterCapture(name) => RenderedSchemaNode::FrontmatterCapture {
+            name: name.as_str().to_owned(),
+        },
+        SchemaNode::OrderEntry(path) => RenderedSchemaNode::OrderEntry {
+            scope: path.rule.scope.0.iter().map(|index| index.0).collect(),
+            index: path.rule.index.0,
+            order_index: path.order_index.0,
         },
         SchemaNode::Constraint(path) => RenderedSchemaNode::Constraint {
             scope: path.scope.0.iter().map(|index| index.0).collect(),

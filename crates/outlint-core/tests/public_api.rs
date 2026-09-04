@@ -243,3 +243,68 @@ fn the_frontmatter_policy_answers_capture_questions_for_every_variant() {
     assert!(!forbidden.schema.frontmatter.is_required());
     assert!(forbidden.schema.frontmatter.captures().is_empty());
 }
+
+/// Pins §2.1's duplicate classification, which is observable only through the
+/// public error kind. A repeat among a `captures` mapping's own keys is
+/// `invalid-capture`; a repeat anywhere else — including inside one capture
+/// declaration — stays `syntax`. Independent duplicates are collected rather
+/// than stopping at the first.
+#[test]
+fn repeated_capture_keys_are_classified_apart_from_other_duplicate_keys() {
+    let invalid = load_schema(
+        "version: 1\nsections:\n  - match: /(?<a>.)(?<b>.)/\n    captures:\n      a: text\n      a: int\n",
+    )
+    .expect_err("a repeated capture key is refused");
+    assert_eq!(invalid.errors.first.kind.to_string(), "invalid-capture");
+    assert_eq!(invalid.errors.first.message, "duplicate capture name `a`");
+    assert!(invalid.errors.rest.is_empty());
+
+    // Inside one frontmatter capture declaration the general rule applies.
+    let invalid = load_schema(
+        "version: 1\nfrontmatter:\n  captures:\n    v:\n      type: text\n      type: int\nsections: []\n",
+    )
+    .expect_err("a repeated declaration key is refused");
+    assert_eq!(invalid.errors.first.kind.to_string(), "syntax");
+
+    // Two independent repeats are reported together, not one at a time.
+    let invalid = load_schema(
+        "version: 1\nfrontmatter:\n  captures:\n    v: {type: text}\n    v: {type: int}\n    w: {type: text}\n    w: {type: int}\nsections: []\n",
+    )
+    .expect_err("repeated capture keys are refused");
+    let kinds = invalid
+        .errors
+        .iter()
+        .map(|error| error.kind.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["invalid-capture", "invalid-capture"]);
+}
+
+/// Pins that `captures` and `order` are admitted as rule and frontmatter
+/// fields rather than refused as unknown keys. Their contents are still
+/// unvalidated and unnormalized here: the loader lanes that read them land
+/// later, and this test exists so that admission is a deliberate state rather
+/// than an accident nobody noticed.
+#[test]
+fn capture_and_order_declarations_are_admitted_without_being_normalized() {
+    let loaded = load_schema(
+        r#"
+version: 1
+frontmatter:
+  captures:
+    version:
+      type: semver
+sections:
+  - match: /Release (?<version>.+)/
+    captures:
+      version: semver
+    order:
+      - by: version
+        dir: desc
+"#,
+    )
+    .expect("captures and order are known fields");
+
+    assert!(loaded.schema.outline[0].sections[0].captures.is_empty());
+    assert!(loaded.schema.outline[0].sections[0].order.is_empty());
+    assert!(loaded.schema.frontmatter.captures().is_empty());
+}

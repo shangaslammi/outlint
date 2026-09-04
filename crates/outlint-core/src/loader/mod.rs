@@ -22,8 +22,8 @@ use serde_json::Value;
 use crate::{
     ByteOffset, Cardinality, ConstraintIndex, ConstraintPath, InvalidSchema,
     JsonSchemaResourceContents, LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, Matcher,
-    NonEmpty, OutlineProvenance, RelatedLocation, RuleIndex, RuleOutcome, RulePath, Schema,
-    SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
+    NonEmpty, OrderIndex, OutlineProvenance, RelatedLocation, RuleIndex, RuleOutcome, RulePath,
+    Schema, SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
     SchemaVersion, ScopePath, SectionRule, SourceId, SourceLabel, SourceRange, TextRange,
     UpperBound,
 };
@@ -34,7 +34,8 @@ use self::frontmatter_schema::{
     PreparedExternalSchema,
 };
 use self::yaml::{
-    char_range, parse_schema_yaml, schema_yaml_to_json, RangeIndex, SchemaYamlError, SchemaYamlNode,
+    char_range, classify_duplicate_keys, parse_schema_yaml, schema_yaml_to_json, RangeIndex,
+    SchemaYamlError, SchemaYamlNode,
 };
 
 pub use self::frontmatter_schema::{
@@ -117,6 +118,13 @@ struct RawFrontmatter {
     required: Option<bool>,
     allow: Option<bool>,
     schema: Option<RawFrontmatterSchema>,
+    /// The `captures` declaration exactly as written, unnormalized.
+    ///
+    /// Admitted as an opaque value so the field stops being an unknown key
+    /// while the declaration's own shape, names, paths, and types stay the
+    /// frontmatter loader lane's to check. Nothing here reads it.
+    #[allow(dead_code)]
+    captures: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +160,16 @@ struct RawRule {
     sections: Vec<RawRule>,
     #[serde(default)]
     constraints: Vec<Value>,
+    /// The rule's `captures` mapping exactly as written, unnormalized.
+    ///
+    /// See [`RawFrontmatter::captures`]: admitted, not interpreted.
+    #[allow(dead_code)]
+    captures: Option<Value>,
+    /// The rule's `order` list exactly as written, unnormalized.
+    ///
+    /// See [`RawFrontmatter::captures`]: admitted, not interpreted.
+    #[allow(dead_code)]
+    order: Option<Value>,
 }
 
 const fn default_true() -> bool {
@@ -170,6 +188,22 @@ enum RangeKey {
     OutlineRule(RuleIndex),
     /// One field of an `h1`-level rule in the top-level `outline` list.
     OutlineRuleField(RuleIndex, String),
+    /// One entry of a rule's `captures` mapping, keyed by the raw spelling.
+    ///
+    /// The key is the source text, not a validated [`CaptureName`]: a range
+    /// has to exist for the declaration whose name is about to be *rejected*,
+    /// which is precisely the declaration that has no validated name.
+    ///
+    /// [`CaptureName`]: crate::CaptureName
+    RuleCapture(RulePath, String),
+    /// One entry of an `h1`-level `outline` rule's `captures` mapping.
+    OutlineRuleCapture(RuleIndex, String),
+    /// One entry of `frontmatter.captures`, keyed by the raw spelling.
+    FrontmatterCapture(String),
+    /// One entry of a rule's `order` list, by its zero-based position.
+    RuleOrderEntry(RulePath, OrderIndex),
+    /// One entry of an `h1`-level `outline` rule's `order` list.
+    OutlineRuleOrderEntry(RuleIndex, OrderIndex),
 }
 
 struct Loader {
@@ -282,6 +316,19 @@ impl Loader {
                 return self.failure();
             }
         };
+        // Repeated keys are decided before anything is converted: the JSON
+        // object the conversion builds cannot hold two entries for one key,
+        // so a duplicate that reaches it is one the tree still knew about and
+        // the object no longer does. Classification needs the ordered tree,
+        // and every duplicate it finds is independent of every other, so the
+        // whole set is reported at once.
+        let duplicates = classify_duplicate_keys(&tree);
+        if !duplicates.is_empty() {
+            for duplicate in duplicates {
+                self.push_yaml_error(duplicate);
+            }
+            return self.failure();
+        }
         let value = match schema_yaml_to_json(tree) {
             Ok(value) => value,
             Err(error) => {
@@ -501,6 +548,12 @@ impl Loader {
             RangeKey::Rule(path) if path.scope.0.is_empty() => RangeKey::OutlineRule(path.index),
             RangeKey::RuleField(path, field) if path.scope.0.is_empty() => {
                 RangeKey::OutlineRuleField(path.index, field)
+            }
+            RangeKey::RuleCapture(path, name) if path.scope.0.is_empty() => {
+                RangeKey::OutlineRuleCapture(path.index, name)
+            }
+            RangeKey::RuleOrderEntry(path, order_index) if path.scope.0.is_empty() => {
+                RangeKey::OutlineRuleOrderEntry(path.index, order_index)
             }
             other => other,
         }

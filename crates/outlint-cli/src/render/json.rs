@@ -139,6 +139,22 @@ fn schema_node_json(node: &RenderedSchemaNode) -> Value {
         RenderedSchemaNode::Rule { scope, index } => {
             json!({ "kind": "rule", "scope": scope, "index": index })
         }
+        RenderedSchemaNode::Capture { scope, index, name } => {
+            json!({ "kind": "capture", "scope": scope, "index": index, "name": name })
+        }
+        RenderedSchemaNode::FrontmatterCapture { name } => {
+            json!({ "kind": "frontmatter_capture", "name": name })
+        }
+        RenderedSchemaNode::OrderEntry {
+            scope,
+            index,
+            order_index,
+        } => json!({
+            "kind": "order_entry",
+            "scope": scope,
+            "index": index,
+            "order_index": order_index
+        }),
         RenderedSchemaNode::Constraint { scope, index } => {
             json!({ "kind": "constraint", "scope": scope, "index": index })
         }

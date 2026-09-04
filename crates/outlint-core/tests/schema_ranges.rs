@@ -27,9 +27,9 @@ use std::{
 
 use outlint_core::{
     json_schema_external_references, linked_frontmatter_schema_path, load_schema,
-    load_schema_with_resources, ConstraintPath, JsonSchemaResourceContents,
-    JsonSchemaResourceInput, LinkedJsonSchemaInput, LoadedSchema, RulePath, SchemaNode, ScopePath,
-    SourceLabel, SourceRange,
+    load_schema_with_resources, CapturePath, ConstraintPath, JsonSchemaResourceContents,
+    JsonSchemaResourceInput, LinkedJsonSchemaInput, LoadedSchema, OrderEntryPath, RulePath,
+    SchemaNode, ScopePath, SourceLabel, SourceRange,
 };
 
 #[test]
@@ -507,6 +507,19 @@ fn encode_node(node: &SchemaNode) -> String {
         SchemaNode::Rule(RulePath { scope, index }) => {
             format!("rule {}", index_path(scope, index.0))
         }
+        SchemaNode::Capture(CapturePath { rule, name }) => format!(
+            "capture {} {}",
+            index_path(&rule.scope, rule.index.0),
+            name.as_str()
+        ),
+        SchemaNode::FrontmatterCapture(name) => {
+            format!("frontmatter-capture {}", name.as_str())
+        }
+        SchemaNode::OrderEntry(OrderEntryPath { rule, order_index }) => format!(
+            "order-entry {} {}",
+            index_path(&rule.scope, rule.index.0),
+            order_index.0
+        ),
         SchemaNode::Constraint(ConstraintPath { scope, index }) => {
             format!("constraint {}", index_path(scope, index.0))
         }

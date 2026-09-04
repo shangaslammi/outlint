@@ -12,11 +12,13 @@ use crate::yaml::{
     ExactYamlScalar, YamlValueError,
 };
 use crate::{
-    ByteOffset, ConstraintIndex, ConstraintPath, RuleIndex, RulePath, SchemaErrorKind, ScopePath,
-    SourceId, SourceRange, TextRange,
+    ByteOffset, ConstraintIndex, ConstraintPath, OrderIndex, RuleIndex, RulePath, SchemaErrorKind,
+    ScopePath, SourceId, SourceRange, TextRange,
 };
 
-use super::shape::{DOCUMENT_FIELDS, FRONTMATTER_FIELDS, OPTION_FIELDS, RULE_FIELDS};
+use super::shape::{
+    CAPTURES_FIELD, DOCUMENT_FIELDS, FRONTMATTER_FIELDS, OPTION_FIELDS, ORDER_FIELD, RULE_FIELDS,
+};
 use super::{JsonMap, RangeKey};
 
 #[derive(Default)]
@@ -66,6 +68,13 @@ impl RangeIndex {
                         },
                         node_range(value, expansion, char_offsets),
                     );
+                }
+            }
+            if section == "frontmatter" {
+                for (name, range) in capture_declaration_ranges(entries, expansion, char_offsets) {
+                    index
+                        .ranges
+                        .insert(RangeKey::FrontmatterCapture(name), range);
                 }
             }
         }
@@ -127,6 +136,14 @@ impl RangeIndex {
                     );
                 }
             }
+            for (name, range) in capture_declaration_ranges(mapping, expansion, char_offsets) {
+                self.ranges
+                    .insert(RangeKey::RuleCapture(path.clone(), name), range);
+            }
+            for (order_index, range) in order_entry_ranges(mapping, expansion, char_offsets) {
+                self.ranges
+                    .insert(RangeKey::RuleOrderEntry(path.clone(), order_index), range);
+            }
             let mut child_scope = scope.clone();
             child_scope.0.push(RuleIndex(index));
             if let Some(node) = schema_mapping_get(mapping, "sections") {
@@ -166,6 +183,16 @@ impl RangeIndex {
                         node_range(value, expansion, char_offsets),
                     );
                 }
+            }
+            for (name, range) in capture_declaration_ranges(mapping, expansion, char_offsets) {
+                self.ranges
+                    .insert(RangeKey::OutlineRuleCapture(RuleIndex(index), name), range);
+            }
+            for (order_index, range) in order_entry_ranges(mapping, expansion, char_offsets) {
+                self.ranges.insert(
+                    RangeKey::OutlineRuleOrderEntry(RuleIndex(index), order_index),
+                    range,
+                );
             }
             let child_scope = ScopePath(vec![RuleIndex(index)]);
             if let Some(node) = schema_mapping_get(mapping, "sections") {
@@ -302,6 +329,82 @@ fn subtree_expansion(
     inherited: Option<(usize, usize)>,
 ) -> Option<(usize, usize)> {
     inherited.or_else(|| node.expanded.then_some((node.start, node.end)))
+}
+
+/// The addressable range of every entry of a mapping's `captures` value.
+///
+/// One range per declaration, paired with the key's **raw** spelling. Raw is
+/// the point: a range has to exist for the declaration whose name is about to
+/// be rejected, and that declaration has no validated name to be keyed by.
+/// A `captures` value that is not a mapping, and a key that is not a scalar,
+/// contribute nothing — their own shape complaints are the loader's, not this
+/// walk's.
+///
+/// The range spans the whole entry, from the name through the end of its
+/// value, so that §6.3's "anchors at the offending capture declaration" has
+/// one address whether the fault is in the name or in what it declares.
+fn capture_declaration_ranges(
+    mapping: &[(SchemaYamlNode, SchemaYamlNode)],
+    expansion: Option<(usize, usize)>,
+    char_offsets: &[usize],
+) -> Vec<(String, SourceRange)> {
+    let Some(node) = schema_mapping_get(mapping, CAPTURES_FIELD) else {
+        return Vec::new();
+    };
+    let expansion = subtree_expansion(node, expansion);
+    let Some(entries) = node.as_mapping() else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|(key, value)| {
+            let name = key.scalar_text()?;
+            Some((
+                name.to_owned(),
+                entry_range(key, value, expansion, char_offsets),
+            ))
+        })
+        .collect()
+}
+
+/// The addressable range of every entry of a mapping's `order` value.
+///
+/// Unlike a capture, an order entry is addressed by position: `order` is a
+/// list whose entry order is semantic, so an entry keeps its index even
+/// before anything in it is understood.
+fn order_entry_ranges(
+    mapping: &[(SchemaYamlNode, SchemaYamlNode)],
+    expansion: Option<(usize, usize)>,
+    char_offsets: &[usize],
+) -> Vec<(OrderIndex, SourceRange)> {
+    let Some(node) = schema_mapping_get(mapping, ORDER_FIELD) else {
+        return Vec::new();
+    };
+    let expansion = subtree_expansion(node, expansion);
+    let Some(entries) = node.as_sequence() else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            (
+                OrderIndex(index),
+                node_range(entry, expansion, char_offsets),
+            )
+        })
+        .collect()
+}
+
+/// One mapping entry's range: its key through the end of its value.
+fn entry_range(
+    key: &SchemaYamlNode,
+    value: &SchemaYamlNode,
+    expansion: Option<(usize, usize)>,
+    char_offsets: &[usize],
+) -> SourceRange {
+    let (start, end) = expansion.unwrap_or((key.start, value.end.max(key.start)));
+    char_range(start, end, char_offsets)
 }
 
 /// Converts one node's character-index range into a byte-offset source range.
@@ -577,7 +680,6 @@ impl<'source> SchemaYamlReader<'source> {
                 let depth = deeper_yaml_nesting(depth, 1).map_err(|_| self.depth_error(&span))?;
                 self.budget.spend(1).map_err(|_| self.budget_error(&span))?;
                 let mut entries: Vec<(SchemaYamlNode, SchemaYamlNode)> = Vec::new();
-                let mut keys: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
                 let mut inner = 0;
                 let end;
                 loop {
@@ -590,19 +692,12 @@ impl<'source> SchemaYamlReader<'source> {
                     let (event, span) = self.next_event()?;
                     let value = self.node(event, span, depth)?;
                     inner = inner.max(key.depth).max(value.depth);
-                    let (key, value) = (key.node, value.node);
-                    // Whole-node equality catches the keys the conversion
-                    // never reduces to a string; keys that do resolve are
-                    // caught again there, on the resolved text. The digest
-                    // narrows the candidates so an aliased flood of large
-                    // keys costs hashes rather than quadratic comparisons.
-                    let digest = schema_yaml_key_digest(&key);
-                    let alike = keys.entry(digest).or_default();
-                    if alike.iter().any(|&entry| entries[entry].0 == key) {
-                        return Err(duplicate_schema_key_error(&key));
-                    }
-                    alike.push(entries.len());
-                    entries.push((key, value));
+                    // Repeated keys are kept, not refused here. §2.1 gives a
+                    // repeat inside a `captures` mapping a different id from
+                    // a repeat anywhere else, and this reader has no idea
+                    // which mapping it is building — the tree it returns
+                    // does. See [`classify_duplicate_keys`].
+                    entries.push((key.node, value.node));
                 }
                 (SchemaYamlKind::Mapping(entries), end, anchor, inner + 1)
             }
@@ -674,19 +769,183 @@ impl<'source> SchemaYamlReader<'source> {
     }
 }
 
+/// Where in the schema document a mapping sits, for the one classification
+/// §2.1 makes depend on it.
+///
+/// Only [`Self::Captures`] changes an answer; the rest exist to reach it,
+/// because a `captures` mapping is recognized by what encloses it and not by
+/// anything the mapping itself says.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DuplicateScope {
+    /// The schema document's root mapping.
+    Document,
+    /// The `frontmatter` mapping.
+    Frontmatter,
+    /// One rule object, at any depth.
+    Rule,
+    /// A sequence whose elements are rule objects.
+    RuleList,
+    /// A `captures` mapping, whose own keys are capture names.
+    Captures,
+    /// Anywhere else, including inside one capture declaration or one order
+    /// entry — §2.1 keeps those `syntax`.
+    Other,
+}
+
+/// Reports every repeated mapping key in the tree, classified by §2.1.
+///
+/// This runs over the built tree rather than inside the reader because the
+/// classification is positional: "a repeated key within one `captures`
+/// mapping is `invalid-capture`", while "duplicate YAML keys anywhere else —
+/// including within one frontmatter capture declaration or one order entry —
+/// remain schema error `syntax`". The reader knows how a mapping is spelled
+/// and nothing about where it sits; the tree knows both.
+///
+/// Independent duplicates are collected rather than stopping at the first,
+/// which §6.3 requires of independent schema errors. A key repeated three
+/// times reports its second and third occurrences: each is independently a
+/// repeat of a key already declared.
+pub(super) fn classify_duplicate_keys(root: &SchemaYamlNode) -> Vec<SchemaYamlError> {
+    let mut errors = Vec::new();
+    collect_duplicate_keys(root, DuplicateScope::Document, &mut errors);
+    errors
+}
+
+fn collect_duplicate_keys(
+    node: &SchemaYamlNode,
+    scope: DuplicateScope,
+    errors: &mut Vec<SchemaYamlError>,
+) {
+    if node.expanded {
+        // An alias copy repeats a subtree that is checked where it is
+        // defined, and an anchor definition is always itself a node of this
+        // tree. Descending here would report one authored duplicate once per
+        // alias site, each anchored at an alias rather than at the spelling
+        // its author would have to change.
+        return;
+    }
+    match &node.kind {
+        SchemaYamlKind::Scalar(_) => {}
+        SchemaYamlKind::Sequence(values) => {
+            let element = match scope {
+                DuplicateScope::RuleList => DuplicateScope::Rule,
+                _ => DuplicateScope::Other,
+            };
+            for value in values {
+                collect_duplicate_keys(value, element, errors);
+            }
+        }
+        SchemaYamlKind::Mapping(entries) => {
+            report_duplicate_keys(entries, scope, errors);
+            for (key, value) in entries {
+                collect_duplicate_keys(value, child_duplicate_scope(scope, key), errors);
+            }
+        }
+    }
+}
+
+/// The scope one mapping entry's value sits in, given its key.
+fn child_duplicate_scope(scope: DuplicateScope, key: &SchemaYamlNode) -> DuplicateScope {
+    let Some(key) = key.scalar_text() else {
+        return DuplicateScope::Other;
+    };
+    match scope {
+        DuplicateScope::Document if key == "frontmatter" => DuplicateScope::Frontmatter,
+        DuplicateScope::Document if key == "sections" || key == "outline" => {
+            DuplicateScope::RuleList
+        }
+        DuplicateScope::Rule if key == "sections" => DuplicateScope::RuleList,
+        DuplicateScope::Rule | DuplicateScope::Frontmatter if key == CAPTURES_FIELD => {
+            DuplicateScope::Captures
+        }
+        _ => DuplicateScope::Other,
+    }
+}
+
+/// Reports the repeated keys of one mapping.
+///
+/// Two keys are the same key when they resolve to the same string — so
+/// `version` and `"version"` collide — and, for a key that resolves to no
+/// string at all, when the key nodes themselves are equal. Both halves are
+/// needed: the first is the identity the converted JSON object would use, and
+/// the second still catches a key the conversion never reduces to a string.
+/// The digest narrows the candidates so an aliased flood of large keys costs
+/// hashes rather than quadratic comparisons.
+fn report_duplicate_keys(
+    entries: &[(SchemaYamlNode, SchemaYamlNode)],
+    scope: DuplicateScope,
+    errors: &mut Vec<SchemaYamlError>,
+) {
+    let texts = entries
+        .iter()
+        .map(|(key, _)| resolved_key_text(key))
+        .collect::<Vec<_>>();
+    let mut declared: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (index, (key, _)) in entries.iter().enumerate() {
+        let digest = match &texts[index] {
+            Some(text) => schema_yaml_key_digest(&(0_u8, text.as_str())),
+            None => schema_yaml_key_digest(&(1_u8, key)),
+        };
+        let alike = declared.entry(digest).or_default();
+        let repeated = alike
+            .iter()
+            .any(|&prior| match (&texts[index], &texts[prior]) {
+                (Some(current), Some(earlier)) => current == earlier,
+                (None, None) => entries[prior].0 == *key,
+                _ => false,
+            });
+        if repeated {
+            errors.push(duplicate_schema_key_error(
+                key,
+                texts[index].as_deref(),
+                scope,
+            ));
+        } else {
+            alike.push(index);
+        }
+    }
+}
+
+/// The string a mapping key resolves to, or `None` if it resolves to no
+/// string — a number, a boolean, a null, or a collection.
+fn resolved_key_text(key: &SchemaYamlNode) -> Option<String> {
+    let SchemaYamlKind::Scalar(scalar) = &key.kind else {
+        return None;
+    };
+    match exact_yaml_scalar_to_json(scalar.clone()) {
+        Ok(Value::String(text)) => Some(text),
+        _ => None,
+    }
+}
+
 /// Digests a mapping key so only the keys that could equal it are compared.
-fn schema_yaml_key_digest(key: &SchemaYamlNode) -> u64 {
+fn schema_yaml_key_digest(key: &impl std::hash::Hash) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     std::hash::Hash::hash(key, &mut hasher);
     std::hash::Hasher::finish(&hasher)
 }
 
 /// Names a duplicate mapping key at the duplicate occurrence's own range.
-fn duplicate_schema_key_error(key: &SchemaYamlNode) -> SchemaYamlError {
+fn duplicate_schema_key_error(
+    key: &SchemaYamlNode,
+    text: Option<&str>,
+    scope: DuplicateScope,
+) -> SchemaYamlError {
+    let span = Some((key.start, key.end));
+    if scope == DuplicateScope::Captures {
+        return SchemaYamlError {
+            kind: SchemaErrorKind::InvalidCapture,
+            span,
+            message: match text {
+                Some(text) => format!("duplicate capture name `{text}`"),
+                None => "duplicate capture name".into(),
+            },
+        };
+    }
     SchemaYamlError {
         kind: SchemaErrorKind::Syntax,
-        span: Some((key.start, key.end)),
-        message: match key.scalar_text() {
+        span,
+        message: match text {
             Some(text) => format!("invalid YAML: duplicate mapping key `{text}`"),
             None => "invalid YAML: duplicate mapping key".into(),
         },
