@@ -1223,3 +1223,289 @@ fn frontmatter_captures_do_not_collide_with_outline_names() {
     assert_eq!(schema.frontmatter.captures().len(), 1);
     assert_eq!(schema.outline.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Frontmatter capture rejection
+// ---------------------------------------------------------------------------
+
+/// Builds a schema whose `frontmatter.captures` is spelled by `declarations`.
+fn capture_source(declarations: &str) -> String {
+    format!("version: 1\nfrontmatter:\n  captures:\n{declarations}sections: []\n")
+}
+
+/// The one error a source is expected to produce, with its anchor's text.
+fn single_capture_error(source: &str) -> (String, String) {
+    let refused = invalid(source);
+    assert!(
+        refused.errors.rest.is_empty(),
+        "expected one error, got {:#?}",
+        refused.errors
+    );
+    assert_eq!(refused.errors.first.kind, SchemaErrorKind::InvalidCapture);
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    (
+        refused.errors.first.message.clone(),
+        source_slice(source, refused.errors.first.range).to_owned(),
+    )
+}
+
+/// §2.3: "A frontmatter `captures` value MUST be a non-empty mapping." Every
+/// way of writing something else is one fault of the collection, so §6.3
+/// anchors it at the `captures` key rather than at an entry there is none of.
+#[test]
+fn rejects_invalid_capture_collections() {
+    for (spelling, anchor) in [
+        ("  captures: {}\n", "{}"),
+        ("  captures: null\n", "null"),
+        ("  captures: version\n", "version"),
+        ("  captures: 3\n", "3"),
+        ("  captures: [version]\n", "[version]"),
+    ] {
+        let source = format!("version: 1\nfrontmatter:\n{spelling}sections: []\n");
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message, "frontmatter.captures must be a non-empty mapping of capture declarations",
+            "for {spelling:?}"
+        );
+        assert_eq!(slice, anchor, "for {spelling:?}");
+    }
+}
+
+/// §2.2's capture-name grammar is `[a-z][a-z0-9_]*`, and it is ASCII: an
+/// uppercase letter, a hyphen, a dot, a leading digit, a leading underscore,
+/// and the empty name are each outside it. §6.3 anchors the refusal at the
+/// declaration, which is the entry an author would rename.
+#[test]
+fn rejects_invalid_capture_names() {
+    for spelled in ["Version", "my-name", "my.name", "1st", "_lead", "verão"] {
+        let source = capture_source(&format!("    {spelled}:\n      type: text\n"));
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            format!("capture name `{spelled}` must match `[a-z][a-z0-9_]*`")
+        );
+        assert_eq!(slice, format!("{spelled}:\n      type: text\n"));
+    }
+
+    let source = capture_source("    \"\":\n      type: text\n");
+    let (message, slice) = single_capture_error(&source);
+    assert_eq!(message, "capture name `` must match `[a-z][a-z0-9_]*`");
+    assert_eq!(slice, "\"\":\n      type: text\n");
+}
+
+/// §2.3 requires each value to be "an object having exactly the required key
+/// `type` and optional keys `path` and `required`". A value that is not an
+/// object, one missing `type`, and one carrying a key outside that set are
+/// the three ways of failing that sentence.
+#[test]
+fn rejects_malformed_capture_objects() {
+    for spelled in [
+        "    version:\n",
+        "    version: text\n",
+        "    version: [text]\n",
+    ] {
+        let source = capture_source(spelled);
+        let (message, _) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            "frontmatter capture `version` must be a mapping declaring a `type`"
+        );
+    }
+
+    let source = capture_source("    version:\n      path: \"$.version\"\n");
+    let (message, slice) = single_capture_error(&source);
+    assert_eq!(
+        message,
+        "frontmatter capture `version` is missing required field `type`"
+    );
+    assert_eq!(slice, "version:\n      path: \"$.version\"\n");
+
+    let source = capture_source("    version:\n      type: text\n      kind: header\n");
+    let (message, slice) = single_capture_error(&source);
+    assert_eq!(
+        message,
+        "unknown field `kind` in frontmatter capture `version`"
+    );
+    assert_eq!(slice, "version:\n      type: text\n      kind: header\n");
+}
+
+/// §2.4's type set is closed and its spellings are exact, so a type that is
+/// not a string, not one of the six, or one of the six in another case is
+/// refused. The message lists the set, because "unknown" is only actionable
+/// beside what is known.
+#[test]
+fn rejects_invalid_capture_types() {
+    for spelled in ["      type:\n", "      type: 3\n", "      type: [text]\n"] {
+        let source = capture_source(&format!("    version:\n{spelled}"));
+        let (message, _) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            "frontmatter capture `version` `type` must be a string and cannot be null"
+        );
+    }
+
+    for spelled in ["bogus", "Text", "INT", "string"] {
+        let source = capture_source(&format!("    version:\n      type: {spelled}\n"));
+        let (message, slice) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            format!(
+                "unknown capture type `{spelled}` in frontmatter capture `version`; \
+                 expected one of `int`, `bool`, `date`, `semver`, `dotted`, `text`"
+            )
+        );
+        assert_eq!(slice, format!("version:\n      type: {spelled}\n"));
+    }
+}
+
+/// §2.3: "`path` MUST be a string containing an absolute, `$`-rooted RFC 9535
+/// JSONPath singular query." A value that is not a string never reaches the
+/// query parser, so it is refused for what it is.
+#[test]
+fn rejects_non_string_capture_paths() {
+    for spelled in [
+        "      path:\n",
+        "      path: 3\n",
+        "      path: [\"$.a\"]\n",
+    ] {
+        let source = capture_source(&format!("    version:\n      type: text\n{spelled}"));
+        let (message, _) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            "frontmatter capture `version` `path` must be a string and cannot be null"
+        );
+    }
+}
+
+/// §2.3 gives `required` the type `bool`. YAML 1.2's core resolver makes
+/// `yes` a string rather than a boolean, so the common spelling is refused
+/// here too rather than silently reading as true.
+#[test]
+fn rejects_invalid_capture_required_flags() {
+    for spelled in [
+        "      required:\n",
+        "      required: 1\n",
+        "      required: yes\n",
+        "      required: [true]\n",
+    ] {
+        let source = capture_source(&format!("    version:\n      type: text\n{spelled}"));
+        let (message, _) = single_capture_error(&source);
+        assert_eq!(
+            message,
+            "frontmatter capture `version` `required` must be a bool and cannot be null"
+        );
+    }
+}
+
+/// §6.3: "Independent schema errors MUST be collected together." One bad
+/// declaration therefore does not hide the next, and each keeps its own
+/// anchor rather than sharing the collection's.
+#[test]
+fn collects_independent_capture_declaration_errors() {
+    let source = capture_source(concat!(
+        "    good:\n      type: text\n",
+        "    bad:\n      type: bogus\n",
+        "    worse:\n      type: 3\n",
+    ));
+    let refused = invalid(&source);
+    let errors = refused.errors.iter().collect::<Vec<_>>();
+    assert_eq!(errors.len(), 2);
+    assert!(errors
+        .iter()
+        .all(|error| error.kind == SchemaErrorKind::InvalidCapture));
+    assert_eq!(
+        errors
+            .iter()
+            .map(|error| source_slice(&source, error.range))
+            .collect::<Vec<_>>(),
+        // A declaration's range runs from its key to the end of its value,
+        // so a non-final entry carries the indentation the next key sits on.
+        vec!["bad:\n      type: bogus\n    ", "worse:\n      type: 3\n"]
+    );
+}
+
+/// The same rule inside one declaration: its faults are independent of each
+/// other, so all four are reported, and §6.3 anchors every one of them at the
+/// declaration they belong to.
+#[test]
+fn collects_independent_defects_within_one_capture_declaration() {
+    let source = capture_source(concat!(
+        "    version:\n",
+        "      type: bogus\n",
+        "      path: 3\n",
+        "      required: 4\n",
+        "      extra: yes\n",
+    ));
+    let refused = invalid(&source);
+    let errors = refused.errors.iter().collect::<Vec<_>>();
+    assert_eq!(errors.len(), 4);
+    assert!(errors
+        .iter()
+        .all(|error| error.kind == SchemaErrorKind::InvalidCapture));
+    let declaration = source_slice(
+        &source,
+        errors.first().expect("the declaration was refused").range,
+    );
+    assert_eq!(
+        declaration,
+        "version:\n      type: bogus\n      path: 3\n      required: 4\n      extra: yes\n"
+    );
+    assert!(errors
+        .iter()
+        .all(|error| source_slice(&source, error.range) == declaration));
+}
+
+/// A collection with one unusable entry is unusable as a whole: the load
+/// fails, so neither the refused entry nor its valid neighbour can be
+/// observed in a normalized collection or in the node map.
+#[test]
+fn a_rejected_capture_never_reaches_a_loaded_schema() {
+    let source = capture_source(concat!(
+        "    good:\n      type: text\n",
+        "    bad:\n      type: bogus\n",
+    ));
+    assert_eq!(
+        error_kinds(&source),
+        vec![SchemaErrorKind::InvalidCapture],
+        "only the unusable entry is refused"
+    );
+    assert!(load_schema(&source).is_err());
+}
+
+/// §2.1's special classification is for keys *inside* a `captures` mapping.
+/// The `captures` key itself is an ordinary key of the `frontmatter` mapping,
+/// so repeating it stays `syntax`, anchored at the later spelling.
+#[test]
+fn frontmatter_field_duplicates_remain_syntax() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: semver\n",
+        "  captures:\n",
+        "    build:\n",
+        "      type: int\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
+    assert_eq!(
+        refused.errors.first.message,
+        "invalid YAML: duplicate mapping key `captures`"
+    );
+    assert_eq!(refused.errors.first.range.source, SourceId(0));
+    assert_eq!(source_slice(source, refused.errors.first.range), "captures");
+    let later = source
+        .rfind("  captures:")
+        .expect("the frontmatter mapping spells the key twice")
+        + "  ".len();
+    assert_eq!(
+        refused.errors.first.range.range,
+        TextRange {
+            start: ByteOffset(later),
+            end: ByteOffset(later + "captures".len()),
+        }
+    );
+}
