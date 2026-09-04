@@ -6,7 +6,7 @@
 //! expected to be normalized by the schema loader before constructing this
 //! model.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde_json::Value as JsonValue;
 
@@ -115,10 +115,19 @@ pub enum OutlineProvenance {
 
 /// The document's normalized frontmatter policy.
 ///
-/// This representation makes the invalid `required: true, allow: false`
-/// combination unrepresentable while retaining a schema declared alongside
-/// `allow: false`; if forbidden frontmatter is nevertheless present, the
-/// validation algorithm still evaluates that schema.
+/// This representation makes two invalid combinations of §2.3 unrepresentable
+/// rather than merely rejected. `required: true, allow: false` has no variant,
+/// and neither does `allow: false` together with `captures`: the two
+/// capture-bearing variants are exactly the two allowed presence policies, so
+/// no value of this type can spell forbidden frontmatter that also exports
+/// typed captures. A schema declared alongside `allow: false` is still
+/// retained; if forbidden frontmatter is nevertheless present, the validation
+/// algorithm still evaluates that schema.
+///
+/// Match on the variants only when the distinction matters. [`Self::schema`],
+/// [`Self::captures`], [`Self::is_required`], and [`Self::is_forbidden`]
+/// answer the questions callers actually ask without repeating a five-way
+/// match at every site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FrontmatterPolicy {
@@ -138,6 +147,296 @@ pub enum FrontmatterPolicy {
         /// JSON Schema to apply if forbidden frontmatter is present.
         schema: Option<FrontmatterSchema>,
     },
+    /// [`Self::Optional`] with a non-empty `captures` declaration (§2.3).
+    OptionalWithCaptures {
+        /// JSON Schema to apply when frontmatter is present.
+        schema: Option<FrontmatterSchema>,
+        /// The declared typed exports, keyed by capture name.
+        captures: FrontmatterCaptures,
+    },
+    /// [`Self::Required`] with a non-empty `captures` declaration (§2.3).
+    RequiredWithCaptures {
+        /// JSON Schema to apply to the required frontmatter mapping.
+        schema: Option<FrontmatterSchema>,
+        /// The declared typed exports, keyed by capture name.
+        captures: FrontmatterCaptures,
+    },
+}
+
+impl FrontmatterPolicy {
+    /// The JSON Schema declared alongside this policy, if any.
+    pub fn schema(&self) -> Option<&FrontmatterSchema> {
+        match self {
+            Self::Optional { schema }
+            | Self::Required { schema }
+            | Self::Forbidden { schema }
+            | Self::OptionalWithCaptures { schema, .. }
+            | Self::RequiredWithCaptures { schema, .. } => schema.as_ref(),
+        }
+    }
+
+    /// The declared frontmatter captures, as an empty view when none exist.
+    ///
+    /// Every variant answers, so a caller iterating declarations never has to
+    /// know which presence policy carries them.
+    pub fn captures(&self) -> FrontmatterCaptureView<'_> {
+        match self {
+            Self::Optional { .. } | Self::Required { .. } | Self::Forbidden { .. } => {
+                FrontmatterCaptureView { declared: None }
+            }
+            Self::OptionalWithCaptures { captures, .. }
+            | Self::RequiredWithCaptures { captures, .. } => FrontmatterCaptureView {
+                declared: Some(captures),
+            },
+        }
+    }
+
+    /// Whether a frontmatter block must be present.
+    pub fn is_required(&self) -> bool {
+        matches!(
+            self,
+            Self::Required { .. } | Self::RequiredWithCaptures { .. }
+        )
+    }
+
+    /// Whether a frontmatter block is forbidden.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(self, Self::Forbidden { .. })
+    }
+}
+
+/// A validated capture name under the §2.2 grammar `[a-z][a-z0-9_]*`.
+///
+/// Construction is restricted to the schema loader, which checks the grammar
+/// and the §4.3 named-scope rules before a name reaches the semantic model.
+/// Ordering and hashing are derived so that capture-keyed collections have a
+/// deterministic iteration order independent of the source mapping's order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct CaptureName(pub(crate) String);
+
+impl CaptureName {
+    /// Returns the validated capture name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CaptureName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// One rule capture declaration: the §2.4 type a named regex group binds.
+///
+/// The capture's own name is the key of [`SectionRule::captures`], so it is
+/// not repeated here. The type is held in its resolved kernel form; public
+/// inspection exposes only the stable spelling, keeping the closed type set an
+/// implementation detail rather than a public enum every consumer must match.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RuleCapture {
+    value_type: crate::typed_value::ValueType,
+}
+
+impl RuleCapture {
+    /// Builds a declaration for an already-resolved capture type.
+    ///
+    /// Called by the rule loader, which lands in a later lane; the model that
+    /// lane builds against is established here, so the constructor exists
+    /// before its one caller does.
+    #[allow(dead_code)]
+    pub(crate) fn new(value_type: crate::typed_value::ValueType) -> Self {
+        Self { value_type }
+    }
+
+    /// The declared type's stable §2.4 spelling, such as `semver`.
+    pub fn type_name(&self) -> &'static str {
+        self.value_type.as_str()
+    }
+
+    /// The resolved capture type, for the loader and the validator.
+    ///
+    /// Its consumers — capture extraction and value ordering — belong to the
+    /// validator lane; see [`Self::new`] for why the accessor precedes them.
+    #[allow(dead_code)]
+    pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
+        self.value_type
+    }
+}
+
+/// One frontmatter capture declaration (§2.3).
+///
+/// The capture's own name is the key of the owning [`FrontmatterCaptures`].
+/// The path is retained in parsed form together with its exact source, because
+/// §2.3 gives a declaration one absolute singular query and diagnostics quote
+/// that spelling back rather than reconstructing it. The provider-facing
+/// parsed form never appears in a public signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterCapture {
+    path: crate::locator::AbsoluteSingularPath,
+    value_type: crate::typed_value::ValueType,
+    required: bool,
+}
+
+impl FrontmatterCapture {
+    /// Builds a declaration from an already-parsed path and resolved type.
+    ///
+    /// Called by the frontmatter loader, which lands in a later lane; see
+    /// [`RuleCapture::new`].
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        path: crate::locator::AbsoluteSingularPath,
+        value_type: crate::typed_value::ValueType,
+        required: bool,
+    ) -> Self {
+        Self {
+            path,
+            value_type,
+            required,
+        }
+    }
+
+    /// The declared or defaulted singular query, exactly as normalized.
+    pub fn path_source(&self) -> &str {
+        self.path.source()
+    }
+
+    /// The declared type's stable §2.4 spelling, such as `int`.
+    pub fn type_name(&self) -> &'static str {
+        self.value_type.as_str()
+    }
+
+    /// Whether an absent value produces `missing-value` (§2.3).
+    pub fn is_required(&self) -> bool {
+        self.required
+    }
+
+    /// The parsed singular query, for the loader and the validator.
+    ///
+    /// Its consumer is frontmatter capture evaluation, in a later lane.
+    #[allow(dead_code)]
+    pub(crate) fn path(&self) -> &crate::locator::AbsoluteSingularPath {
+        &self.path
+    }
+
+    /// The resolved capture type, for the loader and the validator.
+    ///
+    /// Its consumer is frontmatter capture evaluation, in a later lane.
+    #[allow(dead_code)]
+    pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
+        self.value_type
+    }
+}
+
+/// A non-empty, normalized set of frontmatter capture declarations.
+///
+/// §2.3 requires `frontmatter.captures` to be a non-empty mapping, so this
+/// collection is only ever built with at least one entry and construction is
+/// restricted to the loader. Entries are keyed by name rather than kept in
+/// source order: the source mapping's order is not semantic, and keying makes
+/// two schemas that spell the same declarations differently compare equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterCaptures {
+    entries: BTreeMap<CaptureName, FrontmatterCapture>,
+}
+
+impl FrontmatterCaptures {
+    /// Builds the collection, or `None` when it would be empty.
+    ///
+    /// Called by the frontmatter loader, which lands in a later lane; see
+    /// [`RuleCapture::new`].
+    #[allow(dead_code)]
+    pub(crate) fn new(entries: BTreeMap<CaptureName, FrontmatterCapture>) -> Option<Self> {
+        (!entries.is_empty()).then_some(Self { entries })
+    }
+
+    /// The declaration named `name`, if one exists.
+    pub fn get(&self, name: &CaptureName) -> Option<&FrontmatterCapture> {
+        self.entries.get(name)
+    }
+
+    /// Iterates declarations in capture-name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&CaptureName, &FrontmatterCapture)> {
+        self.entries.iter()
+    }
+
+    /// The number of declarations, which is never zero.
+    ///
+    /// There is deliberately no `is_empty`: it could only ever answer
+    /// `false`, and offering it would suggest the emptiness this collection's
+    /// construction rules out is worth testing for. A caller that may or may
+    /// not have declarations holds a [`FrontmatterCaptureView`], which does
+    /// have one.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// A read-only view of a policy's frontmatter captures, empty when none were
+/// declared.
+///
+/// [`FrontmatterPolicy::captures`] returns this for every variant so that
+/// "no captures" and "some captures" share one inspection surface. It borrows;
+/// it never allocates an empty collection, which would contradict
+/// [`FrontmatterCaptures`]'s non-empty invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrontmatterCaptureView<'a> {
+    declared: Option<&'a FrontmatterCaptures>,
+}
+
+impl<'a> FrontmatterCaptureView<'a> {
+    /// The declaration named `name`, if this policy declares one.
+    pub fn get(&self, name: &CaptureName) -> Option<&'a FrontmatterCapture> {
+        self.declared.and_then(|captures| captures.get(name))
+    }
+
+    /// Iterates declarations in capture-name order; empty when none exist.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a CaptureName, &'a FrontmatterCapture)> {
+        self.declared
+            .into_iter()
+            .flat_map(FrontmatterCaptures::iter)
+    }
+
+    /// The number of declarations, zero when none exist.
+    pub fn len(&self) -> usize {
+        self.declared.map_or(0, FrontmatterCaptures::len)
+    }
+
+    /// Whether this policy declares no frontmatter captures.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The underlying non-empty collection, if this policy declares captures.
+    pub fn declared(&self) -> Option<&'a FrontmatterCaptures> {
+        self.declared
+    }
+}
+
+/// One entry of a rule's `order` list (§3.8).
+///
+/// Entry order is semantic — the list is a sort key read most significant
+/// first — so these live in a [`Vec`] rather than a keyed collection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ValueOrderEntry {
+    /// The capture whose values this entry compares.
+    pub by: CaptureName,
+    /// The direction values must run in.
+    pub direction: ValueOrderDirection,
+    /// Whether equal neighbouring values violate the order.
+    pub strict: bool,
+}
+
+/// The direction one [`ValueOrderEntry`] sorts in; the normalized form of
+/// `dir: asc` and `dir: desc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValueOrderDirection {
+    /// Non-decreasing values, the default when `dir` is omitted.
+    Ascending,
+    /// Non-increasing values.
+    Descending,
 }
 
 /// An opaque, normalized JSON Schema resource graph.
@@ -274,6 +573,18 @@ pub struct SectionRule {
     pub sections: Vec<SectionRule>,
     /// Presence and ordering constraints attached to the child scope.
     pub constraints: Vec<Constraint>,
+    /// Typed values this rule's matcher exports (§2.1, §2.4), keyed by name.
+    ///
+    /// Empty for a rule that declares no `captures`. The mapping's source
+    /// order is not semantic, so declarations are keyed rather than listed:
+    /// two schemas spelling the same captures in different orders normalize
+    /// to the same rule.
+    pub captures: BTreeMap<CaptureName, RuleCapture>,
+    /// The value ordering this rule's own matches must satisfy (§3.8).
+    ///
+    /// Empty for a rule that declares no `order`. Unlike `captures`, entry
+    /// order is semantic and therefore preserved.
+    pub order: Vec<ValueOrderEntry>,
 }
 
 /// The result of matching a header against a section rule.

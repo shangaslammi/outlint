@@ -1,6 +1,6 @@
 //! Construction of options, scopes, rules, matchers, and cardinalities.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
@@ -116,6 +116,12 @@ impl Loader {
                         ordered: raw.ordered.unwrap_or(ordered_default),
                         sections,
                         constraints: Vec::new(),
+                        // Lane 2A wires the shape through; declaration
+                        // normalization belongs to the rule loader lane, so
+                        // every rule still normalizes to no captures and no
+                        // value order.
+                        captures: BTreeMap::new(),
+                        order: Vec::new(),
                     });
                 }
                 _ => complete = false,

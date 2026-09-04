@@ -40,13 +40,17 @@
 // comes out when the wiring lands.
 #![allow(dead_code)]
 
-// No facade re-export lives here yet. One would have to be `pub(crate)` and,
-// with nothing outside this module importing from it, would need a second
-// suppression on top of the one above. The lane that wires this module up
-// picks the surface it actually needs and re-exports exactly that.
 mod jsonpath;
 mod path;
 mod syntax;
+
+// The facade: exactly the kernel items the rest of the crate names, and
+// nothing more. Everything reachable through it is `pub(crate)`, so no
+// provider type escapes this module by being re-exported here, and the
+// module-level allowance above still covers everything the facade does not
+// mention. It grows one item at a time as later lanes wire themselves up,
+// rather than being opened wholesale.
+pub(crate) use self::jsonpath::AbsoluteSingularPath;
 
 #[cfg(test)]
 mod tests;

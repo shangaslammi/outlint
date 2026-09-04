@@ -5,7 +5,7 @@ use crate::loader::{
     preloaded_json_schema_registry, NoExternalRetrieve, MAX_JSON_SCHEMA_REFERENCES,
 };
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
-use crate::{FrontmatterPolicy, FrontmatterSchema, Matcher, Schema, SectionRule};
+use crate::{FrontmatterSchema, Matcher, Schema, SectionRule};
 
 use super::diagnostic::PrepareValidationError;
 
@@ -18,18 +18,12 @@ impl ValidationPlan {
     pub(super) fn new(schema: &Schema) -> Result<Self, PrepareValidationError> {
         Ok(Self {
             outline: prepare_rules(&schema.outline, schema.options.match_case)?,
-            frontmatter: frontmatter_schema(&schema.frontmatter)
+            frontmatter: schema
+                .frontmatter
+                .schema()
                 .map(compile_frontmatter_schema)
                 .transpose()?,
         })
-    }
-}
-
-fn frontmatter_schema(policy: &FrontmatterPolicy) -> Option<&FrontmatterSchema> {
-    match policy {
-        FrontmatterPolicy::Optional { schema }
-        | FrontmatterPolicy::Required { schema }
-        | FrontmatterPolicy::Forbidden { schema } => schema.as_ref(),
     }
 }
 

@@ -408,6 +408,11 @@ impl Loader {
                     ordered: ordered_default,
                     sections,
                     constraints: Vec::new(),
+                    // The synthesized title rule has no source declaration to
+                    // carry captures or an order, and never will: both are
+                    // spelled on a rule object.
+                    captures: BTreeMap::new(),
+                    order: Vec::new(),
                 }]
             });
             (outline, outline_provenance)

@@ -191,3 +191,55 @@ fn semantic_options_default_to_the_specification_values() {
     assert!(customized.allow_skipped_levels);
     assert!(!customized.ordered_sections);
 }
+
+/// Pins the typed-value declaration surface a schema without `captures` or
+/// `order` must expose: present, inspectable, and empty. The loader does not
+/// normalize either declaration yet, so a schema that spells neither is the
+/// only one that can be asserted about — which is exactly the invariant this
+/// test exists to hold while the loader lanes land.
+#[test]
+fn schemas_without_typed_values_normalize_to_empty_capture_and_order_defaults() {
+    let loaded = load_schema(
+        r#"
+version: 1
+title: "*"
+sections:
+  - id: guide
+    match: /(?<version>.+)/
+"#,
+    )
+    .expect("schema is valid");
+
+    let guide = &loaded.schema.outline[0].sections[0];
+    assert!(guide.captures.is_empty());
+    assert!(guide.order.is_empty());
+    // The synthesized title rule has no source declaration to carry either.
+    assert!(loaded.schema.outline[0].captures.is_empty());
+    assert!(loaded.schema.outline[0].order.is_empty());
+}
+
+/// Pins the frontmatter policy's capture inspection: every variant answers,
+/// and a policy with no declarations answers with an empty view rather than
+/// forcing callers to match five ways.
+#[test]
+fn the_frontmatter_policy_answers_capture_questions_for_every_variant() {
+    let loaded = load_schema("version: 1\nfrontmatter:\n  required: true\nsections: []\n")
+        .expect("schema is valid");
+    let policy = &loaded.schema.frontmatter;
+
+    assert!(policy.is_required());
+    assert!(!policy.is_forbidden());
+    assert!(policy.schema().is_none());
+
+    let captures = policy.captures();
+    assert!(captures.is_empty());
+    assert_eq!(captures.len(), 0);
+    assert!(captures.declared().is_none());
+    assert_eq!(captures.iter().count(), 0);
+
+    let forbidden = load_schema("version: 1\nfrontmatter:\n  allow: false\nsections: []\n")
+        .expect("schema is valid");
+    assert!(forbidden.schema.frontmatter.is_forbidden());
+    assert!(!forbidden.schema.frontmatter.is_required());
+    assert!(forbidden.schema.frontmatter.captures().is_empty());
+}

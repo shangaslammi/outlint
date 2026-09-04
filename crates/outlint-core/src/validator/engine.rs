@@ -2,9 +2,9 @@
 
 use crate::{
     ByteOffset, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
-    DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, FrontmatterPolicy, HeaderLevel,
-    Heading, HeadingLocation, Matcher, OutlineProvenance, RuleIndex, RuleOutcome, Schema,
-    SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
+    DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, HeaderLevel, Heading,
+    HeadingLocation, Matcher, OutlineProvenance, RuleIndex, RuleOutcome, Schema, SchemaNode,
+    ScopePath, Section, SectionRule, TextRange, UpperBound,
 };
 
 use super::constraints::EvalCtx;
@@ -359,8 +359,8 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_frontmatter(&mut self, validator: Option<&jsonschema::Validator>) {
-        let required = matches!(self.schema.frontmatter, FrontmatterPolicy::Required { .. });
-        let forbidden = matches!(self.schema.frontmatter, FrontmatterPolicy::Forbidden { .. });
+        let required = self.schema.frontmatter.is_required();
+        let forbidden = self.schema.frontmatter.is_forbidden();
         match &self.document.frontmatter {
             DocumentFrontmatter::Absent => {
                 if required {
