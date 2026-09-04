@@ -631,3 +631,213 @@ fn an_explicit_ordered_constraint_over_an_ordered_scope_is_refused() {
         1
     );
 }
+
+// ---------------------------------------------------------------------------
+// Declared captures
+// ---------------------------------------------------------------------------
+
+/// A rule declaring one `semver` capture named `version`, plus a sibling to
+/// give every list operand a second member.
+fn release_schema(constraint: &str) -> String {
+    format!(
+        "version: 1\nsections:\n  - id: release\n    match: \"/Release (?<version>.+)/\"\n    \
+         captures:\n      version: semver\n  - id: other\n    match: Other\nconstraints:\n  \
+         - {constraint}\n"
+    )
+}
+
+#[test]
+fn a_declared_rule_capture_binds_and_is_refused_as_a_proposition() {
+    // §4.4: "A capture-name step produces the typed value declared by the rule
+    // that owns the current named scope; after a rule-id step, that rule owns
+    // the next scope." Reaching §4.5's context error is what proves the name
+    // bound: an unbound one would never get that far.
+    let bound = invalid(&release_schema("any_of: [\"release[0].version\", other]"));
+    assert_eq!(bound.errors.rest.len(), 0);
+    assert_eq!(
+        bound.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
+    assert!(bound
+        .errors
+        .first
+        .message
+        .contains("a value and not a proposition"));
+    // A name the owning rule does not declare resolves nowhere.
+    assert_eq!(
+        error_kinds(&release_schema("any_of: [\"release[0].missing\", other]")),
+        vec![SchemaErrorKind::UnresolvedRef]
+    );
+    // §4.3: "A declared capture is a terminal typed value, not a child scope",
+    // so nothing may follow it.
+    for continued in [
+        "any_of: [\"release[0].version.deeper\", other]",
+        "any_of: [\"release[0].version/text\", other]",
+    ] {
+        let refused = invalid(&release_schema(continued));
+        assert_eq!(
+            refused.errors.first.kind,
+            SchemaErrorKind::InvalidDocumentShape
+        );
+        assert!(refused
+            .errors
+            .first
+            .message
+            .contains("continues past the declared capture"));
+    }
+}
+
+#[test]
+fn the_rule_owning_a_capture_is_non_terminal_and_must_be_singular() {
+    // §4.4: the capture is the terminal step, so the rule in front of it takes
+    // the singular-non-terminal rule. `release` has the open default maximum.
+    let plural = invalid(&release_schema("any_of: [release.version, other]"));
+    assert_eq!(
+        plural.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
+    assert!(plural
+        .errors
+        .first
+        .message
+        .contains("repeatable rule `release`"));
+    // §5.1 gives `ordered` its own error for the same fault.
+    let ordered = invalid(
+        "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: release\n    \
+         match: \"/Release (?<version>.+)/\"\n    captures:\n      version: semver\n  \
+         - id: other\n    match: Other\nconstraints:\n  - ordered: [release.version, other]\n",
+    );
+    assert_eq!(
+        ordered.errors.first.kind,
+        SchemaErrorKind::OrderedScopeMismatch
+    );
+}
+
+#[test]
+fn a_bare_capture_name_binds_in_the_scope_the_constraint_is_attached_to() {
+    // §4.4: a capture-name step with no preceding rule step "produces the
+    // typed value declared by the rule that owns the current named scope" —
+    // here, the rule the constraint hangs on.
+    let bound = invalid(
+        "version: 1\nsections:\n  - id: release\n    match: \"/Release (?<version>.+)/\"\n    \
+         captures:\n      version: semver\n    constraints:\n      - any_of: [version, kid]\n    \
+         sections:\n      - id: kid\n        match: Kid\n",
+    );
+    assert_eq!(
+        bound.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
+    assert!(bound
+        .errors
+        .first
+        .message
+        .contains("a value and not a proposition"));
+    // The addressed root is owned by no rule, so the same name resolves
+    // nowhere from a top-level constraint.
+    assert_eq!(
+        error_kinds(&release_schema("any_of: [version, other]")),
+        vec![SchemaErrorKind::UnresolvedRef]
+    );
+}
+
+/// A schema declaring one frontmatter capture `version`, plus an outline rule.
+fn frontmatter_capture_schema(constraint: &str) -> String {
+    format!(
+        "version: 1\nfrontmatter:\n  captures:\n    version:\n      type: semver\nsections:\n  \
+         - id: a\n    match: A\n    required: false\nconstraints:\n  - {constraint}\n"
+    )
+}
+
+#[test]
+fn a_declared_frontmatter_capture_normalizes() {
+    let schema = valid(&frontmatter_capture_schema("any_of: [fm.version, a]"));
+    let Constraint::AnyOf(items) = &schema.outline[0].constraints[0] else {
+        panic!("expected any_of")
+    };
+    let Proposition::FrontmatterCapture(capture) = &items.first else {
+        panic!("expected a frontmatter capture proposition")
+    };
+    // §4.6: `fm.<name>` "is the typo-safe reference to a declaration, checked
+    // at schema load", so the declared type comes along with the name.
+    assert_eq!(capture.locator(), "fm.version");
+    assert_eq!(capture.name().as_str(), "version");
+    assert_eq!(capture.type_name(), "semver");
+
+    // §4.6: "Unknown capture names are `unresolved-ref`, even if a YAML key of
+    // the same name exists."
+    assert_eq!(
+        error_kinds(&frontmatter_capture_schema("any_of: [fm.other, a]")),
+        vec![SchemaErrorKind::UnresolvedRef]
+    );
+    // §5.4: two references to one declaration are one proposition.
+    assert_eq!(
+        error_kinds(&frontmatter_capture_schema(
+            "any_of: [fm.version, fm.version]"
+        )),
+        vec![SchemaErrorKind::DuplicateRef]
+    );
+    // A capture and a query over the same name are different propositions.
+    valid(&frontmatter_capture_schema(
+        "any_of: [fm.version, \"fm[$.version]\"]",
+    ));
+}
+
+#[test]
+fn a_declared_frontmatter_capture_is_still_refused_by_ordered() {
+    // §4.6: both frontmatter forms "are invalid in `ordered`, because
+    // frontmatter has no header position; such use is
+    // `ordered-scope-mismatch`" — and the name binds before that verdict, so
+    // an undeclared one is `unresolved-ref` instead.
+    assert_eq!(
+        error_kinds(&frontmatter_capture_schema("ordered: [fm.version, a]")),
+        vec![SchemaErrorKind::OrderedScopeMismatch]
+    );
+    assert_eq!(
+        error_kinds(&frontmatter_capture_schema("ordered: [fm.other, a]")),
+        vec![SchemaErrorKind::UnresolvedRef]
+    );
+}
+
+#[test]
+fn the_frontmatter_and_outline_namespaces_stay_independent() {
+    // §4.3: "Frontmatter captures occupy a separate named scope rooted at
+    // `fm`; they do not collide with names at the schema root."
+    let schema = valid(
+        "version: 1\nfrontmatter:\n  captures:\n    version:\n      type: semver\nsections:\n  \
+         - id: version\n    match: Version\n    required: false\n  - id: a\n    match: A\n    \
+         required: false\nconstraints:\n  - any_of: [fm.version, version]\n",
+    );
+    let Constraint::AnyOf(items) = &schema.outline[0].constraints[0] else {
+        panic!("expected any_of")
+    };
+    assert!(matches!(items.first, Proposition::FrontmatterCapture(_)));
+    assert!(matches!(items.second, Proposition::ResolvedRule(_)));
+
+    // A rule capture and a frontmatter capture may share a name too: only the
+    // `fm` root reaches the frontmatter one.
+    let both = valid(
+        "version: 1\nfrontmatter:\n  captures:\n    version:\n      type: text\nsections:\n  \
+         - id: release\n    match: \"/Release (?<version>.+)/\"\n    required: false\n    \
+         captures:\n      version: semver\n  - id: a\n    match: A\n    required: false\n\
+         constraints:\n  - any_of: [fm.version, a]\n",
+    );
+    let Constraint::AnyOf(items) = &both.outline[0].constraints[0] else {
+        panic!("expected any_of")
+    };
+    let Proposition::FrontmatterCapture(capture) = &items.first else {
+        panic!("expected a frontmatter capture proposition")
+    };
+    // The frontmatter declaration's own type, not the rule capture's.
+    assert_eq!(capture.type_name(), "text");
+    // And a bare `version` from the root scope still reaches neither: the
+    // addressed root owns no captures.
+    assert_eq!(
+        error_kinds(
+            "version: 1\nfrontmatter:\n  captures:\n    version:\n      type: text\nsections:\n  \
+             - id: release\n    match: \"/Release (?<version>.+)/\"\n    required: false\n    \
+             captures:\n      version: semver\n  - id: a\n    match: A\n    required: false\n\
+             constraints:\n  - any_of: [version, a]\n",
+        ),
+        vec![SchemaErrorKind::UnresolvedRef]
+    );
+}
