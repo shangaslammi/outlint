@@ -2,43 +2,61 @@
 
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
-    BoundRuleStep, Constraint, FrontmatterRef, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
-    ResolvedFrontmatterQuery, ResolvedRuleLocator, RuleRef, SectionRule,
+    BoundRuleStep, Constraint, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
+    ResolvedFrontmatterQuery, ResolvedRuleLocator, SectionRule,
 };
 
 use super::diagnostic::DiagnosticReference;
 use super::engine::{BoundScope, BoundSection};
 
-/// Evaluates an `fm.` proposition against the document's frontmatter (§4.6).
+/// Evaluates an `fm[...]` proposition against the frontmatter view (§4.6).
 ///
-/// The bare form is satisfied iff the addressed value exists and is not null —
-/// mappings and sequences included. The `=` form additionally requires typed
-/// scalar equality, so it is never satisfied by a mapping or sequence value.
-pub(super) fn frontmatter_satisfied(
+/// PHASE 4A DEBT, in the bare form only: §4.6 says "Every non-boolean,
+/// non-null result node produces `invalid-value`, and the entire constraint
+/// containing the proposition is suppressed". Neither the diagnostic nor the
+/// suppression exists yet, so such a node reads as unsatisfied here. The
+/// equality form is complete: it is existential over non-null result nodes
+/// with §4.6's typed scalar equality, and nothing about it is deferred.
+pub(super) fn frontmatter_query_satisfied(
     frontmatter: Option<&serde_json::Map<String, serde_json::Value>>,
-    reference: &FrontmatterRef,
+    proposition: &ResolvedFrontmatterQuery,
     match_case: bool,
 ) -> bool {
-    let Some(value) = frontmatter.and_then(|mapping| mapping.get(&reference.path.first.0)) else {
+    // §4.6: "If the block is absent, the query produces an empty result: a
+    // bare boolean read is unsatisfied, and an equality proposition is
+    // unsatisfied." An `invalid-frontmatter` block arrives here as `None` too;
+    // suppressing its containing constraint is 4A's.
+    let Some(frontmatter) = frontmatter else {
         return false;
     };
-    let mut value = value;
-    for key in &reference.path.rest {
-        let Some(next) = value.as_object().and_then(|mapping| mapping.get(&key.0)) else {
-            return false;
-        };
-        value = next;
-    }
-    if value.is_null() {
+    let Ok(prepared) = proposition.parsed().query().prepare() else {
+        // The source was validated when the schema loaded, so a provider that
+        // now refuses it is a provider bug, not an authoring one.
         return false;
-    }
-    match &reference.equals {
-        None => true,
-        Some(expected) => frontmatter_scalar_equals(value, expected, match_case),
+    };
+    // PHASE 4A DEBT: the frontmatter view is rebuilt per proposition because
+    // the engine carries the mapping rather than a JSON document. Frontmatter
+    // is small and this is temporary; evaluation moves behind a prepared
+    // document in 4A.
+    let document = serde_json::Value::Object(frontmatter.clone());
+    let nodes = prepared.evaluate(&document);
+    match proposition.equals() {
+        // §4.6: "A bare `fm[...]` is a typed boolean read, not a presence
+        // test. It is satisfied iff at least one result node is the YAML/JSON
+        // boolean `true`."
+        None => nodes
+            .iter()
+            .any(|(_, value)| matches!(value, serde_json::Value::Bool(true))),
+        // §4.6: "Equality is existential over non-null result nodes [...]
+        // satisfied iff at least one such node has the same resolved scalar
+        // type and value."
+        Some(expected) => nodes.iter().any(|(_, value)| {
+            !value.is_null() && frontmatter_scalar_equals(value, expected, match_case)
+        }),
     }
 }
 
-/// Typed equality between a frontmatter value and a resolved ref literal.
+/// Typed equality between a frontmatter value and a resolved literal.
 ///
 /// Both sides went through the YAML 1.2 core-schema resolver
 /// ([`parse_frontmatter_scalar`]): the document side when the frontmatter was
@@ -66,8 +84,8 @@ fn frontmatter_scalar_equals(
             serde_json::Value::Number(actual),
             FrontmatterScalar::Integer(_) | FrontmatterScalar::Float(_),
         ) => parse_frontmatter_scalar(&actual.to_string()) == *expected,
-        // Null never reaches here (the bare form already rejected it), and a
-        // mapping or sequence is unsatisfied by every `=` form.
+        // A null node is filtered out before this is reached, and a mapping
+        // or sequence is unsatisfied by every `=` form.
         _ => false,
     }
 }
@@ -128,52 +146,40 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                         .iter()
                         .all(|proposition| !self.proposition_satisfied(proposition))
             }
-            Constraint::Ordered(refs) => self.ordered_satisfied(
-                refs.iter()
-                    .map(|reference| self.resolve_occurrences(reference)),
-            ),
-            Constraint::OrderedLocators(refs) => self.ordered_satisfied(
-                refs.iter()
-                    .map(|locator| self.resolve_bound_occurrences(locator)),
-            ),
+            // §5.1's pairwise `last(A) < first(B)` over the locators whose
+            // terminal lists are non-empty.
+            Constraint::Ordered(refs) => {
+                let satisfied = refs
+                    .iter()
+                    .map(|locator| self.resolve_occurrences(locator))
+                    .filter(|occurrences| !occurrences.is_empty())
+                    .collect::<Vec<_>>();
+                satisfied
+                    .iter()
+                    .zip(satisfied.iter().skip(1))
+                    .all(|(left, right)| {
+                        let last_left = left
+                            .iter()
+                            .map(|occurrence| occurrence.section.heading.location.range.start.0)
+                            .max();
+                        let first_right = right
+                            .iter()
+                            .map(|occurrence| occurrence.section.heading.location.range.start.0)
+                            .min();
+                        matches!((last_left, first_right), (Some(left), Some(right)) if left < right)
+                    })
+            }
         }
-    }
-
-    /// §5.1's pairwise `last(A) < first(B)` over the non-empty terminal lists.
-    fn ordered_satisfied(self, lists: impl Iterator<Item = Vec<&'s BoundSection<'d>>>) -> bool {
-        let satisfied = lists
-            .filter(|occurrences| !occurrences.is_empty())
-            .collect::<Vec<_>>();
-        satisfied
-            .iter()
-            .zip(satisfied.iter().skip(1))
-            .all(|(left, right)| {
-                let last_left = left
-                    .iter()
-                    .map(|occurrence| occurrence.section.heading.location.range.start.0)
-                    .max();
-                let first_right = right
-                    .iter()
-                    .map(|occurrence| occurrence.section.heading.location.range.start.0)
-                    .min();
-                matches!((last_left, first_right), (Some(left), Some(right)) if left < right)
-            })
     }
 
     fn proposition_satisfied(self, proposition: &Proposition) -> bool {
         match proposition {
-            Proposition::Rule(reference) => !self.resolve_occurrences(reference).is_empty(),
-            Proposition::Frontmatter(reference) => {
-                frontmatter_satisfied(self.frontmatter, reference, self.match_case)
-            }
             // §4.5: an outline locator ending in a rule id "is satisfied iff
             // its terminal node list is non-empty. Positional narrowing does
             // not change that definition."
-            Proposition::ResolvedRule(locator) => {
-                !self.resolve_bound_occurrences(locator).is_empty()
-            }
+            Proposition::Rule(locator) => !self.resolve_occurrences(locator).is_empty(),
             Proposition::FrontmatterQuery(proposition) => {
-                self.frontmatter_query_satisfied(proposition)
+                frontmatter_query_satisfied(self.frontmatter, proposition, self.match_case)
             }
             // PHASE 4A DEBT: capture evaluation does not exist yet, so a
             // declared `fm.<name>` reads as unsatisfied. §4.6 makes it
@@ -188,56 +194,12 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
         }
     }
 
-    /// Evaluates an `fm[...]` proposition against the frontmatter view (§4.6).
-    ///
-    /// PHASE 4A DEBT, in the bare form only: §4.6 says "Every non-boolean,
-    /// non-null result node produces `invalid-value`, and the entire
-    /// constraint containing the proposition is suppressed". Neither the
-    /// diagnostic nor the suppression exists yet, so such a node reads as
-    /// unsatisfied here. The equality form is complete: it is existential
-    /// over non-null result nodes with §4.6's typed scalar equality, and
-    /// nothing about it is deferred.
-    fn frontmatter_query_satisfied(self, proposition: &ResolvedFrontmatterQuery) -> bool {
-        // §4.6: "If the block is absent, the query produces an empty result: a
-        // bare boolean read is unsatisfied, and an equality proposition is
-        // unsatisfied." An `invalid-frontmatter` block arrives here as `None`
-        // too; suppressing its containing constraint is 4A's.
-        let Some(frontmatter) = self.frontmatter else {
-            return false;
-        };
-        let Ok(prepared) = proposition.parsed().query().prepare() else {
-            // The source was validated when the schema loaded, so a provider
-            // that now refuses it is a provider bug, not an authoring one.
-            return false;
-        };
-        // PHASE 4A DEBT: the frontmatter view is rebuilt per proposition
-        // because the engine carries the mapping rather than a JSON document.
-        // Frontmatter is small and this is temporary; evaluation moves behind
-        // a prepared document in 4A.
-        let document = serde_json::Value::Object(frontmatter.clone());
-        let nodes = prepared.evaluate(&document);
-        match proposition.equals() {
-            // §4.6: "A bare `fm[...]` is a typed boolean read, not a presence
-            // test. It is satisfied iff at least one result node is the
-            // YAML/JSON boolean `true`."
-            None => nodes
-                .iter()
-                .any(|(_, value)| matches!(value, serde_json::Value::Bool(true))),
-            // §4.6: "Equality is existential over non-null result nodes [...]
-            // satisfied iff at least one such node has the same resolved
-            // scalar type and value."
-            Some(expected) => nodes.iter().any(|(_, value)| {
-                !value.is_null() && frontmatter_scalar_equals(value, expected, self.match_case)
-            }),
-        }
-    }
-
     /// Walks a bound locator's steps to its terminal occurrence list.
     ///
     /// Binding already resolved every name to a structural index, so this
     /// walks indices rather than searching ids a second time, and applies each
     /// step's `[i]` through the kernel's one checked conversion.
-    fn resolve_bound_occurrences(self, locator: &ResolvedRuleLocator) -> Vec<&'s BoundSection<'d>> {
+    fn resolve_occurrences(self, locator: &ResolvedRuleLocator) -> Vec<&'s BoundSection<'d>> {
         let (start_scope, start_rules) = match locator.anchor() {
             RefAnchor::CurrentScope => (self.current, self.current_rules),
             RefAnchor::SchemaRoot => (self.root, self.root_rules),
@@ -277,40 +239,6 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
         found
     }
 
-    fn resolve_occurrences(self, reference: &RuleRef) -> Vec<&'s BoundSection<'d>> {
-        let (start_scope, start_rules) = match reference.anchor {
-            RefAnchor::CurrentScope => (self.current, self.current_rules),
-            RefAnchor::SchemaRoot => (self.root, self.root_rules),
-        };
-        let mut candidate_scopes = vec![(start_scope, start_rules)];
-        let mut found = Vec::new();
-        for (position, id) in reference.path.iter().enumerate() {
-            found.clear();
-            let mut next_scopes = Vec::new();
-            for (candidate, candidate_rules) in std::mem::take(&mut candidate_scopes) {
-                let Some((index, rule)) = candidate_rules
-                    .iter()
-                    .enumerate()
-                    .find(|(_, rule)| rule.id.as_ref() == Some(id))
-                else {
-                    continue;
-                };
-                for occurrence in candidate
-                    .occurrences
-                    .iter()
-                    .filter(|occurrence| occurrence.rule_index == index)
-                {
-                    found.push(occurrence);
-                    next_scopes.push((&occurrence.child, &rule.sections[..]));
-                }
-            }
-            if position < reference.path.rest.len() {
-                candidate_scopes = next_scopes;
-            }
-        }
-        found
-    }
-
     pub(super) fn constraint_occurrences(
         self,
         constraint: &Constraint,
@@ -344,13 +272,8 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                 }
             }
             Constraint::Ordered(refs) => {
-                for reference in refs.iter() {
-                    occurrences.extend(self.resolve_occurrences(reference));
-                }
-            }
-            Constraint::OrderedLocators(refs) => {
                 for locator in refs.iter() {
-                    occurrences.extend(self.resolve_bound_occurrences(locator));
+                    occurrences.extend(self.resolve_occurrences(locator));
                 }
             }
         }
@@ -393,18 +316,9 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                 );
             }
             Constraint::Ordered(items) => {
-                references.extend(items.iter().filter_map(|reference| {
-                    self.rule_for_ref(reference)
-                        .map(|rule| DiagnosticReference::Rule {
-                            reference: reference.clone(),
-                            matcher: rule.matcher.clone(),
-                        })
-                }));
-            }
-            Constraint::OrderedLocators(items) => {
                 references.extend(items.iter().filter_map(|locator| {
                     self.rule_for_locator(locator)
-                        .map(|rule| DiagnosticReference::ResolvedRule {
+                        .map(|rule| DiagnosticReference::Rule {
                             locator: locator.clone(),
                             matcher: rule.matcher.clone(),
                         })
@@ -416,19 +330,9 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
 
     fn diagnostic_reference(self, proposition: &Proposition) -> Option<DiagnosticReference> {
         match proposition {
-            Proposition::Rule(reference) => {
-                self.rule_for_ref(reference)
-                    .map(|rule| DiagnosticReference::Rule {
-                        reference: reference.clone(),
-                        matcher: rule.matcher.clone(),
-                    })
-            }
-            Proposition::Frontmatter(reference) => {
-                Some(DiagnosticReference::Frontmatter(reference.clone()))
-            }
-            Proposition::ResolvedRule(locator) => {
+            Proposition::Rule(locator) => {
                 self.rule_for_locator(locator)
-                    .map(|rule| DiagnosticReference::ResolvedRule {
+                    .map(|rule| DiagnosticReference::Rule {
                         locator: locator.clone(),
                         matcher: rule.matcher.clone(),
                     })
@@ -456,34 +360,16 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
         target
     }
 
-    fn rule_for_ref(self, reference: &RuleRef) -> Option<&'s SectionRule> {
-        let mut rules = match reference.anchor {
-            RefAnchor::CurrentScope => self.current_rules,
-            RefAnchor::SchemaRoot => self.root_rules,
-        };
-        let mut target = None;
-        for id in reference.path.iter() {
-            target = rules.iter().find(|rule| rule.id.as_ref() == Some(id));
-            rules = &target?.sections;
-        }
-        target
-    }
-
     fn add_proposition_occurrences(
         self,
         proposition: &Proposition,
         output: &mut Vec<&'s BoundSection<'d>>,
     ) {
         match proposition {
-            Proposition::Rule(reference) => output.extend(self.resolve_occurrences(reference)),
-            Proposition::ResolvedRule(locator) => {
-                output.extend(self.resolve_bound_occurrences(locator));
-            }
-            // A frontmatter proposition names no header, so it contributes
-            // no occurrence to a constraint's involved headers.
-            Proposition::Frontmatter(_)
-            | Proposition::FrontmatterQuery(_)
-            | Proposition::FrontmatterCapture(_) => {}
+            Proposition::Rule(locator) => output.extend(self.resolve_occurrences(locator)),
+            // A frontmatter proposition names no header, so it contributes no
+            // occurrence to a constraint's involved headers.
+            Proposition::FrontmatterQuery(_) | Proposition::FrontmatterCapture(_) => {}
         }
     }
 }

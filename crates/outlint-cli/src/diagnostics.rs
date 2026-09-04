@@ -5,9 +5,9 @@
 //! locations and the total per-file ordering the JSON contract promises.
 
 use outlint_core::{
-    Diagnostic, DiagnosticReference, DiagnosticTarget, FrontmatterRef, FrontmatterScalar,
-    InvalidSchema, LoadedSchema, Matcher, RefAnchor, RuleRef, SchemaError, SchemaLocations,
-    SchemaNode, SchemaSources, SourceRange,
+    Diagnostic, DiagnosticReference, DiagnosticTarget, FrontmatterScalar, InvalidSchema,
+    LoadedSchema, Matcher, RefAnchor, SchemaError, SchemaLocations, SchemaNode, SchemaSources,
+    SourceRange,
 };
 
 #[derive(Debug)]
@@ -129,28 +129,14 @@ pub(crate) struct RenderedInvolvedHeader {
     pub(crate) column: u64,
 }
 
-/// The rendering of [`DiagnosticReference`], compatibility forms first.
+/// The rendering of [`DiagnosticReference`], one variant per §11.3 kind.
 ///
-/// [`Self::Rule`] and [`Self::Frontmatter`] render the pre-Typed-Values
-/// references validation still emits; the three that follow render the final
-/// §11.3 reference kinds and are unreachable until constraint binding cuts
-/// over. Keeping them apart is what stops a half-migrated reference from
-/// being emitted as if it were complete. The variant order is the derived
-/// [`Ord`] the JSON total ordering compares references by, so the
-/// compatibility pair keeps its position rather than being reshuffled.
+/// The variant order is §11.3's, which is also the derived [`Ord`] §11.4's
+/// total key compares references by, so the two cannot drift apart.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RenderedReference {
-    Rule {
-        anchor: &'static str,
-        path: Vec<String>,
-        matcher: RenderedMatcher,
-    },
-    Frontmatter {
-        path: Vec<String>,
-        equals: Option<RenderedScalar>,
-    },
     /// §11.3 kind `rule`, with its members in declaration order.
-    ResolvedRule {
+    Rule {
         locator: String,
         anchor: &'static str,
         path: Vec<String>,
@@ -315,22 +301,13 @@ fn render_schema_node(node: &SchemaNode) -> RenderedSchemaNode {
 
 fn render_reference(reference: &DiagnosticReference) -> RenderedReference {
     match reference {
-        DiagnosticReference::Rule { reference, matcher } => RenderedReference::Rule {
-            anchor: render_anchor(reference.anchor),
-            path: non_empty_rule_path(reference),
-            matcher: render_matcher(matcher),
-        },
-        DiagnosticReference::Frontmatter(reference) => RenderedReference::Frontmatter {
-            path: non_empty_frontmatter_path(reference),
-            equals: reference.equals.as_ref().map(render_scalar),
-        },
-        DiagnosticReference::ResolvedRule { locator, matcher } => {
+        DiagnosticReference::Rule { locator, matcher } => {
             let steps = locator.steps().iter().collect::<Vec<_>>();
             let positions = steps
                 .iter()
                 .map(|step| step.position_digits())
                 .collect::<Vec<_>>();
-            RenderedReference::ResolvedRule {
+            RenderedReference::Rule {
                 locator: locator.locator().to_owned(),
                 anchor: render_anchor(locator.anchor()),
                 path: steps
@@ -363,22 +340,6 @@ fn render_anchor(anchor: RefAnchor) -> &'static str {
         RefAnchor::CurrentScope => "current_scope",
         RefAnchor::SchemaRoot => "schema_root",
     }
-}
-
-fn non_empty_rule_path(reference: &RuleRef) -> Vec<String> {
-    reference
-        .path
-        .iter()
-        .map(|id| id.as_str().to_owned())
-        .collect()
-}
-
-fn non_empty_frontmatter_path(reference: &FrontmatterRef) -> Vec<String> {
-    reference
-        .path
-        .iter()
-        .map(|key| key.as_str().to_owned())
-        .collect()
 }
 
 fn render_matcher(matcher: &Matcher) -> RenderedMatcher {
@@ -559,22 +520,13 @@ mod tests {
         }
     }
 
-    /// The same argument for references: the compatibility pair keeps its
-    /// position ahead of the final §11.3 kinds, so cutting production over
-    /// later cannot permute an existing result's diagnostics.
+    /// The same argument for references: §11.4 compares them "by their
+    /// variants in the order listed in Sections 6.1 and 11.3", which is the
+    /// derived `Ord` only while the variants stay in §11.3's order.
     #[test]
-    fn reference_variants_keep_the_compatibility_pair_ahead_of_the_final_kinds() {
+    fn reference_variants_follow_the_declaration_order_of_section_11_3() {
         let declaration_order = [
             RenderedReference::Rule {
-                anchor: "current_scope",
-                path: vec!["a".into()],
-                matcher: RenderedMatcher::Any,
-            },
-            RenderedReference::Frontmatter {
-                path: vec!["a".into()],
-                equals: None,
-            },
-            RenderedReference::ResolvedRule {
                 locator: "a".into(),
                 anchor: "current_scope",
                 path: vec!["a".into()],
@@ -671,8 +623,10 @@ mod tests {
                 Some(frontmatter("/b")),
                 "m",
                 vec![RenderedReference::Rule {
+                    locator: "a".into(),
                     anchor: "/",
                     path: vec!["a".into()],
+                    positions: None,
                     matcher: RenderedMatcher::Exact("A".into()),
                 }],
             ),

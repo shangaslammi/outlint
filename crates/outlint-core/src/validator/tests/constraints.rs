@@ -1,139 +1,123 @@
-use crate::validator::constraints::frontmatter_satisfied;
+use crate::locator::{parse_locator, ParsedLocator};
+use crate::validator::constraints::frontmatter_query_satisfied;
 use crate::validator::{validate, DiagnosticId, DiagnosticReference, DiagnosticTarget};
 use crate::yaml::parse_frontmatter_scalar;
-use crate::{load_schema, parse_markdown, DocumentFrontmatter, MarkdownOptions};
+use crate::{
+    load_schema, parse_markdown, DocumentFrontmatter, MarkdownOptions, ResolvedFrontmatterQuery,
+};
 
-/// Builds an `fm.` reference the way the loader normalizes one: the
-/// equality literal resolves through the shared core-schema resolver.
-fn fm_reference(path: &[&str], equals: Option<&str>) -> crate::FrontmatterRef {
-    let mut keys = path.iter();
-    crate::FrontmatterRef {
-        path: crate::NonEmpty {
-            first: crate::FrontmatterKey(
-                (*keys.next().expect("test paths are non-empty")).to_owned(),
-            ),
-            rest: keys
-                .map(|key| crate::FrontmatterKey((*key).to_owned()))
-                .collect(),
-        },
-        equals: equals.map(parse_frontmatter_scalar),
-    }
+/// Normalizes one `fm[...]` locator the way the loader does: the query source
+/// is retained as written, and the equality remainder, when there is one,
+/// resolves through the shared YAML core-schema resolver.
+fn fm_query(locator: &str) -> ResolvedFrontmatterQuery {
+    let Ok(ParsedLocator::FrontmatterQuery(parsed)) = parse_locator(locator) else {
+        panic!("`{locator}` must parse as a frontmatter query")
+    };
+    let equals = parsed.equality().map(parse_frontmatter_scalar);
+    ResolvedFrontmatterQuery::new(parsed, equals)
 }
 
-/// Evaluates one `fm.` proposition against a Markdown document's parsed
+/// Evaluates one `fm[...]` proposition against a Markdown document's parsed
 /// frontmatter, typed by the real reader.
-fn fm_satisfied(markdown: &str, path: &[&str], equals: Option<&str>, match_case: bool) -> bool {
+fn fm_satisfied(markdown: &str, locator: &str, match_case: bool) -> bool {
     let document = parse_markdown(markdown, MarkdownOptions::default());
     let frontmatter = match &document.frontmatter {
         DocumentFrontmatter::Mapping { value, .. } => Some(value),
         DocumentFrontmatter::Absent | DocumentFrontmatter::Invalid { .. } => None,
     };
-    frontmatter_satisfied(frontmatter, &fm_reference(path, equals), match_case)
+    frontmatter_query_satisfied(frontmatter, &fm_query(locator), match_case)
 }
 
 #[test]
-fn bare_frontmatter_refs_are_presence_of_a_non_null_value() {
-    let document = "---\npresent: 1\nempty: null\nnested:\n  inner: yes\n---\n";
-    assert!(fm_satisfied(document, &["present"], None, false));
-    // A null value does not satisfy the bare form, and neither does a key
-    // the frontmatter lacks.
-    assert!(!fm_satisfied(document, &["empty"], None, false));
-    assert!(!fm_satisfied(document, &["absent"], None, false));
-    // Nested steps address nested mappings.
-    assert!(fm_satisfied(document, &["nested", "inner"], None, false));
-    assert!(!fm_satisfied(document, &["nested", "missing"], None, false));
-    // A step into a non-mapping is unsatisfied, whatever the value is.
-    assert!(!fm_satisfied(document, &["present", "deeper"], None, false));
+fn a_bare_query_is_a_typed_boolean_read() {
+    // §4.6: "A bare `fm[...]` is a typed boolean read, not a presence test. It
+    // is satisfied iff at least one result node is the YAML/JSON boolean
+    // `true`. Boolean `false`, an empty result, and null are unsatisfied."
+    let document = "---\nyes: true\nno: false\nempty: null\nnested:\n  inner: true\n---\n";
+    assert!(fm_satisfied(document, "fm[$.yes]", false));
+    assert!(!fm_satisfied(document, "fm[$.no]", false));
+    assert!(!fm_satisfied(document, "fm[$.empty]", false));
+    assert!(!fm_satisfied(document, "fm[$.absent]", false));
+    assert!(fm_satisfied(document, "fm[$.nested.inner]", false));
     // A document with no frontmatter at all satisfies nothing.
-    assert!(!fm_satisfied("# Title\n", &["present"], None, false));
+    assert!(!fm_satisfied("# Title\n", "fm[$.yes]", false));
+    // Existential over the node set: one `true` among several is enough.
+    let several = "---\nflags:\n  - false\n  - true\n---\n";
+    assert!(fm_satisfied(several, "fm[$.flags[*]]", false));
+    // PHASE 4A DEBT: §4.6 says a non-boolean, non-null result node "produces
+    // `invalid-value`, and the entire constraint containing the proposition is
+    // suppressed". Neither exists yet, so such a node reads as unsatisfied
+    // rather than suppressing anything. These two assertions pin the interim
+    // answer, not the specified one, and must be rewritten when suppression
+    // lands.
+    let text = "---\nname: outlint\ncount: 1\n---\n";
+    assert!(!fm_satisfied(text, "fm[$.name]", false));
+    assert!(!fm_satisfied(text, "fm[$.count]", false));
 }
 
 #[test]
-fn bare_refs_accept_collections_but_equality_refuses_them() {
-    let document = "---\nitems:\n  - one\ntable:\n  key: value\n---\n";
-    // The bare form is satisfied by any non-null value, collections
-    // included; the `=` form compares scalars only.
-    assert!(fm_satisfied(document, &["items"], None, false));
-    assert!(fm_satisfied(document, &["table"], None, false));
-    assert!(!fm_satisfied(document, &["items"], Some("one"), false));
-    assert!(!fm_satisfied(document, &["table"], Some("value"), false));
-    // Stepping through a sequence is unsatisfied: only mappings nest.
-    assert!(!fm_satisfied(document, &["items", "one"], None, false));
+fn equality_refuses_collections_and_never_holds_against_null() {
+    let document = "---\nitems:\n  - one\ntable:\n  key: value\nempty: null\n---\n";
+    // §4.6: "mappings and sequences never equal the literal".
+    assert!(!fm_satisfied(document, "fm[$.items]=one", false));
+    assert!(!fm_satisfied(document, "fm[$.table]=value", false));
+    // A selector applied to the wrong container kind selects nothing.
+    assert!(!fm_satisfied(document, "fm[$.items.one]=x", false));
+    // Equality reaches inside them by naming the member.
+    assert!(fm_satisfied(document, "fm[$.items[0]]=one", false));
+    assert!(fm_satisfied(document, "fm[$.table.key]=value", false));
+    // §4.6: "`fm[query]=null` is always false", and equality is existential
+    // over *non-null* nodes, so a null node satisfies nothing.
+    assert!(!fm_satisfied(document, "fm[$.empty]=null", false));
+    assert!(!fm_satisfied(document, "fm[$.table.key]=null", false));
+    // §4.6: "a result set `[null, \"x\"]` satisfies `=\"x\"`".
+    let mixed = "---\nvalues:\n  - null\n  - x\n---\n";
+    assert!(fm_satisfied(mixed, "fm[$.values[*]]=x", false));
 }
 
 #[test]
 fn equality_is_typed_by_the_core_schema_resolver() {
     let document = "---\ncount: 1\nspelled: \"1\"\ndraft: true\nquoted: \"true\"\n---\n";
-    assert!(fm_satisfied(document, &["count"], Some("1"), false));
-    assert!(fm_satisfied(document, &["draft"], Some("true"), false));
-    // There is no quoting in the ref literal: the quotes are characters
-    // of the string, which the value `"1"` does not contain.
-    assert!(!fm_satisfied(document, &["spelled"], Some("\"1\""), false));
+    assert!(fm_satisfied(document, "fm[$.count]=1", false));
+    assert!(fm_satisfied(document, "fm[$.draft]=true", false));
+    // There is no quoting in the literal: the quotes are characters of the
+    // string, which the value `"1"` does not contain.
+    assert!(!fm_satisfied(document, "fm[$.spelled]=\"1\"", false));
     // The spec's three negative examples: no cross-type coercion.
-    assert!(!fm_satisfied(document, &["spelled"], Some("1"), false));
-    assert!(!fm_satisfied(document, &["quoted"], Some("true"), false));
-    assert!(!fm_satisfied(document, &["count"], Some("1.0"), false));
-    // Both sides canonicalize before comparing: spelling is irrelevant
-    // within a type.
+    assert!(!fm_satisfied(document, "fm[$.spelled]=1", false));
+    assert!(!fm_satisfied(document, "fm[$.quoted]=true", false));
+    assert!(!fm_satisfied(document, "fm[$.count]=1.0", false));
+    // Both sides canonicalize before comparing: spelling is irrelevant within
+    // a type.
     let spellings = "---\nhex: 0x10\nfloat: 12.5\n---\n";
-    assert!(fm_satisfied(spellings, &["hex"], Some("16"), false));
-    assert!(fm_satisfied(spellings, &["float"], Some("1.25e1"), false));
-    assert!(!fm_satisfied(spellings, &["hex"], Some("16.0"), false));
-    // `=null` can never hold: a null value already fails the bare form.
-    assert!(!fm_satisfied(
-        "---\nempty: null\n---\n",
-        &["empty"],
-        Some("null"),
-        false
-    ));
+    assert!(fm_satisfied(spellings, "fm[$.hex]=16", false));
+    assert!(fm_satisfied(spellings, "fm[$.float]=1.25e1", false));
+    assert!(!fm_satisfied(spellings, "fm[$.hex]=16.0", false));
 }
 
 #[test]
 fn string_equality_follows_match_case_with_simple_folding() {
     let document = "---\nstatus: Deprecated\nfold: \u{17f}\n---\n";
-    assert!(fm_satisfied(
-        document,
-        &["status"],
-        Some("deprecated"),
-        false
-    ));
-    assert!(!fm_satisfied(
-        document,
-        &["status"],
-        Some("deprecated"),
-        true
-    ));
-    assert!(fm_satisfied(
-        document,
-        &["status"],
-        Some("Deprecated"),
-        true
-    ));
+    assert!(fm_satisfied(document, "fm[$.status]=deprecated", false));
+    assert!(!fm_satisfied(document, "fm[$.status]=deprecated", true));
+    assert!(fm_satisfied(document, "fm[$.status]=Deprecated", true));
     // Unicode simple folding: `ſ` matches `S` only case-insensitively.
-    assert!(fm_satisfied(document, &["fold"], Some("S"), false));
-    assert!(!fm_satisfied(document, &["fold"], Some("S"), true));
+    assert!(fm_satisfied(document, "fm[$.fold]=S", false));
+    assert!(!fm_satisfied(document, "fm[$.fold]=S", true));
 }
 
 #[test]
-fn deep_nesting_resolves_one_mapping_per_step() {
+fn a_query_resolves_one_member_per_segment() {
     let document = "---\na:\n  b:\n    c:\n      d: leaf\n---\n";
-    assert!(fm_satisfied(document, &["a", "b", "c", "d"], None, false));
+    assert!(fm_satisfied(document, "fm[$.a.b.c.d]=leaf", false));
+    // A missing member selects nothing, and so does a step past a scalar.
+    assert!(!fm_satisfied(document, "fm[$.a.b.c.d.e]=leaf", false));
+    assert!(!fm_satisfied(document, "fm[$.a.b.missing]=leaf", false));
+    // §4.6: a hyphenated member name needs bracket notation.
+    let hyphenated = "---\ndecision-makers: ada\n---\n";
     assert!(fm_satisfied(
-        document,
-        &["a", "b", "c", "d"],
-        Some("leaf"),
-        false
-    ));
-    assert!(!fm_satisfied(
-        document,
-        &["a", "b", "c", "d", "e"],
-        None,
-        false
-    ));
-    assert!(!fm_satisfied(
-        document,
-        &["a", "b", "c"],
-        Some("leaf"),
+        hyphenated,
+        "fm[$['decision-makers']]=ada",
         false
     ));
 }

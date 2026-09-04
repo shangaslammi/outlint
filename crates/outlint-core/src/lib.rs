@@ -33,12 +33,12 @@ pub use markdown::{
 pub use schema::{
     AtLeastTwo, BoundRuleStep, CanonicalFloat, CanonicalInteger, CaptureName, Cardinality,
     Constraint, ExactText, FrontmatterCapture, FrontmatterCaptureView, FrontmatterCaptures,
-    FrontmatterKey, FrontmatterPolicy, FrontmatterRef, FrontmatterScalar, FrontmatterSchema,
-    GlobPattern, HeaderLevel, Matcher, NonEmpty, Options, OutlineProvenance, Proposition,
-    RefAnchor, RegexPattern, ResolvedFrontmatterCapture, ResolvedFrontmatterQuery,
-    ResolvedIntrinsicTextLocator, ResolvedOutlineLocator, ResolvedRuleCaptureLocator,
-    ResolvedRuleLocator, RuleCapture, RuleId, RuleOutcome, RuleRef, Schema, SchemaVersion,
-    SectionRule, UpperBound, ValueOrderDirection, ValueOrderEntry,
+    FrontmatterPolicy, FrontmatterScalar, FrontmatterSchema, GlobPattern, HeaderLevel, Matcher,
+    NonEmpty, Options, OutlineProvenance, Proposition, RefAnchor, RegexPattern,
+    ResolvedFrontmatterCapture, ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator,
+    ResolvedOutlineLocator, ResolvedRuleCaptureLocator, ResolvedRuleLocator, RuleCapture, RuleId,
+    RuleOutcome, Schema, SchemaVersion, SectionRule, UpperBound, ValueOrderDirection,
+    ValueOrderEntry,
 };
 pub use validator::{
     validate, Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticReference, DiagnosticTarget,

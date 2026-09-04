@@ -10,7 +10,7 @@ fn first_rule_locator(schema: &Schema) -> &ResolvedRuleLocator {
     let Constraint::AnyOf(items) = &schema.outline[0].constraints[0] else {
         panic!("expected any_of")
     };
-    let Proposition::ResolvedRule(locator) = &items.first else {
+    let Proposition::Rule(locator) = &items.first else {
         panic!("expected a bound rule proposition")
     };
     locator
@@ -40,13 +40,13 @@ constraints:
     };
     // The outline operands are bound locators: each id resolved to a
     // structural index, and the spelling the author wrote is retained.
-    let Proposition::ResolvedRule(locator) = condition else {
+    let Proposition::Rule(locator) = condition else {
         panic!("expected a bound rule proposition")
     };
     assert_eq!(locator.locator(), "deployment");
     assert_eq!(locator.anchor(), RefAnchor::CurrentScope);
     assert_eq!(locator.steps().first.index().0, 1);
-    let Proposition::ResolvedRule(nested) = &consequences.first else {
+    let Proposition::Rule(nested) = &consequences.first else {
         panic!("expected a bound rule proposition")
     };
     assert_eq!(nested.locator(), "$.overview.goals");
@@ -811,7 +811,7 @@ fn the_frontmatter_and_outline_namespaces_stay_independent() {
         panic!("expected any_of")
     };
     assert!(matches!(items.first, Proposition::FrontmatterCapture(_)));
-    assert!(matches!(items.second, Proposition::ResolvedRule(_)));
+    assert!(matches!(items.second, Proposition::Rule(_)));
 
     // A rule capture and a frontmatter capture may share a name too: only the
     // `fm` root reaches the frontmatter one.

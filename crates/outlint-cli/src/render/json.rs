@@ -164,25 +164,6 @@ fn schema_node_json(node: &RenderedSchemaNode) -> Value {
 fn reference_json(reference: &RenderedReference) -> Value {
     match reference {
         RenderedReference::Rule {
-            anchor,
-            path,
-            matcher,
-        } => json!({
-            "kind": "rule",
-            "anchor": anchor,
-            "path": path,
-            "matcher": matcher_json(matcher)
-        }),
-        RenderedReference::Frontmatter { path, equals } => {
-            let mut object = Map::new();
-            object.insert("kind".into(), json!("frontmatter"));
-            object.insert("path".into(), json!(path));
-            if let Some(equals) = equals {
-                object.insert("equals".into(), scalar_json(equals));
-            }
-            Value::Object(object)
-        }
-        RenderedReference::ResolvedRule {
             locator,
             anchor,
             path,

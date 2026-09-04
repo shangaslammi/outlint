@@ -276,7 +276,7 @@ impl Loader {
             self.shape_error_at(range, "ordered requires at least two refs");
             None
         })?;
-        Some(Constraint::OrderedLocators(refs))
+        Some(Constraint::Ordered(refs))
     }
 
     fn parse_proposition_list(
@@ -321,10 +321,9 @@ impl Loader {
         range: SourceRange,
     ) -> Option<(Proposition, ResolvedIdentity)> {
         match self.bind_operand(schema, scope, value, Context::Proposition, range)? {
-            BoundOperand::Rule { locator, identity } => Some((
-                Proposition::ResolvedRule(locator),
-                ResolvedIdentity::Rule(identity),
-            )),
+            BoundOperand::Rule { locator, identity } => {
+                Some((Proposition::Rule(locator), ResolvedIdentity::Rule(identity)))
+            }
             BoundOperand::FrontmatterQuery(proposition) => {
                 let identity = query_identity(&proposition, schema.options.match_case);
                 Some((Proposition::FrontmatterQuery(proposition), identity))

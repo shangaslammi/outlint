@@ -49,7 +49,7 @@ impl PreparedValidator {
 
     /// Validates one parsed document without recompiling schema state.
     ///
-    /// Frontmatter validation is included, and `fm.` propositions in
+    /// Frontmatter validation is included, and the `fm[...]` propositions in
     /// constraints evaluate against the document's frontmatter (§4.6).
     ///
     /// Diagnostic order is deterministic for a given schema and document but

@@ -362,12 +362,11 @@ sections:
 }
 
 /// Pins the resolved-locator inspection surface by coercing each accessor to
-/// a function pointer. Nothing is constructed: the current loader produces no
-/// resolved locator, and pretending otherwise would test a binder that does
-/// not exist. What this does hold is the shape — that the terminal kinds are
-/// distinct types, that every form yields its original spelling, and that a
-/// position leaves the model as arbitrary-precision decimal text rather than
-/// a machine integer.
+/// a function pointer. Nothing is constructed here: the loader's own tests
+/// build these through real schemas, and what this holds is the shape — that
+/// the terminal kinds are distinct types, that every form yields its original
+/// spelling, and that a position leaves the model as arbitrary-precision
+/// decimal text rather than a machine integer.
 #[test]
 fn the_resolved_locator_inspection_surface_is_pinned() {
     use outlint_core::{
@@ -433,7 +432,7 @@ fn kernel_backed_values_stay_opaque_to_callers() {
 
 /// Pins the stable ids Typed Values adds, on both channels. §6.3 fixes the
 /// spellings, and `outlint-disable` matches diagnostic ids as text, so a
-/// spelling is a compatibility contract even while nothing emits it.
+/// spelling is a contract even before anything emits it.
 #[test]
 fn the_typed_value_ids_have_their_specified_spellings() {
     use outlint_core::SchemaErrorKind;

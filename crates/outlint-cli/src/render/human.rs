@@ -1,8 +1,8 @@
 //! Human-readable output: headlines, details, evidence, and escaping.
 
 use crate::diagnostics::{
-    RenderedDiagnostic, RenderedMatcher, RenderedReference, RenderedScalar, RenderedSchemaNode,
-    RenderedTarget, ValidationResult,
+    RenderedDiagnostic, RenderedMatcher, RenderedReference, RenderedSchemaNode, RenderedTarget,
+    ValidationResult,
 };
 
 pub(super) fn render_human(results: &[ValidationResult], use_color: bool) -> String {
@@ -299,70 +299,24 @@ fn human_header_path(path: &[String]) -> String {
 
 fn human_reference(reference: &RenderedReference) -> String {
     match reference {
-        RenderedReference::Rule {
-            anchor,
-            path,
-            matcher,
-        } => {
-            let prefix = if *anchor == "schema_root" { "$." } else { "" };
-            format!(
-                "{}{} ({})",
-                prefix,
-                path.iter()
-                    .map(|part| escape_human(part))
-                    .collect::<Vec<_>>()
-                    .join("."),
-                human_matcher(matcher)
-            )
-        }
-        RenderedReference::Frontmatter { path, equals } => {
-            let mut display = format!(
-                "fm.{}",
-                path.iter()
-                    .map(|part| escape_human(part))
-                    .collect::<Vec<_>>()
-                    .join(".")
-            );
-            if let Some(value) = equals {
-                display.push('=');
-                display.push_str(&human_scalar(value));
-            }
-            display
-        }
-        // The final forms quote the author's own locator rather than
-        // rebuilding one from bound steps: it is the text they would edit,
-        // and it is retained precisely so it need not be reconstructed. It is
+        // Every form quotes the author's own locator rather than rebuilding
+        // one from bound steps: it is the text they would edit, and it is
+        // retained precisely so it need not be reconstructed. It is
         // schema-controlled, so it is escaped like every other untrusted
         // value here.
-        RenderedReference::ResolvedRule {
+        RenderedReference::Rule {
             locator, matcher, ..
         } => {
             format!("{} ({})", escape_human(locator), human_matcher(matcher))
         }
-        RenderedReference::FrontmatterQuery {
-            locator, equals, ..
-        } => {
-            let mut display = escape_human(locator);
-            if let Some(value) = equals {
-                display.push('=');
-                display.push_str(&human_scalar(value));
-            }
-            display
-        }
+        // §4.6 makes the equality literal "the remainder of the locator", so
+        // the retained spelling already carries it and nothing is appended.
+        RenderedReference::FrontmatterQuery { locator, .. } => escape_human(locator),
         RenderedReference::FrontmatterCapture {
             locator,
             value_type,
             ..
         } => format!("{} ({})", escape_human(locator), escape_human(value_type)),
-    }
-}
-
-fn human_scalar(scalar: &RenderedScalar) -> String {
-    match scalar {
-        RenderedScalar::Null => "null".to_owned(),
-        RenderedScalar::Boolean(value) => value.to_string(),
-        RenderedScalar::Integer(value) | RenderedScalar::Float(value) => escape_human(value),
-        RenderedScalar::String(value) => format!("\"{}\"", escape_human_quoted(value)),
     }
 }
 
