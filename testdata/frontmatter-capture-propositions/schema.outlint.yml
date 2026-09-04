@@ -1,13 +1,15 @@
 version: 1
-# Declared frontmatter captures used as propositions (spec 4.6, `fm.<name>`).
+# Declared frontmatter captures used as propositions (spec 4.6).
 #
-# `fm.<name>` is the typo-safe reference to a declaration and is checked at
-# schema load, where `fm[$.name]` is a document-time query. As a proposition it
-# is satisfied iff the capture is valid and bound — except that a bound `bool`
-# capture contributes its own boolean value, so a valid bound `false` is
-# unsatisfied. Optional absence is ordinary falsity, while an invalid value, a
-# missing required capture, invalid frontmatter, or an absent required block
-# suppresses the whole containing constraint after its primary diagnostic.
+# A capture proposition names a declaration and resolves at schema load, so a
+# typo is `unresolved-ref` rather than a proposition that quietly reads false
+# forever; a bracketed JSONPath query reads the document instead. As a
+# proposition a capture is satisfied iff it is valid and bound — except that a
+# bound `bool` capture contributes its own boolean value, so a valid bound
+# `false` is unsatisfied. Optional absence is ordinary falsity, while an
+# invalid value, a missing required capture, invalid frontmatter, or an absent
+# required block suppresses the whole containing constraint after its primary
+# diagnostic.
 options:
   ordered_sections: false
 title: null

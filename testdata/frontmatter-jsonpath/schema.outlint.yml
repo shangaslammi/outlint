@@ -6,8 +6,9 @@ version: 1
 # states that vendor-tier query outcomes are not an Outlint conformance gate,
 # so they have no place in the portable corpus.
 #
-# `fm[...]` is the JSONPath form; `fm.<name>` is the separate declared-capture
-# form and is covered by `frontmatter-capture-propositions`.
+# This group uses the bracketed JSONPath form only. Declared frontmatter
+# captures are the separate form, covered by
+# `frontmatter-capture-propositions`.
 #
 # `match_case` keeps its `false` default, which 4.6 makes string equality
 # follow.

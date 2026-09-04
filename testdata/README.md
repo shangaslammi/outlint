@@ -32,12 +32,16 @@ in its directory.
 The runner consumes the CLI's **version 3** JSON envelope (§11.3) and projects
 each diagnostic down to `{id, target}`. That narrowing is deliberate, not a
 simplification waiting to be undone. A version 3 diagnostic also carries
-`message`, `location`, `schema_node`, `schema_location`, `involved_headers`,
-and `references`; those are the reference implementation's rendering of a
-violation, and pinning them here would make the corpus a test of one
-implementation's presentation rather than of the specified semantics. `id` and
-`target` are what every conforming implementation must agree on. Anything a
-fixture wants to say beyond them belongs in a comment in its schema.
+`message` and `location`, and — whenever the corresponding semantic data
+exists — `schema_node`, `schema_location`, `involved_headers`, and
+`references`. Those members are normatively specified by §11.3; they are
+optional in the sense that a diagnostic omits one when it has no such data to
+report, not in the sense of being one implementation's embellishment. The
+narrowing is the corpus's choice rather than a judgement about them: `id` and
+`target` are the pair that says what a diagnostic *is*, and restating a
+schema's own coordinates in every fixture file would obscure that without
+testing anything further. Anything a fixture wants to say beyond them belongs
+in a comment in its schema.
 
 ## Targets
 
@@ -146,8 +150,11 @@ The two forms are different languages and the corpus keeps them apart:
 
 - `fm[...]` wraps one complete RFC 9535 **JSONPath query**, evaluated against
   the document's frontmatter at validation time — `fm[$.flag]` as a boolean
-  read, `fm[$.status]=deprecated` as an equality proposition. The query is
-  document data; nothing about it is checked when the schema loads.
+  read, `fm[$.status]=deprecated` as an equality proposition. Its *results* are
+  document data, but the query itself is not unexamined at load: §4.6 checks
+  core index selectors against the I-JSON exact range at binding time, and a
+  binding failure in a schema-resident query is `invalid-document-shape`. What
+  waits for the document is evaluation, not syntax or binding.
 - `fm.name` names a **declared frontmatter capture** and nothing else. It is
   resolved against `frontmatter.captures` at schema load, so a typo is
   `unresolved-ref` rather than a proposition that quietly reads false forever.
@@ -191,7 +198,7 @@ this backwards is silent: the suite still passes.
 | --- | --- | --- |
 | `typed-rule-captures` | regex rule captures per type; case-preserving capture source under `match_case: false`; identical-target multiplicity | §2.2, §2.4, §6.2 |
 | `typed-frontmatter-captures` | required and optional captures; strict YAML kinds; `missing-value` pointer normalization and its omission; absent optional block skipping capture evaluation | §2.3, §2.4, §6.1 |
-| `typed-value-boundaries` | every boundary in the §2.4 table and its consequences list, from both capture sites; no coercion | §2.4 |
+| `typed-value-boundaries` | from the header-capture site, the §2.4 lexical, calendar, SemVer and numeric-bound limits, including the SemVer numeric-identifier bounds and both signed-integer extremes; from the frontmatter site, the strict YAML kind of all six types (no coercion) over a representative subset of those same value limits | §2.4 |
 | `typed-order` | one `order` entry per comparator, asc/desc and strict/non-strict; adjacency unbroken by other rules' headers; per-ancestor sequences; excess occurrences still ordered | §3.8, §6.2 |
 | `typed-order-suppression` | an invalid capture suppresses its own entry in its own scope only; suppression precedes `outlint-disable` filtering | §3.8, §6.3 |
 | `locator-positions` | positional narrowing; `[i]` making a plural step singular; an out-of-range index selecting nothing at arbitrary precision | §4.4, §4.5, §5.3 |
