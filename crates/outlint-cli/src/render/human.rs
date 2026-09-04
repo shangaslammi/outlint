@@ -109,10 +109,10 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
 
     append_human_declaration_detail(output, diagnostic);
 
-    if diagnostic.id == "ordered" {
-        append_human_ordering_evidence(output, diagnostic);
-    } else {
-        append_human_constraint_evidence(output, diagnostic);
+    match diagnostic.id.as_str() {
+        "ordered" => append_human_ordering_evidence(output, diagnostic),
+        "order-violation" => append_human_violating_pair(output, diagnostic),
+        _ => append_human_constraint_evidence(output, diagnostic),
     }
 
     if let Some(location) = &diagnostic.schema_location {
@@ -120,12 +120,18 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
             && location.line == diagnostic.line
             && location.column == diagnostic.column;
         if !duplicates_primary {
+            // A capture and an order entry are already named above by the
+            // declaration detail, which spells them `capture:` and `order
+            // entry:`. Reusing those words here would print the same label
+            // twice for one diagnostic, once for a name and once for a file
+            // position, so the location line says what it is instead: where
+            // the thing just named was declared.
             let label = match diagnostic.schema_node.as_ref() {
                 Some(RenderedSchemaNode::Constraint { .. }) => "constraint",
                 Some(RenderedSchemaNode::Rule { .. }) => "rule",
                 Some(RenderedSchemaNode::Capture { .. })
-                | Some(RenderedSchemaNode::FrontmatterCapture { .. }) => "capture",
-                Some(RenderedSchemaNode::OrderEntry { .. }) => "order entry",
+                | Some(RenderedSchemaNode::FrontmatterCapture { .. })
+                | Some(RenderedSchemaNode::OrderEntry { .. }) => "declared",
                 _ => "schema",
             };
             output.push_str(&format!(
@@ -195,6 +201,33 @@ fn append_human_ordering_evidence(output: &mut String, diagnostic: &RenderedDiag
                 human_header_path(&header.header_path)
             ));
         }
+    }
+}
+
+/// Presents an `order-violation`'s two headers as the ordered pair they are.
+///
+/// §6.2 has an `order-violation` list "exactly the first and second headers of
+/// its violating adjacent pair, in that order", and which of the two is which
+/// is the whole of what the reader needs: the message names the values, the
+/// pair names the sections holding them. The generic `involved sections:`
+/// list of a constraint says only that these headers took part, which for an
+/// adjacent pair loses the one fact that makes it actionable — so this stays
+/// separate from both the `ordered` constraint's expected/observed listing
+/// and the constraint evidence every other id gets.
+fn append_human_violating_pair(output: &mut String, diagnostic: &RenderedDiagnostic) {
+    if diagnostic.involved_headers.is_empty() {
+        return;
+    }
+    output.push_str("  out-of-order pair:\n");
+    for (position, header) in diagnostic.involved_headers.iter().enumerate() {
+        output.push_str(&format!(
+            "    {}. {}:{}:{} \"{}\"\n",
+            position + 1,
+            escape_human(&diagnostic.source_path),
+            header.line,
+            header.column,
+            human_header_path(&header.header_path)
+        ));
     }
 }
 
