@@ -1,6 +1,14 @@
-//! The version 2 JSON output envelope and its field conversions.
+//! The version 3 JSON output envelope and its field conversions.
 
 use serde_json::{json, Map, Value};
+
+/// The envelope version this build emits.
+///
+/// §11.3 fixes the number and requires consumers to reject versions they do
+/// not know rather than reading them as an older shape, so Typed Values is a
+/// hard cut from 2 to 3: there is no second emission path, no negotiation,
+/// and no `json-v2` format name to fall back to.
+const ENVELOPE_VERSION: u64 = 3;
 
 use crate::diagnostics::{
     RenderedDiagnostic, RenderedMatcher, RenderedReference, RenderedScalar, RenderedSchemaNode,
@@ -34,7 +42,7 @@ pub(super) fn render_json(results: &[ValidationResult]) -> String {
     format!(
         "{}\n",
         json!({
-            "version": 2,
+            "version": ENVELOPE_VERSION,
             "results": results,
             "summary": {
                 "files": results.len(),
