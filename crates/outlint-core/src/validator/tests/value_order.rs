@@ -429,6 +429,36 @@ fn denied_and_unvisited_headings_contribute_nothing_to_a_sequence() {
         [DiagnosticId::NotAllowed]
     );
 
+    // A skipping header is in no scope (§3.1), so it joins no sequence
+    // either. The `h4` below is a child of the `h1` and skips two levels;
+    // were it in the sequence it would sit first in document order and break
+    // the descending pair that the two `h2`s satisfy.
+    let skipping = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+                    sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
+                    captures:\n          v: semver\n        order:\n          - by: v\n            \
+                    dir: desc\n";
+    assert_eq!(
+        ids(&diagnostics(
+            skipping,
+            "# Part\n#### V 1.0.0\n## V 3.0.0\n## V 2.0.0\n"
+        )),
+        [DiagnosticId::SkippedLevel]
+    );
+    // Admitted, it joins the sequence and breaks it.
+    let admitted = format!(
+        "version: 1\noptions:\n  allow_skipped_levels: true\n{}",
+        skipping
+            .strip_prefix("version: 1\n")
+            .expect("the schema spells the version first")
+    );
+    assert_eq!(
+        ids(&diagnostics(
+            &admitted,
+            "# Part\n#### V 1.0.0\n## V 3.0.0\n## V 2.0.0\n"
+        )),
+        [DiagnosticId::OrderViolation]
+    );
+
     // An unmatched header's subtree is never visited, so the `V` rule below
     // it binds nothing and its sequence stays empty.
     let nested = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \

@@ -309,7 +309,11 @@ impl<'a> Validator<'a> {
         // path saying which subtree failed.
         let attribute = occurrences.len() > 1;
         for (index, occurrence) in occurrences.iter().enumerate() {
-            let mut children = child_sections(occurrence.section, &occurrence.path);
+            let mut children = child_sections(
+                occurrence.section,
+                &occurrence.path,
+                schema.options.allow_skipped_levels,
+            );
             if index == 0 && !admitted_strays.is_empty() {
                 let mut merged = std::mem::take(&mut admitted_strays);
                 merged.extend(children);
@@ -597,6 +601,7 @@ impl<'a> Validator<'a> {
             parent,
             parent_path,
         } = input;
+        let allow_skipped = self.schema.options.allow_skipped_levels;
         let mut counts = vec![0_usize; rules.len()];
         let mut occurrences = Vec::new();
         for pathed in sections {
@@ -655,7 +660,7 @@ impl<'a> Validator<'a> {
                 &path,
                 &rule_path(schema_scope, rule_index),
             );
-            let child_refs = child_sections(section, &path);
+            let child_refs = child_sections(section, &path, allow_skipped);
             let mut child_scope_path = schema_scope.clone();
             child_scope_path.0.push(RuleIndex(rule_index));
             let child = self.bind_scope(BindScopeInput {
@@ -1221,10 +1226,43 @@ fn admitted_at_root<'d>(
         .collect()
 }
 
-fn child_sections<'d>(section: &'d Section, path: &HeaderPath) -> Vec<PathedSection<'d>> {
+/// One bound section's bindable children.
+///
+/// §3.1: "A skipping subtree under the default of §1.5 is in no scope, so
+/// §3.2 through §3.8 never see it." A child more than one level below its
+/// parent is therefore dropped here rather than matched and then excused,
+/// which is what makes §1.5's "takes part in no rule" true of every rule
+/// mechanism at once: it matches none, counts toward no cardinality,
+/// satisfies no constraint locator, exports no capture, and joins no order
+/// sequence. Nor does anything below it, because the subtree is never
+/// entered — and dropping it is also what keeps a closed scope from calling
+/// it `unexpected-section`, which would be that scope having an opinion
+/// about a header §3.1 says it never sees.
+///
+/// §1.5 still reports it: the skipped-level walk covers the whole document
+/// and consults no scope, and its own recursion is what keeps a well-nested
+/// descendant from being blamed for its ancestor's misplacement.
+///
+/// With `allow_skipped_levels` there is nothing to drop — "the skip is
+/// admitted: the header becomes an ordinary member of the enclosing scope
+/// and is matched against that scope's rules like any sibling".
+///
+/// The virtual root has the same rule with its own stand-in level; see
+/// [`admitted_at_root`], which differs only in having no parent header to
+/// take the level from.
+fn child_sections<'d>(
+    section: &'d Section,
+    path: &HeaderPath,
+    allow_skipped: bool,
+) -> Vec<PathedSection<'d>> {
+    let child_level = section.heading.level as u8 + 1;
     section
         .children
         .iter()
+        .filter(|child| {
+            let level = child.heading.level as u8;
+            level == child_level || (allow_skipped && level > child_level)
+        })
         .map(|child| PathedSection {
             section: child,
             path: appended_path(path, &child.heading.diagnostic_text),

@@ -180,8 +180,8 @@ fn first_match_ownership_decides_which_rule_extracts_captures() {
 fn headings_that_bind_no_rule_contribute_no_capture_diagnostic() {
     // §3.3: an unmatched header's subtree is not recursed into, so a rule
     // below it never sees the heading its capture would have read. §1.5: a
-    // top-level heading that skips a level against the document root "takes
-    // part in no rule", and neither does anything below it.
+    // heading that skips a level "takes part in no rule", and neither does
+    // anything below it.
     let schema = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
                   captures:\n          v: semver\n";
@@ -196,6 +196,35 @@ fn headings_that_bind_no_rule_contribute_no_capture_diagnostic() {
     assert_eq!(
         reported[0].target,
         DiagnosticTarget::Header(HeaderPath(vec!["Part".into(), "V nope".into()]))
+    );
+
+    // §1.5 reads the same inside a bound scope: this `h3` is a child of the
+    // `h1` and skips the `h2` level, so its capture is never extracted.
+    // §3.3 puts capture parsing among the effects of matching, and a
+    // skipping header matches nothing.
+    let nested = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+                  sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
+                  captures:\n          v: semver\n";
+    assert_eq!(
+        diagnostics(nested, "# Part\n### V nope\n")
+            .iter()
+            .map(|diagnostic| diagnostic.id)
+            .collect::<Vec<_>>(),
+        [DiagnosticId::SkippedLevel]
+    );
+    // Admitting the skip makes it an ordinary member, capture and all.
+    let admitted = format!(
+        "version: 1\noptions:\n  allow_skipped_levels: true\n{}",
+        nested
+            .strip_prefix("version: 1\n")
+            .expect("the schema spells the version first")
+    );
+    assert_eq!(
+        diagnostics(&admitted, "# Part\n### V nope\n")
+            .iter()
+            .map(|diagnostic| diagnostic.id)
+            .collect::<Vec<_>>(),
+        [DiagnosticId::InvalidValue]
     );
 
     // A denied heading is rejected wholesale, and a capture cannot be

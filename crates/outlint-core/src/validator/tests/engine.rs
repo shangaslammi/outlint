@@ -257,6 +257,136 @@ fn an_unadmitted_subtree_is_reported_once_at_its_root() {
 }
 
 #[test]
+fn a_nested_skipping_header_takes_part_in_no_rule() {
+    // §1.5: "A skipping header takes part in no rule — it matches none,
+    // counts toward no cardinality, and satisfies no constraint locator — and
+    // neither does anything below it." §3.1 says the same structurally: "a
+    // skipping subtree under the default of §1.5 is in no scope, so §3.2
+    // through §3.8 never see it." That holds inside a bound scope exactly as
+    // it does at the document root; the `h3` below is a child of the `h1` and
+    // skips the `h2` level.
+    let required = "version: 1\noutline:\n  - id: part\n    match: Part\n    required: true\n    \
+                    strict: true\n    sections:\n      - id: goal\n        match: Goal\n        \
+                    required: true\n";
+    assert_eq!(
+        ids_and_targets(required, "# Part\n### Goal\n"),
+        [
+            (
+                DiagnosticId::SkippedLevel,
+                DiagnosticTarget::Header(HeaderPath(vec!["Part".into(), "Goal".into()])),
+            ),
+            // It matched no rule, so the rule it would have matched is
+            // unsatisfied — and the scope being closed does not make it
+            // `unexpected-section` either, since the scope never saw it.
+            (
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath(vec!["Part".into()]),
+                    matcher: "Goal".into(),
+                },
+            ),
+        ]
+    );
+
+    // Nor does it count toward a maximum: one `Goal` is in scope, and one is
+    // what the rule allows. (An `h3` written after an `h2` is that `h2`'s
+    // child rather than a skipping sibling of it, so the skipping case has to
+    // put the deeper header first.)
+    let bounded = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+                   sections:\n      - match: Goal\n        repeat: 0..1\n";
+    assert_eq!(ids_and_targets(bounded, "# Part\n## Goal\n### Goal\n"), []);
+    assert_eq!(
+        ids_and_targets(bounded, "# Part\n### Goal\n## Goal\n"),
+        [(
+            DiagnosticId::SkippedLevel,
+            DiagnosticTarget::Header(HeaderPath(vec!["Part".into(), "Goal".into()])),
+        )]
+    );
+
+    // And it satisfies no constraint locator descending through its scope.
+    let constrained = "version: 1\noutline:\n  - id: part\n    match: Part\n    \
+                       required: true\n    sections:\n      - id: goal\n        \
+                       match: Goal\n        required: false\n\
+                       constraints:\n  - requires: { if: part, then: \"$.part.goal\" }\n";
+    assert_eq!(ids_and_targets(constrained, "# Part\n## Goal\n"), []);
+    assert_eq!(
+        ids_and_targets(constrained, "# Part\n### Goal\n")
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        [DiagnosticId::SkippedLevel, DiagnosticId::Requires]
+    );
+}
+
+#[test]
+fn a_nested_skipping_headers_own_descendants_are_not_reported_for_its_skip() {
+    // §1.5: "§1.5 itself still applies inside the subtree, so a header that
+    // skips relative to a skipping parent is reported in its own right, but a
+    // well-nested descendant yields no cascade of complaints about a
+    // misplacement that is entirely its ancestor's."
+    let schema = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    strict: true\n    \
+                  sections:\n      - match: \"*\"\n        repeat: 0..n\n";
+    // `Deep` sits one level under the skipping `Goal`, so it is no skip of
+    // its own — one diagnostic for the subtree, at its root.
+    assert_eq!(
+        ids_and_targets(schema, "# Part\n### Goal\n#### Deep\n"),
+        [(
+            DiagnosticId::SkippedLevel,
+            DiagnosticTarget::Header(HeaderPath(vec!["Part".into(), "Goal".into()])),
+        )]
+    );
+    // A descendant that skips relative to that parent is reported in its own
+    // right, which is the other half of the same sentence.
+    assert_eq!(
+        ids_and_targets(schema, "# Part\n### Goal\n##### Deeper\n"),
+        [
+            (
+                DiagnosticId::SkippedLevel,
+                DiagnosticTarget::Header(HeaderPath(vec!["Part".into(), "Goal".into()])),
+            ),
+            (
+                DiagnosticId::SkippedLevel,
+                DiagnosticTarget::Header(HeaderPath(vec![
+                    "Part".into(),
+                    "Goal".into(),
+                    "Deeper".into(),
+                ])),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn allowing_skipped_levels_admits_a_nested_skip_as_an_ordinary_sibling() {
+    // §1.5: "If the option is true, the skip is admitted: the header becomes
+    // an ordinary member of the enclosing scope and is matched against that
+    // scope's rules like any sibling."
+    let schema = "version: 1\noptions:\n  allow_skipped_levels: true\noutline:\n  \
+                  - match: Part\n    required: true\n    strict: true\n    \
+                  sections:\n      - match: Goal\n        repeat: 1..1\n";
+    // The `h3` binds the `Goal` rule, so nothing is missing and nothing skips.
+    assert_eq!(ids_and_targets(schema, "# Part\n### Goal\n"), []);
+    // Being an ordinary member, it also counts toward the bound and is judged
+    // by the closed scope like any sibling. Both documents put the deeper
+    // header first, since an `h3` written after an `h2` is that `h2`'s child
+    // rather than a sibling of it (§1.1).
+    assert_eq!(
+        ids_and_targets(schema, "# Part\n### Goal\n## Goal\n")
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        [DiagnosticId::TooManySections]
+    );
+    assert_eq!(
+        ids_and_targets(schema, "# Part\n### Stray\n## Goal\n")
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        [DiagnosticId::UnexpectedSection]
+    );
+}
+
+#[test]
 fn orphan_headers_skip_against_the_virtual_root() {
     let schema = "version: 1\nsections:\n  - match: Sec\n    repeat: 0..n\n";
 
