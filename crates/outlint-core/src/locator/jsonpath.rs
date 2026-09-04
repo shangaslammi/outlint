@@ -141,9 +141,9 @@ impl fmt::Display for QueryParseError {
 ///
 /// The equality remainder is kept raw. §4.6 says "the literal is the remainder
 /// of the locator and is resolved as one YAML 1.2 core-schema scalar", and
-/// that resolution belongs to the lane that owns typed values; resolving it
-/// here would decide `fm[$.x]=null`, `match_case`, and scalar typing in a
-/// module that knows nothing about any of them.
+/// that resolution belongs to the loader, which has the YAML scalar resolver:
+/// resolving it here would decide `fm[$.x]=null`, `match_case`, and scalar
+/// typing in a module that knows nothing about any of them.
 ///
 /// `None` and `Some("")` are different locators and stay different: the first
 /// is a bare boolean read, the second is an equality proposition against the
@@ -338,9 +338,11 @@ impl AbsoluteSingularPath {
         &self.source
     }
 
-    /// Awaiting frontmatter capture evaluation, which walks these to find
-    /// the node a declaration's path names.
-    #[allow(dead_code)]
+    /// The decoded segments, in path order.
+    ///
+    /// Frontmatter capture evaluation walks these to reach the node a §2.3
+    /// declaration's path names, which is what keeps it from reparsing the
+    /// path's RFC escapes for itself.
     pub(crate) fn components(&self) -> &[SingularComponent] {
         &self.components
     }
@@ -372,22 +374,15 @@ impl SingularPathError {
     }
 
     // The capture loader reports a refused path through `Display`, which
-    // already carries all three of these. They are kept for a caller that
-    // wants to branch on the fault or highlight it inside the path.
-    #[allow(dead_code)]
+    // already carries the fault, its offset, and any provider detail, so
+    // nothing in production branches on them. The parser's tests do assert
+    // which fault a path has, since a test that read only the rendered
+    // sentence would pass for the wrong one, so the kind is readable in the
+    // test build. The offset and detail have no reader at all and are left to
+    // `Display`.
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> SingularPathErrorKind {
         self.kind
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn offset(&self) -> usize {
-        self.offset
-    }
-
-    /// The provider's own message, when the failure came from the provider.
-    #[allow(dead_code)]
-    pub(crate) fn detail(&self) -> Option<&str> {
-        self.detail.as_deref()
     }
 }
 

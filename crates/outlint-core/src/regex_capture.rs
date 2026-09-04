@@ -14,7 +14,7 @@
 //! anything: an undeclared optional helper group is a perfectly legal part of a
 //! pattern, and only the caller knows which names were declared. Turning these
 //! facts into `invalid-capture` diagnostics — together with the name grammar
-//! and the missing-group case — belongs to the loader in Phase 3.
+//! and the missing-group case — belongs to the loader (`loader/rules.rs`).
 //!
 //! **Input contract.** `pattern_body` is the normalized body produced by
 //! `loader::rules::regex_body`: the outer `/` delimiters are already stripped
@@ -38,11 +38,6 @@ use regex_syntax::ast::{
 ///
 /// The function is pure — no IO, no global state, no regex compilation, and no
 /// diagnostic construction — and is deterministic for a given input.
-// The loader's capture-declaration checking (Phase 3, `loader/rules.rs`) is the
-// only intended consumer of this module's API. Until it lands, `analyze` and
-// the types below are reachable only from the unit tests, which does not count
-// as a use in the non-test build.
-#[allow(dead_code)]
 pub(crate) fn analyze(pattern_body: &str) -> Result<RegexCaptureAnalysis, CaptureAnalysisError> {
     let ast = Parser::new()
         .parse(pattern_body)
@@ -54,13 +49,11 @@ pub(crate) fn analyze(pattern_body: &str) -> Result<RegexCaptureAnalysis, Captur
 ///
 /// Names are keyed, so lookup is by name and iteration is in sorted order.
 /// A name absent from the report simply does not name a group in the pattern.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RegexCaptureAnalysis {
     groups: BTreeMap<String, CaptureAncestors>,
 }
 
-#[allow(dead_code)]
 impl RegexCaptureAnalysis {
     /// The ancestor facts for the group named `name`, or `None` when the
     /// pattern has no such named group.
@@ -69,6 +62,12 @@ impl RegexCaptureAnalysis {
     }
 
     /// Every named group in the pattern, in sorted name order.
+    ///
+    /// The loader looks groups up by the names a schema declared, so it needs
+    /// [`Self::get`] and never the whole set. Enumeration is what lets a test
+    /// assert the complete report for a pattern rather than one name at a
+    /// time, so it is compiled for the test build alone.
+    #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, CaptureAncestors)> + '_ {
         self.groups
             .iter()
@@ -82,7 +81,6 @@ impl RegexCaptureAnalysis {
 /// is therefore a legal declaration target. Either flag set is a
 /// mandatory-participation violation, and the flags are independent so a group
 /// nested under both constructs reports both causes.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CaptureAncestors {
     /// An alternation node encloses the group.
@@ -92,7 +90,6 @@ pub(crate) struct CaptureAncestors {
 }
 
 /// Why a pattern yielded no capture facts at all.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CaptureAnalysisError {
     /// `regex-syntax` could not parse the body.

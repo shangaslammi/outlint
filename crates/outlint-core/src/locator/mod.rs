@@ -32,13 +32,11 @@
 //! rediscovered from a failure later. Where the provider is narrower than
 //! RFC 9535, the gap is pinned too, not papered over.
 
-// The wiring into `lib.rs` lands one lane at a time: constraint binding names
-// the outline and frontmatter forms, capture declarations name the singular
-// path, and evaluation names the prepared query. A handful of items are still
-// waiting on the last of those, and each one says so at its own definition.
 // There is deliberately no module-wide dead-code allowance: one would silence
-// the next genuinely dead item as readily as these, and this module is where
-// an unused kernel path is most likely to go unnoticed.
+// a genuinely dead kernel path as readily as a deliberate one, and this module
+// is where an unused kernel path is most likely to go unnoticed. Items the
+// production build does not reach are `#[cfg(test)]` instead, which says the
+// same thing without hiding anything else.
 
 mod jsonpath;
 mod path;
@@ -46,18 +44,15 @@ mod syntax;
 
 // The facade: exactly the kernel items the rest of the crate names, and
 // nothing more. Everything reachable through it is `pub(crate)`, so no
-// provider type escapes this module by being re-exported here. It grows one
-// item at a time as later lanes wire themselves up, rather than being opened
+// provider type escapes this module by being re-exported here, and adding a
+// name is a deliberate act rather than a consequence of opening the module
 // wholesale.
 pub(crate) use self::jsonpath::{AbsoluteSingularPath, FrontmatterQueryLocator};
-// The two items the validator's typed-value lane names, kept on a line of
-// their own so that the allowance below covers nothing else and comes out
-// with the first consumer. `PreparedQuery` is what a validation plan stores
-// per distinct §4.6 query, so that a query compiles once per schema rather
-// than once per proposition per document; `SingularComponent` is what
-// frontmatter capture evaluation walks, and re-exporting it is what keeps
-// that walk from reparsing a §2.3 path's RFC escapes for itself.
-#[allow(unused_imports)]
+// `PreparedQuery` is what a validation plan stores per distinct §4.6 query,
+// so that a query compiles once per schema rather than once per proposition
+// per document; `SingularComponent` is what frontmatter capture evaluation
+// walks, and re-exporting it is what keeps that walk from reparsing a §2.3
+// path's RFC escapes for itself.
 pub(crate) use self::jsonpath::{PreparedQuery, SingularComponent};
 pub(crate) use self::syntax::{
     parse_locator, FrontmatterCaptureLocator, LocatorAnchor, LocatorPosition, LocatorSource,

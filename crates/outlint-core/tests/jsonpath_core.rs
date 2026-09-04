@@ -33,6 +33,10 @@ const CORPUS: &str = include_str!("fixtures/jsonpath/outlint-core.json");
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Corpus {
+    // `deny_unknown_fields` means every member of the on-disk corpus must be
+    // named here. These two are prose the runner never branches on; naming
+    // them is what keeps a corpus that grows a member from being accepted
+    // silently, so they are deserialized and validated without being read.
     #[allow(dead_code)]
     description: String,
     #[allow(dead_code)]
@@ -460,8 +464,9 @@ const OVERSIZED_DIGIT_COUNTS: [usize; 4] = [20, 100, 1_000, 10_000];
 /// An oversized ordinary locator index must cost only what its spelling costs.
 ///
 /// There is deliberately no wall-clock assertion here; an elapsed-time bound
-/// would be flaky. Phase 1B owns the end-to-end version of this against the
-/// real Outlint locator parser and its over-the-end lookup.
+/// would be flaky. The locator module's own tests carry the end-to-end
+/// version, against the real Outlint locator parser and its over-the-end
+/// lookup.
 #[test]
 fn an_oversized_index_spelling_costs_only_its_own_length() {
     for digits in OVERSIZED_DIGIT_COUNTS {
@@ -499,8 +504,9 @@ fn an_oversized_index_spelling_costs_only_its_own_length() {
 /// §4.6 makes rendering Outlint's own responsibility and says "a JSONPath
 /// provider's rendered path is not authoritative". These tests state each
 /// escaping rule directly, including the two provider defects that made an
-/// Outlint-owned renderer necessary, so the rules survive the Phase 1B move
-/// into the production locator wrapper.
+/// Outlint-owned renderer necessary. The production wrapper is checked against
+/// this implementation rather than against a copy of it, so these are the
+/// rules the shipped renderers are held to.
 mod rendering {
     use super::support::jsonpath_path::{render_json_pointer, render_normalized_path};
     use serde_json::Value;

@@ -15,10 +15,12 @@
 //! here from `PathElement::as_name` and `as_index` is both correct and
 //! sufficient.
 //!
-//! Phase 1B promotes this same component-based logic into the private
-//! production locator wrapper. It lives in test support until then, with the
-//! regression tests in `tests/jsonpath_core.rs` pinning every escaping rule so
-//! the move carries its coverage with it.
+//! The private production locator wrapper now renders paths from the same
+//! components. This implementation stays because it is the one the regression
+//! tests in `tests/jsonpath_core.rs` pin rule by rule, and the wrapper's own
+//! tests check the production renderers against it: keeping one proven
+//! implementation rather than copying it is what makes that a parity check
+//! instead of a tautology.
 
 use serde_json_path::{NormalizedPath, PathElement};
 

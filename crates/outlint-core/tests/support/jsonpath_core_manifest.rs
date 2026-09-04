@@ -46,6 +46,9 @@ pub const REVIEWED_EXCLUSIONS: &[ReviewedExclusion] = &[];
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSuite {
+    // Named so `deny_unknown_fields` accepts the suite, and validated as a
+    // string, but the manifest carries no prose: the runner reports a case by
+    // its name.
     #[serde(default)]
     #[allow(dead_code)]
     description: Option<String>,
@@ -71,6 +74,8 @@ struct RawCase {
     results_paths: Option<Vec<Vec<String>>>,
     #[serde(default, deserialize_with = "deserialize_present")]
     invalid_selector: Option<bool>,
+    // As with `RawSuite::description`: named and validated so an unknown key
+    // is still refused, but the runner selects cases by name, never by tag.
     #[serde(default)]
     #[allow(dead_code)]
     tags: Option<Vec<String>>,

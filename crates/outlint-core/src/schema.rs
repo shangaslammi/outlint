@@ -242,10 +242,8 @@ pub struct RuleCapture {
 impl RuleCapture {
     /// Builds a declaration for an already-resolved capture type.
     ///
-    /// Called by the rule loader, which lands in a later lane; the model that
-    /// lane builds against is established here, so the constructor exists
-    /// before its one caller does.
-    #[allow(dead_code)]
+    /// The rule loader is the only caller: a declaration exists only where a
+    /// `captures` entry named a type the closed §2.4 set contains.
     pub(crate) fn new(value_type: crate::typed_value::ValueType) -> Self {
         Self { value_type }
     }
@@ -257,9 +255,9 @@ impl RuleCapture {
 
     /// The resolved capture type, for the loader and the validator.
     ///
-    /// Its consumers — capture extraction and value ordering — belong to the
-    /// validator lane; see [`Self::new`] for why the accessor precedes them.
-    #[allow(dead_code)]
+    /// Capture extraction and value ordering parse against this; callers
+    /// outside the crate get the §2.4 spelling from [`Self::type_name`]
+    /// instead, so the kernel type stays behind the public surface.
     pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
         self.value_type
     }
@@ -282,9 +280,7 @@ pub struct FrontmatterCapture {
 impl FrontmatterCapture {
     /// Builds a declaration from an already-parsed path and resolved type.
     ///
-    /// Called by the frontmatter loader, which lands in a later lane; see
-    /// [`RuleCapture::new`].
-    #[allow(dead_code)]
+    /// Called by the frontmatter loader; see [`RuleCapture::new`].
     pub(crate) fn new(
         path: crate::locator::AbsoluteSingularPath,
         value_type: crate::typed_value::ValueType,
@@ -314,16 +310,16 @@ impl FrontmatterCapture {
 
     /// The parsed singular query, for the loader and the validator.
     ///
-    /// Its consumer is frontmatter capture evaluation, in a later lane.
-    #[allow(dead_code)]
+    /// Frontmatter capture evaluation walks its components; [`Self::path_source`]
+    /// is what a caller outside the crate reads.
     pub(crate) fn path(&self) -> &crate::locator::AbsoluteSingularPath {
         &self.path
     }
 
     /// The resolved capture type, for the loader and the validator.
     ///
-    /// Its consumer is frontmatter capture evaluation, in a later lane.
-    #[allow(dead_code)]
+    /// Frontmatter capture evaluation checks a selected node's YAML kind
+    /// against it before parsing; see [`RuleCapture::value_type`].
     pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
         self.value_type
     }
@@ -344,9 +340,7 @@ pub struct FrontmatterCaptures {
 impl FrontmatterCaptures {
     /// Builds the collection, or `None` when it would be empty.
     ///
-    /// Called by the frontmatter loader, which lands in a later lane; see
-    /// [`RuleCapture::new`].
-    #[allow(dead_code)]
+    /// Called by the frontmatter loader; see [`RuleCapture::new`].
     pub(crate) fn new(entries: BTreeMap<CaptureName, FrontmatterCapture>) -> Option<Self> {
         (!entries.is_empty()).then_some(Self { entries })
     }
@@ -560,7 +554,7 @@ impl TryFrom<u8> for HeaderLevel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SectionRule {
-    /// The explicit or generated identifier used by constraints.
+    /// The explicit or default identifier used by constraints.
     ///
     /// Non-exact matchers without an explicit identifier remain `None`.
     pub id: Option<RuleId>,
@@ -996,19 +990,6 @@ impl ResolvedRuleCaptureLocator {
             position,
         }
     }
-
-    /// The bound capture type, for typed-value evaluation in a later lane.
-    #[allow(dead_code)]
-    pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
-        self.value_type
-    }
-
-    /// The terminal subscript as the arbitrary-precision kernel value, for
-    /// the runtime selection that evaluates a value locator.
-    #[allow(dead_code)]
-    pub(crate) fn position(&self) -> Option<&crate::locator::LocatorPosition> {
-        self.position.as_ref()
-    }
 }
 
 /// A bound outline locator terminating at the `/text` intrinsic (§4.4).
@@ -1061,13 +1042,6 @@ impl ResolvedIntrinsicTextLocator {
             rule_steps,
             position,
         }
-    }
-
-    /// The `/text` subscript as the arbitrary-precision kernel value, for the
-    /// runtime selection that evaluates a value locator.
-    #[allow(dead_code)]
-    pub(crate) fn position(&self) -> Option<&crate::locator::LocatorPosition> {
-        self.position.as_ref()
     }
 }
 
@@ -1161,12 +1135,6 @@ impl ResolvedFrontmatterCapture {
             value_type,
         }
     }
-
-    /// The bound capture type, for typed-value evaluation in a later lane.
-    #[allow(dead_code)]
-    pub(crate) fn value_type(&self) -> crate::typed_value::ValueType {
-        self.value_type
-    }
 }
 
 /// The starting scope for resolving a rule reference.
@@ -1182,8 +1150,8 @@ pub enum RefAnchor {
 /// The semantic anchor a parsed locator's kernel anchor denotes.
 ///
 /// The two enums say the same thing in two layers, and this is the one place
-/// that knows it. Binding lanes convert here rather than matching the kernel
-/// enum themselves, so the locator module's types stay behind its facade.
+/// that knows it. The binder converts here rather than matching the kernel
+/// enum itself, so the locator module's types stay behind its facade.
 pub(crate) fn resolved_anchor(anchor: crate::locator::LocatorAnchor) -> RefAnchor {
     match anchor {
         crate::locator::LocatorAnchor::CurrentScope => RefAnchor::CurrentScope,

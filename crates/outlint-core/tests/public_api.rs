@@ -196,10 +196,12 @@ fn semantic_options_default_to_the_specification_values() {
 }
 
 /// Pins the typed-value declaration surface a schema without `captures` or
-/// `order` must expose: present, inspectable, and empty. The loader does not
-/// normalize either declaration yet, so a schema that spells neither is the
-/// only one that can be asserted about — which is exactly the invariant this
-/// test exists to hold while the loader lanes land.
+/// `order` must expose: present, inspectable, and empty. §2.1 makes both
+/// declarations optional, so the absent case is a shape a caller meets on
+/// most rules, and it must answer the same questions the declared case does
+/// rather than making the fields optional in the model. The synthesized title
+/// rule has no source declaration to carry either, so it answers the same way
+/// for a second reason.
 #[test]
 fn schemas_without_typed_values_normalize_to_empty_capture_and_order_defaults() {
     let loaded = load_schema(

@@ -6,7 +6,7 @@
 //! consults a schema, so it cannot and does not decide whether a terminal name
 //! is a rule id or a capture, whether a structural kind is allocated, or
 //! whether an intermediate step is singular. Those are binding questions, and
-//! they belong to the lane that owns binding.
+//! they belong to the binder, which has the schema this module never sees.
 //!
 //! The types below are shaped so the lexical invariants of §4.4 cannot be
 //! violated by construction rather than re-checked at each use:
@@ -226,10 +226,14 @@ impl StructuralStep {
         &self.kind
     }
 
-    /// Unread while this version allocates no structural kind: binding
-    /// refuses the step before its subscript could matter. The feature that
-    /// allocates such kinds is what reads this.
-    #[allow(dead_code)]
+    /// The step's `[i]` subscript, if any.
+    ///
+    /// This version allocates no structural kind, so binding refuses such a
+    /// step before its subscript could matter and no production caller reads
+    /// this. The grammar still parses the subscript, and the parser's tests
+    /// are what check that it does, so the accessor is compiled for the test
+    /// build alone rather than kept alive by an allowance.
+    #[cfg(test)]
     pub(crate) fn position(&self) -> Option<&LocatorPosition> {
         self.position.as_ref()
     }
@@ -322,10 +326,14 @@ pub(crate) enum ParsedLocator {
 }
 
 impl ParsedLocator {
-    /// Unread by the binder, which classifies first and then takes the
-    /// source from the form it matched. This is for a caller that wants the
-    /// spelling without classifying.
-    #[allow(dead_code)]
+    /// The spelling, whichever form the locator turned out to be.
+    ///
+    /// The binder classifies first and then takes the source from the form it
+    /// matched, so nothing in production asks a `ParsedLocator` for its
+    /// spelling. The round-trip property does, since it compares every form's
+    /// retained source against the input, so this is compiled for the test
+    /// build alone.
+    #[cfg(test)]
     pub(crate) fn source(&self) -> &LocatorSource {
         match self {
             ParsedLocator::Outline(locator) => locator.source(),
@@ -366,21 +374,23 @@ impl LocatorParseError {
     }
 
     // §4.4 gives every locator fault one diagnostic id, so the loader quotes
-    // the whole failure through `Display` rather than branching. These stay
-    // for a caller that wants to highlight the fault inside the locator.
-    #[allow(dead_code)]
+    // the whole failure through `Display` rather than branching on any of
+    // these. The parser's own tests do branch — a test that asserted only the
+    // rendered sentence would pass for a fault reported at the wrong place —
+    // so the three parts are readable in the test build alone.
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> LocatorParseErrorKind {
         self.kind
     }
 
     /// The byte offset into the original locator where the problem starts.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn offset(&self) -> usize {
         self.offset
     }
 
     /// The provider's own message, when the failure came from the provider.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
     }

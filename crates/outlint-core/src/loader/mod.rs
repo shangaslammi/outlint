@@ -120,10 +120,12 @@ struct RawFrontmatter {
     schema: Option<RawFrontmatterSchema>,
     /// The `captures` declaration exactly as written, unnormalized.
     ///
-    /// Admitted as an opaque value so the field stops being an unknown key
-    /// while the declaration's own shape, names, paths, and types stay the
-    /// frontmatter loader lane's to check. Nothing here reads it.
-    #[allow(dead_code)]
+    /// Held as an opaque value because `deny_unknown_fields` decides only
+    /// that the key is known; the declaration's own shape, names, paths, and
+    /// types are §2.3 questions, and `frontmatter_schema` answers them
+    /// against the YAML tree, where every one of them has a source range to
+    /// anchor an `invalid-capture` at. A typed field here would answer them
+    /// through serde instead, and lose the range.
     captures: Option<Value>,
 }
 
@@ -162,13 +164,12 @@ struct RawRule {
     constraints: Vec<Value>,
     /// The rule's `captures` mapping exactly as written, unnormalized.
     ///
-    /// See [`RawFrontmatter::captures`]: admitted, not interpreted.
-    #[allow(dead_code)]
+    /// See [`RawFrontmatter::captures`]: held raw so `rules` can normalize it
+    /// against the YAML tree and keep its ranges.
     captures: Option<Value>,
     /// The rule's `order` list exactly as written, unnormalized.
     ///
-    /// See [`RawFrontmatter::captures`]: admitted, not interpreted.
-    #[allow(dead_code)]
+    /// See [`RawFrontmatter::captures`]: held raw for the same reason.
     order: Option<Value>,
 }
 

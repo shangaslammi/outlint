@@ -8,7 +8,7 @@
 //! where the reason is written down, instead of somewhere downstream where it
 //! would look like an Outlint bug.
 
-/// The Phase 0 path renderer, compiled into this test build unmodified.
+/// The proven path renderer, compiled into this test build unmodified.
 ///
 /// It lives in `tests/support` because the integration suites established it
 /// and pin every escaping rule it implements. Including it by path rather than
@@ -1721,7 +1721,7 @@ mod located_paths {
         }
     }
 
-    // --- parity with the proven Phase 0 renderer ---------------------------
+    // --- parity with the proven renderer -----------------------------------
 
     /// The production renderers must agree with the implementation the
     /// integration suites already pin, for the same provider components.

@@ -17,14 +17,6 @@
 //! Both sources normalize to the same [`TypedValue`], so one comparison
 //! relation serves every consumer.
 
-// The kernel is deliberately unwired: the loader, validator, and diagnostic
-// layers begin consuming it in a later phase. Until then every item here is
-// reachable only from this module's own tests, so the ordinary build sees
-// the whole module as dead. The allow is scoped to `not(test)` so that the
-// test build still reports anything the tests do not reach, and it comes out
-// entirely when the spine starts calling in.
-#![cfg_attr(not(test), allow(dead_code))]
-
 #[cfg(test)]
 mod tests;
 
@@ -255,6 +247,12 @@ impl TypedValue {
     }
 
     /// The type this value was parsed as.
+    ///
+    /// A consumer always knows the declared type already — it is what chose
+    /// the parser — so production never asks a value what it is. The kernel's
+    /// own tests do, to check that each parser yields the type it was asked
+    /// for, so this is compiled for the test build alone.
+    #[cfg(test)]
     pub(crate) fn value_type(&self) -> ValueType {
         match self.value {
             NormalizedValue::Int(_) => ValueType::Int,
@@ -316,6 +314,12 @@ impl TypedValue {
     ///
     /// Defined from [`TypedValue::compare`] rather than from a second pass
     /// over the representations, so equality and ordering cannot disagree.
+    ///
+    /// §3.8's ordering needs the full relation and calls [`Self::compare`]
+    /// directly, so this narrower form is exercised only by the kernel's own
+    /// tests, where stating equality as equality is what makes the §2.4
+    /// equality table readable.
+    #[cfg(test)]
     pub(crate) fn equals(&self, other: &TypedValue) -> Option<bool> {
         self.compare(other)
             .map(|ordering| ordering == Ordering::Equal)
