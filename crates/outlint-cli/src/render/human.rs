@@ -107,6 +107,8 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
         }
     }
 
+    append_human_declaration_detail(output, diagnostic);
+
     if diagnostic.id == "ordered" {
         append_human_ordering_evidence(output, diagnostic);
     } else {
@@ -121,6 +123,9 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
             let label = match diagnostic.schema_node.as_ref() {
                 Some(RenderedSchemaNode::Constraint { .. }) => "constraint",
                 Some(RenderedSchemaNode::Rule { .. }) => "rule",
+                Some(RenderedSchemaNode::Capture { .. })
+                | Some(RenderedSchemaNode::FrontmatterCapture { .. }) => "capture",
+                Some(RenderedSchemaNode::OrderEntry { .. }) => "order entry",
                 _ => "schema",
             };
             output.push_str(&format!(
@@ -130,6 +135,33 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
                 location.column
             ));
         }
+    }
+}
+
+/// Names the declaration a typed-value diagnostic is about.
+///
+/// `invalid-value`, `missing-value`, and `order-violation` all anchor on a
+/// declaration rather than on a section, and their messages read badly
+/// without one: which of a rule's captures failed, or which `order` entry was
+/// violated, is not recoverable from a line and column. Nothing emits those
+/// ids yet, so this branch is inert today; it exists so the format is settled
+/// before the lane that emits them arrives, rather than being invented under
+/// the pressure of making a diagnostic legible.
+///
+/// The capture name is schema-controlled text and goes through the same
+/// quoting and control-character escaping as every other untrusted value.
+fn append_human_declaration_detail(output: &mut String, diagnostic: &RenderedDiagnostic) {
+    match diagnostic.schema_node.as_ref() {
+        Some(RenderedSchemaNode::Capture { name, .. }) => {
+            append_human_quoted_detail(output, "capture", name);
+        }
+        Some(RenderedSchemaNode::FrontmatterCapture { name }) => {
+            append_human_quoted_detail(output, "capture", &format!("fm.{name}"));
+        }
+        Some(RenderedSchemaNode::OrderEntry { order_index, .. }) => {
+            output.push_str(&format!("  order entry: {order_index}\n"));
+        }
+        _ => {}
     }
 }
 

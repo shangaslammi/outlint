@@ -378,3 +378,72 @@ fn kernel_backed_values_stay_opaque_to_callers() {
     assert_inspectable::<outlint_core::ResolvedFrontmatterQuery>();
     assert_inspectable::<outlint_core::ResolvedFrontmatterCapture>();
 }
+
+/// Pins the stable ids Typed Values adds, on both channels. §6.3 fixes the
+/// spellings, and `outlint-disable` matches diagnostic ids as text, so a
+/// spelling is a compatibility contract even while nothing emits it.
+#[test]
+fn the_typed_value_ids_have_their_specified_spellings() {
+    use outlint_core::SchemaErrorKind;
+
+    assert_eq!(DiagnosticId::InvalidValue.as_str(), "invalid-value");
+    assert_eq!(DiagnosticId::MissingValue.as_str(), "missing-value");
+    assert_eq!(DiagnosticId::OrderViolation.as_str(), "order-violation");
+    assert_eq!(DiagnosticId::InvalidValue.to_string(), "invalid-value");
+    assert_eq!(DiagnosticId::MissingValue.to_string(), "missing-value");
+    assert_eq!(DiagnosticId::OrderViolation.to_string(), "order-violation");
+
+    assert_eq!(SchemaErrorKind::InvalidCapture.as_str(), "invalid-capture");
+    assert_eq!(SchemaErrorKind::InvalidOrder.as_str(), "invalid-order");
+    assert_eq!(
+        SchemaErrorKind::InvalidCapture.to_string(),
+        "invalid-capture"
+    );
+    assert_eq!(SchemaErrorKind::InvalidOrder.to_string(), "invalid-order");
+}
+
+/// Pins the new schema-node addresses: that a capture is addressed by its
+/// owning rule plus a name, an order entry by its owning rule plus a
+/// position, and a frontmatter capture by a name alone — its named scope is
+/// rooted at `fm`, not at any rule. The `Ord` these derive is what orders the
+/// side-car node map, so the addresses are compared here too.
+#[test]
+fn the_new_schema_node_addresses_are_constructible_and_ordered() {
+    use outlint_core::{
+        CaptureName, CapturePath, ConstraintIndex, ConstraintPath, OrderEntryPath, OrderIndex,
+        RuleIndex, RulePath, SchemaNode, ScopePath,
+    };
+
+    let rule = RulePath {
+        scope: ScopePath(vec![RuleIndex(0)]),
+        index: RuleIndex(1),
+    };
+    // §11.3 declaration order: rule, capture, frontmatter_capture,
+    // order_entry, constraint. The derived `Ord` follows it, and a variant
+    // appended rather than inserted would fail here.
+    assert!(
+        SchemaNode::Rule(rule.clone())
+            < SchemaNode::OrderEntry(OrderEntryPath {
+                rule: rule.clone(),
+                order_index: OrderIndex(0),
+            })
+    );
+    assert!(
+        SchemaNode::OrderEntry(OrderEntryPath {
+            rule,
+            order_index: OrderIndex(0),
+        }) < SchemaNode::Constraint(ConstraintPath {
+            scope: ScopePath(vec![RuleIndex(0)]),
+            index: ConstraintIndex(0),
+        })
+    );
+
+    // A `CapturePath` and a `SchemaNode::FrontmatterCapture` both need a
+    // validated `CaptureName`, which only the loader can make, so their field
+    // types are pinned by coercion rather than by construction.
+    let _: fn(&CapturePath) -> &RulePath = |path| &path.rule;
+    let _: fn(&CapturePath) -> &CaptureName = |path| &path.name;
+    let _: fn(&OrderEntryPath) -> OrderIndex = |path| path.order_index;
+    let _: fn(CaptureName) -> SchemaNode = SchemaNode::FrontmatterCapture;
+    let _: fn(CapturePath) -> SchemaNode = SchemaNode::Capture;
+}

@@ -518,8 +518,84 @@ pub(crate) fn sort_diagnostics(diagnostics: &mut [RenderedDiagnostic]) {
 mod tests {
     use super::{
         diagnostic_sort_key, line_column, sort_diagnostics, RenderedDiagnostic, RenderedLineRange,
-        RenderedLocation, RenderedMatcher, RenderedReference, RenderedTarget,
+        RenderedLocation, RenderedMatcher, RenderedReference, RenderedSchemaNode, RenderedTarget,
     };
+
+    /// The schema-node variant order is what the JSON total key compares
+    /// schema nodes by, and §11.3 fixes it. Appending a variant instead of
+    /// inserting it where §11.3 lists it would silently reorder diagnostics
+    /// that tie on every earlier tier, so the order is asserted rather than
+    /// left to whoever edits the enum next.
+    #[test]
+    fn schema_node_variants_are_ordered_as_the_json_contract_lists_them() {
+        let rule_coordinates = || (vec![0_usize], 1_usize);
+        let (scope, index) = rule_coordinates();
+        let declaration_order = [
+            RenderedSchemaNode::Title,
+            RenderedSchemaNode::Frontmatter,
+            RenderedSchemaNode::FrontmatterSchemaDeclaration,
+            RenderedSchemaNode::FrontmatterSchemaDocument,
+            RenderedSchemaNode::Rule {
+                scope: scope.clone(),
+                index,
+            },
+            RenderedSchemaNode::Capture {
+                scope: scope.clone(),
+                index,
+                name: "version".into(),
+            },
+            RenderedSchemaNode::FrontmatterCapture {
+                name: "version".into(),
+            },
+            RenderedSchemaNode::OrderEntry {
+                scope: scope.clone(),
+                index,
+                order_index: 0,
+            },
+            RenderedSchemaNode::Constraint { scope, index },
+        ];
+        for pair in declaration_order.windows(2) {
+            assert!(pair[0] < pair[1], "out of §11.3 order: {pair:#?}");
+        }
+    }
+
+    /// The same argument for references: the compatibility pair keeps its
+    /// position ahead of the final §11.3 kinds, so cutting production over
+    /// later cannot permute an existing result's diagnostics.
+    #[test]
+    fn reference_variants_keep_the_compatibility_pair_ahead_of_the_final_kinds() {
+        let declaration_order = [
+            RenderedReference::Rule {
+                anchor: "current_scope",
+                path: vec!["a".into()],
+                matcher: RenderedMatcher::Any,
+            },
+            RenderedReference::Frontmatter {
+                path: vec!["a".into()],
+                equals: None,
+            },
+            RenderedReference::ResolvedRule {
+                locator: "a".into(),
+                anchor: "current_scope",
+                path: vec!["a".into()],
+                positions: None,
+                matcher: RenderedMatcher::Any,
+            },
+            RenderedReference::FrontmatterQuery {
+                locator: "fm[$.a]".into(),
+                query: "$.a".into(),
+                equals: None,
+            },
+            RenderedReference::FrontmatterCapture {
+                locator: "fm.a".into(),
+                name: "a".into(),
+                value_type: "text".into(),
+            },
+        ];
+        for pair in declaration_order.windows(2) {
+            assert!(pair[0] < pair[1], "out of declaration order: {pair:#?}");
+        }
+    }
 
     #[test]
     fn source_positions_are_one_based_byte_columns() {
