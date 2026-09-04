@@ -83,13 +83,42 @@ outlint check rollout.md --format json
 ```
 
 ```json
-{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":2}
+{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":3}
 ```
+
+The envelope is exactly version `3`. There is no version 2 and no
+compatibility mode: consumers must read `version` and reject a value they do
+not support instead of assuming the older reference shape.
 
 Every diagnostic carries a `target` object tagged by `kind`: `header`,
 `missing_header`, `document`, or `frontmatter`. They stay distinct because
 the text they carry has different provenance — a `missing_header` matcher is
 schema text that may occur nowhere in the document.
+
+Where a diagnostic names the schema locators it evaluated, it also carries
+`references`. Each entry is tagged by `kind` and keeps the locator's
+original spelling in `locator`:
+
+- `rule` — `anchor` (`current_scope` or `schema_root`), the `path` of
+  declared names, an optional `positions` array aligned with `path` giving
+  each step's `[i]` or null, and the rule's `matcher`. Position values are
+  JSON integers of arbitrary size and must not be assumed to fit 64 bits.
+- `frontmatter_query` — the `query` inside `fm[...]` without the wrapper,
+  plus an `equals` object of `type` and `value` when the locator spelled an
+  equality literal.
+- `frontmatter_capture` — the capture's `name` and its declared `type`.
+
+Typed Values diagnostics are located in the schema through `schema_node`,
+which adds the `capture`, `frontmatter_capture`, and `order_entry` kinds to
+the existing ones. Section 11.3 of the specification is the normative shape;
+every member listed there appears only when the corresponding semantic data
+exists.
+
+In human output, an `invalid-value` names the responsible capture or
+frontmatter query and the type that was expected, and an `order-violation`
+names the capture, the declared direction, and both values of the offending
+adjacent pair. As with all human output, that wording is presentation and
+may change between releases; parse `--format json` instead.
 
 Schemas can be checked on their own:
 
@@ -196,7 +225,10 @@ key. Human output may order or group diagnostics differently for readability.
 
 Validation output goes to stdout. Usage errors and failures to read or locate
 inputs go to stderr. If both diagnostics and an operational error occur,
-Outlint reports both and exits with status 2.
+Outlint reports both and exits with status 2. A frontmatter `fm[...]` query
+whose result cannot be evaluated in full is such an operational error, not a
+diagnostic: the document has no verdict, and Outlint reports that rather than
+a partial diagnostic set that would read like a cleaner document than it is.
 
 ## Exit codes
 

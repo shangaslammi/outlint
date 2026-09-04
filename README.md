@@ -140,6 +140,9 @@ options:
 frontmatter:
   required: true
   schema: ./frontmatter.schema.json   # delegated JSON Schema (draft 2020-12)
+  captures:                           # typed values outlint itself consumes
+    released: { path: "$.release.date", type: date, required: true }
+    draft: { type: bool }
 
 title: "*"                     # the h1: any text, exactly one
 
@@ -149,7 +152,7 @@ sections:
     required: true             # 1..1
     strict: true               # unmatched children are diagnostics
     sections:
-      - match: "Goals"         # auto-id: goals
+      - match: "Goals"         # default id: goals
         required: true
   - id: api
     match: "/API: .+/"         # regex, anchored to the whole header text
@@ -157,8 +160,18 @@ sections:
   - id: changelog
     match: "Changelog"
     required: false            # 0..1
+    sections:
+      - id: release
+        match: '/\[(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\] - (?<date>\d{4}-\d{2}-\d{2})/'
+        repeat: "1..n"
+        captures: { version: semver, date: date }   # typed named groups
+        order:                                      # newest release first
+          - { by: version, dir: desc, strict: true }
+          - { by: date, dir: desc }
   - id: history
     match: "History"
+    required: false
+  - match: "Deprecated"        # default id: deprecated
     required: false
   - match: "Appendix *"        # glob
     required: false
@@ -168,6 +181,9 @@ sections:
 constraints:
   - one_of: [changelog, history]
   - requires: { if: api, then: overview }
+  - requires: { if: "fm[$.status]=deprecated", then: deprecated }
+  - requires: { if: fm.released, then: changelog }
+  - conflicts: { if: fm.draft, then_not: deprecated }
 ```
 
 The pieces:
@@ -185,19 +201,63 @@ The pieces:
 - **Order.** Rules bind in document order by default: the list above says
   Overview comes before the API sections, which come before Changelog. Set
   `ordered: false` on a rule (or `options.ordered_sections: false` for
-  every scope) where sections may come in any order.
+  every scope) where sections may come in any order. That orders one rule
+  against another; ordering the repeated matches of a single rule is a
+  rule's own `order` list, below.
+- **Typed values.** A regex rule can declare its named groups as typed
+  captures (`captures: { version: semver, date: date }`), and
+  `frontmatter.captures` exports typed values from the frontmatter mapping,
+  each with a `type`, an optional `$`-rooted singular JSONPath `path`
+  defaulting to the capture name, and an optional `required`. The type set
+  is closed: `int`, `bool`, `date`, `semver`, `dotted`, and `text`. Values
+  are parsed, never coerced — unquoted `version: 1.2` is a YAML float and so
+  is not a `semver` — and a value that fails its type's spelling, YAML kind,
+  calendar, or numeric bound is `invalid-value`. A frontmatter capture
+  declared `required: true` whose value is absent is `missing-value`.
+- **Value order.** A rule's `order` list orders that rule's own repeated
+  matches by one of its captures: `by` names the capture, `dir` is `asc` or
+  `desc`, and `strict: true` demands uniqueness as well. Entries are
+  independent single-key orders, not a multi-key sort, and each parent
+  section binds its own sequence, so occurrences under different parents are
+  never compared. Every violating adjacent pair is one `order-violation`. If
+  any selected value in a sequence is invalid, that entry reports no
+  ordering for that scope, because skipping the bad value would invent an
+  adjacency between its neighbours.
 - **Constraints.** `one_of`, `any_of`, `at_most_one`, `all_or_none`,
-  `requires`, `conflicts`, and `ordered` relate rules addressed by id, at
-  the schema root or inside any rule's scope; `ordered` spells a partial
-  order, or any order inside a scope declared `ordered: false`.
+  `requires`, `conflicts`, and `ordered` relate *locators*, at the schema
+  root or inside any rule's scope; `ordered` spells a partial order, or any
+  order inside a scope declared `ordered: false`. A locator is a name path:
+  `deployment.rollback-plan` reads relative to the scope the constraint is
+  attached to, `$.overview.goals` from the outermost scope, and `[i]`
+  narrows a step to its i-th match (`$.release[0]`). Name steps are joined
+  with `.` and structural steps with `/` — `/text`, a heading's own text, is
+  the one such step this version allocates — and a name step may never
+  follow a structural one. Every non-terminal step must be singular, by
+  declared cardinality or by `[i]`; only the last step may stay plural. A
+  locator that ends in a rule id is a proposition, satisfied when it matches
+  at least one header; an outline locator ending in a captured or intrinsic
+  value is a value, not automatically a proposition, and is rejected where a
+  proposition is required.
 - **Frontmatter.** outlint checks presence (`required`, `allow`) and
-  delegates value validation to either a self-contained inline JSON Schema or
-  a linked JSON Schema whose path is relative to the Outlint schema file.
-  Inline schemas may use fragment-only references; linked schemas may use
-  local multi-file reference graphs. Constraints can reference frontmatter with
-  `fm.` propositions — `fm.key` for presence of a non-null value,
-  `fm.key=value` for typed scalar equality, dotted paths for nested
-  mappings — e.g. `requires: { if: fm.status=deprecated, then: migration }`.
+  delegates structural validation to either a self-contained inline JSON
+  Schema or a linked JSON Schema whose path is relative to the Outlint schema
+  file. Inline schemas may use fragment-only references; linked schemas may
+  use local multi-file reference graphs. `frontmatter.captures` is the
+  complementary mechanism: it exports typed singular values rather than
+  validating shape. Constraints address frontmatter two ways. `fm[...]`
+  wraps one complete RFC 9535 JSONPath query over the frontmatter mapping —
+  bare, it is a typed boolean read satisfied only by a `true` result, while
+  `fm[$.status]=deprecated` is existential, type-preserving equality over
+  the non-null result nodes. Results are always evaluated in full, and
+  duplicate result nodes are collapsed by identity. Child name, index, and
+  wildcard segments are the portable *guaranteed core*; slices, descendant
+  segments, filters, multiple selectors in one segment, and functions are
+  admitted but *vendor-tier*, so their behavior depends on the
+  implementation's JSONPath provider. `fm.<name>`, by contrast, names a
+  capture declared under `frontmatter.captures` and is checked when the
+  schema loads, so a typo is `unresolved-ref` rather than a quietly false
+  test. It is not a dynamic YAML-key lookup: the former `fm.key=value`
+  spelling is invalid, and a document key is queried as `fm[$.key]=value`.
 
 A document with several `h1` parts drops the `title:` sugar for the general
 form: `outline:` is a list of the same rule objects, one level up,
@@ -220,7 +280,7 @@ document with no `h1` at all.
 
 Schema mistakes are diagnostics too, with their own stable ids
 (`duplicate-id`, `unresolved-ref`, `invalid-matcher`, `invalid-repeat`,
-`ordered-scope-mismatch`, …).
+`invalid-capture`, `invalid-order`, `ordered-scope-mismatch`, …).
 
 ## CLI
 
@@ -275,17 +335,42 @@ outlint check rollout.md --format json
 ```
 
 ```json
-{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":2}
+{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":3}
 ```
+
+The envelope is exactly version `3`. There is no version 2 mode and no
+compatibility switch: a consumer must read `version` and reject anything it
+does not understand rather than assume the older reference shape.
 
 Every diagnostic carries a `target` saying what it is about, tagged by
 `kind`: `header` (a header the document has, as a `path` array),
 `missing_header` (a section the schema requires, as the `parent` path it
 belongs under plus the schema's `matcher` label), `document`, or
-`frontmatter` (with the block's `line_range` and, when a JSON Schema
-rejected one value, its `pointer`). The kinds are distinct because their
-text has different provenance — a `missing_header` matcher is schema text
-that may appear nowhere in the document.
+`frontmatter` (with the block's `line_range` and, when a JSON Schema or a
+typed value rejected one entry, its `pointer`). The kinds are distinct
+because their text has different provenance — a `missing_header` matcher is
+schema text that may appear nowhere in the document.
+
+Where a diagnostic names the schema locators it evaluated, it carries
+`references`, a tagged union of three `kind`s, each keeping the locator's
+original spelling in `locator`:
+
+- `rule` — the resolved outline locator: its `anchor` (`current_scope` or
+  `schema_root`), the `path` of declared names, an optional `positions`
+  array aligned with `path` holding each step's `[i]` or null, and the
+  target rule's `matcher`. Positions are JSON integers of arbitrary size;
+  consumers must not assume they fit in 64 bits.
+- `frontmatter_query` — the `query` inside `fm[...]` without the wrapper,
+  plus `equals` (as `type` and `value`) when the locator spelled an equality
+  literal.
+- `frontmatter_capture` — the capture's `name` and its declared `type`.
+
+Diagnostics from Typed Values are located in the schema like any other:
+`schema_node` gains the `capture`, `frontmatter_capture`, and `order_entry`
+kinds alongside the existing ones such as `rule` and `constraint`, so an
+`invalid-value` or `order-violation` points at the declaration that produced
+it. Each structured member appears only where the corresponding semantic
+data exists and is omitted otherwise.
 
 **JSON diagnostic order.** Within each JSON result, diagnostics have a fixed
 total order: source line, then byte column, then diagnostic id, then
