@@ -44,7 +44,8 @@ fn fm_truth(markdown: &str, locator: &str, match_case: bool) -> (Truth, Vec<Stri
         &proposition,
         match_case,
         &mut invalid,
-    );
+    )
+    .expect("these queries are all within the §4.6 resource limit");
     (truth, invalid)
 }
 

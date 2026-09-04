@@ -8,6 +8,7 @@ mod frontmatter;
 mod frontmatter_values;
 mod ordering;
 mod prepare;
+mod query_limits;
 mod value_order;
 
 use crate::validator::{validate, Diagnostic, DiagnosticId, DiagnosticTarget};

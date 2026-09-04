@@ -53,7 +53,7 @@ pub(crate) use self::jsonpath::{AbsoluteSingularPath, FrontmatterQueryLocator};
 // per document; `SingularComponent` is what frontmatter capture evaluation
 // walks, and re-exporting it is what keeps that walk from reparsing a §2.3
 // path's RFC escapes for itself.
-pub(crate) use self::jsonpath::{PreparedQuery, SingularComponent};
+pub(crate) use self::jsonpath::{PreparedQuery, QueryLimitExceeded, SingularComponent};
 pub(crate) use self::syntax::{
     parse_locator, FrontmatterCaptureLocator, LocatorAnchor, LocatorPosition, LocatorSource,
     ParsedLocator, UnboundOutlineLocator,

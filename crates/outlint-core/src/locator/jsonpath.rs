@@ -69,7 +69,11 @@ impl FullQuerySource {
     /// is a bug to report, not to crash on.
     pub(crate) fn prepare(&self) -> Result<PreparedQuery, QueryParseError> {
         JsonPath::parse(&self.0)
-            .map(PreparedQuery)
+            .map(|query| PreparedQuery {
+                query,
+                source: self.0.clone(),
+                fanout: QueryFanout::of(&self.0),
+            })
             .map_err(QueryParseError::from_provider)
     }
 }
@@ -85,11 +89,21 @@ impl fmt::Display for FullQuerySource {
 /// The provider type is private to this wrapper and appears in no signature
 /// this module offers, so nothing outside can reach `NormalizedPath`,
 /// `to_json_pointer`, or any other provider rendering.
+///
+/// The fan-out is counted once here rather than per document: it is a
+/// property of the query's spelling, and the document supplies only the two
+/// numbers it is applied to.
 #[derive(Debug)]
-pub(crate) struct PreparedQuery(JsonPath);
+pub(crate) struct PreparedQuery {
+    query: JsonPath,
+    /// Retained for the operational failure's message, which has to name the
+    /// query a reader must rewrite.
+    source: Box<str>,
+    fanout: QueryFanout,
+}
 
 impl PreparedQuery {
-    /// Evaluates the query against one frontmatter view.
+    /// Evaluates the query against one frontmatter view, or refuses.
     ///
     /// §4.6: "Implementations MUST evaluate the complete result and MUST NOT
     /// silently truncate it." The provider's located result is taken whole and
@@ -97,8 +111,347 @@ impl PreparedQuery {
     /// caller that only needs to know whether *some* node is `true` still
     /// evaluates every node — which is what makes §4.6's `invalid-value`
     /// suppression reachable rather than short-circuited away.
-    pub(crate) fn evaluate<'a>(&self, document: &'a Value) -> LocatedNodeSet<'a> {
-        LocatedNodeSet::from_provider(&self.0.query_located(document))
+    ///
+    /// The one thing that may happen instead is refusing to start. §4.6
+    /// provides for it — "if an implementation-specific resource limit
+    /// prevents completion, validation has not produced a document verdict and
+    /// the CLI MUST surface an operational error (§11.5), not a partial
+    /// diagnostic set" — and [`QueryFanout`] explains what the limit is and why
+    /// it cannot reach a guaranteed-core query. The check happens *before* the
+    /// provider is called, because the blow-up it guards against happens inside
+    /// the provider's own evaluation, where nothing Outlint owns could stop it.
+    ///
+    /// A second check follows the evaluation. It is unreachable if the estimate
+    /// is sound, which is the point of having it: were the estimate ever wrong,
+    /// the result would still not be copied into owned paths and the document
+    /// would still get no verdict, rather than the wrongness becoming a
+    /// resource problem one layer further on.
+    pub(crate) fn evaluate<'a>(
+        &self,
+        document: &'a Value,
+    ) -> Result<LocatedNodeSet<'a>, QueryLimitExceeded> {
+        let shape = DocumentShape::of(document);
+        let budget = shape.budget();
+        let estimate = self.fanout.estimated_nodes(shape);
+        if estimate > budget {
+            return Err(QueryLimitExceeded {
+                query: self.source.clone(),
+                nodes: estimate,
+                budget,
+                stage: LimitStage::BeforeEvaluation,
+            });
+        }
+        let located = self.query.query_located(document);
+        let produced = located.len() as u64;
+        if produced > budget {
+            return Err(QueryLimitExceeded {
+                query: self.source.clone(),
+                nodes: produced,
+                budget,
+                stage: LimitStage::AfterEvaluation,
+            });
+        }
+        Ok(LocatedNodeSet::from_provider(&located))
+    }
+}
+
+/// The node ceiling a query's result is held to (§4.6).
+///
+/// It is a floor, not a cap on the document: [`DocumentShape::budget`] raises
+/// it to the document's own node count whenever that is larger, which is what
+/// makes the guarantee below hold at every document size.
+const MAX_QUERY_RESULT_NODES: u64 = 100_000;
+
+/// The two numbers a document contributes to the fan-out estimate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DocumentShape {
+    /// Every value in the document, containers included.
+    nodes: u64,
+    /// The longest root-to-leaf chain, counting the root as 1.
+    depth: u32,
+}
+
+impl DocumentShape {
+    /// A shape stated outright, for a test that needs a document larger than
+    /// one it would care to build.
+    #[cfg(test)]
+    pub(crate) const fn new(nodes: u64, depth: u32) -> Self {
+        Self { nodes, depth }
+    }
+
+    /// Every value the document holds, containers included.
+    #[cfg(test)]
+    pub(crate) const fn nodes(self) -> u64 {
+        self.nodes
+    }
+
+    /// Counts one document. Iterative, so a deep document costs stack the
+    /// walk owns rather than stack the thread has.
+    pub(crate) fn of(document: &Value) -> Self {
+        let mut nodes = 0_u64;
+        let mut depth = 0_u32;
+        let mut pending = vec![(document, 1_u32)];
+        while let Some((value, level)) = pending.pop() {
+            nodes = nodes.saturating_add(1);
+            depth = depth.max(level);
+            match value {
+                Value::Array(items) => {
+                    pending.extend(items.iter().map(|item| (item, level.saturating_add(1))));
+                }
+                Value::Object(members) => {
+                    pending.extend(
+                        members
+                            .values()
+                            .map(|member| (member, level.saturating_add(1))),
+                    );
+                }
+                _ => {}
+            }
+        }
+        Self { nodes, depth }
+    }
+
+    /// The largest result this document admits from any one query.
+    ///
+    /// The floor at the document's own node count is what makes the
+    /// guaranteed-core guarantee structural rather than numeric: a core query
+    /// has a fan-out of 1, so its estimate is exactly `nodes`, which can never
+    /// exceed a budget that is at least `nodes`. There is no document size at
+    /// which a core query starts being refused, and no special case saying so.
+    pub(crate) fn budget(self) -> u64 {
+        self.nodes.max(MAX_QUERY_RESULT_NODES)
+    }
+}
+
+/// How far one query can multiply a document's nodes (§4.6).
+///
+/// **What is being bounded.** Every node of an intermediate result is a
+/// *trace*: a document node together with the choices that reached it. The
+/// number of distinct nodes is the document's own node count, so the size of
+/// any intermediate result is at most `nodes × traces-per-node`, and it is the
+/// traces that a query can multiply without bound. `$.a[0,0][0,0]...` is the
+/// pure case — every segment selects the same node twice, so the distinct set
+/// stays at one node while the located list doubles per segment.
+///
+/// **Where traces come from.** Four constructs, each counted from the query's
+/// own spelling:
+///
+/// - A bracketed segment with *s* selectors multiplies traces by at most *s*.
+///   One selector cannot: a name or index selects one child, and a wildcard or
+///   slice selects each child once, so both add distinct nodes rather than
+///   traces.
+/// - A descendant segment lets a node be reached from any ancestor that is in
+///   the input list, so it multiplies traces by at most the document's depth.
+/// - A filter re-runs its inner queries once per candidate. A relative (`@`)
+///   inner query walks only that candidate's subtree, so summed over the
+///   candidates it costs another depth factor; an absolute (`$`) one is
+///   re-evaluated against the whole document per candidate, which costs a
+///   factor of the node count.
+///
+/// **What it guarantees.** A guaranteed-core query is child segments with one
+/// selector each and no filters, so every factor is 1 and its estimate is the
+/// document's node count exactly — under any budget floored at that count, it
+/// is never refused, at any document size. That is the §4.6 promise the limit
+/// must not touch.
+///
+/// **What it costs.** Deliberate over-estimation. The bound assumes every
+/// choice reaches every node, which no real query does, so it refuses some
+/// vendor-tier queries whose true cost would have been affordable. §4.6 gives
+/// vendor-tier constructs no conformance or portability guarantee and
+/// explicitly provides for an implementation-specific limit, so refusing with
+/// an operational error is a supported outcome; silently spending gigabytes is
+/// not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QueryFanout {
+    /// Product of the selector counts of every bracketed segment.
+    selectors: u64,
+    /// Descendant segments, wherever they appear — inside a filter included.
+    descendants: u32,
+    /// Filter selectors whose inner queries are all relative.
+    relative_filters: u32,
+    /// Filter selectors containing an absolute inner query.
+    absolute_filters: u32,
+}
+
+impl QueryFanout {
+    /// Counts one query's constructs from its source.
+    ///
+    /// The source has already been accepted by the provider, so this scans a
+    /// well-formed query and never has to decide validity. It reads only what
+    /// the four factors above need — bracket nesting, selector commas outside
+    /// function arguments, `..`, `?`, and `$` — and it honours both quote
+    /// forms with their escapes, because every one of those characters is
+    /// ordinary text inside a name selector or a string literal.
+    pub(crate) fn of(source: &str) -> Self {
+        /// What the scan is in the middle of, exactly as the wrapper scan
+        /// upstream defines it.
+        enum State {
+            Bare,
+            Quoted(char),
+            Escaped(char),
+        }
+
+        /// One open bracketed segment.
+        #[derive(Default)]
+        struct Segment {
+            commas: u64,
+            filter: bool,
+            absolute: bool,
+        }
+
+        let mut fanout = Self {
+            selectors: 1,
+            descendants: 0,
+            relative_filters: 0,
+            absolute_filters: 0,
+        };
+        let mut state = State::Bare;
+        let mut segments: Vec<Segment> = Vec::new();
+        // Function arguments are comma-separated too, and their commas
+        // separate no selectors.
+        let mut parentheses = 0_u32;
+        let mut after_dot = false;
+
+        for character in source.chars() {
+            state = match (state, character) {
+                (State::Quoted(quote), '\\') => State::Escaped(quote),
+                (State::Escaped(quote), _) => State::Quoted(quote),
+                (State::Quoted(quote), character) if character == quote => State::Bare,
+                (State::Quoted(quote), _) => State::Quoted(quote),
+                (State::Bare, quote @ ('\'' | '"')) => State::Quoted(quote),
+                (State::Bare, character) => {
+                    match character {
+                        '.' => {
+                            // `..` is the only place two dots meet: a float
+                            // literal has one, and no other construct spells
+                            // a dot at all.
+                            if after_dot {
+                                fanout.descendants = fanout.descendants.saturating_add(1);
+                                after_dot = false;
+                            } else {
+                                after_dot = true;
+                            }
+                            State::Bare
+                        }
+                        '[' => {
+                            after_dot = false;
+                            segments.push(Segment::default());
+                            State::Bare
+                        }
+                        ']' => {
+                            after_dot = false;
+                            if let Some(segment) = segments.pop() {
+                                fanout.selectors = fanout
+                                    .selectors
+                                    .saturating_mul(segment.commas.saturating_add(1));
+                                if segment.filter {
+                                    if segment.absolute {
+                                        fanout.absolute_filters =
+                                            fanout.absolute_filters.saturating_add(1);
+                                    } else {
+                                        fanout.relative_filters =
+                                            fanout.relative_filters.saturating_add(1);
+                                    }
+                                }
+                            }
+                            State::Bare
+                        }
+                        '(' => {
+                            after_dot = false;
+                            parentheses = parentheses.saturating_add(1);
+                            State::Bare
+                        }
+                        ')' => {
+                            after_dot = false;
+                            parentheses = parentheses.saturating_sub(1);
+                            State::Bare
+                        }
+                        ',' => {
+                            after_dot = false;
+                            if parentheses == 0 {
+                                if let Some(segment) = segments.last_mut() {
+                                    segment.commas = segment.commas.saturating_add(1);
+                                }
+                            }
+                            State::Bare
+                        }
+                        '?' => {
+                            after_dot = false;
+                            if let Some(segment) = segments.last_mut() {
+                                segment.filter = true;
+                            }
+                            State::Bare
+                        }
+                        '$' => {
+                            after_dot = false;
+                            // The query's own root `$` is outside every
+                            // bracket; one inside a bracket is an absolute
+                            // query nested in a filter.
+                            if let Some(segment) = segments.last_mut() {
+                                segment.absolute = true;
+                            }
+                            State::Bare
+                        }
+                        _ => {
+                            after_dot = false;
+                            State::Bare
+                        }
+                    }
+                }
+            };
+        }
+        fanout
+    }
+
+    /// The largest result the query could produce from a document of this
+    /// shape.
+    pub(crate) fn estimated_nodes(self, shape: DocumentShape) -> u64 {
+        let depth = u64::from(shape.depth);
+        let traces = self
+            .selectors
+            .saturating_mul(depth.saturating_pow(self.descendants))
+            .saturating_mul(depth.saturating_pow(self.relative_filters))
+            .saturating_mul(shape.nodes.saturating_pow(self.absolute_filters));
+        shape.nodes.saturating_mul(traces)
+    }
+}
+
+/// A query this implementation declines to evaluate against this document.
+///
+/// §4.6 makes this an operational failure rather than a diagnostic: the
+/// document has no verdict. It carries the query so a reader knows which one
+/// to rewrite, and both numbers so the refusal can be argued with rather than
+/// merely obeyed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueryLimitExceeded {
+    query: Box<str>,
+    nodes: u64,
+    budget: u64,
+    stage: LimitStage,
+}
+
+/// Which of the two checks refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LimitStage {
+    /// The estimate refused before the provider was called.
+    BeforeEvaluation,
+    /// The result itself was over the budget, which the estimate should have
+    /// foreseen.
+    AfterEvaluation,
+}
+
+impl fmt::Display for QueryLimitExceeded {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let verb = match self.stage {
+            LimitStage::BeforeEvaluation => "could produce up to",
+            LimitStage::AfterEvaluation => "produced",
+        };
+        write!(
+            formatter,
+            "the frontmatter query `{}` {verb} {} result nodes, above this implementation's \
+             limit of {} for one query (specification §4.6); the document has no verdict",
+            self.query, self.nodes, self.budget
+        )
     }
 }
 

@@ -1436,6 +1436,7 @@ mod located_paths {
             .prepare()
             .expect("a query that parsed must prepare")
             .evaluate(document)
+            .expect("these queries are all within the §4.6 resource limit")
     }
 
     /// The node set as `(normalized path, value)` pairs, sorted by path.
@@ -1794,5 +1795,111 @@ mod located_paths {
             let expected = json!(1);
             prop_assert_eq!(document.pointer(&path.render_pointer()), Some(&expected));
         }
+    }
+}
+
+/// The §4.6 resource limit: what it counts, and what it promises not to reach.
+///
+/// The estimate is deliberately an over-estimate — it assumes every selector
+/// choice reaches every node — so these pin the two things that matter about
+/// it: that it counts the constructs which really do multiply a result, and
+/// that its arithmetic cannot reach a guaranteed-core query at any document
+/// size.
+mod query_limits {
+    use crate::locator::jsonpath::{DocumentShape, QueryFanout};
+
+    /// A document far larger than any frontmatter, for stating the guarantee
+    /// at a size no fixture could reach.
+    const HUGE: DocumentShape = DocumentShape::new(1_000_000_000, 64);
+
+    fn estimate(query: &str, shape: DocumentShape) -> u64 {
+        QueryFanout::of(query).estimated_nodes(shape)
+    }
+
+    #[test]
+    fn a_guaranteed_core_query_can_never_exceed_the_budget() {
+        // §4.6's core is child segments carrying one name, index, or wildcard
+        // selector each. One selector cannot multiply: a name or index picks
+        // one child, and a wildcard or slice picks each child once, which adds
+        // distinct nodes rather than repeats. So a core query's estimate is
+        // the document's own node count, and the budget never falls below it.
+        for query in [
+            "$",
+            "$.a",
+            "$.a.b.c.d.e.f",
+            "$['a']['b']",
+            "$[0][1][2]",
+            "$.*",
+            "$[*][*][*][*][*][*][*][*][*][*]",
+            "$.a[*].b[3].c",
+        ] {
+            assert_eq!(estimate(query, HUGE), HUGE.nodes(), "{query}");
+            assert!(estimate(query, HUGE) <= HUGE.budget(), "{query}");
+        }
+    }
+
+    #[test]
+    fn the_budget_never_falls_below_the_documents_own_node_count() {
+        // Which is what makes the guarantee above hold at every size rather
+        // than up to some threshold.
+        for nodes in [0, 1, 1_000, 100_000, 10_000_000_000] {
+            let shape = DocumentShape::new(nodes, 8);
+            assert!(shape.budget() >= nodes, "{nodes}");
+        }
+    }
+
+    #[test]
+    fn repeated_selectors_in_one_segment_multiply_the_estimate() {
+        // The attack this limit exists for: `[0,0]` selects the same node
+        // twice, so the located list doubles per segment while the distinct
+        // set stays at one node.
+        let shape = DocumentShape::new(10, 4);
+        assert_eq!(estimate("$.a[0,0]", shape), 20);
+        assert_eq!(estimate("$.a[0,0][0,0]", shape), 40);
+        assert_eq!(estimate("$.a[0,0][0,0][0,0]", shape), 80);
+        assert!(estimate(&format!("$.a{}", "[0,0]".repeat(30)), shape) > shape.budget());
+        // A union of distinct names multiplies the same way, because the
+        // count is what the estimate can see.
+        assert_eq!(estimate("$['a','b','c']", shape), 30);
+    }
+
+    #[test]
+    fn a_comma_that_separates_no_selector_is_not_counted() {
+        // Both kinds: a comma inside a name selector, and one between
+        // function arguments. Neither adds a selector to its segment.
+        let shape = DocumentShape::new(10, 4);
+        assert_eq!(estimate("$['a,b']", shape), 10);
+        assert_eq!(estimate("$[\"a,b,c,d\"]", shape), 10);
+        assert_eq!(estimate("$[?match(@.a, 'x,y')]", shape), 40);
+        // The escape keeps the quote inside the name rather than closing it,
+        // so the comma after it is still name text.
+        assert_eq!(estimate(r"$['a\',b']", shape), 10);
+    }
+
+    #[test]
+    fn descendant_segments_are_charged_the_documents_depth() {
+        // A descendant segment lets one node be reached from any ancestor in
+        // the input list, so it multiplies traces by at most the depth.
+        let shape = DocumentShape::new(10, 4);
+        assert_eq!(estimate("$..a", shape), 40);
+        assert_eq!(estimate("$..a..b", shape), 160);
+        // Wherever it appears, a nested query inside a filter included: the
+        // scan counts constructs, not top-level segments.
+        assert!(estimate("$[?count($..a) > 0]", shape) > estimate("$[?count($.a) > 0]", shape));
+    }
+
+    #[test]
+    fn a_filter_is_charged_by_the_reach_of_its_inner_queries() {
+        // A relative inner query walks only the candidate's own subtree, so
+        // summed over the candidates it costs another depth factor. An
+        // absolute one is re-run against the whole document per candidate,
+        // which costs a factor of the node count.
+        let shape = DocumentShape::new(100, 4);
+        assert_eq!(estimate("$[?@.draft]", shape), 400);
+        assert_eq!(estimate("$[?$.draft == @.x]", shape), 10_000);
+        assert!(estimate("$[?$.draft == @.x]", shape) > estimate("$[?@.draft]", shape));
+        // The query's own root `$` is outside every bracket and is not one of
+        // these.
+        assert_eq!(estimate("$.a.b", shape), 100);
     }
 }

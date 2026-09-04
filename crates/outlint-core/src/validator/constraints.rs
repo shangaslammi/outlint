@@ -1,6 +1,6 @@
 //! Truth evaluation of constraints over a bound scope tree.
 
-use crate::locator::PreparedQuery;
+use crate::locator::{PreparedQuery, QueryLimitExceeded};
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
     BoundRuleStep, Constraint, ConstraintPath, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
@@ -78,20 +78,22 @@ pub(super) fn frontmatter_query_truth(
     proposition: &ResolvedFrontmatterQuery,
     match_case: bool,
     invalid: &mut Vec<String>,
-) -> Truth {
+) -> Result<Truth, QueryLimitExceeded> {
     // §4.6: "If the block is `invalid-frontmatter`, the query is unevaluated
     // and the entire containing constraint is suppressed."
     if block_is_invalid {
-        return Truth::Suppressed;
+        return Ok(Truth::Suppressed);
     }
     // §4.6: "If the block is absent, the query produces an empty result: a
     // bare boolean read is unsatisfied, and an equality proposition is
     // unsatisfied."
     let Some(document) = root else {
-        return Truth::Unsatisfied;
+        return Ok(Truth::Unsatisfied);
     };
-    let nodes = prepared.evaluate(document);
-    match proposition.equals() {
+    // §4.6's resource limit. Refusing here is the only outcome besides a
+    // complete result: nothing below ever sees a partial one.
+    let nodes = prepared.evaluate(document)?;
+    Ok(match proposition.equals() {
         // §4.6: "A bare `fm[...]` is a typed boolean read, not a presence
         // test. It is satisfied iff at least one result node is the YAML/JSON
         // boolean `true`."
@@ -121,7 +123,7 @@ pub(super) fn frontmatter_query_truth(
         Some(expected) => Truth::from_bool(nodes.iter().any(|(_, value)| {
             !value.is_null() && frontmatter_scalar_equals(value, expected, match_case)
         })),
-    }
+    })
 }
 
 /// Typed equality between a frontmatter value and a resolved literal.
@@ -182,27 +184,32 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
     /// decisive earlier one still has to be evaluated, both because its
     /// suppression must reach this constraint and because evaluating it is
     /// what produces its own primary diagnostics (§4.6).
+    ///
+    /// The one thing that can stop it short is §4.6's resource limit, which
+    /// is not a truth value: it says the document has no verdict at all, so
+    /// the operands still unevaluated no longer have anything to contribute
+    /// and returning early is not the short-circuiting §5.3 forbids.
     pub(super) fn constraint_evaluation(
         self,
         constraint: &Constraint,
         node: &ConstraintPath,
-    ) -> ConstraintEvaluation<'s, 'd> {
+    ) -> Result<ConstraintEvaluation<'s, 'd>, QueryLimitExceeded> {
         let mut resolved = Resolved::new(node.clone());
         let truth = match constraint {
             Constraint::OneOf(refs) => {
-                let values = resolved.propositions(self, refs.iter());
+                let values = resolved.propositions(self, refs.iter())?;
                 combine(&values, |satisfied| count(satisfied) == 1)
             }
             Constraint::AnyOf(refs) => {
-                let values = resolved.propositions(self, refs.iter());
+                let values = resolved.propositions(self, refs.iter())?;
                 combine(&values, |satisfied| count(satisfied) >= 1)
             }
             Constraint::AtMostOne(refs) => {
-                let values = resolved.propositions(self, refs.iter());
+                let values = resolved.propositions(self, refs.iter())?;
                 combine(&values, |satisfied| count(satisfied) <= 1)
             }
             Constraint::AllOrNone(refs) => {
-                let values = resolved.propositions(self, refs.iter());
+                let values = resolved.propositions(self, refs.iter())?;
                 combine(&values, |satisfied| {
                     count(satisfied) == 0 || count(satisfied) == satisfied.len()
                 })
@@ -212,7 +219,7 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                 consequences,
             } => {
                 let values = resolved
-                    .propositions(self, std::iter::once(condition).chain(consequences.iter()));
+                    .propositions(self, std::iter::once(condition).chain(consequences.iter()))?;
                 combine(&values, |satisfied| {
                     let (condition, consequences) = satisfied
                         .split_first()
@@ -225,7 +232,7 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                 exclusions,
             } => {
                 let values = resolved
-                    .propositions(self, std::iter::once(condition).chain(exclusions.iter()));
+                    .propositions(self, std::iter::once(condition).chain(exclusions.iter()))?;
                 combine(&values, |satisfied| {
                     let (condition, exclusions) = satisfied
                         .split_first()
@@ -271,11 +278,11 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
         } = resolved;
         occurrences.sort_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
         occurrences.dedup_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
-        ConstraintEvaluation {
+        Ok(ConstraintEvaluation {
             truth,
             occurrences,
             pending,
-        }
+        })
     }
 
     /// Walks a bound locator's steps to its terminal occurrence list, or
@@ -458,14 +465,18 @@ impl<'s, 'd> Resolved<'s, 'd> {
         &mut self,
         context: EvalCtx<'s, 'd>,
         propositions: impl Iterator<Item = &'p Proposition>,
-    ) -> Vec<Truth> {
+    ) -> Result<Vec<Truth>, QueryLimitExceeded> {
         propositions
             .map(|proposition| self.proposition(context, proposition))
             .collect()
     }
 
-    fn proposition(&mut self, context: EvalCtx<'s, 'd>, proposition: &Proposition) -> Truth {
-        match proposition {
+    fn proposition(
+        &mut self,
+        context: EvalCtx<'s, 'd>,
+        proposition: &Proposition,
+    ) -> Result<Truth, QueryLimitExceeded> {
+        Ok(match proposition {
             // §4.5: an outline locator ending in a rule id "is satisfied iff
             // its terminal node list is non-empty. Positional narrowing does
             // not change that definition."
@@ -473,22 +484,26 @@ impl<'s, 'd> Resolved<'s, 'd> {
                 Some(found) => Truth::from_bool(!found.is_empty()),
                 None => Truth::Suppressed,
             },
-            Proposition::FrontmatterQuery(proposition) => self.query(context, proposition),
+            Proposition::FrontmatterQuery(proposition) => self.query(context, proposition)?,
             // §4.6's `fm.<name>`, answered from the state the capture
             // evaluation retained rather than from the diagnostics it
             // produced.
             Proposition::FrontmatterCapture(reference) => {
                 context.frontmatter.truth(reference.name())
             }
-        }
+        })
     }
 
     /// Evaluates one `fm[...]` proposition, keeping the primaries it raises.
-    fn query(&mut self, context: EvalCtx<'s, 'd>, proposition: &ResolvedFrontmatterQuery) -> Truth {
+    fn query(
+        &mut self,
+        context: EvalCtx<'s, 'd>,
+        proposition: &ResolvedFrontmatterQuery,
+    ) -> Result<Truth, QueryLimitExceeded> {
         let Some(prepared) = context.queries.get(proposition.query()) else {
             // Unreachable: preparation compiled every query the schema
             // spells, and this plan was built from that schema.
-            return Truth::Unsatisfied;
+            return Ok(Truth::Unsatisfied);
         };
         let mut invalid = Vec::new();
         let truth = frontmatter_query_truth(
@@ -498,7 +513,7 @@ impl<'s, 'd> Resolved<'s, 'd> {
             proposition,
             context.match_case,
             &mut invalid,
-        );
+        )?;
         let message = format!(
             "the frontmatter query `{}` selects a value that is not a `bool`: a bare \
              `fm[...]` reads a boolean rather than testing presence",
@@ -525,7 +540,7 @@ impl<'s, 'd> Resolved<'s, 'd> {
                 self.pending.push(diagnostic);
             }
         }
-        truth
+        Ok(truth)
     }
 
     /// Resolves one locator, retaining the occurrences it named.
