@@ -707,21 +707,44 @@ pub enum Constraint {
         /// Propositions forbidden whenever the condition is satisfied.
         exclusions: NonEmpty<Proposition>,
     },
-    /// Every occurrence of each satisfied ref must precede every occurrence of
-    /// the next satisfied ref (`last(A) < first(B)`).
+    /// Compatibility: every occurrence of each satisfied ref must precede
+    /// every occurrence of the next satisfied ref (`last(A) < first(B)`), in
+    /// the pre-Typed-Values [`RuleRef`] form.
     ///
     /// Frontmatter propositions are excluded because they have no document
     /// position among headers.
     Ordered(AtLeastTwo<RuleRef>),
+    /// Final: the same §5.1 ordering over bound outline locators.
+    ///
+    /// §5.1 admits a positional subscript on any step and requires every
+    /// listed locator to terminate in a rule id within one concrete scope,
+    /// neither of which [`RuleRef`] can spell. This is what the loader
+    /// builds; [`Self::Ordered`] is retained only until the compatibility
+    /// model is removed.
+    OrderedLocators(AtLeastTwo<ResolvedRuleLocator>),
 }
 
 /// A proposition accepted by presence constraints.
+///
+/// The enum currently holds two generations at once, exactly as
+/// [`DiagnosticReference`] does. [`Self::Rule`] and [`Self::Frontmatter`] are
+/// the **compatibility** forms, which nothing builds once constraint binding
+/// has cut over; [`Self::ResolvedRule`] is the first of the **final** forms,
+/// one per §4.5/§4.6 proposition kind. The compatibility pair is removed with
+/// the rest of the legacy reference model.
+///
+/// [`DiagnosticReference`]: crate::DiagnosticReference
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Proposition {
-    /// Presence of a concrete rule path in the section tree.
+    /// Compatibility: presence of a concrete rule path in the section tree,
+    /// in the pre-Typed-Values [`RuleRef`] form.
     Rule(RuleRef),
-    /// Presence or typed equality of a value in document frontmatter.
+    /// Compatibility: presence or typed equality of a value in document
+    /// frontmatter, in the pre-Typed-Values [`FrontmatterRef`] form.
     Frontmatter(FrontmatterRef),
+    /// Final: an outline locator terminating at a rule id (§4.5), satisfied
+    /// iff its terminal node list is non-empty.
+    ResolvedRule(ResolvedRuleLocator),
 }
 
 /// A normalized `fm.` frontmatter proposition.
@@ -903,7 +926,7 @@ impl ResolvedOutlineLocator {
 }
 
 /// A bound outline locator terminating at a rule id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedRuleLocator {
     source: crate::locator::LocatorSource,
     anchor: RefAnchor,

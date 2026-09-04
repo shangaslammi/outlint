@@ -2,8 +2,19 @@ use super::{error_kinds, invalid, source_slice, valid};
 use crate::CanonicalInteger;
 use crate::{
     Constraint, FrontmatterKey, FrontmatterRef, FrontmatterScalar, NonEmpty, Proposition,
-    SchemaErrorKind,
+    RefAnchor, ResolvedRuleLocator, Schema, SchemaErrorKind,
 };
+
+/// The bound rule locator a root `any_of`'s first operand holds.
+fn first_rule_locator(schema: &Schema) -> &ResolvedRuleLocator {
+    let Constraint::AnyOf(items) = &schema.outline[0].constraints[0] else {
+        panic!("expected any_of")
+    };
+    let Proposition::ResolvedRule(locator) = &items.first else {
+        panic!("expected a bound rule proposition")
+    };
+    locator
+}
 
 #[test]
 fn resolves_constraints_and_normalizes_frontmatter_scalars() {
@@ -12,6 +23,7 @@ fn resolves_constraints_and_normalizes_frontmatter_scalars() {
 version: 1
 sections:
   - match: Overview
+    required: false
     sections:
       - match: Goals
   - match: Deployment
@@ -19,9 +31,34 @@ constraints:
   - requires: { if: deployment, then: [$.overview.goals, fm.count=0x10] }
 "#,
     );
-    let Constraint::Requires { consequences, .. } = &schema.outline[0].constraints[0] else {
+    let Constraint::Requires {
+        condition,
+        consequences,
+    } = &schema.outline[0].constraints[0]
+    else {
         panic!("expected requires")
     };
+    // The outline operands are bound locators: each id resolved to a
+    // structural index, and the spelling the author wrote is retained.
+    let Proposition::ResolvedRule(locator) = condition else {
+        panic!("expected a bound rule proposition")
+    };
+    assert_eq!(locator.locator(), "deployment");
+    assert_eq!(locator.anchor(), RefAnchor::CurrentScope);
+    assert_eq!(locator.steps().first.index().0, 1);
+    let Proposition::ResolvedRule(nested) = &consequences.first else {
+        panic!("expected a bound rule proposition")
+    };
+    assert_eq!(nested.locator(), "$.overview.goals");
+    assert_eq!(nested.anchor(), RefAnchor::SchemaRoot);
+    assert_eq!(
+        nested
+            .steps()
+            .iter()
+            .map(|step| step.id().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        ["overview", "goals"]
+    );
     assert_eq!(
         consequences.rest[0],
         Proposition::Frontmatter(FrontmatterRef {
@@ -83,6 +120,8 @@ constraints:
 
 #[test]
 fn checks_constraint_lexemes_even_when_a_rule_cannot_be_built() {
+    // §4.4 makes invalid locator syntax `invalid-document-shape`, and syntax
+    // is the only question answerable with no schema to bind against.
     let kinds = error_kinds(
         r#"
 version: 1
@@ -96,10 +135,23 @@ constraints:
         kinds,
         vec![
             SchemaErrorKind::InvalidMatcher,
-            SchemaErrorKind::UnresolvedRef,
-            SchemaErrorKind::UnresolvedRef
+            SchemaErrorKind::InvalidDocumentShape,
+            SchemaErrorKind::InvalidDocumentShape
         ]
     );
+    // Neither an unbindable name nor a duplicate identity is decidable
+    // without a schema, so the lexical pass claims neither: §4.4 puts both
+    // behind binding, and the only error left here is the matcher's.
+    let quiet = error_kinds(
+        r#"
+version: 1
+sections:
+  - match: /(?=invalid)/
+constraints:
+  - any_of: [nowhere, nowhere]
+"#,
+    );
+    assert_eq!(quiet, vec![SchemaErrorKind::InvalidMatcher]);
 }
 
 #[test]
@@ -113,6 +165,200 @@ constraints:
 "#,
     );
     assert!(kinds.contains(&SchemaErrorKind::InvalidDocumentShape));
+}
+
+#[test]
+fn unknown_and_reserved_keywords_are_refused_as_shape() {
+    // §5.5: reserving a word does not activate syntax, so every reserved
+    // spelling arrives as an ordinary unknown keyword.
+    for keyword in [
+        "equal-values",
+        "subset-values",
+        "select",
+        "sequence",
+        "numbered",
+    ] {
+        let kinds = error_kinds(&format!(
+            "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
+             constraints:\n  - {keyword}: [a, b]\n"
+        ));
+        assert_eq!(
+            kinds,
+            vec![SchemaErrorKind::InvalidDocumentShape],
+            "`{keyword}` must be an unknown keyword"
+        );
+    }
+}
+
+#[test]
+fn relative_and_absolute_spellings_of_one_rule_duplicate() {
+    // §5.4: outline locators "duplicate when they resolve to the same
+    // declared rule steps with the same positional subscripts", whichever
+    // anchor reached them.
+    let kinds = error_kinds(
+        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: [a, \"$.a\"]\n",
+    );
+    assert_eq!(kinds, vec![SchemaErrorKind::DuplicateRef]);
+    // A subscript is part of that identity, so two different ones do not
+    // duplicate, and a subscripted spelling does not duplicate a bare one.
+    valid(
+        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+         - any_of: [\"a[0]\", \"a[1]\"]\n",
+    );
+    valid(
+        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+         - any_of: [a, \"a[0]\"]\n",
+    );
+    // Duplicate detection spans a whole implication, `if` included.
+    let across = error_kinds(
+        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  \
+         - requires: { if: a, then: [b, \"$.a\"] }\n",
+    );
+    assert_eq!(across, vec![SchemaErrorKind::DuplicateRef]);
+}
+
+#[test]
+fn a_name_step_resolves_only_in_its_own_named_scope() {
+    // §4.4: "A name step resolves only in the current named scope. There is
+    // no implicit upward or downward search."
+    let upward = error_kinds(
+        "version: 1\nsections:\n  - id: outer\n    match: Outer\n    required: false\n    \
+         sections:\n      - id: inner\n        match: Inner\n    constraints:\n      \
+         - any_of: [inner, outer]\n",
+    );
+    assert_eq!(upward, vec![SchemaErrorKind::UnresolvedRef]);
+    let downward = error_kinds(
+        "version: 1\nsections:\n  - id: outer\n    match: Outer\n    required: false\n    \
+         sections:\n      - id: inner\n        match: Inner\nconstraints:\n  \
+         - any_of: [inner, outer]\n",
+    );
+    assert_eq!(downward, vec![SchemaErrorKind::UnresolvedRef]);
+}
+
+#[test]
+fn a_position_keeps_arbitrary_precision() {
+    // §4.4 gives `i` "no upper bound" and forbids work proportional to its
+    // value, so the digits survive binding without meeting a machine integer.
+    let digits = "1".repeat(400);
+    let schema = valid(&format!(
+        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  \
+         - any_of: [\"a[{digits}]\", b]\n"
+    ));
+    assert_eq!(
+        first_rule_locator(&schema).steps().first.position_digits(),
+        Some(digits)
+    );
+}
+
+#[test]
+fn only_the_terminal_step_may_stay_plural() {
+    // §4.4: "Every non-terminal step MUST be singular [...] Only the terminal
+    // step may remain plural"; `[i]` makes any step singular.
+    let source = "version: 1\nsections:\n  - id: many\n    match: M\n    sections:\n      \
+                  - id: kid\n        match: K\n  - id: other\n    match: O\nconstraints:\n  \
+                  - any_of: [{locator}, other]\n";
+    assert_eq!(
+        error_kinds(&source.replace("{locator}", "many.kid")),
+        vec![SchemaErrorKind::InvalidDocumentShape]
+    );
+    valid(&source.replace("{locator}", "\"many[0].kid\""));
+    // A terminal repeated rule is legal on its own.
+    valid(&source.replace("{locator}", "many"));
+    // A singular ancestor needs no subscript.
+    valid(
+        "version: 1\nsections:\n  - id: one\n    match: M\n    required: false\n    sections:\n   \
+         \x20  - id: kid\n        match: K\n  - id: other\n    match: O\nconstraints:\n  \
+         - any_of: [one.kid, other]\n",
+    );
+}
+
+#[test]
+fn value_terminals_bind_but_are_not_propositions() {
+    // §4.5: "Locators ending in a capture or intrinsic value are value
+    // locators and are not propositions in this version." Reaching the
+    // context error is itself proof that `/text` bound; `/label` never does.
+    let bound = invalid(
+        "version: 1\nsections:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    \
+         match: B\nconstraints:\n  - any_of: [a/text, b]\n",
+    );
+    assert_eq!(bound.errors.rest.len(), 0);
+    assert_eq!(
+        bound.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
+    assert!(bound.errors.first.message.contains("`/text` intrinsic"));
+    // §4.4: other structural kinds "remain unallocated", so they never bind.
+    let label = error_kinds(
+        "version: 1\nsections:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    \
+         match: B\nconstraints:\n  - any_of: [a/label, b]\n",
+    );
+    assert_eq!(label, vec![SchemaErrorKind::UnresolvedRef]);
+    // The rule in front of `/text` is non-terminal and takes the singularity
+    // check like any other, so a repeatable one is refused before the context.
+    let plural = invalid(
+        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
+         constraints:\n  - any_of: [a/text, b]\n",
+    );
+    assert_eq!(
+        plural.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
+    assert!(plural.errors.first.message.contains("repeatable rule `a`"));
+}
+
+#[test]
+fn ordered_refuses_value_terminals_with_its_own_error() {
+    // §5.1: "Mixing scopes, terminating in a frontmatter or typed value, or
+    // otherwise lacking header position is schema error
+    // `ordered-scope-mismatch`."
+    let text = error_kinds(
+        "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  \
+         - id: b\n    match: B\nconstraints:\n  - ordered: [a/text, b]\n",
+    );
+    assert_eq!(text, vec![SchemaErrorKind::OrderedScopeMismatch]);
+    let frontmatter = error_kinds(
+        "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  \
+         - id: b\n    match: B\nconstraints:\n  - ordered: [fm.draft, b]\n",
+    );
+    assert_eq!(frontmatter, vec![SchemaErrorKind::OrderedScopeMismatch]);
+}
+
+#[test]
+fn ordered_compares_concrete_parent_scopes() {
+    let source = "version: 1\nsections:\n  - id: part\n    match: Part\n    ordered: false\n    \
+                  sections:\n      - id: x\n        match: X\n      - id: y\n        match: Y\n\
+                  constraints:\n  - ordered: [{first}, {second}]\n";
+    // One concrete scope: the same occurrence of a repeatable ancestor.
+    valid(
+        &source
+            .replace("{first}", "\"part[0].x\"")
+            .replace("{second}", "\"part[0].y\""),
+    );
+    // Two occurrences are two scopes, and "before" has no meaning across them.
+    assert_eq!(
+        error_kinds(
+            &source
+                .replace("{first}", "\"part[0].x\"")
+                .replace("{second}", "\"part[1].y\"")
+        ),
+        vec![SchemaErrorKind::OrderedScopeMismatch]
+    );
+    // §5.1: "a bare terminal rule MAY remain plural", and a terminal
+    // subscript is welcome in an unordered scope.
+    valid(
+        "version: 1\nsections:\n  - id: part\n    match: Part\n    required: true\n    \
+         ordered: false\n    sections:\n      - id: x\n        match: X\n      - id: y\n        \
+         match: Y\n    constraints:\n      - ordered: [\"x[0]\", y]\n",
+    );
+    // The terminal subscript is part of the ordered identity too.
+    assert_eq!(
+        error_kinds(
+            "version: 1\nsections:\n  - id: part\n    match: Part\n    required: true\n    \
+             ordered: false\n    sections:\n      - id: x\n        match: X\n      - id: y\n      \
+             \x20 match: Y\n    constraints:\n      - ordered: [\"x[0]\", \"x[0]\"]\n",
+        ),
+        vec![SchemaErrorKind::DuplicateRef]
+    );
 }
 
 #[test]

@@ -1053,6 +1053,6 @@ fn constraint_id(constraint: &Constraint) -> DiagnosticId {
         Constraint::AllOrNone(_) => DiagnosticId::AllOrNone,
         Constraint::Requires { .. } => DiagnosticId::Requires,
         Constraint::Conflicts { .. } => DiagnosticId::Conflicts,
-        Constraint::Ordered(_) => DiagnosticId::Ordered,
+        Constraint::Ordered(_) | Constraint::OrderedLocators(_) => DiagnosticId::Ordered,
     }
 }

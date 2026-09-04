@@ -2,7 +2,8 @@
 
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
-    Constraint, FrontmatterRef, FrontmatterScalar, Proposition, RefAnchor, RuleRef, SectionRule,
+    BoundRuleStep, Constraint, FrontmatterRef, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
+    ResolvedRuleLocator, RuleRef, SectionRule,
 };
 
 use super::diagnostic::DiagnosticReference;
@@ -127,28 +128,36 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                         .iter()
                         .all(|proposition| !self.proposition_satisfied(proposition))
             }
-            Constraint::Ordered(refs) => {
-                let satisfied = refs
-                    .iter()
-                    .map(|reference| self.resolve_occurrences(reference))
-                    .filter(|occurrences| !occurrences.is_empty())
-                    .collect::<Vec<_>>();
-                satisfied
-                    .iter()
-                    .zip(satisfied.iter().skip(1))
-                    .all(|(left, right)| {
-                        let last_left = left
-                            .iter()
-                            .map(|occurrence| occurrence.section.heading.location.range.start.0)
-                            .max();
-                        let first_right = right
-                            .iter()
-                            .map(|occurrence| occurrence.section.heading.location.range.start.0)
-                            .min();
-                        matches!((last_left, first_right), (Some(left), Some(right)) if left < right)
-                    })
-            }
+            Constraint::Ordered(refs) => self.ordered_satisfied(
+                refs.iter()
+                    .map(|reference| self.resolve_occurrences(reference)),
+            ),
+            Constraint::OrderedLocators(refs) => self.ordered_satisfied(
+                refs.iter()
+                    .map(|locator| self.resolve_bound_occurrences(locator)),
+            ),
         }
+    }
+
+    /// §5.1's pairwise `last(A) < first(B)` over the non-empty terminal lists.
+    fn ordered_satisfied(self, lists: impl Iterator<Item = Vec<&'s BoundSection<'d>>>) -> bool {
+        let satisfied = lists
+            .filter(|occurrences| !occurrences.is_empty())
+            .collect::<Vec<_>>();
+        satisfied
+            .iter()
+            .zip(satisfied.iter().skip(1))
+            .all(|(left, right)| {
+                let last_left = left
+                    .iter()
+                    .map(|occurrence| occurrence.section.heading.location.range.start.0)
+                    .max();
+                let first_right = right
+                    .iter()
+                    .map(|occurrence| occurrence.section.heading.location.range.start.0)
+                    .min();
+                matches!((last_left, first_right), (Some(left), Some(right)) if left < right)
+            })
     }
 
     fn proposition_satisfied(self, proposition: &Proposition) -> bool {
@@ -157,7 +166,58 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
             Proposition::Frontmatter(reference) => {
                 frontmatter_satisfied(self.frontmatter, reference, self.match_case)
             }
+            // §4.5: an outline locator ending in a rule id "is satisfied iff
+            // its terminal node list is non-empty. Positional narrowing does
+            // not change that definition."
+            Proposition::ResolvedRule(locator) => {
+                !self.resolve_bound_occurrences(locator).is_empty()
+            }
         }
+    }
+
+    /// Walks a bound locator's steps to its terminal occurrence list.
+    ///
+    /// Binding already resolved every name to a structural index, so this
+    /// walks indices rather than searching ids a second time, and applies each
+    /// step's `[i]` through the kernel's one checked conversion.
+    fn resolve_bound_occurrences(self, locator: &ResolvedRuleLocator) -> Vec<&'s BoundSection<'d>> {
+        let (start_scope, start_rules) = match locator.anchor() {
+            RefAnchor::CurrentScope => (self.current, self.current_rules),
+            RefAnchor::SchemaRoot => (self.root, self.root_rules),
+        };
+        let mut candidate_scopes = vec![(start_scope, start_rules)];
+        let mut found = Vec::new();
+        let steps: &NonEmpty<BoundRuleStep> = locator.steps();
+        let last = steps.rest.len();
+        for (position, step) in steps.iter().enumerate() {
+            found.clear();
+            let mut next_scopes = Vec::new();
+            for (candidate, candidate_rules) in std::mem::take(&mut candidate_scopes) {
+                let index = step.index().0;
+                let Some(rule) = candidate_rules.get(index) else {
+                    continue;
+                };
+                let matched = candidate
+                    .occurrences
+                    .iter()
+                    .filter(|occurrence| occurrence.rule_index == index)
+                    .collect::<Vec<_>>();
+                // §4.4: "`[i]` then retains only the i-th result in document
+                // order, or the empty list if it does not exist."
+                let selected = match step.position() {
+                    Some(subscript) => subscript.select(&matched).copied().into_iter().collect(),
+                    None => matched,
+                };
+                for occurrence in selected {
+                    found.push(occurrence);
+                    next_scopes.push((&occurrence.child, &rule.sections[..]));
+                }
+            }
+            if position < last {
+                candidate_scopes = next_scopes;
+            }
+        }
+        found
     }
 
     fn resolve_occurrences(self, reference: &RuleRef) -> Vec<&'s BoundSection<'d>> {
@@ -231,6 +291,11 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                     occurrences.extend(self.resolve_occurrences(reference));
                 }
             }
+            Constraint::OrderedLocators(refs) => {
+                for locator in refs.iter() {
+                    occurrences.extend(self.resolve_bound_occurrences(locator));
+                }
+            }
         }
         occurrences.sort_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
         occurrences.dedup_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
@@ -279,6 +344,15 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                         })
                 }));
             }
+            Constraint::OrderedLocators(items) => {
+                references.extend(items.iter().filter_map(|locator| {
+                    self.rule_for_locator(locator)
+                        .map(|rule| DiagnosticReference::ResolvedRule {
+                            locator: locator.clone(),
+                            matcher: rule.matcher.clone(),
+                        })
+                }));
+            }
         }
         references
     }
@@ -295,7 +369,28 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
             Proposition::Frontmatter(reference) => {
                 Some(DiagnosticReference::Frontmatter(reference.clone()))
             }
+            Proposition::ResolvedRule(locator) => {
+                self.rule_for_locator(locator)
+                    .map(|rule| DiagnosticReference::ResolvedRule {
+                        locator: locator.clone(),
+                        matcher: rule.matcher.clone(),
+                    })
+            }
         }
+    }
+
+    /// The declared rule a bound locator's terminal step named.
+    fn rule_for_locator(self, locator: &ResolvedRuleLocator) -> Option<&'s SectionRule> {
+        let mut rules = match locator.anchor() {
+            RefAnchor::CurrentScope => self.current_rules,
+            RefAnchor::SchemaRoot => self.root_rules,
+        };
+        let mut target = None;
+        for step in locator.steps().iter() {
+            target = rules.get(step.index().0);
+            rules = &target?.sections;
+        }
+        target
     }
 
     fn rule_for_ref(self, reference: &RuleRef) -> Option<&'s SectionRule> {
@@ -316,8 +411,12 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
         proposition: &Proposition,
         output: &mut Vec<&'s BoundSection<'d>>,
     ) {
-        if let Proposition::Rule(reference) = proposition {
-            output.extend(self.resolve_occurrences(reference));
+        match proposition {
+            Proposition::Rule(reference) => output.extend(self.resolve_occurrences(reference)),
+            Proposition::ResolvedRule(locator) => {
+                output.extend(self.resolve_bound_occurrences(locator));
+            }
+            Proposition::Frontmatter(_) => {}
         }
     }
 }

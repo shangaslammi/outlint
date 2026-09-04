@@ -32,12 +32,13 @@
 //! rediscovered from a failure later. Where the provider is narrower than
 //! RFC 9535, the gap is pinned too, not papered over.
 
-// Nothing here is reachable from `lib.rs` yet: the loader and the validator
-// are wired to this module in a later lane, and until then every item in it
-// is dead in a non-test build. The allowance is stated once, for this private
-// module, rather than sprinkled over individual items — and never for the
-// crate, whose other modules must keep failing on genuinely dead code. It
-// comes out when the wiring lands.
+// The wiring into `lib.rs` lands one lane at a time: constraint binding names
+// the outline and frontmatter forms, capture declarations name the singular
+// path, and evaluation names the prepared query. Until the last of those
+// arrives, some items here are dead in a non-test build. The allowance is
+// stated once, for this private module, rather than sprinkled over individual
+// items — and never for the crate, whose other modules must keep failing on
+// genuinely dead code. It comes out when the wiring is complete.
 #![allow(dead_code)]
 
 mod jsonpath;
@@ -52,7 +53,8 @@ mod syntax;
 // rather than being opened wholesale.
 pub(crate) use self::jsonpath::{AbsoluteSingularPath, FrontmatterQueryLocator};
 pub(crate) use self::syntax::{
-    FrontmatterCaptureLocator, LocatorAnchor, LocatorPosition, LocatorSource,
+    parse_locator, FrontmatterCaptureLocator, LocatorAnchor, LocatorPosition, LocatorSource,
+    ParsedLocator, UnboundOutlineLocator,
 };
 
 #[cfg(test)]

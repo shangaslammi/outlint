@@ -155,8 +155,7 @@ case constraint-duplicate-ref
 case constraint-ordered-scope-mismatch
   source "version: 1\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n  - id: other\n    match: Other\nconstraints:\n  - ordered: [intro.deep, other]\n"
   verdict invalid
-  error ordered-scope-mismatch 0:151..180 "ordered: [intro.deep, other]\n" "ordered ref `intro.deep` passes through a repeatable ancestor"
-  error ordered-scope-mismatch 0:151..180 "ordered: [intro.deep, other]\n" "all ordered refs must resolve in the same scope"
+  error ordered-scope-mismatch 0:151..180 "ordered: [intro.deep, other]\n" "ref `intro.deep` descends through the repeatable rule `intro`; narrow that step with `[i]`"
 
 case constraint-not-a-mapping
   source "version: 1\nsections: []\nconstraints:\n  - nope\n"
