@@ -1,0 +1,53 @@
+{
+  "bool-false.md": [],
+  "bool-true.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "disabled-invalid.md": [],
+  "invalid-frontmatter.md": [
+    {
+      "id": "invalid-frontmatter",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 3 } }
+    }
+  ],
+  "invalid-version.md": [
+    {
+      "id": "invalid-value",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 3 }, "pointer": "/version" }
+    }
+  ],
+  "missing-version.md": [
+    {
+      "id": "missing-value",
+      "target": { "kind": "frontmatter", "line_range": { "start_line": 1, "end_line": 3 }, "pointer": "/version" }
+    }
+  ],
+  "nested-text.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "header", "path": ["Area"] }
+    }
+  ],
+  "no-frontmatter.md": [
+    {
+      "id": "missing-frontmatter",
+      "target": { "kind": "frontmatter" }
+    }
+  ],
+  "optional-absent.md": [],
+  "text-empty.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "version-present.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ]
+}

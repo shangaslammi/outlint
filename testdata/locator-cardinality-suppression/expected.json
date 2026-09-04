@@ -1,0 +1,34 @@
+{
+  "multiple-disabled.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ],
+  "multiple-first-ready.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    },
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Group B"] }
+    }
+  ],
+  "multiple-second-ready.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Group B"] }
+    }
+  ],
+  "single.md": [
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    },
+    {
+      "id": "requires",
+      "target": { "kind": "document" }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "multiple-invalid.md": [
+    {
+      "id": "invalid-value",
+      "target": { "kind": "header", "path": ["Release nope"] }
+    },
+    {
+      "id": "invalid-value",
+      "target": { "kind": "header", "path": ["Release nope"] }
+    },
+    {
+      "id": "invalid-value",
+      "target": { "kind": "header", "path": ["Count 9223372036854775808"] }
+    },
+    {
+      "id": "invalid-value",
+      "target": { "kind": "header", "path": ["Flag TRUE"] }
+    }
+  ],
+  "pass.md": []
+}
