@@ -2,12 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::typed_value::{ParseFailure, TypedValue};
+use crate::typed_value::{
+    parse_header, BoundComponent, ParseFailure, ResolvedYamlKind, TypedValue, ValueType,
+};
 use crate::{
-    ByteOffset, CaptureName, Cardinality, Constraint, ConstraintIndex, ConstraintPath, Document,
-    DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, HeaderLevel, Heading,
-    HeadingLocation, Matcher, OutlineProvenance, RuleIndex, RuleOutcome, Schema, SchemaNode,
-    ScopePath, Section, SectionRule, TextRange, UpperBound,
+    ByteOffset, CaptureName, CapturePath, Cardinality, Constraint, ConstraintIndex, ConstraintPath,
+    Document, DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, HeaderLevel, Heading,
+    HeadingLocation, Matcher, OutlineProvenance, RuleIndex, RuleOutcome, RulePath, Schema,
+    SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
 };
 
 use super::constraints::EvalCtx;
@@ -581,6 +583,18 @@ impl<'a> Validator<'a> {
             if let Some(count) = counts.get_mut(rule_index) {
                 *count += 1;
             }
+            // §8 parses a matched header's declared captures before visiting
+            // its children, and §3.3 makes that the moment every declared
+            // capture is parsed — the one place a value is read, so that
+            // ordering, locators, and dependency suppression all read the
+            // same result rather than each recomputing it.
+            let captures = self.bind_rule_captures(
+                rule,
+                prepared_rule,
+                section,
+                &path,
+                &rule_path(schema_scope, rule_index),
+            );
             let child_refs = child_sections(section, &path);
             let mut child_scope_path = schema_scope.clone();
             child_scope_path.0.push(RuleIndex(rule_index));
@@ -599,9 +613,7 @@ impl<'a> Validator<'a> {
                 section,
                 path,
                 child,
-                // Populated by the capture-extraction lane; nothing is
-                // evaluated here.
-                captures: BTreeMap::new(),
+                captures,
             });
         }
 
@@ -631,6 +643,66 @@ impl<'a> Validator<'a> {
             });
         }
         BoundScope { occurrences }
+    }
+
+    /// Parses every capture the matched rule declares (§3.3, §2.4).
+    ///
+    /// One pass over the declarations, reading each named group out of one
+    /// match of the matcher input. Each substring is parsed into an owned
+    /// value immediately, so no regex result outlives this call, and the
+    /// outcome — value or failure — is retained for every declaration whether
+    /// or not anything reads it. §6.3 puts dependency suppression before
+    /// `outlint-disable` filtering, so the retained state is the record a
+    /// dependent check consults; whether the diagnostic below survives
+    /// filtering says nothing about it.
+    fn bind_rule_captures(
+        &mut self,
+        rule: &SectionRule,
+        prepared_rule: &PreparedRule,
+        section: &Section,
+        path: &HeaderPath,
+        rule_path: &RulePath,
+    ) -> BTreeMap<CaptureName, BoundValueState> {
+        if rule.captures.is_empty() {
+            return BTreeMap::new();
+        }
+        let groups = prepared_rule.matcher.named_groups(&section.heading.text);
+        let mut bound = BTreeMap::new();
+        for (name, declaration) in &rule.captures {
+            let value_type = declaration.value_type();
+            let state = match groups.get(name.as_str()) {
+                Some(source) => match parse_header(value_type, source) {
+                    Ok(value) => BoundValueState::Valid(value),
+                    Err(failure) => {
+                        // §6.2: `invalid-value` from a rule capture targets
+                        // the header whose capture is invalid and is
+                        // "attributed to that capture declaration".
+                        let message = rule_capture_message(name, value_type, source, &failure);
+                        self.emit_present(
+                            DiagnosticId::InvalidValue,
+                            path.clone(),
+                            &section.heading,
+                            Some(SchemaNode::Capture(CapturePath {
+                                rule: rule_path.clone(),
+                                name: name.clone(),
+                            })),
+                            &message,
+                        );
+                        BoundValueState::Invalid(failure)
+                    }
+                },
+                // Unreachable by construction: §2.2 admits only
+                // mandatory-participation groups, and the loader refuses a
+                // declaration whose group is enclosed by an alternation or a
+                // zero-minimum repetition. Were that ever to change, nothing
+                // was looked at here, so nothing is concluded — which every
+                // dependent check reads as a reason to stand down rather than
+                // as a value.
+                None => BoundValueState::Unevaluated,
+            };
+            bound.insert(name.clone(), state);
+        }
+        bound
     }
 
     /// Checks an ordered scope: every header an earlier accepting rule
@@ -909,11 +981,12 @@ pub(super) struct BoundSection<'d> {
     pub(super) child: BoundScope<'d>,
     /// What each capture this section's rule declares evaluated to.
     ///
-    /// Empty here and populated by the lane that extracts capture values:
-    /// nothing is extracted, parsed, or compared yet. It is stored on the
-    /// bound section rather than recomputed per check because §3.8 ordering,
-    /// value locators, and dependency suppression all read the same result
-    /// and must all read the *same* one.
+    /// Empty for a rule that declares none. It is stored on the bound section
+    /// rather than recomputed per check because §3.8 ordering, value
+    /// locators, and dependency suppression all read the same result and must
+    /// all read the *same* one.
+    // Written by capture extraction and read by the value ordering that lands
+    // on top of it.
     #[allow(dead_code)]
     pub(super) captures: BTreeMap<CaptureName, BoundValueState>,
 }
@@ -1042,6 +1115,99 @@ fn matcher_label(matcher: &Matcher) -> String {
         Matcher::Glob(pattern) => pattern.0.clone(),
         Matcher::Regex(pattern) => format!("/{}/", pattern.0),
         Matcher::Any => "*".into(),
+    }
+}
+
+/// The `invalid-value` wording for a rule capture (§6.2).
+///
+/// §6.2 requires the message to "identify the expected type and the
+/// responsible capture", so both open it; the reason follows.
+fn rule_capture_message(
+    name: &CaptureName,
+    value_type: ValueType,
+    source: &str,
+    failure: &ParseFailure,
+) -> String {
+    format!(
+        "capture `{name}` is not a valid `{}`: {}",
+        value_type.as_str(),
+        value_failure_reason(value_type, source, failure)
+    )
+}
+
+/// Why one source failed its declared type, in §2.4's terms.
+///
+/// The reason is a fact about the value and is the same whichever source
+/// supplied it; only the sentence around it says where the value came from.
+/// `source` is the exact spelling that was read, and is unused by the kind
+/// failure, which is about the shape of the node rather than its text.
+fn value_failure_reason(value_type: ValueType, source: &str, failure: &ParseFailure) -> String {
+    match failure {
+        ParseFailure::KindMismatch { expected, actual } => {
+            // §2.4: "diagnostics SHOULD suggest quoting this common mistake"
+            // — the unquoted `version: 1.2` that reads as a YAML float where
+            // a string-kinded type was declared.
+            let hint = if *expected == ResolvedYamlKind::String
+                && matches!(actual, ResolvedYamlKind::Integer | ResolvedYamlKind::Float)
+            {
+                ", so quote it to make it a YAML string"
+            } else {
+                ""
+            };
+            format!(
+                "the value is a YAML {} where a `{}` needs a YAML {}{hint}",
+                yaml_kind_name(*actual),
+                value_type.as_str(),
+                yaml_kind_name(*expected)
+            )
+        }
+        ParseFailure::Lexical => format!(
+            "`{source}` does not have the form a `{}` is written in",
+            value_type.as_str()
+        ),
+        ParseFailure::BoundOverflow { component } => match component {
+            BoundComponent::Int => {
+                format!("`{source}` is outside the signed 64-bit range an `int` allows")
+            }
+            BoundComponent::SemverMajor => {
+                format!("the major identifier of `{source}` is outside the unsigned 64-bit range")
+            }
+            BoundComponent::SemverMinor => {
+                format!("the minor identifier of `{source}` is outside the unsigned 64-bit range")
+            }
+            BoundComponent::SemverPatch => {
+                format!("the patch identifier of `{source}` is outside the unsigned 64-bit range")
+            }
+            BoundComponent::SemverPrerelease { index } => format!(
+                "pre-release identifier {} of `{source}` is outside the unsigned 64-bit range",
+                index + 1
+            ),
+            BoundComponent::DottedComponent { index } => format!(
+                "component {} of `{source}` is outside the unsigned 32-bit range",
+                index + 1
+            ),
+        },
+        ParseFailure::InvalidDate => {
+            format!("`{source}` names no day in the proleptic Gregorian calendar")
+        }
+        // §2.4: a build-metadata failure "MUST identify that suffix as the
+        // reason", so the suffix is named rather than described.
+        ParseFailure::BuildMetadata { suffix } => format!(
+            "`{source}` carries the build metadata `{suffix}`, which a `semver` does not admit"
+        ),
+    }
+}
+
+/// The §1.6 YAML kind's name as a diagnostic spells it.
+fn yaml_kind_name(kind: ResolvedYamlKind) -> &'static str {
+    match kind {
+        ResolvedYamlKind::Null => "null",
+        ResolvedYamlKind::Boolean => "boolean",
+        ResolvedYamlKind::Integer => "integer",
+        ResolvedYamlKind::Float => "finite decimal",
+        ResolvedYamlKind::String => "string",
+        ResolvedYamlKind::Sequence => "sequence",
+        ResolvedYamlKind::Mapping => "mapping",
     }
 }
 

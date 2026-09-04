@@ -104,6 +104,43 @@ fn inline_regex_flags_compose_with_match_case() {
 }
 
 #[test]
+fn only_a_regex_matcher_offers_named_groups() {
+    // §2.1 admits `captures` on a regex rule alone, and a glob's source is
+    // escaped wholesale before compilation, so its `(?<v>...)` is literal
+    // text rather than a group. Every non-regex form therefore answers with
+    // no group at all, whatever the input looks like.
+    let regex = PreparedMatcher::new(&Matcher::Regex(RegexPattern("V (?<v>.+)".into())), true)
+        .expect("test matcher compiles");
+    assert_eq!(regex.named_groups("V 1.0.0").get("v"), Some("1.0.0"));
+    // A name the pattern does not declare, and an input the pattern does not
+    // match, are both simply no group.
+    assert_eq!(regex.named_groups("V 1.0.0").get("other"), None);
+    assert_eq!(regex.named_groups("nothing").get("v"), None);
+
+    for matcher in [
+        Matcher::Exact(ExactText("V (?<v>.+)".into())),
+        Matcher::Glob(GlobPattern("V (?<v>*)".into())),
+        Matcher::Any,
+    ] {
+        let prepared = PreparedMatcher::new(&matcher, true).expect("test matcher compiles");
+        assert_eq!(prepared.named_groups("V 1.0.0").get("v"), None);
+    }
+}
+
+#[test]
+fn a_case_insensitive_group_selects_the_haystack_unfolded() {
+    // Case insensitivity is a flag on the compiled pattern, never a folded
+    // copy of the input, which is what lets §2.4 take a capture's source
+    // "before any case folding used to decide the match".
+    let matcher = PreparedMatcher::new(
+        &Matcher::Regex(RegexPattern("(?<name>release)".into())),
+        false,
+    )
+    .expect("test matcher compiles");
+    assert_eq!(matcher.named_groups("RELEASE").get("name"), Some("RELEASE"));
+}
+
+#[test]
 fn malformed_manually_constructed_regex_fails_preparation() {
     let mut schema = load_schema("version: 1\nsections: []\n")
         .expect("test schema is valid")

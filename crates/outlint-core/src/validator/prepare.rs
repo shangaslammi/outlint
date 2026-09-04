@@ -94,10 +94,20 @@ fn prepare_rules(
         .collect()
 }
 
+/// One rule's matcher, compiled.
+///
+/// The two regex-backed forms are separate variants rather than one
+/// `Pattern`, because only one of them can carry captures: §2.1 admits
+/// `captures` on a regex rule alone, and a glob's source is escaped
+/// wholesale, so it has no named group for any declaration to name. Keeping
+/// them apart means capture extraction asks the variant that can answer
+/// instead of running a group lookup against every matcher that happens to
+/// be regex-backed underneath.
 #[derive(Debug)]
 pub(super) enum PreparedMatcher {
     Exact { text: String, match_case: bool },
-    Pattern(regex::Regex),
+    Glob(regex::Regex),
+    Regex(regex::Regex),
     Any,
 }
 
@@ -108,12 +118,10 @@ impl PreparedMatcher {
                 text: exact.0.clone(),
                 match_case,
             },
-            Matcher::Glob(glob) => Self::Pattern(
+            Matcher::Glob(glob) => Self::Glob(
                 compile_glob_pattern(&glob.0, match_case).map_err(prepare_matcher_error)?,
             ),
-            Matcher::Regex(pattern) => {
-                Self::Pattern(compile_pattern(&pattern.0, match_case, false)?)
-            }
+            Matcher::Regex(pattern) => Self::Regex(compile_pattern(&pattern.0, match_case, false)?),
             Matcher::Any => Self::Any,
         })
     }
@@ -128,9 +136,51 @@ impl PreparedMatcher {
                 text: expected,
                 match_case: false,
             } => crate::case_fold::simple_eq(expected, text),
-            Self::Pattern(regex) => regex.is_match(text),
+            Self::Glob(regex) | Self::Regex(regex) => regex.is_match(text),
             Self::Any => true,
         }
+    }
+
+    /// The named groups this matcher binds in `text`, borrowed from `text`.
+    ///
+    /// §2.4 makes a capture's source "the case-preserving substring of the
+    /// §1.3 matcher input selected by the named group". `text` is that input
+    /// — the heading text the configured markup handling produced — and the
+    /// substrings are slices of it, so nothing is folded, rebuilt from the
+    /// pattern, or reconstructed by re-matching a normalized copy. Case
+    /// insensitivity lives in the compiled pattern's flag, never in the
+    /// haystack, which is what makes an unfolded slice the right answer.
+    ///
+    /// Every other matcher form yields no group. Only the caller knows which
+    /// names a schema declared, so nothing is decided here.
+    pub(super) fn named_groups<'t>(&self, text: &'t str) -> NamedGroups<'t> {
+        NamedGroups {
+            groups: match self {
+                Self::Regex(regex) => regex.captures(text),
+                Self::Exact { .. } | Self::Glob(_) | Self::Any => None,
+            },
+        }
+    }
+}
+
+/// The named capture groups one match bound.
+///
+/// The borrow is the matcher input's, not the regex's, and it is meant to be
+/// short: a caller reads each group and parses it into an owned
+/// [`crate::typed_value::TypedValue`] straight away, so no regex result is
+/// retained beside a bound section.
+pub(super) struct NamedGroups<'t> {
+    groups: Option<regex::Captures<'t>>,
+}
+
+impl<'t> NamedGroups<'t> {
+    /// The substring the group named `name` selected, or `None` when the
+    /// pattern has no such group or the group did not participate.
+    pub(super) fn get(&self, name: &str) -> Option<&'t str> {
+        self.groups
+            .as_ref()
+            .and_then(|groups| groups.name(name))
+            .map(|matched| matched.as_str())
     }
 }
 
