@@ -456,3 +456,199 @@ The same semantic case with `<!-- outlint-disable-file invalid-value -->`
 instead. The file-wide form of 6.3 reaches the diagnostic wherever it is
 anchored, and the dependency ordering is identical. Both forms are pinned
 because they are separate filtering paths.
+
+---
+
+## Group `locator-positions`
+
+Rules: `group` (`/Group .+/`, `0..n`) with optional child `ready`
+(exact `Ready`, `0..1`), and root `fallback` (exact `Fallback`, `0..1`).
+
+Constraints, all at the schema root, so every violation targets `document`
+under the sugar's single-h1 document voice (6.2 — this schema declares
+`title: null`, so no h1 exists to own the scope) and anchors at line 1:
+
+| # | Constraint |
+|---|---|
+| C1 | `requires: { if: "group[0]", then: "group[1]" }` |
+| C2 | `conflicts: { if: "group[0].ready", then_not: "group[1].ready" }` |
+| C3 | `any_of: ["group[184467440737095516160]", fallback]` |
+
+Load-time notes: `group[0]` and `group[1]` are not duplicate locators under
+5.4, which compares declared rule steps **together with** their positional
+subscripts; `any_of` has the two locators 5.4 requires; and each `[i]` makes
+its step singular, satisfying 4.4's singular-non-terminal rule for the
+`.ready` descents. 4.5: a locator ending in a rule id is satisfied iff its
+terminal node list is non-empty, and "positional narrowing does not change
+that definition".
+
+### `one-group.md` — expected exactly 1 diagnostic
+
+One `Group A` containing `Ready`; no second group; `Fallback` present.
+
+| Constraint | `if` | `then` / `then_not` | Verdict |
+|---|---|---|---|
+| C1 | `group[0]` → [Group A], satisfied | `group[1]` → [], unsatisfied | **violated** |
+| C2 | `group[0].ready` → [Ready], satisfied | `group[1].ready` → [] (descent from an empty list is empty), unsatisfied | satisfied — `conflicts` holds when `then_not` is unsatisfied |
+| C3 | — | `group[huge]` → [] ; `fallback` → [Fallback], satisfied | satisfied — `any_of` needs at least one |
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `requires` | D | 1 | line 1 col 1 |
+
+### `two-ready.md` — expected exactly 1 diagnostic
+
+Two groups, both containing `Ready`; `Fallback` present.
+
+| Constraint | Verdict |
+|---|---|
+| C1 | `group[1]` → [Group B], satisfied → constraint satisfied |
+| C2 | both `if` and `then_not` satisfied → **violated** |
+| C3 | `fallback` satisfied |
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `conflicts` | D | 1 | line 1 col 1 |
+
+Cardinality: `ready` is `0..1` and matches once **in each** group's own scope
+(3.1 binds scopes per parent), so no `too-many-sections`. `group` is `0..n`.
+
+### `position-pass.md` — expected `[]`
+
+Two groups; only the **second** contains `Ready`; `Fallback` present.
+
+| Constraint | Verdict |
+|---|---|
+| C1 | `group[1]` non-empty → satisfied |
+| C2 | `group[0].ready` → Group A has no `Ready` → [] → `if` unsatisfied → satisfied |
+| C3 | `fallback` satisfied |
+
+This is the discriminating case for position semantics: an implementation that
+ignored `[0]` and descended through every group would find `Ready` under Group
+B, satisfy C2's `if` and its `then_not`, and report a `conflicts` the document
+does not deserve.
+
+### `huge-out-of-range.md` — expected exactly 1 diagnostic
+
+Neither `Group` nor `Fallback` exists; the lone `Notes` heading matches no rule
+and is legal in the open root scope.
+
+| Constraint | Verdict |
+|---|---|
+| C1 | `group[0]` → [] → `if` unsatisfied → satisfied |
+| C2 | `if` unsatisfied → satisfied |
+| C3 | `group[184467440737095516160]` → [] ; `fallback` → [] → **violated** |
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `any_of` | D | 1 | line 1 col 1 |
+
+No `missing-section`: `fallback` is `0..1` and `group` is `0..n`, so a count of
+zero satisfies both minima.
+
+**Raw-record requirements for the huge index** (4.4, 11.3), to hand-review at
+activation:
+
+- the constraint's `references` entry for that locator has `kind: "rule"` and a
+  `positions` array aligned with `path`, carrying `184467440737095516160` as a
+  **JSON integer**, not a string and not a float;
+- the index selects nothing rather than erroring — magnitude is never an error;
+- evaluation is proportional to the spelling, never to the numeric value.
+
+---
+
+## Group `locator-cardinality-suppression`
+
+Rules: `group` (`/Group .+/`, **`required: false`** → `0..1`, hence statically
+singular) with optional child `ready`; root `notice` (`0..1`).
+
+| # | Constraint |
+|---|---|
+| C1 | `requires: { if: group.ready, then: notice }` — **unnarrowed** descent |
+| C2 | `requires: { if: "group[0].ready", then: notice }` — **narrowed** descent |
+
+Both bind at load: `group`'s effective maximum is one, so the bare `group` step
+is statically singular under 4.4. The two locators differ in their positional
+subscripts, so they are not duplicates under 5.4 (and they sit in separate
+constraints in any case). Both constraints target `document` and anchor at
+line 1, for the reason given under `locator-positions`.
+
+### `single.md` — expected exactly 2 diagnostics
+
+One `Group A` containing `Ready`; `Notice` absent. `group` matches once, within
+its `0..1` bound, so no cardinality failure and nothing is suppressed.
+
+| Constraint | `if` | `then` | Verdict |
+|---|---|---|---|
+| C1 | `group.ready` → [Ready], satisfied | `notice` → [], unsatisfied | violated |
+| C2 | `group[0].ready` → [Ready], satisfied | unsatisfied | violated |
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `requires` | D | **2** | line 1 col 1 (both) |
+
+**Multiplicity note.** Two distinct constraints produce two byte-identical
+portable entries; the portable projection keeps only `{id, target}` and does
+not carry the schema location that distinguishes them. Two entries therefore
+require exactly two diagnostics. The raw version 3 records must differ in
+`schema_node` (`kind: "constraint"`, different `index`) and in `references`,
+and that is where the distinction is reviewed.
+
+### `multiple-first-ready.md` — expected exactly 2 diagnostics
+
+Two groups; the **first** contains `Ready`; `Notice` absent.
+
+| id | target | multiplicity | anchor | reasoning |
+|---|---|---|---|---|
+| `too-many-sections` | H("Group B") | 1 | line 5 col 1 | `group` is `0..1` and matched twice; 6.2 targets the first header in excess of the bound |
+| `requires` | D | 1 | line 1 col 1 | from **C2** only |
+
+**C1 is suppressed.** 4.4: "an unnarrowed non-terminal locator step may be
+statically singular because its rule has effective maximum one. If that rule
+nevertheless matches several headers in a cardinality-violating concrete
+scope, `too-many-sections` stands and every constraint evaluation that depends
+on descending through that step is suppressed in that scope; it emits no
+constraint diagnostic." 5.3 adds that suppression applies to the whole boolean
+constraint without three-valued short-circuiting.
+
+**C2 is not.** 4.4: "A step narrowed with `[i]` does not depend on the rule's
+cardinality holding and remains evaluable." `group[0]` is Group A, whose
+`Ready` satisfies the `if`; `notice` is absent, so it violates.
+
+If both constraints reported, the count would be 3; if suppression were applied
+by rule rather than per locator, it would be 1. The expected count is exactly
+2, and the two entries carry different ids, so they are distinct.
+
+### `multiple-second-ready.md` — expected exactly 1 diagnostic
+
+Two groups; only the **second** contains `Ready`; `Notice` absent.
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `too-many-sections` | H("Group B") | 1 | line 3 col 1 |
+
+C1 is suppressed for the same reason as above. C2 evaluates and is
+**satisfied**: `group[0]` is Group A, which has no `Ready`, so the `if` is
+unsatisfied and `requires` holds vacuously. This separates position-zero
+semantics from mere evaluability — the previous fixture shows C2 firing, this
+one shows it correctly not firing.
+
+### `multiple-disabled.md` — expected exactly 1 diagnostic
+
+`multiple-first-ready.md` again, with
+`<!-- outlint-disable-file too-many-sections -->` at the top of the file.
+
+| id | target | multiplicity | anchor |
+|---|---|---|---|
+| `requires` | D | 1 | line 1 col 1 |
+
+The cardinality diagnostic is filtered. C1 remains suppressed and C2 remains
+evaluable: 4.4 says "This dependency is decided before the `outlint-disable`
+filtering of 6.3, so hiding `too-many-sections` does not make the descent
+evaluable", and 6.3 repeats it. Hiding a diagnostic must not change a verdict —
+if C1 re-entered, this document would report two `requires` and the fixture
+would fail on multiplicity alone.
+
+This document has no frontmatter block, so the disable comment can sit on the
+first line; the file-wide form of 6.3 applies from anywhere in the file
+regardless.
