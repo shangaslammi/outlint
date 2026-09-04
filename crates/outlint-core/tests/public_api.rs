@@ -2,7 +2,7 @@ use outlint_core::{
     load_schema, parse_markdown, validate, ByteOffset, Diagnostic, DiagnosticId, Document,
     DocumentFrontmatter, FrontmatterAnchors, FrontmatterLocation, HeaderPath, MarkdownOptions,
     Options, PrepareValidationError, PreparedValidator, Schema, SchemaError, TextRange,
-    ValidationError, ValidationOperationalError,
+    ValidationError, ValidationOperationalError, ValueOrderDirection,
 };
 
 #[test]
@@ -311,13 +311,11 @@ fn non_string_capture_keys_fail_the_shape_rule_before_duplicate_classification()
         .all(|error| error.kind.to_string() != "invalid-capture"));
 }
 
-/// Pins that `captures` and `order` are admitted as rule and frontmatter
-/// fields rather than refused as unknown keys. Their contents are still
-/// unvalidated and unnormalized here: the loader lanes that read them land
-/// later, and this test exists so that admission is a deliberate state rather
-/// than an accident nobody noticed.
+/// Pins that a rule's `captures` and `order` declarations and the
+/// frontmatter `captures` declaration all reach the public model
+/// normalized — types resolved, directions, paths, and flags defaulted.
 #[test]
-fn capture_and_order_declarations_are_admitted_without_being_normalized() {
+fn rule_captures_and_order_reach_the_public_model() {
     let loaded = load_schema(
         r#"
 version: 1
@@ -336,13 +334,18 @@ sections:
     )
     .expect("captures and order are known fields");
 
-    assert!(loaded.schema.outline[0].sections[0].captures.is_empty());
-    assert!(loaded.schema.outline[0].sections[0].order.is_empty());
+    let rule = &loaded.schema.outline[0].sections[0];
+    let captures = rule
+        .captures
+        .iter()
+        .map(|(name, capture)| (name.as_str(), capture.type_name()))
+        .collect::<Vec<_>>();
+    assert_eq!(captures, vec![("version", "semver")]);
+    assert_eq!(rule.order.len(), 1);
+    assert_eq!(rule.order[0].by.as_str(), "version");
+    assert_eq!(rule.order[0].direction, ValueOrderDirection::Descending);
+    assert!(!rule.order[0].strict);
 
-    // The frontmatter half is no longer merely admitted: §2.3's declaration
-    // now normalizes, so what the public surface shows is the typed export
-    // itself, with `path` defaulted to the capture name and `required` to
-    // false. The rule half above is still awaiting its own loader.
     let captures = loaded.schema.frontmatter.captures();
     assert_eq!(captures.len(), 1);
     let (name, capture) = captures

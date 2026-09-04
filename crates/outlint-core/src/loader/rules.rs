@@ -1,16 +1,22 @@
-//! Construction of options, scopes, rules, matchers, and cardinalities.
+//! Construction of options, named scopes, rules, matchers, cardinalities,
+//! capture declarations, and value orders.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use serde_json::Value;
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
+use crate::regex_capture;
+use crate::typed_value::ValueType;
 use crate::{
-    Cardinality, ExactText, GlobPattern, Matcher, Options, RegexPattern, RelatedLocation, RuleId,
-    RuleIndex, RuleOutcome, RulePath, SchemaErrorKind, SchemaNode, ScopePath, SectionRule,
-    SourceRange, UpperBound,
+    CaptureName, CapturePath, Cardinality, ExactText, GlobPattern, Matcher, Options,
+    OrderEntryPath, OrderIndex, RegexPattern, RelatedLocation, RuleCapture, RuleId, RuleIndex,
+    RuleOutcome, RulePath, SchemaErrorKind, SchemaNode, ScopePath, SectionRule, SourceRange,
+    UpperBound, ValueOrderDirection, ValueOrderEntry,
 };
 
+use super::shape::{CAPTURES_FIELD, ORDER_FIELD};
 use super::{Loader, RangeKey, RawOptions, RawRule};
 
 impl Loader {
@@ -56,6 +62,12 @@ impl Loader {
         }
     }
 
+    /// Builds the schema root's scope: the one named scope no rule opens.
+    ///
+    /// The root holds top-level rule ids alone (§4.3). Every deeper scope is
+    /// opened by a rule, whose captures are names in it, so the recursion goes
+    /// through [`Self::build_named_scope`] with that rule's declarations in
+    /// hand.
     pub(super) fn build_scope(
         &mut self,
         rules: Vec<RawRule>,
@@ -63,8 +75,29 @@ impl Loader {
         match_case: bool,
         ordered_default: bool,
     ) -> Option<Vec<SectionRule>> {
+        self.build_named_scope(rules, scope, match_case, ordered_default, None)
+    }
+
+    /// Builds one named scope: a rule list plus the captures of the rule that
+    /// opens the scope those rules live in.
+    ///
+    /// `owner` is `None` for the schema root, and for a rule whose `captures`
+    /// mapping never normalized — §2.1 enters a name into the scope only once
+    /// its mapping is well-formed, so a failed mapping contributes nothing to
+    /// compare against rather than contributing a partial set.
+    fn build_named_scope(
+        &mut self,
+        rules: Vec<RawRule>,
+        scope: &ScopePath,
+        match_case: bool,
+        ordered_default: bool,
+        owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
+    ) -> Option<Vec<SectionRule>> {
         let mut semantic = Vec::with_capacity(rules.len());
-        let mut semantic_indices = Vec::with_capacity(rules.len());
+        // Collected for every rule, not only the ones that built: an id is a
+        // declaration in this scope whether or not the rule around it turned
+        // out to be constructible, and §4.3 compares declarations.
+        let mut ids = Vec::with_capacity(rules.len());
         let mut complete = true;
         for (index, raw) in rules.into_iter().enumerate() {
             let rule_path = RulePath {
@@ -86,6 +119,7 @@ impl Loader {
                 if raw.id.is_some() { "id" } else { "match" }.into(),
             ));
             let id = self.build_rule_id(raw.id.as_deref(), matcher.as_ref(), scope, id_range);
+            ids.push(id.clone());
             let cardinality_field = if raw.repeat.is_some() {
                 "repeat"
             } else if raw.required.is_some() {
@@ -103,11 +137,23 @@ impl Loader {
                 raw.repeat.as_deref(),
                 outcome_range,
             );
-            let children =
-                self.build_scope(raw.sections, &child_scope, match_case, ordered_default);
-            match (matcher, outcome, children) {
-                (Some(matcher), Some(outcome), Some(sections)) => {
-                    semantic_indices.push(index);
+            let captures = self.build_rule_captures(
+                raw.captures.as_ref(),
+                &rule_path,
+                matcher.as_ref(),
+                raw.allow,
+            );
+            let order =
+                self.build_rule_order(raw.order.as_ref(), &rule_path, captures.as_ref(), outcome);
+            let children = self.build_named_scope(
+                raw.sections,
+                &child_scope,
+                match_case,
+                ordered_default,
+                captures.as_ref().map(|entries| (&rule_path, entries)),
+            );
+            match (matcher, outcome, children, captures, order) {
+                (Some(matcher), Some(outcome), Some(sections), Some(captures), Some(order)) => {
                     semantic.push(SectionRule {
                         id,
                         matcher,
@@ -116,46 +162,484 @@ impl Loader {
                         ordered: raw.ordered.unwrap_or(ordered_default),
                         sections,
                         constraints: Vec::new(),
-                        // Lane 2A wires the shape through; declaration
-                        // normalization belongs to the rule loader lane, so
-                        // every rule still normalizes to no captures and no
-                        // value order.
-                        captures: BTreeMap::new(),
-                        order: Vec::new(),
+                        captures,
+                        order,
                     });
                 }
                 _ => complete = false,
             }
         }
 
-        let mut ids: HashMap<RuleId, usize> = HashMap::new();
-        for (&index, rule) in semantic_indices.iter().zip(&semantic) {
-            let Some(id) = &rule.id else { continue };
-            if let Some(first_index) = ids.get(id).copied() {
-                let duplicate_path = RulePath {
-                    scope: scope.clone(),
-                    index: RuleIndex(index),
-                };
-                let first_path = RulePath {
-                    scope: scope.clone(),
-                    index: RuleIndex(first_index),
-                };
-                self.error_with_related_at(
-                    SchemaErrorKind::DuplicateId,
-                    self.rule_id_range(&duplicate_path),
-                    format!("duplicate rule id `{}` in one scope", id.0),
-                    vec![RelatedLocation {
-                        range: self.rule_id_range(&first_path),
-                        message: format!("first declared by sibling rule {first_index}"),
-                    }],
-                );
-                complete = false;
-            } else {
-                ids.insert(id.clone(), index);
+        complete &= self.check_named_scope(scope, owner, &ids);
+        complete.then_some(semantic)
+    }
+
+    /// Reports every §4.3 collision in one named scope, and says whether the
+    /// scope came out free of them.
+    ///
+    /// The scope's names are the opening rule's valid captures together with
+    /// the valid explicit and default ids of the rules directly in it — no
+    /// deeper, and not the opening rule's own id, which is a name in the scope
+    /// above. §6.3 anchors a collision at whichever declaration the document
+    /// spells second and relates the first, so the names are put into
+    /// schema-document order before they are compared: the capture mapping's
+    /// own order is a `BTreeMap`'s, not the source's.
+    fn check_named_scope(
+        &mut self,
+        scope: &ScopePath,
+        owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
+        ids: &[Option<RuleId>],
+    ) -> bool {
+        // `None` marks a capture; `Some(index)` the sibling rule that declared
+        // the id.
+        let mut declarations: Vec<(String, SourceRange, Option<usize>)> = Vec::new();
+        if let Some((owner_path, captures)) = owner {
+            let field = self.range(RangeKey::RuleField(
+                owner_path.clone(),
+                CAPTURES_FIELD.into(),
+            ));
+            declarations.extend(captures.keys().map(|name| {
+                (
+                    name.as_str().to_owned(),
+                    self.capture_declaration_range(owner_path, name.as_str(), field),
+                    None,
+                )
+            }));
+        }
+        for (index, id) in ids.iter().enumerate() {
+            let Some(id) = id else { continue };
+            let path = RulePath {
+                scope: scope.clone(),
+                index: RuleIndex(index),
+            };
+            declarations.push((id.0.clone(), self.rule_id_range(&path), Some(index)));
+        }
+        // Stable, so two declarations sharing one range — an alias expanded
+        // twice — keep the order they were collected in.
+        declarations.sort_by_key(|(_, range, _)| (range.source, range.range.start));
+
+        let mut earliest: HashMap<&str, usize> = HashMap::new();
+        let mut collisions = Vec::new();
+        for (position, (name, _, _)) in declarations.iter().enumerate() {
+            match earliest.get(name.as_str()) {
+                Some(&first) => collisions.push((first, position)),
+                None => {
+                    earliest.insert(name, position);
+                }
             }
         }
 
-        complete.then_some(semantic)
+        let free = collisions.is_empty();
+        for (first, later) in collisions {
+            let (name, range, origin) = &declarations[later];
+            let (_, first_range, first_origin) = &declarations[first];
+            let (message, related) = match (first_origin, origin) {
+                (Some(first_index), Some(_)) => (
+                    format!("duplicate rule id `{name}` in one scope"),
+                    format!("first declared by sibling rule {first_index}"),
+                ),
+                (Some(first_index), None) => (
+                    format!("capture `{name}` collides with a rule id in the same named scope"),
+                    format!("first declared by sibling rule {first_index}"),
+                ),
+                (None, _) => (
+                    format!("rule id `{name}` collides with a capture in the same named scope"),
+                    format!("capture `{name}` declared here"),
+                ),
+            };
+            self.error_with_related_at(
+                SchemaErrorKind::DuplicateId,
+                *range,
+                message,
+                vec![RelatedLocation {
+                    range: *first_range,
+                    message: related,
+                }],
+            );
+        }
+        free
+    }
+
+    /// Normalizes one rule's `captures` mapping (§2.1, §2.2, §2.4).
+    ///
+    /// Three outcomes are kept apart, because §6.3 makes them mean different
+    /// things downstream: an absent mapping and a fully valid one both yield
+    /// `Some` — the absent one empty — while a mapping that failed anywhere
+    /// yields `None`. `None` is not "no captures": it says the mapping never
+    /// became a collection at all, so no name from it enters the named scope
+    /// (§4.3), no `order` entry may resolve against it, and the rule cannot be
+    /// built. Every reason for `None` has already reported itself here, except
+    /// the one case §6.3 requires be left silent: a matcher that never
+    /// compiled says nothing about the groups its captures would have named.
+    fn build_rule_captures(
+        &mut self,
+        raw: Option<&Value>,
+        rule_path: &RulePath,
+        matcher: Option<&Matcher>,
+        allow: bool,
+    ) -> Option<BTreeMap<CaptureName, RuleCapture>> {
+        let field = self.range(RangeKey::RuleField(
+            rule_path.clone(),
+            CAPTURES_FIELD.into(),
+        ));
+        let Some(raw) = raw else {
+            if self.field_is_spelled(rule_path, CAPTURES_FIELD) {
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    field,
+                    "rule `captures` must be a non-empty mapping and cannot be null",
+                );
+                return None;
+            }
+            return Some(BTreeMap::new());
+        };
+        let Some(declared) = raw.as_object() else {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                field,
+                "rule `captures` must be a mapping from capture names to types",
+            );
+            return None;
+        };
+        if declared.is_empty() {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                field,
+                "rule `captures` must declare at least one capture",
+            );
+            return None;
+        }
+
+        // The JSON object sorted the mapping's keys, and a reader meets the
+        // declarations in the order the document spells them; the retained
+        // declaration ranges put that order back.
+        let mut ordered = declared
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str(),
+                    value,
+                    self.capture_declaration_range(rule_path, name, field),
+                )
+            })
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|(name, _, range)| (range.source, range.range.start, *name));
+
+        // One analysis serves every declaration: it reports the ancestor facts
+        // of all named groups at once, and the pattern does not change between
+        // declarations.
+        let groups = match matcher {
+            Some(Matcher::Regex(pattern)) => regex_capture::analyze(&pattern.0).ok(),
+            _ => None,
+        };
+
+        let mut entries = BTreeMap::new();
+        let mut valid = true;
+        for (name, value, range) in ordered {
+            let Some(value_type) = self.build_rule_capture(name, value, range, matcher, allow)
+            else {
+                valid = false;
+                continue;
+            };
+            let Some(analysis) = groups.as_ref() else {
+                // Unreachable by construction: `compile_anchored_pattern` and
+                // `regex_capture::analyze` share one pinned `regex-syntax`, so
+                // a body the matcher accepted parses here too. Were that ever
+                // to diverge, the group facts would be unknown rather than
+                // favourable, so the declaration is refused rather than
+                // credited with a participation it was never shown to have.
+                valid = false;
+                continue;
+            };
+            let Some(ancestors) = analysis.get(name) else {
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    range,
+                    format!("capture `{name}` names no group in this rule's regex"),
+                );
+                valid = false;
+                continue;
+            };
+            if ancestors.alternation || ancestors.min_zero_repetition {
+                let cause = match (ancestors.alternation, ancestors.min_zero_repetition) {
+                    (true, true) => "an alternation and a zero-minimum repetition",
+                    (true, false) => "an alternation",
+                    _ => "a zero-minimum repetition",
+                };
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    range,
+                    format!(
+                        "capture `{name}` is enclosed by {cause}, so its group does not \
+                         participate in every match"
+                    ),
+                );
+                valid = false;
+                continue;
+            }
+            let name = CaptureName(name.to_owned());
+            self.nodes.insert(
+                SchemaNode::Capture(CapturePath {
+                    rule: rule_path.clone(),
+                    name: name.clone(),
+                }),
+                range,
+            );
+            entries.insert(name, RuleCapture::new(value_type));
+        }
+        valid.then_some(entries)
+    }
+
+    /// Checks one capture declaration's name, type, and rule context.
+    ///
+    /// Returns the resolved type when the declaration is admissible so far;
+    /// the group facts of §2.2 are checked by the caller, which holds the one
+    /// analysis they all read.
+    fn build_rule_capture(
+        &mut self,
+        name: &str,
+        value: &Value,
+        range: SourceRange,
+        matcher: Option<&Matcher>,
+        allow: bool,
+    ) -> Option<ValueType> {
+        if !is_capture_name(name) {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("capture name `{name}` must match `[a-z][a-z0-9_]*`"),
+            );
+            return None;
+        }
+        let Some(declared) = value.as_str() else {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("capture `{name}` must declare its type as a string"),
+            );
+            return None;
+        };
+        let Some(value_type) = ValueType::from_name(declared) else {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("capture `{name}` declares unknown type `{declared}`"),
+            );
+            return None;
+        };
+        match matcher {
+            // §6.3: a matcher that never compiled is already an
+            // `invalid-matcher`, and it left no form to judge this
+            // declaration against. The capture collection still fails, so
+            // nothing partial reaches the model, but silently.
+            None => return None,
+            Some(Matcher::Regex(_)) => {}
+            Some(_) => {
+                self.error_at(
+                    SchemaErrorKind::InvalidCapture,
+                    range,
+                    format!(
+                        "capture `{name}` needs a regex matcher; only a regex declares the \
+                         named groups a capture binds"
+                    ),
+                );
+                return None;
+            }
+        }
+        if !allow {
+            self.error_at(
+                SchemaErrorKind::InvalidCapture,
+                range,
+                format!("capture `{name}` cannot be declared on an `allow: false` rule"),
+            );
+            return None;
+        }
+        Some(value_type)
+    }
+
+    /// Normalizes one rule's `order` list (§2.1, §3.8).
+    ///
+    /// Four checks run, and §6.3 makes them independent of one another. An
+    /// entry's own shape, field set, and value types are decided against the
+    /// entry alone, and so are the duplicates that appear once defaults are
+    /// applied; only `by` needs the capture mapping, and only the maximum
+    /// needs the cardinality. So a rule whose captures or whose `repeat` never
+    /// normalized still reports every structural fault its `order` has, and
+    /// reports nothing it would have to guess the lost value to know.
+    ///
+    /// Independence is symmetric, so it also holds within one entry: only the
+    /// entry's own structure gates the other three, and past that a duplicate,
+    /// an undeclared `by`, and an unrepeatable rule are each reported wherever
+    /// they apply. An entry wrong in two independent ways therefore says so
+    /// twice, rather than one check silently consuming what the next would
+    /// have found.
+    ///
+    /// Like [`Self::build_rule_captures`], `None` distinguishes a collection
+    /// that never became one from an absent declaration's valid empty list.
+    fn build_rule_order(
+        &mut self,
+        raw: Option<&Value>,
+        rule_path: &RulePath,
+        captures: Option<&BTreeMap<CaptureName, RuleCapture>>,
+        outcome: Option<RuleOutcome>,
+    ) -> Option<Vec<ValueOrderEntry>> {
+        let field = self.range(RangeKey::RuleField(rule_path.clone(), ORDER_FIELD.into()));
+        let Some(raw) = raw else {
+            if self.field_is_spelled(rule_path, ORDER_FIELD) {
+                self.error_at(
+                    SchemaErrorKind::InvalidOrder,
+                    field,
+                    "rule `order` must be a non-empty list and cannot be null",
+                );
+                return None;
+            }
+            return Some(Vec::new());
+        };
+        let Some(elements) = raw.as_array() else {
+            self.error_at(
+                SchemaErrorKind::InvalidOrder,
+                field,
+                "rule `order` must be a list of order entries",
+            );
+            return None;
+        };
+        if elements.is_empty() {
+            self.error_at(
+                SchemaErrorKind::InvalidOrder,
+                field,
+                "rule `order` must declare at least one entry",
+            );
+            return None;
+        }
+
+        // An entry is addressed by its position whether or not anything in it
+        // is understood, so every element gets its node before any of them is
+        // read.
+        //
+        // The four checks that follow are independent in the sense of §6.3:
+        // only an entry's own structure gates the rest, and a fault one check
+        // finds never hides what another would have found. So faults
+        // accumulate against the entry they belong to and are reported
+        // together, in document order — no pass consumes the entries a later
+        // pass has still to read.
+        let mut reports = Vec::with_capacity(elements.len());
+        for (index, element) in elements.iter().enumerate() {
+            let order_index = OrderIndex(index);
+            let range = self.range(RangeKey::RuleOrderEntry(rule_path.clone(), order_index));
+            self.nodes.insert(
+                SchemaNode::OrderEntry(OrderEntryPath {
+                    rule: rule_path.clone(),
+                    order_index,
+                }),
+                range,
+            );
+            let (entry, faults) = parse_order_entry(element);
+            reports.push(OrderEntryReport {
+                range,
+                entry,
+                faults,
+            });
+        }
+
+        // §3.8 compares entries after defaults are applied, so `by: v` and
+        // `{by: v, dir: asc, strict: false}` are the same entry twice. The
+        // later spelling is the one a reader meets as the repetition.
+        let mut seen = HashSet::new();
+        for report in &mut reports {
+            let Some(entry) = &report.entry else { continue };
+            let key = (entry.by.clone(), entry.direction, entry.strict);
+            if !seen.insert(key) {
+                report.faults.push(format!(
+                    "`order` already declares this ordering of capture `{}`",
+                    entry.by
+                ));
+            }
+        }
+
+        // §6.3: the names `by` would resolve against were never entered when
+        // the capture mapping failed, so the resolution is not attempted
+        // rather than failed. Nothing else here reads those names, and the
+        // collection still cannot be built.
+        let captures_known = captures.is_some();
+        if let Some(captures) = captures {
+            for report in &mut reports {
+                let Some(entry) = &report.entry else { continue };
+                if !captures.contains_key(&CaptureName(entry.by.clone())) {
+                    report.faults.push(format!(
+                        "`order` entry `by: {}` names no capture declared by this rule",
+                        entry.by
+                    ));
+                }
+            }
+        }
+
+        // §3.8 orders a rule's own repeated matches, which a rule that can
+        // match at most once does not have. Every entry is refused, including
+        // the ones already faulted for a reason of their own: the maximum is a
+        // fact about the rule, not about any entry, so no entry escapes it by
+        // being wrong in some other way first. A cardinality that never
+        // normalized supplies no maximum to test, so the check is skipped
+        // rather than run against an invented one.
+        if let Some(RuleOutcome::Allow(cardinality)) = outcome {
+            if matches!(cardinality.max, UpperBound::Bounded(max) if max <= 1) {
+                for report in reports.iter_mut().filter(|report| report.entry.is_some()) {
+                    report.faults.push(
+                        "`order` needs a rule that can match more than once, and this rule's \
+                         effective maximum is one"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+
+        let mut complete = captures_known;
+        for report in &reports {
+            complete &= report.entry.is_some() && report.faults.is_empty();
+            for fault in &report.faults {
+                self.error_at(SchemaErrorKind::InvalidOrder, report.range, fault.clone());
+            }
+        }
+
+        complete.then(|| {
+            reports
+                .into_iter()
+                .map(|report| {
+                    let entry = report.entry.expect("a complete collection has every entry");
+                    ValueOrderEntry {
+                        by: CaptureName(entry.by),
+                        direction: entry.direction,
+                        strict: entry.strict,
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// The range of one capture declaration — its key through its value —
+    /// falling back to the `captures` collection when the key had no scalar
+    /// spelling of its own to anchor at.
+    fn capture_declaration_range(
+        &self,
+        rule_path: &RulePath,
+        name: &str,
+        fallback: SourceRange,
+    ) -> SourceRange {
+        self.ranges.get(
+            &self.source_key(RangeKey::RuleCapture(rule_path.clone(), name.to_owned())),
+            fallback,
+        )
+    }
+
+    /// Whether a rule spelled `field:` at all.
+    ///
+    /// Serde cannot answer this for `captures` and `order`: an explicit null
+    /// deserializes to the same `None` an absent key does. The range index
+    /// keeps a range for every key the source wrote, so presence there is the
+    /// distinction the two need.
+    fn field_is_spelled(&self, rule_path: &RulePath, field: &str) -> bool {
+        self.ranges
+            .ranges
+            .contains_key(&self.source_key(RangeKey::RuleField(rule_path.clone(), field.into())))
     }
 
     fn build_rule_id(
@@ -174,11 +658,11 @@ impl Loader {
                 );
                 return None;
             }
-            if scope.0.is_empty() && id == "fm" {
+            if let Some(purpose) = scope.0.is_empty().then(|| reserved_root_id(id)).flatten() {
                 self.error_at(
                     SchemaErrorKind::ReservedId,
                     range,
-                    "top-level rule id `fm` is reserved for frontmatter refs",
+                    format!("top-level rule id `{id}` is reserved for {purpose}"),
                 );
             }
             return Some(RuleId(id.to_owned()));
@@ -188,11 +672,15 @@ impl Loader {
             return None;
         };
         let generated = auto_id(&text.0).map(RuleId);
-        if scope.0.is_empty() && generated.as_ref().is_some_and(|id| id.0 == "fm") {
+        let reserved = generated
+            .as_ref()
+            .filter(|_| scope.0.is_empty())
+            .and_then(|id| Some((id.0.as_str(), reserved_root_id(&id.0)?)));
+        if let Some((id, purpose)) = reserved {
             self.error_at(
                 SchemaErrorKind::ReservedId,
                 range,
-                "top-level auto-generated rule id `fm` is reserved for frontmatter refs",
+                format!("top-level auto-generated rule id `{id}` is reserved for {purpose}"),
             );
         }
         generated
@@ -305,6 +793,118 @@ impl Loader {
         };
         Some(RuleOutcome::Allow(cardinality))
     }
+}
+
+/// What a name is reserved for at the schema root, or `None` when it is an
+/// ordinary top-level rule id (§4.1).
+///
+/// The reservation is on top-level *rule ids* only: a nested rule may take
+/// either name, and §2.2 gives capture names no reserved words at all.
+fn reserved_root_id(id: &str) -> Option<&'static str> {
+    match id {
+        "fm" => Some("frontmatter refs"),
+        // §4.1 holds the name for a later document source; it has no
+        // behavior in this version.
+        "linkdefs" => Some("a later document source"),
+        _ => None,
+    }
+}
+
+/// Parses one `order` entry's own shape, independently of every other entry
+/// and of the rule around it (§2.1).
+///
+/// Faults within one entry are independent of each other, so all of them are
+/// collected rather than only the first, and the entry normalizes only when
+/// none was found. Nothing is reported from here: the caller holds the
+/// entry's range and reports its faults beside those the checks that need the
+/// rule's captures and cardinality add later.
+fn parse_order_entry(element: &Value) -> (Option<OrderEntry>, Vec<String>) {
+    let mut faults = Vec::new();
+    let Some(mapping) = element.as_object() else {
+        faults.push("each `order` entry must be a mapping".to_owned());
+        return (None, faults);
+    };
+    for key in mapping.keys() {
+        if !matches!(key.as_str(), "by" | "dir" | "strict") {
+            faults.push(format!("unknown `order` entry field `{key}`"));
+        }
+    }
+    let by = match mapping.get("by") {
+        Some(Value::String(by)) => Some(by.clone()),
+        Some(_) => {
+            faults.push("`order` entry `by` must be a capture name string".to_owned());
+            None
+        }
+        None => {
+            faults.push("each `order` entry must declare `by`".to_owned());
+            None
+        }
+    };
+    let direction = match mapping.get("dir") {
+        None => Some(ValueOrderDirection::Ascending),
+        Some(Value::String(dir)) if dir == "asc" => Some(ValueOrderDirection::Ascending),
+        Some(Value::String(dir)) if dir == "desc" => Some(ValueOrderDirection::Descending),
+        Some(_) => {
+            faults.push("`order` entry `dir` must be `asc` or `desc`".to_owned());
+            None
+        }
+    };
+    let strict = match mapping.get("strict") {
+        None => Some(false),
+        Some(Value::Bool(strict)) => Some(*strict),
+        Some(_) => {
+            faults.push("`order` entry `strict` must be a bool".to_owned());
+            None
+        }
+    };
+    let form = match (by, direction, strict) {
+        (Some(by), Some(direction), Some(strict)) if faults.is_empty() => Some(OrderEntry {
+            by,
+            direction,
+            strict,
+        }),
+        _ => None,
+    };
+    (form, faults)
+}
+
+/// One `order` entry as the normalization sees it: where it is, what it
+/// normalized to if it did, and every fault found against it (§3.8).
+///
+/// Faults accumulate rather than replacing the normalized form, so a check
+/// that rejects an entry does not remove it from the checks that follow. §6.3
+/// makes the four independent — only the entry's own structure gates the rest
+/// — and an entry that is wrong in two independent ways says so twice.
+struct OrderEntryReport {
+    range: SourceRange,
+    entry: Option<OrderEntry>,
+    faults: Vec<String>,
+}
+
+/// One `order` entry after its own shape is normalized but before `by` is
+/// resolved (§3.8).
+///
+/// `by` is still the raw spelling: a [`CaptureName`] is a name that reached
+/// the model, and this one has not yet been shown to name a capture of the
+/// rule that wrote it. Duplicate detection reads this form, so two entries
+/// that agree are found whether or not either resolves.
+struct OrderEntry {
+    by: String,
+    direction: ValueOrderDirection,
+    strict: bool,
+}
+
+/// Whether a string is a capture name under the §2.2 grammar
+/// `[a-z][a-z0-9_]*`.
+///
+/// Deliberately distinct from [`is_slug`]: a rule id separates words with
+/// `-`, a capture name with `_`, and neither spelling is admissible as the
+/// other. The test is over bytes, so every non-ASCII scalar is rejected by
+/// the same arm that rejects an ASCII one outside the set.
+pub(super) fn is_capture_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 pub(super) fn is_slug(value: &str) -> bool {
