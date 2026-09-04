@@ -2,9 +2,9 @@ use super::{error_kinds, invalid, source_slice, valid};
 use crate::loader::load_schema;
 use crate::loader::rules::{auto_id, parse_repeat, regex_body};
 use crate::{
-    Cardinality, ConstraintIndex, ConstraintPath, ExactText, Matcher, OutlineProvenance,
-    RegexPattern, RuleId, RuleIndex, RuleOutcome, RulePath, SchemaErrorKind, SchemaNode, ScopePath,
-    UpperBound,
+    Cardinality, ConstraintIndex, ConstraintPath, ExactText, InvalidSchema, Matcher,
+    OutlineProvenance, RegexPattern, RuleId, RuleIndex, RuleOutcome, RulePath, SchemaError,
+    SchemaErrorKind, SchemaNode, ScopePath, UpperBound,
 };
 use proptest::prelude::*;
 
@@ -561,15 +561,8 @@ sections:
   - id: duplicate
     match: Second
 "#;
-    let invalid = invalid(source);
-    let error = invalid
-        .errors
-        .iter()
-        .find(|error| error.kind == SchemaErrorKind::DuplicateId)
-        .unwrap_or_else(|| panic!("missing duplicate-id error"));
-    assert_eq!(source_slice(source, error.range), "duplicate");
-    assert_eq!(error.related.len(), 1);
-    assert_eq!(source_slice(source, error.related[0].range), "duplicate");
+    let error = assert_anchored(source, SchemaErrorKind::DuplicateId, "duplicate");
+    assert_related(source, &error, "duplicate");
     assert_ne!(error.range.range.start, error.related[0].range.range.start);
 }
 
@@ -723,4 +716,151 @@ proptest! {
             })
         );
     }
+}
+
+// --- Shared assertions for capture and order diagnostics -------------------
+//
+// Every capture and order contract is stated the same way: one error of an
+// exact kind, anchored at an exact stretch of the schema source, sometimes
+// with one related location. Spelling that out per test buried the contract
+// in `find`/`expect` noise, so the three shapes get named assertions.
+
+/// The single error of `kind`, or a panic naming what was collected instead.
+#[track_caller]
+fn only_error_of(invalid: &InvalidSchema, kind: SchemaErrorKind) -> SchemaError {
+    let matching = invalid
+        .errors
+        .iter()
+        .filter(|error| error.kind == kind)
+        .cloned()
+        .collect::<Vec<_>>();
+    match matching.len() {
+        1 => matching.into_iter().next().expect("one error was matched"),
+        _ => panic!(
+            "expected exactly one {kind:?} error, collected {:#?}",
+            invalid.errors.iter().collect::<Vec<_>>()
+        ),
+    }
+}
+
+/// Asserts the loader collected exactly the given `(kind, anchor)` pairs, in
+/// the order it produced them.
+#[track_caller]
+fn assert_errors(source: &str, expected: &[(SchemaErrorKind, &str)]) {
+    let invalid = invalid(source);
+    let actual = invalid
+        .errors
+        .iter()
+        .map(|error| (error.kind, source_slice(source, error.range)))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected.to_vec());
+}
+
+/// Asserts one error is the only one of its kind and anchors at `anchor`.
+#[track_caller]
+fn assert_anchored(source: &str, kind: SchemaErrorKind, anchor: &str) -> SchemaError {
+    let invalid = invalid(source);
+    let error = only_error_of(&invalid, kind);
+    assert_eq!(source_slice(source, error.range), anchor);
+    error
+}
+
+/// Asserts an error carries exactly one related location, at `anchor`.
+#[track_caller]
+fn assert_related(source: &str, error: &SchemaError, anchor: &str) {
+    assert_eq!(
+        error.related.len(),
+        1,
+        "expected one related location, got {:#?}",
+        error.related
+    );
+    assert_eq!(source_slice(source, error.related[0].range), anchor);
+}
+
+// --- §2.1 classification and precedence contracts -------------------------
+
+/// A key repeated inside one `captures` mapping is `invalid-capture`, not the
+/// `syntax` every other repeated YAML key is (§2.1). The later occurrence is
+/// the one a reader meets as the contradiction, so it anchors the error.
+#[test]
+fn duplicate_capture_key_has_special_classification() {
+    let source = r#"version: 1
+sections:
+  - match: "/(?<major>[0-9]+)/"
+    captures:
+      major: int
+      major: text
+"#;
+    let error = assert_anchored(source, SchemaErrorKind::InvalidCapture, "major");
+    assert_eq!(error.message, "duplicate capture name `major`");
+    // The second `major:` key, not the first.
+    assert_eq!(
+        error.range.range.start.0,
+        source.rfind("major").expect("the source repeats the key")
+    );
+}
+
+/// The special classification stops at the `captures` mapping's own keys: a
+/// key repeated inside one `order` entry stays `syntax` (§2.1).
+#[test]
+fn duplicate_order_entry_key_remains_syntax() {
+    let source = r#"version: 1
+sections:
+  - match: "/(?<major>[0-9]+)/"
+    captures:
+      major: int
+    order:
+      - by: major
+        by: major
+"#;
+    let error = assert_anchored(source, SchemaErrorKind::Syntax, "by");
+    assert_eq!(error.message, "invalid YAML: duplicate mapping key `by`");
+}
+
+/// And it stops at the rule object too: an ordinary repeated rule key is the
+/// same `syntax` it always was.
+#[test]
+fn duplicate_rule_keys_remain_syntax() {
+    let source = r#"version: 1
+sections:
+  - match: First
+    match: Second
+"#;
+    let error = assert_anchored(source, SchemaErrorKind::Syntax, "match");
+    assert_eq!(error.message, "invalid YAML: duplicate mapping key `match`");
+}
+
+/// §6.3: a check whose input could not be built is not attempted. A regex the
+/// matcher rejects yields no capture-group facts, so an otherwise valid
+/// declaration against it reports `invalid-matcher` alone.
+#[test]
+fn invalid_regex_suppresses_capture_group_checks() {
+    let source = r#"version: 1
+sections:
+  - match: "/(?<major>[0-9]+/"
+    captures:
+      major: int
+"#;
+    assert_errors(
+        source,
+        &[(SchemaErrorKind::InvalidMatcher, "\"/(?<major>[0-9]+/\"")],
+    );
+}
+
+/// §2.1: capture names enter the named scope only after their mapping is
+/// well-formed, so a repeated key is reported instead of — never beside — the
+/// `duplicate-id` its name would otherwise raise against a child rule.
+#[test]
+fn invalid_capture_precedes_duplicate_id() {
+    let source = r#"version: 1
+sections:
+  - match: "/(?<major>[0-9]+)/"
+    captures:
+      major: int
+      major: text
+    sections:
+      - id: major
+        match: Major
+"#;
+    assert_errors(source, &[(SchemaErrorKind::InvalidCapture, "major")]);
 }
