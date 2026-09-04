@@ -497,14 +497,6 @@ impl Loader {
         let raw = raw?;
         let required = raw.required.unwrap_or(false);
         let allow = raw.allow.unwrap_or(true);
-        if required && !allow {
-            self.error_at(
-                SchemaErrorKind::ConflictingFrontmatter,
-                frontmatter_range,
-                "frontmatter cannot be both required and forbidden",
-            );
-            return None;
-        }
         // Presence of the key, not of a value: §2.3 makes `captures` with
         // `allow: false` a conflict however the declaration itself reads, and
         // an explicit `captures: null` is a declaration the loader must
@@ -514,13 +506,26 @@ impl Loader {
             .ranges
             .ranges
             .contains_key(&RangeKey::FrontmatterField(CAPTURES_FIELD.into()));
-        let forbidden_captures = captures_declared && !allow;
-        if forbidden_captures {
-            self.report_forbidden_captures();
+        // §2.3 states two conflicts, and §6.3 requires independent schema
+        // errors to be collected together. They are independent: one is
+        // between `required` and `allow`, the other between `captures` and
+        // `allow`, and a document can spell both. Neither is an input the
+        // other's check is built from, so neither may cut the other short —
+        // nor may either suppress the declaration's own faults, which are
+        // read from the `captures` mapping and not from the policy at all.
+        let mut conflicted = false;
+        if required && !allow {
+            self.error_at(
+                SchemaErrorKind::ConflictingFrontmatter,
+                frontmatter_range,
+                "frontmatter cannot be both required and forbidden",
+            );
+            conflicted = true;
         }
-        // Independent of the conflict above, and reported alongside it: a
-        // declaration that is also malformed has two faults, and §6.3 asks
-        // for both.
+        if captures_declared && !allow {
+            self.report_forbidden_captures();
+            conflicted = true;
+        }
         let captures = self.build_frontmatter_captures(raw.captures.as_ref(), captures_declared);
         let schema = match raw.schema {
             None => None,
@@ -594,15 +599,16 @@ impl Loader {
                 }
             }
         };
-        // A forbidden policy has no capture-bearing variant, so a conflict is
-        // not something this function can return a value for; neither is a
-        // collection whose entries did not normalize.
+        // The policy is returned only once every check has run. A conflicting
+        // presence policy has no variant to return, and neither has a
+        // collection whose entries did not normalize; both have already said
+        // why, here and in the checks above.
         let captures = match captures {
             DeclaredCaptures::Absent => None,
             DeclaredCaptures::Valid(captures) => Some(captures),
             DeclaredCaptures::Invalid => return None,
         };
-        if forbidden_captures {
+        if conflicted {
             return None;
         }
         Some(match captures {

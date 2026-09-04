@@ -1299,17 +1299,21 @@ fn rejects_invalid_capture_names() {
 /// the three ways of failing that sentence.
 #[test]
 fn rejects_malformed_capture_objects() {
-    for spelled in [
-        "    version:\n",
-        "    version: text\n",
-        "    version: [text]\n",
+    // A declaration written with no value at all ends at its own key, and one
+    // written as a flow scalar or sequence ends with that value: the anchor
+    // covers the entry either way, which is what §6.3 asks of it.
+    for (spelled, anchor) in [
+        ("    version:\n", "version"),
+        ("    version: text\n", "version: text"),
+        ("    version: [text]\n", "version: [text]"),
     ] {
         let source = capture_source(spelled);
-        let (message, _) = single_capture_error(&source);
+        let (message, slice) = single_capture_error(&source);
         assert_eq!(
             message,
             "frontmatter capture `version` must be a mapping declaring a `type`"
         );
+        assert_eq!(slice, anchor, "for {spelled:?}");
     }
 
     let source = capture_source("    version:\n      path: \"$.version\"\n");
@@ -1337,11 +1341,12 @@ fn rejects_malformed_capture_objects() {
 fn rejects_invalid_capture_types() {
     for spelled in ["      type:\n", "      type: 3\n", "      type: [text]\n"] {
         let source = capture_source(&format!("    version:\n{spelled}"));
-        let (message, _) = single_capture_error(&source);
+        let (message, slice) = single_capture_error(&source);
         assert_eq!(
             message,
             "frontmatter capture `version` `type` must be a string and cannot be null"
         );
+        assert_eq!(slice, format!("version:\n{spelled}"), "for {spelled:?}");
     }
 
     for spelled in ["bogus", "Text", "INT", "string"] {
@@ -1369,10 +1374,15 @@ fn rejects_non_string_capture_paths() {
         "      path: [\"$.a\"]\n",
     ] {
         let source = capture_source(&format!("    version:\n      type: text\n{spelled}"));
-        let (message, _) = single_capture_error(&source);
+        let (message, slice) = single_capture_error(&source);
         assert_eq!(
             message,
             "frontmatter capture `version` `path` must be a string and cannot be null"
+        );
+        assert_eq!(
+            slice,
+            format!("version:\n      type: text\n{spelled}"),
+            "for {spelled:?}"
         );
     }
 }
@@ -1389,10 +1399,15 @@ fn rejects_invalid_capture_required_flags() {
         "      required: [true]\n",
     ] {
         let source = capture_source(&format!("    version:\n      type: text\n{spelled}"));
-        let (message, _) = single_capture_error(&source);
+        let (message, slice) = single_capture_error(&source);
         assert_eq!(
             message,
             "frontmatter capture `version` `required` must be a bool and cannot be null"
+        );
+        assert_eq!(
+            slice,
+            format!("version:\n      type: text\n{spelled}"),
+            "for {spelled:?}"
         );
     }
 }
@@ -1905,4 +1920,103 @@ fn no_forbidden_policy_carries_captures() {
     );
     assert!(schema.frontmatter.is_forbidden());
     assert!(schema.frontmatter.captures().is_empty());
+}
+
+/// §2.3 states two conflicts and §6.3 requires independent schema errors to
+/// be collected together, so a policy that spells both still reports both —
+/// and neither suppresses the declaration's own fault, which is read from the
+/// `captures` mapping rather than from the policy. Pinned because the
+/// `required`/`allow` refusal predates captures and used to return before the
+/// declaration was ever looked at, hiding two errors behind one.
+#[test]
+fn a_required_and_forbidden_policy_still_reports_its_capture_faults() {
+    let source = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  required: true\n",
+        "  allow: false\n",
+        "  captures:\n",
+        "    version:\n",
+        "      type: bogus\n",
+        "sections: []\n",
+    );
+    let refused = invalid(source);
+    assert_eq!(
+        refused
+            .errors
+            .iter()
+            .map(|error| error.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            SchemaErrorKind::ConflictingFrontmatter,
+            SchemaErrorKind::ConflictingFrontmatter,
+            SchemaErrorKind::InvalidCapture,
+        ]
+    );
+
+    // The presence conflict anchors at the whole `frontmatter` mapping, as it
+    // did before captures existed.
+    assert_eq!(
+        refused.errors.first.message,
+        "frontmatter cannot be both required and forbidden"
+    );
+    assert_eq!(
+        source_slice(source, refused.errors.first.range),
+        "required: true\n  allow: false\n  captures:\n    version:\n      type: bogus\n"
+    );
+    assert!(refused.errors.first.related.is_empty());
+
+    // The capture conflict anchors at `captures`, the later of its two keys,
+    // with `allow` attached (§6.3).
+    let conflict = &refused.errors.rest[0];
+    assert_eq!(
+        conflict.message,
+        "`frontmatter.captures` cannot be declared together with `frontmatter.allow`"
+    );
+    assert_eq!(
+        source_slice(source, conflict.range),
+        "version:\n      type: bogus\n"
+    );
+    assert_eq!(conflict.related.len(), 1);
+    assert_eq!(
+        conflict.related[0].message,
+        "`frontmatter.allow` declared here"
+    );
+    assert_eq!(source_slice(source, conflict.related[0].range), "false");
+
+    // The declaration's own fault anchors at the declaration.
+    let declaration = &refused.errors.rest[1];
+    assert_eq!(
+        declaration.message,
+        "unknown capture type `bogus` in frontmatter capture `version`; \
+         expected one of `int`, `bool`, `date`, `semver`, `dotted`, `text`"
+    );
+    assert_eq!(
+        source_slice(source, declaration.range),
+        "version:\n      type: bogus\n"
+    );
+
+    // Without captures, the pre-existing refusal is unchanged: one error, no
+    // related location, anchored at the `frontmatter` mapping.
+    let policy_only = concat!(
+        "version: 1\n",
+        "frontmatter:\n",
+        "  required: true\n",
+        "  allow: false\n",
+        "sections: []\n",
+    );
+    let refused = invalid(policy_only);
+    assert!(refused.errors.rest.is_empty());
+    assert_eq!(
+        refused.errors.first.kind,
+        SchemaErrorKind::ConflictingFrontmatter
+    );
+    assert_eq!(
+        refused.errors.first.message,
+        "frontmatter cannot be both required and forbidden"
+    );
+    assert_eq!(
+        source_slice(policy_only, refused.errors.first.range),
+        "required: true\n  allow: false\n"
+    );
 }
