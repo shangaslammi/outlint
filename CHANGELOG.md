@@ -27,7 +27,8 @@ output shape, and the library API may all change in a minor release. See
   queries are written `fm[...]` and take a complete RFC 9535 query — bare as
   a typed boolean read, `=literal` as type-preserving existential equality —
   with a portable guaranteed core of child name, index, and wildcard segments
-  and a provider-dependent vendor tier beyond it, while `fm.<name>` now
+  and non-surrogate quoted-name escapes, and a provider-dependent vendor tier
+  beyond it that includes surrogate escape pairs, while `fm.<name>` now
   refers only to a declared frontmatter capture: the former dynamic-key
   meaning is gone and legacy `fm.key=value` is invalid. CLI machine output is
   envelope version 3, whose diagnostics carry tagged `rule`,

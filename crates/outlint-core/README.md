@@ -32,7 +32,9 @@ where the two disagree, the specification wins.
   captures, declared on a regex rule's named groups or exported from
   frontmatter through a singular RFC 9535 JSONPath. Values are parsed
   without coercion; a value that fails its type is `invalid-value` and an
-  absent required frontmatter capture is `missing-value`.
+  absent required frontmatter capture is `missing-value` — except when the
+  frontmatter block is itself absent or invalid, where captures are not
+  evaluated and the block-level diagnostic stands alone.
 - **Value ordering** — a rule's `order` entries order that rule's own
   repeated matches by a captured value, ascending or descending and
   optionally strict, independently per entry and per parent scope, reported
@@ -46,9 +48,12 @@ where the two disagree, the specification wins.
   type-preserving existential equality — while `fm.<name>` names a capture
   declared under `frontmatter.captures` and is resolved when the schema
   loads. Child name, index, and wildcard segments are the portable
-  guaranteed core; slices, descendant segments, filters, multiple selectors
-  in one segment, and functions are admitted but vendor-tier, and their
-  behavior depends on the JSONPath provider.
+  guaranteed core, as are quoted-name escapes whose code unit is not a
+  surrogate; a surrogate escape pair is vendor-tier, so write non-BMP
+  characters literally for portability. Slices, descendant segments,
+  filters, multiple selectors in one segment, and functions are also
+  admitted but vendor-tier, and their behavior depends on the JSONPath
+  provider.
 
 Diagnostics carry stable ids (`missing-section`, `unexpected-section`,
 `ordered`, `frontmatter-schema`, …), document source anchors, and structural

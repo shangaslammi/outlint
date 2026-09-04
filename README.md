@@ -213,7 +213,10 @@ The pieces:
   are parsed, never coerced — unquoted `version: 1.2` is a YAML float and so
   is not a `semver` — and a value that fails its type's spelling, YAML kind,
   calendar, or numeric bound is `invalid-value`. A frontmatter capture
-  declared `required: true` whose value is absent is `missing-value`.
+  declared `required: true` whose value is absent is `missing-value` —
+  except when the block itself is absent or does not parse, where captures
+  are not evaluated at all and the block-level diagnostic is the whole
+  report.
 - **Value order.** A rule's `order` list orders that rule's own repeated
   matches by one of its captures: `by` names the capture, `dir` is `asc` or
   `desc`, and `strict: true` demands uniqueness as well. Entries are
@@ -246,18 +249,25 @@ The pieces:
   complementary mechanism: it exports typed singular values rather than
   validating shape. Constraints address frontmatter two ways. `fm[...]`
   wraps one complete RFC 9535 JSONPath query over the frontmatter mapping —
-  bare, it is a typed boolean read satisfied only by a `true` result, while
-  `fm[$.status]=deprecated` is existential, type-preserving equality over
-  the non-null result nodes. Results are always evaluated in full, and
-  duplicate result nodes are collapsed by identity. Child name, index, and
-  wildcard segments are the portable *guaranteed core*; slices, descendant
-  segments, filters, multiple selectors in one segment, and functions are
-  admitted but *vendor-tier*, so their behavior depends on the
-  implementation's JSONPath provider. `fm.<name>`, by contrast, names a
-  capture declared under `frontmatter.captures` and is checked when the
-  schema loads, so a typo is `unresolved-ref` rather than a quietly false
-  test. It is not a dynamic YAML-key lookup: the former `fm.key=value`
-  spelling is invalid, and a document key is queried as `fm[$.key]=value`.
+  bare, it is a typed boolean read, satisfied only when some result node is
+  the boolean `true`; `false`, null, and an empty result leave it
+  unsatisfied, and any non-boolean, non-null result node is `invalid-value`
+  and suppresses the entire constraint containing it — a `true` alongside it
+  does not rescue the read. `fm[$.status]=deprecated` is instead
+  existential, type-preserving equality over the non-null result nodes.
+  Results are always evaluated in full, and duplicate result nodes are
+  collapsed by identity. Child name, index, and wildcard segments are the
+  portable *guaranteed core*, along with the escapes inside a quoted name
+  whose code unit is not a surrogate — a surrogate escape pair is
+  vendor-tier, so write a non-BMP character literally for portability.
+  Slices, descendant segments, filters, multiple selectors in one segment,
+  and functions are likewise admitted but *vendor-tier*, so their behavior
+  depends on the implementation's JSONPath provider. `fm.<name>`, by
+  contrast, names a capture declared under `frontmatter.captures` and is
+  checked when the schema loads, so a typo is `unresolved-ref` rather than a
+  quietly false test. It is not a dynamic YAML-key lookup: the former
+  `fm.key=value` spelling is invalid, and a document key is queried as
+  `fm[$.key]=value`.
 
 A document with several `h1` parts drops the `title:` sugar for the general
 form: `outline:` is a list of the same rule objects, one level up,
