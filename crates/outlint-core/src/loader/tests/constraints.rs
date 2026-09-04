@@ -238,6 +238,79 @@ fn the_retired_dotted_frontmatter_spelling_is_invalid_syntax() {
 }
 
 #[test]
+fn every_locator_syntax_failure_is_invalid_document_shape() {
+    // §4.4: "Invalid locator syntax is `invalid-document-shape`." Each of
+    // these is a different lexical fault, and none of them is a resolution
+    // failure, so none may borrow `unresolved-ref`.
+    for locator in [
+        "\"@overview\"", // the retired `@` prefix
+        "\"$\"",         // `$` alone, which no constraint accepts
+        "\"$overview\"", // an anchor not followed by `.`
+        "\"a.\"",        // an empty step
+        "\"a..b\"",      // the same, in the middle
+        "\"Overview\"",  // outside both the slug and capture grammars
+        "\"a[01]\"",     // an index outside `0|[1-9][0-9]*`
+        "\"a[-1]\"",     // the same
+        "\"a[0\"",       // an unterminated subscript
+        "\"a[0][1]\"",   // two subscripts on one step
+        "\"a/list.b\"",  // a name step after a structural step
+        "\"a/text/x\"",  // a step after the terminal intrinsic
+        "\"fm\"",        // bare `fm`, which names neither form
+        "\"fm[$.a\"",    // an unterminated `fm[...]` wrapper
+        "\"fm[]\"",      // a wrapper enclosing no query
+        "\"fm[$.]\"",    // a query the provider refuses
+        "\"fm[$.a]x\"",  // trailing text that is not an `=` remainder
+    ] {
+        let kinds = error_kinds(&format!(
+            "version: 1\nsections:\n  - id: a\n    match: A\n    required: false\n\
+             constraints:\n  - any_of: [{locator}, a]\n"
+        ));
+        assert_eq!(
+            kinds,
+            vec![SchemaErrorKind::InvalidDocumentShape],
+            "`{locator}` must be a syntax failure"
+        );
+    }
+}
+
+#[test]
+fn constraint_shape_faults_precede_any_binding() {
+    // Every row here anchors at the whole constraint entry and is decided
+    // before a single locator is parsed.
+    let shape = |source: &str| {
+        assert_eq!(
+            error_kinds(source),
+            vec![SchemaErrorKind::InvalidDocumentShape],
+            "{source}"
+        );
+    };
+    // A constraint is a single-key object.
+    shape("version: 1\nsections: []\nconstraints:\n  - nope\n");
+    shape(
+        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
+           constraints:\n  - { any_of: [a, b], one_of: [a, b] }\n",
+    );
+    // A list operand is a sequence of at least two locators.
+    shape("version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: a\n");
+    shape("version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: [a]\n");
+    shape(
+        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
+           constraints:\n  - ordered: [a]\n",
+    );
+    // A locator operand is a string.
+    shape("version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: [a, 7]\n");
+    // `then` and `then_not` may be a list, but not an empty one.
+    shape(
+        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+           - requires: { if: a, then: [] }\n",
+    );
+    shape(
+        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+           - conflicts: { if: a, then_not: [] }\n",
+    );
+}
+
+#[test]
 fn an_undeclared_frontmatter_capture_does_not_resolve() {
     // §4.6: "Unknown capture names are `unresolved-ref`, even if a YAML key
     // of the same name exists."
