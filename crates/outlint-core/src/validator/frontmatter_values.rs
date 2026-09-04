@@ -21,13 +21,20 @@ use crate::locator::SingularComponent;
 use crate::typed_value::{
     parse_frontmatter, FrontmatterValue, ParseFailure, ResolvedYamlKind, ValueType,
 };
-use crate::{CaptureName, DocumentFrontmatter, FrontmatterCapture, FrontmatterCaptureView};
+use crate::{
+    CaptureName, DocumentFrontmatter, FrontmatterAnchor, FrontmatterAnchors, FrontmatterCapture,
+    FrontmatterCaptureView, FrontmatterLocation, SchemaNode,
+};
 
 use super::constraints::Truth;
+use super::diagnostic::{
+    Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticTarget, FrontmatterBlock,
+    FrontmatterLineRange,
+};
 use super::engine::BoundValueState;
 
 /// What every declared frontmatter capture evaluated to for one document.
-pub(super) struct FrontmatterValues {
+pub(super) struct FrontmatterValues<'d> {
     /// The §1.6 YAML-to-JSON view of the block, built once.
     ///
     /// `None` when there is no usable mapping — an absent block or an
@@ -36,6 +43,10 @@ pub(super) struct FrontmatterValues {
     root: Option<Value>,
     /// Why captures could not be evaluated, when they could not.
     block: BlockSource,
+    /// The block's extent and its entries' positions, for anchoring a
+    /// diagnostic at the value it is about. Present only for a mapping, which
+    /// is the only block anything inside it can be reported against.
+    positions: Option<(FrontmatterLocation, &'d FrontmatterAnchors)>,
     entries: BTreeMap<CaptureName, CaptureEntry>,
 }
 
@@ -57,10 +68,60 @@ struct CaptureEntry {
     required: bool,
 }
 
-impl FrontmatterValues {
+impl FrontmatterValues<'_> {
     /// The frontmatter JSON root, or `None` when the block is unusable.
     pub(super) fn root(&self) -> Option<&Value> {
         self.root.as_ref()
+    }
+
+    /// Whether the block exists but is not a valid mapping.
+    ///
+    /// §4.6 parts the two unusable blocks: an `invalid-frontmatter` block
+    /// leaves a query "unevaluated and the entire containing constraint
+    /// suppressed", while an absent one "produces an empty result" and is
+    /// merely unsatisfied.
+    pub(super) fn block_is_invalid(&self) -> bool {
+        matches!(self.block, BlockSource::Invalid)
+    }
+
+    /// Builds one diagnostic about a value inside the block.
+    ///
+    /// `pointer` names the entry (§6.1) and `anchor` is the pointer whose
+    /// position the reader is sent to; the two differ for `missing-value`,
+    /// where the named path does not exist and the position comes from its
+    /// deepest resolving ancestor. Returns `None` when there is no mapping,
+    /// which is also when nothing inside one can be reported.
+    pub(super) fn entry_diagnostic(
+        &self,
+        id: DiagnosticId,
+        pointer: Option<String>,
+        anchor: &str,
+        schema_node: SchemaNode,
+        message: String,
+    ) -> Option<Diagnostic> {
+        let (location, anchors) = self.positions?;
+        let position = enclosing_anchor(anchors, anchor);
+        Some(Diagnostic {
+            id,
+            target: DiagnosticTarget::Frontmatter {
+                block: Some(FrontmatterBlock {
+                    line_range: FrontmatterLineRange {
+                        start_line: location.start_line,
+                        end_line: location.end_line,
+                    },
+                    json_pointer: pointer,
+                }),
+            },
+            location: DiagnosticLocation {
+                range: location.range,
+                line: position.map_or(location.start_line, |anchor| anchor.line),
+                column: position.map_or(1, |anchor| anchor.column),
+            },
+            schema_node: Some(schema_node),
+            involved_headers: Vec::new(),
+            references: Vec::new(),
+            message,
+        })
     }
 
     /// What `fm.<name>` reads as (§4.6).
@@ -81,7 +142,7 @@ impl FrontmatterValues {
             // bound `bool` capture contributes its boolean value: a valid
             // bound `false` is unsatisfied."
             BoundValueState::Valid(value) => Truth::from_bool(value.as_bool() != Some(false)),
-            BoundValueState::Invalid(_) => Truth::Suppressed,
+            BoundValueState::Invalid => Truth::Suppressed,
             // A required capture that selected nothing is §4.6's "missing
             // required capture"; an optional one is "ordinary falsity".
             BoundValueState::Absent => {
@@ -133,20 +194,29 @@ pub(super) enum CaptureFailure {
 /// and before the outline walk. A `frontmatter-schema` failure does not reach
 /// it: §2.3 keeps the two mechanisms independent, "because a valid resolved
 /// mapping still exists".
-pub(super) fn evaluate(
+pub(super) fn evaluate<'d>(
     declared: FrontmatterCaptureView<'_>,
-    frontmatter: &DocumentFrontmatter,
+    frontmatter: &'d DocumentFrontmatter,
     block_required: bool,
-) -> (FrontmatterValues, Vec<CaptureProblem>) {
-    let (block, mapping) = match frontmatter {
-        DocumentFrontmatter::Mapping { value, .. } => (BlockSource::Mapping, Some(value)),
-        DocumentFrontmatter::Invalid { .. } => (BlockSource::Invalid, None),
+) -> (FrontmatterValues<'d>, Vec<CaptureProblem>) {
+    let (block, mapping, positions) = match frontmatter {
+        DocumentFrontmatter::Mapping {
+            value,
+            location,
+            anchors,
+        } => (
+            BlockSource::Mapping,
+            Some(value),
+            Some((*location, anchors)),
+        ),
+        DocumentFrontmatter::Invalid { .. } => (BlockSource::Invalid, None, None),
         DocumentFrontmatter::Absent => (
             if block_required {
                 BlockSource::AbsentRequired
             } else {
                 BlockSource::AbsentOptional
             },
+            None,
             None,
         ),
     };
@@ -176,10 +246,33 @@ pub(super) fn evaluate(
         FrontmatterValues {
             root,
             block,
+            positions,
             entries,
         },
         problems,
     )
+}
+
+/// The position of the entry `pointer` names, or of the nearest enclosing
+/// entry that has one.
+///
+/// §6.2 permits exactly this fallback — "the nearest enclosing entry that has
+/// a position of its own — `/list/0` to `/list`, and `/list` to the block" —
+/// and it is what makes an absent path anchor at its deepest resolving
+/// ancestor, and an entry with no spelling of its own anchor at its container
+/// rather than at some neighbour's text. Reference tokens are escaped, so no
+/// token contains the `/` this splits on.
+fn enclosing_anchor(anchors: &FrontmatterAnchors, pointer: &str) -> Option<FrontmatterAnchor> {
+    let mut candidate = pointer;
+    loop {
+        if let Some(anchor) = anchors.get(candidate) {
+            return Some(anchor);
+        }
+        match candidate.rsplit_once('/') {
+            Some((parent, _)) => candidate = parent,
+            None => return None,
+        }
+    }
 }
 
 fn evaluate_capture(
@@ -202,10 +295,10 @@ fn evaluate_capture(
                         reason: CaptureFailure::Invalid {
                             value_type,
                             source: scalar_spelling(value),
-                            failure: failure.clone(),
+                            failure,
                         },
                     });
-                    BoundValueState::Invalid(failure)
+                    BoundValueState::Invalid
                 }
             }
         }

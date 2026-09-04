@@ -4,14 +4,18 @@ use crate::loader::{
     json_schema_reference_budget_message, json_schema_reference_count,
     preloaded_json_schema_registry, NoExternalRetrieve, MAX_JSON_SCHEMA_REFERENCES,
 };
+use crate::locator::PreparedQuery;
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
-use crate::{FrontmatterSchema, Matcher, Schema, SectionRule};
+use crate::{Constraint, FrontmatterSchema, Matcher, Proposition, Schema, SectionRule};
+
+use std::collections::BTreeMap;
 
 use super::diagnostic::PrepareValidationError;
 
 pub(super) struct ValidationPlan {
     pub(super) outline: Vec<PreparedRule>,
     pub(super) frontmatter: Option<jsonschema::Validator>,
+    pub(super) queries: PreparedQueries,
 }
 
 impl ValidationPlan {
@@ -23,7 +27,106 @@ impl ValidationPlan {
                 .schema()
                 .map(compile_frontmatter_schema)
                 .transpose()?,
+            queries: PreparedQueries::new(schema)?,
         })
+    }
+}
+
+/// Every distinct §4.6 query the schema spells, compiled once.
+///
+/// Keyed by query source rather than by the constraint that carries it: §5.4
+/// makes two propositions with an identical query source the same query, and
+/// the same source in two different constraints is still one thing to
+/// compile. Compiling per proposition per document would recompile the same
+/// query for every document checked.
+pub(super) struct PreparedQueries {
+    queries: BTreeMap<String, PreparedQuery>,
+}
+
+impl PreparedQueries {
+    fn new(schema: &Schema) -> Result<Self, PrepareValidationError> {
+        let mut queries = BTreeMap::new();
+        collect_queries(&schema.constraints, &mut queries)?;
+        collect_rule_queries(&schema.outline, &mut queries)?;
+        Ok(Self { queries })
+    }
+
+    /// The compiled query for one source, or `None` if the schema this plan
+    /// was built from never spelled it.
+    pub(super) fn get(&self, source: &str) -> Option<&PreparedQuery> {
+        self.queries.get(source)
+    }
+}
+
+fn collect_rule_queries(
+    rules: &[SectionRule],
+    queries: &mut BTreeMap<String, PreparedQuery>,
+) -> Result<(), PrepareValidationError> {
+    for rule in rules {
+        collect_queries(&rule.constraints, queries)?;
+        collect_rule_queries(&rule.sections, queries)?;
+    }
+    Ok(())
+}
+
+fn collect_queries(
+    constraints: &[Constraint],
+    queries: &mut BTreeMap<String, PreparedQuery>,
+) -> Result<(), PrepareValidationError> {
+    for constraint in constraints {
+        for proposition in constraint_propositions(constraint) {
+            let Proposition::FrontmatterQuery(query) = proposition else {
+                continue;
+            };
+            if queries.contains_key(query.query()) {
+                continue;
+            }
+            // The source was admitted when the schema loaded, so a provider
+            // that now refuses it is a provider disagreement rather than an
+            // authoring fault — an operational failure to prepare, not a
+            // document diagnostic.
+            let prepared =
+                query
+                    .parsed()
+                    .query()
+                    .prepare()
+                    .map_err(|error| PrepareValidationError {
+                        message: format!(
+                            "cannot compile frontmatter query `{}`: {error}",
+                            query.query()
+                        ),
+                    })?;
+            queries.insert(query.query().to_owned(), prepared);
+        }
+    }
+    Ok(())
+}
+
+/// The propositions one constraint evaluates, in declaration order.
+///
+/// `ordered` carries locators rather than propositions, and no locator can
+/// name frontmatter: §4.6 makes both frontmatter forms
+/// `ordered-scope-mismatch` there, "because frontmatter has no header
+/// position".
+fn constraint_propositions(constraint: &Constraint) -> Vec<&Proposition> {
+    match constraint {
+        Constraint::OneOf(refs)
+        | Constraint::AnyOf(refs)
+        | Constraint::AtMostOne(refs)
+        | Constraint::AllOrNone(refs) => refs.iter().collect(),
+        Constraint::Requires {
+            condition,
+            consequences,
+        } => std::iter::once(condition)
+            .chain(consequences.iter())
+            .collect(),
+        Constraint::Conflicts {
+            condition,
+            exclusions,
+        } => std::iter::once(condition)
+            .chain(exclusions.iter())
+            .collect(),
+        Constraint::Ordered(_) => Vec::new(),
     }
 }
 

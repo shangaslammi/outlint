@@ -135,7 +135,7 @@ impl<'a> Validator<'a> {
         &mut self,
         top: &[PathedSection<'a>],
         plan: &ValidationPlan,
-        frontmatter: &FrontmatterValues,
+        frontmatter: &FrontmatterValues<'a>,
     ) {
         let schema = self.schema;
         let admitted = admitted_at_root(top, HeaderLevel::H1, schema.options.allow_skipped_levels);
@@ -158,6 +158,7 @@ impl<'a> Validator<'a> {
                 root: &root,
                 root_rules: &schema.outline,
                 frontmatter,
+                queries: &plan.queries,
                 match_case: schema.options.match_case,
             },
             &schema.constraints,
@@ -186,7 +187,7 @@ impl<'a> Validator<'a> {
         top: &[PathedSection<'a>],
         has_h1: bool,
         plan: &ValidationPlan,
-        frontmatter: &FrontmatterValues,
+        frontmatter: &FrontmatterValues<'a>,
     ) {
         let schema = self.schema;
         let provenance = schema.outline_provenance;
@@ -238,7 +239,7 @@ impl<'a> Validator<'a> {
             }
             let admitted =
                 admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
-            self.bind_sugar_sections(&admitted, rule, prepared, frontmatter, None);
+            self.bind_sugar_sections(&admitted, rule, prepared, frontmatter, plan, None);
             return;
         }
 
@@ -315,7 +316,7 @@ impl<'a> Validator<'a> {
                 children = merged;
             }
             let owner = attribute.then_some((&occurrence.section.heading, &occurrence.path));
-            self.bind_sugar_sections(&children, rule, prepared, frontmatter, owner);
+            self.bind_sugar_sections(&children, rule, prepared, frontmatter, plan, owner);
         }
     }
 
@@ -335,7 +336,8 @@ impl<'a> Validator<'a> {
         sections: &[PathedSection<'a>],
         rule: &'a SectionRule,
         prepared: &PreparedRule,
-        frontmatter: &FrontmatterValues,
+        frontmatter: &FrontmatterValues<'a>,
+        plan: &ValidationPlan,
         owner: Option<(&'a Heading, &HeaderPath)>,
     ) {
         let scope = ScopePath(Vec::new());
@@ -362,6 +364,7 @@ impl<'a> Validator<'a> {
                 root: &bound,
                 root_rules: &rule.sections,
                 frontmatter,
+                queries: &plan.queries,
                 match_case: self.schema.options.match_case,
             },
             &rule.constraints,
@@ -376,34 +379,26 @@ impl<'a> Validator<'a> {
     /// The retained states are the record §6.3 makes dependent checks read:
     /// the diagnostics below may be filtered, and filtering one must not
     /// change what `fm.<name>` concluded about the value it names.
-    fn evaluate_frontmatter_captures(&mut self) -> FrontmatterValues {
+    fn evaluate_frontmatter_captures(&mut self) -> FrontmatterValues<'a> {
         let (values, problems) = frontmatter_values::evaluate(
             self.schema.frontmatter.captures(),
             &self.document.frontmatter,
             self.schema.frontmatter.is_required(),
         );
         for problem in problems {
-            self.emit_capture_problem(problem);
+            self.emit_capture_problem(&values, problem);
         }
         values
     }
 
     /// Places one capture primary at the entry it is about (§6.1, §6.2).
-    fn emit_capture_problem(&mut self, problem: CaptureProblem) {
+    fn emit_capture_problem(&mut self, values: &FrontmatterValues<'_>, problem: CaptureProblem) {
         let CaptureProblem {
             name,
             pointer,
             anchor,
             reason,
         } = problem;
-        let (location, anchors) = match &self.document.frontmatter {
-            DocumentFrontmatter::Mapping {
-                location, anchors, ..
-            } => (*location, anchors),
-            // A capture is evaluated only against a valid mapping, so there
-            // is always a block to name.
-            DocumentFrontmatter::Absent | DocumentFrontmatter::Invalid { .. } => return,
-        };
         let (id, message) = match reason {
             CaptureFailure::Invalid {
                 value_type,
@@ -422,32 +417,10 @@ impl<'a> Validator<'a> {
                 format!("frontmatter capture `{name}` is required but selects no value"),
             ),
         };
-        self.emit(
-            Diagnostic {
-                id,
-                target: DiagnosticTarget::Frontmatter {
-                    block: Some(FrontmatterBlock {
-                        line_range: FrontmatterLineRange {
-                            start_line: location.start_line,
-                            end_line: location.end_line,
-                        },
-                        json_pointer: pointer,
-                    }),
-                },
-                location: DiagnosticLocation {
-                    range: location.range,
-                    line: enclosing_anchor(anchors, &anchor)
-                        .map_or(location.start_line, |anchor| anchor.line),
-                    column: enclosing_anchor(anchors, &anchor).map_or(1, |anchor| anchor.column),
-                },
-                schema_node: Some(SchemaNode::FrontmatterCapture(name)),
-                involved_headers: Vec::new(),
-                references: Vec::new(),
-                message,
-            },
-            None,
-            false,
-        );
+        let node = SchemaNode::FrontmatterCapture(name);
+        if let Some(diagnostic) = values.entry_diagnostic(id, pointer, &anchor, node, message) {
+            self.emit(diagnostic, None, false);
+        }
     }
 
     fn validate_frontmatter(&mut self, validator: Option<&jsonschema::Validator>) {
@@ -793,7 +766,7 @@ impl<'a> Validator<'a> {
                             })),
                             &message,
                         );
-                        BoundValueState::Invalid(failure)
+                        BoundValueState::Invalid
                     }
                 },
                 // Unreachable by construction: §2.2 admits only
@@ -1018,7 +991,11 @@ impl<'a> Validator<'a> {
         parent_path: &HeaderPath,
     ) {
         for (index, constraint) in constraints.iter().enumerate() {
-            let evaluation = eval.constraint_evaluation(constraint);
+            let node = ConstraintPath {
+                scope: schema_scope.clone(),
+                index: ConstraintIndex(index),
+            };
+            let evaluation = eval.constraint_evaluation(constraint, &node);
             // The operands' own primaries stand whatever the constraint
             // concluded, and they are emitted before that conclusion is
             // acted on: §4.6 has one node both produce `invalid-value` and
@@ -1054,10 +1031,7 @@ impl<'a> Validator<'a> {
                     },
                     location: parent
                         .map_or_else(root_location, |heading| heading_location(&heading.location)),
-                    schema_node: Some(SchemaNode::Constraint(ConstraintPath {
-                        scope: schema_scope.clone(),
-                        index: ConstraintIndex(index),
-                    })),
+                    schema_node: Some(SchemaNode::Constraint(node)),
                     involved_headers: involved,
                     references: eval.constraint_references(constraint),
                     message: format!("the `{}` constraint is not satisfied", id.as_str()),
@@ -1080,6 +1054,7 @@ impl<'a> Validator<'a> {
                     root: eval.root,
                     root_rules: eval.root_rules,
                     frontmatter: eval.frontmatter,
+                    queries: eval.queries,
                     match_case: eval.match_case,
                 },
                 &rule.constraints,
@@ -1177,13 +1152,17 @@ pub(super) struct BoundSection<'d> {
 /// would make hiding a diagnostic re-enable the check that depended on it,
 /// which §6.3 forbids in as many words.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(super) enum BoundValueState {
     /// The source parsed to a value of the declared type.
     Valid(TypedValue),
-    /// A primary `invalid-value` reason exists, whether or not its diagnostic
-    /// is later filtered.
-    Invalid(ParseFailure),
+    /// The source failed the type's lexical, kind, calendar, SemVer, or bound
+    /// requirement, so a primary `invalid-value` reason exists whether or not
+    /// its diagnostic is later filtered.
+    ///
+    /// The reason itself is not retained: it is spent on that diagnostic at
+    /// the moment of failure, and what every dependent check asks of this
+    /// state is only whether a value came out of it.
+    Invalid,
     /// The capture was evaluated and selected no usable value. For a
     /// `required: true` frontmatter capture this is what `missing-value`
     /// reports; for an optional one it is ordinary, valid absence.
@@ -1384,30 +1363,6 @@ fn yaml_kind_name(kind: ResolvedYamlKind) -> &'static str {
         ResolvedYamlKind::String => "string",
         ResolvedYamlKind::Sequence => "sequence",
         ResolvedYamlKind::Mapping => "mapping",
-    }
-}
-
-/// The position of the entry `pointer` names, or of the nearest enclosing
-/// entry that has one.
-///
-/// §6.2 permits exactly this fallback — "the nearest enclosing entry that has
-/// a position of its own — `/list/0` to `/list`, and `/list` to the block" —
-/// and it is what makes an absent path anchor at its deepest resolving
-/// ancestor and an entry with no spelling of its own anchor at its container
-/// rather than at some neighbour's text.
-fn enclosing_anchor(
-    anchors: &crate::FrontmatterAnchors,
-    pointer: &str,
-) -> Option<FrontmatterAnchor> {
-    let mut candidate = pointer;
-    loop {
-        if let Some(anchor) = anchors.get(candidate) {
-            return Some(anchor);
-        }
-        match candidate.rsplit_once('/') {
-            Some((parent, _)) => candidate = parent,
-            None => return None,
-        }
     }
 }
 

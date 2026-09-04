@@ -141,6 +141,38 @@ fn a_case_insensitive_group_selects_the_haystack_unfolded() {
 }
 
 #[test]
+fn every_distinct_frontmatter_query_is_compiled_once_with_the_plan() {
+    // §4.6's queries are schema text, so they compile with the schema rather
+    // than per document or per proposition. The same source spelled in two
+    // constraints is one compiled query; two different sources are two.
+    let loaded = load_schema(
+        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+         required: false\nconstraints:\n  - any_of: [body, \"fm[$.draft]\"]\n  \
+         - any_of: [body, \"fm[$.draft]=yes\"]\n  - any_of: [body, \"fm[$.other]\"]\n",
+    )
+    .expect("test schema is valid");
+    let prepared = PreparedValidator::new(&loaded.schema).expect("the schema prepares");
+    assert!(prepared.plan.queries.get("$.draft").is_some());
+    assert!(prepared.plan.queries.get("$.other").is_some());
+    // Nothing is compiled for a query the schema never spells.
+    assert!(prepared.plan.queries.get("$.absent").is_none());
+}
+
+#[test]
+fn a_nested_rule_constraint_query_is_compiled_too() {
+    // Constraints attach to any rule, so the collection walks the whole rule
+    // forest rather than the root list alone.
+    let loaded = load_schema(
+        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+         required: false\n    sections:\n      - id: inner\n        match: Inner\n        \
+         required: false\n    constraints:\n      - any_of: [inner, \"fm[$.deep]\"]\n",
+    )
+    .expect("test schema is valid");
+    let prepared = PreparedValidator::new(&loaded.schema).expect("the schema prepares");
+    assert!(prepared.plan.queries.get("$.deep").is_some());
+}
+
+#[test]
 fn malformed_manually_constructed_regex_fails_preparation() {
     let mut schema = load_schema("version: 1\nsections: []\n")
         .expect("test schema is valid")

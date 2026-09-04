@@ -1,14 +1,16 @@
 //! Truth evaluation of constraints over a bound scope tree.
 
+use crate::locator::PreparedQuery;
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
-    BoundRuleStep, Constraint, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
-    ResolvedFrontmatterQuery, ResolvedRuleLocator, SectionRule,
+    BoundRuleStep, Constraint, ConstraintPath, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
+    ResolvedFrontmatterQuery, ResolvedRuleLocator, SchemaNode, SectionRule,
 };
 
-use super::diagnostic::{Diagnostic, DiagnosticReference};
+use super::diagnostic::{Diagnostic, DiagnosticId, DiagnosticReference};
 use super::engine::{BoundScope, BoundSection};
 use super::frontmatter_values::FrontmatterValues;
+use super::prepare::PreparedQueries;
 
 /// What one proposition, or one whole constraint, evaluated to (§5.3).
 ///
@@ -55,45 +57,70 @@ pub(super) struct ConstraintEvaluation<'s, 'd> {
     pub(super) pending: Vec<Diagnostic>,
 }
 
-/// Evaluates an `fm[...]` proposition against the frontmatter view (§4.6).
+/// Evaluates an `fm[...]` proposition against one document (§4.6).
 ///
-/// PHASE 4A DEBT, in the bare form only: §4.6 says "Every non-boolean,
-/// non-null result node produces `invalid-value`, and the entire constraint
-/// containing the proposition is suppressed". Neither the diagnostic nor the
-/// suppression exists yet, so such a node reads as unsatisfied here. The
-/// equality form is complete: it is existential over non-null result nodes
-/// with §4.6's typed scalar equality, and nothing about it is deferred.
-pub(super) fn frontmatter_query_satisfied(
+/// The two forms of the proposition differ in more than their answer. A bare
+/// read is a *typed boolean read*: "every non-boolean, non-null result node
+/// produces `invalid-value`, and the entire constraint containing the
+/// proposition is suppressed". An equality proposition never invalidates
+/// anything — "mappings and sequences never equal the literal" — so it is
+/// existential typed equality over the non-null nodes and nothing more.
+///
+/// Every node is inspected before either form answers. §4.6 says so of the
+/// bare read in as many words: "a true sibling result or another already-true
+/// operand does not short-circuit that suppression". The pointers of the
+/// offending nodes are appended to `invalid`; turning them into diagnostics
+/// belongs to the caller, which knows the constraint they are attributed to.
+pub(super) fn frontmatter_query_truth(
     root: Option<&serde_json::Value>,
+    block_is_invalid: bool,
+    prepared: &PreparedQuery,
     proposition: &ResolvedFrontmatterQuery,
     match_case: bool,
-) -> bool {
+    invalid: &mut Vec<String>,
+) -> Truth {
+    // §4.6: "If the block is `invalid-frontmatter`, the query is unevaluated
+    // and the entire containing constraint is suppressed."
+    if block_is_invalid {
+        return Truth::Suppressed;
+    }
     // §4.6: "If the block is absent, the query produces an empty result: a
     // bare boolean read is unsatisfied, and an equality proposition is
-    // unsatisfied." An `invalid-frontmatter` block arrives here as `None` too;
-    // suppressing its containing constraint is 4A's.
+    // unsatisfied."
     let Some(document) = root else {
-        return false;
-    };
-    let Ok(prepared) = proposition.parsed().query().prepare() else {
-        // The source was validated when the schema loaded, so a provider that
-        // now refuses it is a provider bug, not an authoring one.
-        return false;
+        return Truth::Unsatisfied;
     };
     let nodes = prepared.evaluate(document);
     match proposition.equals() {
         // §4.6: "A bare `fm[...]` is a typed boolean read, not a presence
         // test. It is satisfied iff at least one result node is the YAML/JSON
         // boolean `true`."
-        None => nodes
-            .iter()
-            .any(|(_, value)| matches!(value, serde_json::Value::Bool(true))),
+        None => {
+            let mut satisfied = false;
+            let before = invalid.len();
+            for (path, value) in nodes.iter() {
+                match value {
+                    serde_json::Value::Bool(true) => satisfied = true,
+                    // "Boolean `false`, an empty result, and null are
+                    // unsatisfied" — and neither is an invalid value.
+                    serde_json::Value::Bool(false) | serde_json::Value::Null => {}
+                    // §6.1 makes the pointer Outlint's own rendering of the
+                    // node's path components, never the provider's spelling.
+                    _ => invalid.push(path.render_pointer()),
+                }
+            }
+            if invalid.len() > before {
+                Truth::Suppressed
+            } else {
+                Truth::from_bool(satisfied)
+            }
+        }
         // §4.6: "Equality is existential over non-null result nodes [...]
         // satisfied iff at least one such node has the same resolved scalar
         // type and value."
-        Some(expected) => nodes.iter().any(|(_, value)| {
+        Some(expected) => Truth::from_bool(nodes.iter().any(|(_, value)| {
             !value.is_null() && frontmatter_scalar_equals(value, expected, match_case)
-        }),
+        })),
     }
 }
 
@@ -140,7 +167,9 @@ pub(super) struct EvalCtx<'s, 'd> {
     /// The document's frontmatter runtime view. `fm.` propositions address
     /// the document rather than a scope, so this is the same from every
     /// constraint node.
-    pub(super) frontmatter: &'s FrontmatterValues,
+    pub(super) frontmatter: &'s FrontmatterValues<'d>,
+    /// Every §4.6 query the schema spells, compiled once with the plan.
+    pub(super) queries: &'s PreparedQueries,
     pub(super) match_case: bool,
 }
 
@@ -156,8 +185,9 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
     pub(super) fn constraint_evaluation(
         self,
         constraint: &Constraint,
+        node: &ConstraintPath,
     ) -> ConstraintEvaluation<'s, 'd> {
-        let mut resolved = Resolved::default();
+        let mut resolved = Resolved::new(node.clone());
         let truth = match constraint {
             Constraint::OneOf(refs) => {
                 let values = resolved.propositions(self, refs.iter());
@@ -237,6 +267,7 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
         let Resolved {
             mut occurrences,
             pending,
+            ..
         } = resolved;
         occurrences.sort_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
         occurrences.dedup_by_key(|occurrence| occurrence.section.heading.location.range.start.0);
@@ -400,13 +431,23 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
 /// primaries the operands produced. Asking for those separately would
 /// evaluate each operand more than once, and a query evaluated twice is a
 /// question that can be answered twice.
-#[derive(Default)]
 struct Resolved<'s, 'd> {
+    /// The constraint being evaluated, which §6.2 makes the schema node an
+    /// invalid boolean-read value is attributed to.
+    node: ConstraintPath,
     occurrences: Vec<&'s BoundSection<'d>>,
     pending: Vec<Diagnostic>,
 }
 
 impl<'s, 'd> Resolved<'s, 'd> {
+    fn new(node: ConstraintPath) -> Self {
+        Self {
+            node,
+            occurrences: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+
     /// Evaluates every proposition in the order the constraint spells them.
     ///
     /// The whole iterator is consumed: no truth rule is applied until every
@@ -432,13 +473,7 @@ impl<'s, 'd> Resolved<'s, 'd> {
                 Some(found) => Truth::from_bool(!found.is_empty()),
                 None => Truth::Suppressed,
             },
-            Proposition::FrontmatterQuery(proposition) => {
-                Truth::from_bool(frontmatter_query_satisfied(
-                    context.frontmatter.root(),
-                    proposition,
-                    context.match_case,
-                ))
-            }
+            Proposition::FrontmatterQuery(proposition) => self.query(context, proposition),
             // §4.6's `fm.<name>`, answered from the state the capture
             // evaluation retained rather than from the diagnostics it
             // produced.
@@ -446,6 +481,41 @@ impl<'s, 'd> Resolved<'s, 'd> {
                 context.frontmatter.truth(reference.name())
             }
         }
+    }
+
+    /// Evaluates one `fm[...]` proposition, keeping the primaries it raises.
+    fn query(&mut self, context: EvalCtx<'s, 'd>, proposition: &ResolvedFrontmatterQuery) -> Truth {
+        let Some(prepared) = context.queries.get(proposition.query()) else {
+            // Unreachable: preparation compiled every query the schema
+            // spells, and this plan was built from that schema.
+            return Truth::Unsatisfied;
+        };
+        let mut invalid = Vec::new();
+        let truth = frontmatter_query_truth(
+            context.frontmatter.root(),
+            context.frontmatter.block_is_invalid(),
+            prepared,
+            proposition,
+            context.match_case,
+            &mut invalid,
+        );
+        for pointer in invalid {
+            let message = format!(
+                "the frontmatter query `{}` selects a value that is not a `bool`: a bare \
+                 `fm[...]` reads a boolean rather than testing presence",
+                proposition.query()
+            );
+            if let Some(diagnostic) = context.frontmatter.entry_diagnostic(
+                DiagnosticId::InvalidValue,
+                Some(pointer.clone()),
+                &pointer,
+                SchemaNode::Constraint(self.node.clone()),
+                message,
+            ) {
+                self.pending.push(diagnostic);
+            }
+        }
+        truth
     }
 
     /// Resolves one locator, retaining the occurrences it named.

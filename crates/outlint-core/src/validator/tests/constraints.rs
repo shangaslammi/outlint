@@ -1,5 +1,5 @@
 use crate::locator::{parse_locator, ParsedLocator};
-use crate::validator::constraints::frontmatter_query_satisfied;
+use crate::validator::constraints::{frontmatter_query_truth, Truth};
 use crate::validator::{validate, DiagnosticId, DiagnosticReference, DiagnosticTarget};
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
@@ -18,17 +18,39 @@ fn fm_query(locator: &str) -> ResolvedFrontmatterQuery {
 }
 
 /// Evaluates one `fm[...]` proposition against a Markdown document's parsed
-/// frontmatter, typed by the real reader.
-fn fm_satisfied(markdown: &str, locator: &str, match_case: bool) -> bool {
+/// frontmatter, typed by the real reader, and reports both its §4.6 truth and
+/// the pointers of any nodes it found invalid.
+fn fm_truth(markdown: &str, locator: &str, match_case: bool) -> (Truth, Vec<String>) {
     let document = parse_markdown(markdown, MarkdownOptions::default());
-    // The §1.6 JSON root the validator builds once per document.
+    // The §1.6 JSON root the validator builds once per document, and the
+    // query the plan compiles once per schema.
     let root = match &document.frontmatter {
         DocumentFrontmatter::Mapping { value, .. } => {
             Some(serde_json::Value::Object(value.clone()))
         }
         DocumentFrontmatter::Absent | DocumentFrontmatter::Invalid { .. } => None,
     };
-    frontmatter_query_satisfied(root.as_ref(), &fm_query(locator), match_case)
+    let proposition = fm_query(locator);
+    let prepared = proposition
+        .parsed()
+        .query()
+        .prepare()
+        .expect("a locator that parsed compiles");
+    let mut invalid = Vec::new();
+    let truth = frontmatter_query_truth(
+        root.as_ref(),
+        matches!(document.frontmatter, DocumentFrontmatter::Invalid { .. }),
+        &prepared,
+        &proposition,
+        match_case,
+        &mut invalid,
+    );
+    (truth, invalid)
+}
+
+/// Whether one `fm[...]` proposition is satisfied outright.
+fn fm_satisfied(markdown: &str, locator: &str, match_case: bool) -> bool {
+    fm_truth(markdown, locator, match_case).0 == Truth::Satisfied
 }
 
 #[test]
@@ -47,15 +69,24 @@ fn a_bare_query_is_a_typed_boolean_read() {
     // Existential over the node set: one `true` among several is enough.
     let several = "---\nflags:\n  - false\n  - true\n---\n";
     assert!(fm_satisfied(several, "fm[$.flags[*]]", false));
-    // PHASE 4A DEBT: §4.6 says a non-boolean, non-null result node "produces
-    // `invalid-value`, and the entire constraint containing the proposition is
-    // suppressed". Neither exists yet, so such a node reads as unsatisfied
-    // rather than suppressing anything. These two assertions pin the interim
-    // answer, not the specified one, and must be rewritten when suppression
-    // lands.
+    // §4.6: "Every non-boolean, non-null result node produces `invalid-value`,
+    // and the entire constraint containing the proposition is suppressed."
+    // Such a node is neither satisfied nor unsatisfied, and it names itself.
     let text = "---\nname: outlint\ncount: 1\n---\n";
-    assert!(!fm_satisfied(text, "fm[$.name]", false));
-    assert!(!fm_satisfied(text, "fm[$.count]", false));
+    assert_eq!(
+        fm_truth(text, "fm[$.name]", false),
+        (Truth::Suppressed, vec!["/name".to_owned()])
+    );
+    assert_eq!(
+        fm_truth(text, "fm[$.count]", false),
+        (Truth::Suppressed, vec!["/count".to_owned()])
+    );
+    // A true sibling neither rescues the read nor hides the offending node.
+    let mixed = "---\nflags:\n  - true\n  - text\n---\n";
+    assert_eq!(
+        fm_truth(mixed, "fm[$.flags[*]]", false),
+        (Truth::Suppressed, vec!["/flags/1".to_owned()])
+    );
 }
 
 #[test]
