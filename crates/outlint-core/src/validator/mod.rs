@@ -67,18 +67,15 @@ impl PreparedValidator {
     /// the document's complete diagnostic set, so a caller can never observe a
     /// partial set that reads as a clean document (§11.5).
     ///
-    /// The present engine has no failure path and always returns `Ok`. The
-    /// result type is the channel through which the evaluation limits of
-    /// JSONPath frontmatter propositions will surface.
+    /// One failure exists today: §4.6 lets an implementation decline to
+    /// evaluate an `fm[...]` query whose result it cannot bound, and says
+    /// that when it does, "validation has not produced a document verdict".
+    /// The limit cannot reach a guaranteed-core query at any document size.
     pub fn validate(
         &self,
         document: &Document,
     ) -> Result<Vec<Diagnostic>, ValidationOperationalError> {
-        Ok(engine::validate_document(
-            &self.schema,
-            document,
-            &self.plan,
-        ))
+        engine::validate_document(&self.schema, document, &self.plan)
     }
 }
 

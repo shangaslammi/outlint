@@ -272,10 +272,12 @@ impl Error for PrepareValidationError {}
 /// or an operational failure, never a truncated list that reads as a clean
 /// document (specification §11.5).
 ///
-/// The current engine cannot fail: every validation returns `Ok`. The channel
-/// exists so that the evaluation limits introduced with JSONPath frontmatter
-/// propositions have somewhere to surface without changing the signature a
-/// second time.
+/// One thing reaches it today: §4.6's resource limit on evaluating an
+/// `fm[...]` query. That section provides for it — "if an
+/// implementation-specific resource limit prevents completion, validation has
+/// not produced a document verdict and the CLI MUST surface an operational
+/// error (§11.5), not a partial diagnostic set" — and the limit cannot be
+/// reached by a guaranteed-core query at any document size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ValidationOperationalError {

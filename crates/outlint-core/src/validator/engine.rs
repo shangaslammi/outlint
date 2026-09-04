@@ -13,22 +13,33 @@ use crate::{
     UpperBound,
 };
 
+use crate::locator::QueryLimitExceeded;
+
 use super::constraints::{EvalCtx, Truth};
 use super::diagnostic::{
     Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticTarget, FrontmatterBlock,
-    FrontmatterLineRange, HeaderPath, InvolvedHeader,
+    FrontmatterLineRange, HeaderPath, InvolvedHeader, ValidationOperationalError,
 };
 use super::frontmatter_values::{self, CaptureFailure, CaptureProblem, FrontmatterValues};
 use super::prepare::{PreparedRule, ValidationPlan};
 use super::value_order;
 
 /// Validates one parsed document against a schema and its prepared plan.
+///
+/// # Errors
+///
+/// Returns the operational failure of §4.6 when a frontmatter query cannot be
+/// evaluated within this implementation's resource limit. The walk stops
+/// there and its diagnostics are discarded: §11.5 admits a complete verdict or
+/// none, and a set built up to the point of failure would read as the former.
 pub(super) fn validate_document(
     schema: &Schema,
     document: &Document,
     plan: &ValidationPlan,
-) -> Vec<Diagnostic> {
-    Validator::new(schema, document).run(plan)
+) -> Result<Vec<Diagnostic>, ValidationOperationalError> {
+    Validator::new(schema, document)
+        .run(plan)
+        .map_err(|limit| ValidationOperationalError::new(limit.to_string()))
 }
 
 struct Validator<'a> {
@@ -82,7 +93,7 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn run(mut self, plan: &ValidationPlan) -> Vec<Diagnostic> {
+    fn run(mut self, plan: &ValidationPlan) -> Result<Vec<Diagnostic>, QueryLimitExceeded> {
         self.validate_frontmatter(plan.frontmatter.as_ref());
         // §8 evaluates the declared frontmatter captures once, straight after
         // the block's own checks and before the outline walk. §2.3 keeps this
@@ -117,12 +128,14 @@ impl<'a> Validator<'a> {
             self.validate_skipped_levels(&document.sections, root_level, &HeaderPath::default());
         }
         match self.schema.outline_provenance {
-            OutlineProvenance::Outline => self.validate_outline_root(&top, plan, &values),
+            OutlineProvenance::Outline => self.validate_outline_root(&top, plan, &values)?,
             OutlineProvenance::Title
             | OutlineProvenance::BareSections
-            | OutlineProvenance::NoTitle => self.validate_sugar_root(&top, has_h1, plan, &values),
+            | OutlineProvenance::NoTitle => {
+                self.validate_sugar_root(&top, has_h1, plan, &values)?
+            }
         }
-        self.diagnostics
+        Ok(self.diagnostics)
     }
 
     /// Binds the general form's outline scope: `h1` rules on the virtual root.
@@ -136,7 +149,7 @@ impl<'a> Validator<'a> {
         top: &[PathedSection<'a>],
         plan: &ValidationPlan,
         frontmatter: &FrontmatterValues<'a>,
-    ) {
+    ) -> Result<(), QueryLimitExceeded> {
         let schema = self.schema;
         let admitted = admitted_at_root(top, HeaderLevel::H1, schema.options.allow_skipped_levels);
         let root_scope = ScopePath(Vec::new());
@@ -165,7 +178,7 @@ impl<'a> Validator<'a> {
             &root_scope,
             None,
             &root_path,
-        );
+        )
     }
 
     /// Binds a sugar schema's synthesized `h1` rule with its legacy voice.
@@ -188,11 +201,11 @@ impl<'a> Validator<'a> {
         has_h1: bool,
         plan: &ValidationPlan,
         frontmatter: &FrontmatterValues<'a>,
-    ) {
+    ) -> Result<(), QueryLimitExceeded> {
         let schema = self.schema;
         let provenance = schema.outline_provenance;
         let (Some(rule), Some(prepared)) = (schema.outline.first(), plan.outline.first()) else {
-            return;
+            return Ok(());
         };
 
         if provenance == OutlineProvenance::NoTitle || !has_h1 {
@@ -239,8 +252,7 @@ impl<'a> Validator<'a> {
             }
             let admitted =
                 admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
-            self.bind_sugar_sections(&admitted, rule, prepared, frontmatter, plan, None);
-            return;
+            return self.bind_sugar_sections(&admitted, rule, prepared, frontmatter, plan, None);
         }
 
         // The titled scope: every `h1` occupies the synthesized rule, a
@@ -320,8 +332,9 @@ impl<'a> Validator<'a> {
                 children = merged;
             }
             let owner = attribute.then_some((&occurrence.section.heading, &occurrence.path));
-            self.bind_sugar_sections(&children, rule, prepared, frontmatter, plan, owner);
+            self.bind_sugar_sections(&children, rule, prepared, frontmatter, plan, owner)?;
         }
+        Ok(())
     }
 
     /// Binds one instance of a sugar schema's `sections` scope.
@@ -343,7 +356,7 @@ impl<'a> Validator<'a> {
         frontmatter: &FrontmatterValues<'a>,
         plan: &ValidationPlan,
         owner: Option<(&'a Heading, &HeaderPath)>,
-    ) {
+    ) -> Result<(), QueryLimitExceeded> {
         let scope = ScopePath(Vec::new());
         let (parent, path) = match owner {
             Some((heading, path)) => (Some(heading), path.clone()),
@@ -375,7 +388,7 @@ impl<'a> Validator<'a> {
             &scope,
             parent,
             &path,
-        );
+        )
     }
 
     /// Evaluates every declared frontmatter capture once (§2.3).
@@ -999,13 +1012,13 @@ impl<'a> Validator<'a> {
         schema_scope: &ScopePath,
         parent: Option<&Heading>,
         parent_path: &HeaderPath,
-    ) {
+    ) -> Result<(), QueryLimitExceeded> {
         for (index, constraint) in constraints.iter().enumerate() {
             let node = ConstraintPath {
                 scope: schema_scope.clone(),
                 index: ConstraintIndex(index),
             };
-            let evaluation = eval.constraint_evaluation(constraint, &node);
+            let evaluation = eval.constraint_evaluation(constraint, &node)?;
             // The operands' own primaries stand whatever the constraint
             // concluded, and they are emitted before that conclusion is
             // acted on: §4.6 has one node both produce `invalid-value` and
@@ -1071,8 +1084,9 @@ impl<'a> Validator<'a> {
                 &child_schema_scope,
                 Some(&occurrence.section.heading),
                 &occurrence.path,
-            );
+            )?;
         }
+        Ok(())
     }
 
     /// Emits a diagnostic about a header that is present in the document.
