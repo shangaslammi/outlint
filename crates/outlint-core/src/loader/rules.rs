@@ -1,4 +1,5 @@
-//! Construction of options, scopes, rules, matchers, and cardinalities.
+//! Construction of options, named scopes, rules, matchers, cardinalities,
+//! capture declarations, and value orders.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -61,6 +62,12 @@ impl Loader {
         }
     }
 
+    /// Builds the schema root's scope: the one named scope no rule opens.
+    ///
+    /// The root holds top-level rule ids alone (§4.3). Every deeper scope is
+    /// opened by a rule, whose captures are names in it, so the recursion goes
+    /// through [`Self::build_named_scope`] with that rule's declarations in
+    /// hand.
     pub(super) fn build_scope(
         &mut self,
         rules: Vec<RawRule>,
@@ -68,8 +75,29 @@ impl Loader {
         match_case: bool,
         ordered_default: bool,
     ) -> Option<Vec<SectionRule>> {
+        self.build_named_scope(rules, scope, match_case, ordered_default, None)
+    }
+
+    /// Builds one named scope: a rule list plus the captures of the rule that
+    /// opens the scope those rules live in.
+    ///
+    /// `owner` is `None` for the schema root, and for a rule whose `captures`
+    /// mapping never normalized — §2.1 enters a name into the scope only once
+    /// its mapping is well-formed, so a failed mapping contributes nothing to
+    /// compare against rather than contributing a partial set.
+    fn build_named_scope(
+        &mut self,
+        rules: Vec<RawRule>,
+        scope: &ScopePath,
+        match_case: bool,
+        ordered_default: bool,
+        owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
+    ) -> Option<Vec<SectionRule>> {
         let mut semantic = Vec::with_capacity(rules.len());
-        let mut semantic_indices = Vec::with_capacity(rules.len());
+        // Collected for every rule, not only the ones that built: an id is a
+        // declaration in this scope whether or not the rule around it turned
+        // out to be constructible, and §4.3 compares declarations.
+        let mut ids = Vec::with_capacity(rules.len());
         let mut complete = true;
         for (index, raw) in rules.into_iter().enumerate() {
             let rule_path = RulePath {
@@ -91,6 +119,7 @@ impl Loader {
                 if raw.id.is_some() { "id" } else { "match" }.into(),
             ));
             let id = self.build_rule_id(raw.id.as_deref(), matcher.as_ref(), scope, id_range);
+            ids.push(id.clone());
             let cardinality_field = if raw.repeat.is_some() {
                 "repeat"
             } else if raw.required.is_some() {
@@ -116,11 +145,15 @@ impl Loader {
             );
             let order =
                 self.build_rule_order(raw.order.as_ref(), &rule_path, captures.as_ref(), outcome);
-            let children =
-                self.build_scope(raw.sections, &child_scope, match_case, ordered_default);
+            let children = self.build_named_scope(
+                raw.sections,
+                &child_scope,
+                match_case,
+                ordered_default,
+                captures.as_ref().map(|entries| (&rule_path, entries)),
+            );
             match (matcher, outcome, children, captures, order) {
                 (Some(matcher), Some(outcome), Some(sections), Some(captures), Some(order)) => {
-                    semantic_indices.push(index);
                     semantic.push(SectionRule {
                         id,
                         matcher,
@@ -137,34 +170,94 @@ impl Loader {
             }
         }
 
-        let mut ids: HashMap<RuleId, usize> = HashMap::new();
-        for (&index, rule) in semantic_indices.iter().zip(&semantic) {
-            let Some(id) = &rule.id else { continue };
-            if let Some(first_index) = ids.get(id).copied() {
-                let duplicate_path = RulePath {
-                    scope: scope.clone(),
-                    index: RuleIndex(index),
-                };
-                let first_path = RulePath {
-                    scope: scope.clone(),
-                    index: RuleIndex(first_index),
-                };
-                self.error_with_related_at(
-                    SchemaErrorKind::DuplicateId,
-                    self.rule_id_range(&duplicate_path),
-                    format!("duplicate rule id `{}` in one scope", id.0),
-                    vec![RelatedLocation {
-                        range: self.rule_id_range(&first_path),
-                        message: format!("first declared by sibling rule {first_index}"),
-                    }],
-                );
-                complete = false;
-            } else {
-                ids.insert(id.clone(), index);
+        complete &= self.check_named_scope(scope, owner, &ids);
+        complete.then_some(semantic)
+    }
+
+    /// Reports every §4.3 collision in one named scope, and says whether the
+    /// scope came out free of them.
+    ///
+    /// The scope's names are the opening rule's valid captures together with
+    /// the valid explicit and default ids of the rules directly in it — no
+    /// deeper, and not the opening rule's own id, which is a name in the scope
+    /// above. §6.3 anchors a collision at whichever declaration the document
+    /// spells second and relates the first, so the names are put into
+    /// schema-document order before they are compared: the capture mapping's
+    /// own order is a `BTreeMap`'s, not the source's.
+    fn check_named_scope(
+        &mut self,
+        scope: &ScopePath,
+        owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
+        ids: &[Option<RuleId>],
+    ) -> bool {
+        // `None` marks a capture; `Some(index)` the sibling rule that declared
+        // the id.
+        let mut declarations: Vec<(String, SourceRange, Option<usize>)> = Vec::new();
+        if let Some((owner_path, captures)) = owner {
+            let field = self.range(RangeKey::RuleField(
+                owner_path.clone(),
+                CAPTURES_FIELD.into(),
+            ));
+            declarations.extend(captures.keys().map(|name| {
+                (
+                    name.as_str().to_owned(),
+                    self.capture_declaration_range(owner_path, name.as_str(), field),
+                    None,
+                )
+            }));
+        }
+        for (index, id) in ids.iter().enumerate() {
+            let Some(id) = id else { continue };
+            let path = RulePath {
+                scope: scope.clone(),
+                index: RuleIndex(index),
+            };
+            declarations.push((id.0.clone(), self.rule_id_range(&path), Some(index)));
+        }
+        // Stable, so two declarations sharing one range — an alias expanded
+        // twice — keep the order they were collected in.
+        declarations.sort_by_key(|(_, range, _)| (range.source, range.range.start));
+
+        let mut earliest: HashMap<&str, usize> = HashMap::new();
+        let mut collisions = Vec::new();
+        for (position, (name, _, _)) in declarations.iter().enumerate() {
+            match earliest.get(name.as_str()) {
+                Some(&first) => collisions.push((first, position)),
+                None => {
+                    earliest.insert(name, position);
+                }
             }
         }
 
-        complete.then_some(semantic)
+        let free = collisions.is_empty();
+        for (first, later) in collisions {
+            let (name, range, origin) = &declarations[later];
+            let (_, first_range, first_origin) = &declarations[first];
+            let (message, related) = match (first_origin, origin) {
+                (Some(first_index), Some(_)) => (
+                    format!("duplicate rule id `{name}` in one scope"),
+                    format!("first declared by sibling rule {first_index}"),
+                ),
+                (Some(first_index), None) => (
+                    format!("capture `{name}` collides with a rule id in the same named scope"),
+                    format!("first declared by sibling rule {first_index}"),
+                ),
+                (None, _) => (
+                    format!("rule id `{name}` collides with a capture in the same named scope"),
+                    format!("capture `{name}` declared here"),
+                ),
+            };
+            self.error_with_related_at(
+                SchemaErrorKind::DuplicateId,
+                *range,
+                message,
+                vec![RelatedLocation {
+                    range: *first_range,
+                    message: related,
+                }],
+            );
+        }
+        free
     }
 
     /// Normalizes one rule's `captures` mapping (§2.1, §2.2, §2.4).
@@ -643,11 +736,11 @@ impl Loader {
                 );
                 return None;
             }
-            if scope.0.is_empty() && id == "fm" {
+            if let Some(purpose) = scope.0.is_empty().then(|| reserved_root_id(id)).flatten() {
                 self.error_at(
                     SchemaErrorKind::ReservedId,
                     range,
-                    "top-level rule id `fm` is reserved for frontmatter refs",
+                    format!("top-level rule id `{id}` is reserved for {purpose}"),
                 );
             }
             return Some(RuleId(id.to_owned()));
@@ -657,11 +750,15 @@ impl Loader {
             return None;
         };
         let generated = auto_id(&text.0).map(RuleId);
-        if scope.0.is_empty() && generated.as_ref().is_some_and(|id| id.0 == "fm") {
+        let reserved = generated
+            .as_ref()
+            .filter(|_| scope.0.is_empty())
+            .and_then(|id| Some((id.0.as_str(), reserved_root_id(&id.0)?)));
+        if let Some((id, purpose)) = reserved {
             self.error_at(
                 SchemaErrorKind::ReservedId,
                 range,
-                "top-level auto-generated rule id `fm` is reserved for frontmatter refs",
+                format!("top-level auto-generated rule id `{id}` is reserved for {purpose}"),
             );
         }
         generated
@@ -773,6 +870,21 @@ impl Loader {
             (Some(_), Some(_)) => return None,
         };
         Some(RuleOutcome::Allow(cardinality))
+    }
+}
+
+/// What a name is reserved for at the schema root, or `None` when it is an
+/// ordinary top-level rule id (§4.1).
+///
+/// The reservation is on top-level *rule ids* only: a nested rule may take
+/// either name, and §2.2 gives capture names no reserved words at all.
+fn reserved_root_id(id: &str) -> Option<&'static str> {
+    match id {
+        "fm" => Some("frontmatter refs"),
+        // §4.1 holds the name for a later document source; it has no
+        // behavior in this version.
+        "linkdefs" => Some("a later document source"),
+        _ => None,
     }
 }
 

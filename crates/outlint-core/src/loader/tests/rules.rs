@@ -933,7 +933,7 @@ fn both_named_group_spellings_bind_a_capture() {
 /// alternation written inside the declared group leaves it participating in
 /// every match, while one written above it does not.
 #[test]
-fn alternation_below_a_declared_group_is_legal_and_above_it_is_not() {
+fn declared_group_cannot_be_under_alternation() {
     let schema = valid(
         r#"version: 1
 sections:
@@ -1670,4 +1670,259 @@ fn capture_name(name: &str) -> CaptureName {
         .next()
         .expect("the schema declares one capture")
         .clone()
+}
+
+// --- §4.1/§4.3 named scopes -----------------------------------------------
+
+/// A rule's captures and its direct child ids share one named scope, so a
+/// name declared in both collides (§4.3). §6.3 anchors at whichever
+/// declaration the document spells second and relates the first — here, the
+/// child id — for an explicit and a default id alike.
+#[test]
+fn a_capture_declared_before_a_child_id_anchors_the_child() {
+    for (child, id_anchor) in CHILD_ID_SPELLINGS {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+             \x20   captures:\n      major: int\n    sections:\n      - {child}\n"
+        );
+        let error = assert_anchored(&source, SchemaErrorKind::DuplicateId, id_anchor);
+        assert_eq!(
+            error.message,
+            "rule id `major` collides with a capture in the same named scope"
+        );
+        assert_related(&source, &error, "major: int");
+    }
+}
+
+/// The same collision written the other way round: the capture comes second,
+/// so the capture entry anchors and the child id is the related location.
+#[test]
+fn a_capture_declared_after_a_child_id_anchors_the_capture() {
+    for (child, id_anchor) in CHILD_ID_SPELLINGS {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+             \x20   sections:\n      - {child}\n    captures:\n      major: int\n"
+        );
+        let error = assert_anchored(&source, SchemaErrorKind::DuplicateId, "major: int");
+        assert_eq!(
+            error.message,
+            "capture `major` collides with a rule id in the same named scope"
+        );
+        assert_related(&source, &error, id_anchor);
+    }
+}
+
+/// A child rule named `major`, spelled explicitly and by §4.2 default, with
+/// the scalar each spelling anchors its identity at.
+const CHILD_ID_SPELLINGS: [(&str, &str); 2] = [
+    ("id: major\n        match: Major", "major"),
+    ("match: Major", "Major"),
+];
+
+/// §2.1: names enter the scope only once their mapping is well-formed, so one
+/// invalid declaration keeps every name beside it out of the comparison.
+#[test]
+fn an_invalid_capture_prevents_every_capture_child_collision() {
+    let source = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+      bogus: nope
+    sections:
+      - id: major
+        match: Major
+"#;
+    assert_errors(source, &[(SchemaErrorKind::InvalidCapture, "bogus: nope")]);
+}
+
+/// An `order` that failed says nothing about the capture mapping, which is
+/// what the named scope reads, so the collision is still reported.
+#[test]
+fn an_invalid_order_does_not_suppress_a_capture_child_collision() {
+    let source = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+    order:
+      - by: minor
+    sections:
+      - id: major
+        match: Major
+"#;
+    assert_errors(
+        source,
+        &[
+            (SchemaErrorKind::InvalidOrder, "by: minor\n    "),
+            (SchemaErrorKind::DuplicateId, "major"),
+        ],
+    );
+}
+
+/// The scope a rule opens holds its captures and its direct children. The
+/// rule's own id is a name one scope up, and a grandchild's is one scope
+/// down, so neither collides with a capture.
+#[test]
+fn a_capture_collides_with_neither_its_own_rule_nor_a_grandchild() {
+    let schema = valid(
+        r#"version: 1
+sections:
+  - id: major
+    match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+    sections:
+      - match: Section
+        sections:
+          - id: major
+            match: Deep
+"#,
+    );
+    let rule = &schema.addressed_root_rules()[0];
+    assert_eq!(rule.id, Some(RuleId("major".into())));
+    assert_eq!(rule.captures.len(), 1);
+    assert_eq!(
+        rule.sections[0].sections[0].id,
+        Some(RuleId("major".into()))
+    );
+}
+
+/// §4.3 makes names unique within a scope, not globally: two rules may each
+/// declare the same capture name.
+#[test]
+fn separate_rules_may_declare_the_same_capture_name() {
+    let schema = valid(
+        r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+  - match: "/r(?<major>[0-9]+)/"
+    captures:
+      major: int
+"#,
+    );
+    let rules = schema.addressed_root_rules();
+    assert_eq!(rules[0].captures, rules[1].captures);
+}
+
+/// §4.1 reserves both leading names at the schema root, explicitly spelled or
+/// derived from an exact matcher.
+#[test]
+fn reserved_root_ids_are_rejected() {
+    for id in ["fm", "linkdefs"] {
+        let source = format!("version: 1\nsections:\n  - id: {id}\n    match: Intro\n");
+        let error = assert_anchored(&source, SchemaErrorKind::ReservedId, id);
+        assert!(
+            error
+                .message
+                .starts_with(&format!("top-level rule id `{id}` is reserved for")),
+            "unexpected message: {:?}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn generated_reserved_root_ids_are_rejected() {
+    for (matcher, id) in [
+        ("fm", "fm"),
+        ("Link Defs", "link-defs"),
+        ("Linkdefs", "linkdefs"),
+    ] {
+        let source = format!("version: 1\nsections:\n  - match: {matcher}\n");
+        if id == "link-defs" {
+            // Only the exact reserved spellings are held back; a slug that
+            // merely resembles one is an ordinary id.
+            assert_eq!(
+                valid(&source).addressed_root_rules()[0].id,
+                Some(RuleId(id.into()))
+            );
+            continue;
+        }
+        let error = assert_anchored(&source, SchemaErrorKind::ReservedId, matcher);
+        assert!(
+            error.message.starts_with(&format!(
+                "top-level auto-generated rule id `{id}` is reserved for"
+            )),
+            "unexpected message: {:?}",
+            error.message
+        );
+    }
+}
+
+/// The reservation is on top-level ids alone: nested rules may take either
+/// name.
+#[test]
+fn nested_reserved_names_are_ordinary_rule_ids() {
+    let schema = valid(
+        r#"version: 1
+sections:
+  - match: Doc
+    sections:
+      - id: fm
+        match: Front
+      - id: linkdefs
+        match: Links
+"#,
+    );
+    let children = &schema.addressed_root_rules()[0].sections;
+    assert_eq!(children[0].id, Some(RuleId("fm".into())));
+    assert_eq!(children[1].id, Some(RuleId("linkdefs".into())));
+}
+
+/// A schema that loads publishes both new node kinds, each narrower than the
+/// document.
+#[test]
+fn successful_locations_carry_capture_and_order_nodes() {
+    let source = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+    order:
+      - by: major
+        dir: desc
+"#;
+    let loaded = load_schema(source).expect("the schema loads");
+    let rule = RulePath {
+        scope: ScopePath(Vec::new()),
+        index: RuleIndex(0),
+    };
+    let capture = loaded
+        .locations
+        .nodes
+        .keys()
+        .filter_map(|node| match node {
+            SchemaNode::Capture(path) if path.rule == rule => Some(path.name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(capture, vec!["major"]);
+    assert_eq!(
+        order_slice(&loaded, source, ScopePath(Vec::new()), 0, 0),
+        "by: major\n        dir: desc\n"
+    );
+}
+
+/// The matcher's compiler and the capture analyzer share one pinned
+/// `regex-syntax`, so they agree on what a pattern is. A body either rejects
+/// is `invalid-matcher` alone, never a capture fault reported twice: a
+/// repeated group name is refused by both, and only the matcher says so.
+#[test]
+fn the_matcher_and_the_capture_analyzer_agree_on_a_pattern() {
+    let source = r#"version: 1
+sections:
+  - match: "/(?<major>x)(?<major>y)/"
+    captures:
+      major: text
+"#;
+    assert_errors(
+        source,
+        &[(
+            SchemaErrorKind::InvalidMatcher,
+            "\"/(?<major>x)(?<major>y)/\"",
+        )],
+    );
 }
