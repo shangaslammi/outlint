@@ -498,3 +498,254 @@ fn the_new_schema_node_addresses_are_constructible_and_ordered() {
     let _: fn(CaptureName) -> SchemaNode = SchemaNode::FrontmatterCapture;
     let _: fn(CapturePath) -> SchemaNode = SchemaNode::Capture;
 }
+
+/// Pins a positional rule reference as a caller actually receives one: loaded
+/// from a schema, bound by the loader, and carried out of validation on an
+/// unsatisfied constraint.
+///
+/// The coercion test above holds the accessors' shapes; this holds what they
+/// answer. Three facts are the contract. The locator keeps the spelling the
+/// schema wrote, `$.` and subscript included, rather than one reconstructed
+/// from the bound index; the anchor records that the `$.` resolved at the
+/// schema root; and §4.4 gives `[i]` "no upper bound", so a subscript wider
+/// than `u64` reaches the caller as its exact decimal digits.
+#[test]
+fn a_positional_rule_reference_survives_binding_and_validation_intact() {
+    use outlint_core::{DiagnosticReference, Matcher, RefAnchor, RuleIndex};
+
+    let position = "1".repeat(40);
+    let loaded = load_schema(&format!(
+        "version: 1\nsections:\n  - id: alpha\n    match: Alpha\n  - id: beta\n    \
+         match: Beta\nconstraints:\n  - any_of: [\"$.alpha[{position}]\", beta]\n"
+    ))
+    .expect("schema is valid");
+    let document = parse_markdown("# Guide\n", MarkdownOptions::default());
+    let reported = validate(&loaded.schema, &document).expect("validation completes");
+
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0].id, DiagnosticId::AnyOf);
+    let DiagnosticReference::Rule { locator, matcher } = &reported[0].references[0] else {
+        panic!("the first reference is the positional rule locator")
+    };
+    assert_eq!(locator.locator(), format!("$.alpha[{position}]"));
+    assert_eq!(locator.anchor(), RefAnchor::SchemaRoot);
+    assert!(locator.steps().rest.is_empty());
+    let step = &locator.steps().first;
+    assert_eq!(step.id().as_str(), "alpha");
+    assert_eq!(step.index(), RuleIndex(0));
+    // Decimal text, never a machine integer: 40 ones do not fit in a `u64`.
+    assert_eq!(step.position_digits(), Some(position));
+    let Matcher::Exact(text) = matcher else {
+        panic!("the referenced rule's matcher travels with the reference")
+    };
+    assert_eq!(text.0, "Alpha");
+}
+
+/// Pins the shape of an `invalid-value` raised by a rule capture: §6.2 targets
+/// "`header` whose capture is invalid" and attributes it "to that capture
+/// declaration", so the schema node is the capture's own address and not the
+/// owning rule's. The constraint-only fields stay empty, which is what keeps a
+/// value diagnostic distinguishable from a constraint one.
+#[test]
+fn a_rule_capture_invalid_value_names_its_header_and_capture_declaration() {
+    use outlint_core::{DiagnosticTarget, RuleIndex, SchemaNode};
+
+    let loaded = load_schema(
+        "version: 1\nsections:\n  - match: \"/Release (?<version>.+)/\"\n    repeat: 0..n\n    \
+         captures:\n      version: semver\n",
+    )
+    .expect("schema is valid");
+    let document = parse_markdown(
+        "# Guide\n## Release 1.0.0+build.7\n",
+        MarkdownOptions::default(),
+    );
+    let reported = validate(&loaded.schema, &document).expect("validation completes");
+
+    assert_eq!(reported.len(), 1);
+    let diagnostic = &reported[0];
+    assert_eq!(diagnostic.id, DiagnosticId::InvalidValue);
+    assert_eq!(
+        diagnostic.target,
+        DiagnosticTarget::Header(HeaderPath(vec![
+            "Guide".into(),
+            "Release 1.0.0+build.7".into()
+        ]))
+    );
+    let Some(SchemaNode::Capture(path)) = &diagnostic.schema_node else {
+        panic!("a rule-capture diagnostic is attributed to its capture declaration")
+    };
+    assert_eq!(path.name.as_str(), "version");
+    assert_eq!(path.rule.index, RuleIndex(0));
+    assert!(path.rule.scope.0.is_empty());
+    // §6.2 requires the message to identify the expected type and the
+    // responsible capture; the prose around them is not pinned.
+    assert!(
+        diagnostic.message.contains("version") && diagnostic.message.contains("semver"),
+        "the message names the capture and its type: {}",
+        diagnostic.message
+    );
+    assert!(diagnostic.involved_headers.is_empty());
+    assert!(diagnostic.references.is_empty());
+}
+
+/// Pins the shape of a `missing-value`: §6.2 targets "`frontmatter` with the
+/// absent capture's pointer when one can be normalized", and attributes it to
+/// the frontmatter capture declaration, whose named scope is rooted at `fm`
+/// and so needs no rule coordinates. The pointer is the normalized default
+/// path, built from the capture's name rather than copied from a provider.
+#[test]
+fn a_frontmatter_missing_value_names_its_block_pointer_and_declaration() {
+    use outlint_core::{DiagnosticTarget, FrontmatterLineRange, SchemaNode};
+
+    let loaded = load_schema(
+        "version: 1\ntitle: null\nsections: []\nfrontmatter:\n  captures:\n    version:\n      \
+         type: semver\n      required: true\n",
+    )
+    .expect("schema is valid");
+    let document = parse_markdown("---\nother: 1\n---\n", MarkdownOptions::default());
+    let reported = validate(&loaded.schema, &document).expect("validation completes");
+
+    assert_eq!(reported.len(), 1);
+    let diagnostic = &reported[0];
+    assert_eq!(diagnostic.id, DiagnosticId::MissingValue);
+    let DiagnosticTarget::Frontmatter { block: Some(block) } = &diagnostic.target else {
+        panic!("a capture diagnostic targets the frontmatter block")
+    };
+    assert_eq!(
+        block.line_range,
+        FrontmatterLineRange {
+            start_line: 1,
+            end_line: 3
+        }
+    );
+    assert_eq!(block.json_pointer.as_deref(), Some("/version"));
+    let Some(SchemaNode::FrontmatterCapture(name)) = &diagnostic.schema_node else {
+        panic!("a frontmatter-capture diagnostic is attributed to its declaration")
+    };
+    assert_eq!(name.as_str(), "version");
+    assert!(diagnostic.involved_headers.is_empty());
+    assert!(diagnostic.references.is_empty());
+}
+
+/// Pins the shape of an `order-violation`: §6.2 targets and anchors "the
+/// violating adjacent pair's second header", §6.3 attributes it to the order
+/// entry, and §6.2 requires it to list "exactly the first and second headers
+/// of its violating adjacent pair, in that order".
+#[test]
+fn an_order_violation_names_its_entry_and_exactly_its_adjacent_pair() {
+    use outlint_core::{DiagnosticTarget, OrderIndex, RuleIndex, SchemaNode};
+
+    let loaded = load_schema(
+        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
+         captures:\n      v: int\n    order:\n      - by: v\n",
+    )
+    .expect("schema is valid");
+    let document = parse_markdown("# Guide\n## V 2\n## V 1\n", MarkdownOptions::default());
+    let reported = validate(&loaded.schema, &document).expect("validation completes");
+
+    assert_eq!(reported.len(), 1);
+    let diagnostic = &reported[0];
+    assert_eq!(diagnostic.id, DiagnosticId::OrderViolation);
+    assert_eq!(
+        diagnostic.target,
+        DiagnosticTarget::Header(HeaderPath(vec!["Guide".into(), "V 1".into()]))
+    );
+    let Some(SchemaNode::OrderEntry(path)) = &diagnostic.schema_node else {
+        panic!("an order violation is attributed to its order entry")
+    };
+    assert_eq!(path.order_index, OrderIndex(0));
+    assert_eq!(path.rule.index, RuleIndex(0));
+    assert!(path.rule.scope.0.is_empty());
+    assert_eq!(
+        diagnostic
+            .involved_headers
+            .iter()
+            .map(|header| header.path.to_string())
+            .collect::<Vec<_>>(),
+        ["Guide > V 2", "Guide > V 1"]
+    );
+    // The anchor is the second header of the pair, not the first.
+    assert_eq!(diagnostic.location, diagnostic.involved_headers[1].location);
+    assert_eq!(diagnostic.location.line, 3);
+}
+
+/// Pins the `fm[...]` half of §11.3's reference kinds on the one diagnostic
+/// that carries a single query: an `invalid-value` from a boolean read. §6.2
+/// attributes it to the containing constraint, which does not say which of
+/// that constraint's queries failed, so the responsible query travels as a
+/// reference — keeping both the locator spelling the schema wrote and the
+/// query inside the brackets.
+#[test]
+fn an_invalid_boolean_read_carries_the_query_that_failed() {
+    use outlint_core::{DiagnosticReference, DiagnosticTarget};
+
+    let loaded = load_schema(
+        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+         required: true\nconstraints:\n  - requires: { if: body, then: \"fm[$.flag]\" }\n",
+    )
+    .expect("schema is valid");
+    // The rule binds `h2`: with `title: null` the sugar's root still stands at
+    // level 1, so an `h1` would be a header the schema denies.
+    let document = parse_markdown(
+        "---\nflag: \"text\"\n---\n## Body\n",
+        MarkdownOptions::default(),
+    );
+    let reported = validate(&loaded.schema, &document).expect("validation completes");
+
+    assert_eq!(reported.len(), 1);
+    let diagnostic = &reported[0];
+    assert_eq!(diagnostic.id, DiagnosticId::InvalidValue);
+    let DiagnosticTarget::Frontmatter { block: Some(block) } = &diagnostic.target else {
+        panic!("a boolean-read failure targets the frontmatter block")
+    };
+    assert_eq!(block.json_pointer.as_deref(), Some("/flag"));
+    let [DiagnosticReference::FrontmatterQuery(query)] = diagnostic.references.as_slice() else {
+        panic!("exactly the responsible query travels with the diagnostic")
+    };
+    assert_eq!(query.locator(), "fm[$.flag]");
+    assert_eq!(query.query(), "$.flag");
+    // A bare read compares against nothing, so there is no equality literal.
+    assert!(query.equals().is_none());
+}
+
+/// Pins the two remaining §11.3 reference kinds on one failed constraint, so
+/// that `fm.<name>` and a rule locator are matched and inspected side by side
+/// and in the order the constraint declared them.
+#[test]
+fn a_failed_constraint_carries_its_rule_and_frontmatter_capture_references() {
+    use outlint_core::{DiagnosticReference, Matcher, RefAnchor};
+
+    let loaded = load_schema(
+        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+         required: false\nfrontmatter:\n  captures:\n    released:\n      \
+         type: bool\nconstraints:\n  - any_of: [body, \"fm.released\"]\n",
+    )
+    .expect("schema is valid");
+    let document = parse_markdown("---\nreleased: false\n---\n", MarkdownOptions::default());
+    let reported = validate(&loaded.schema, &document).expect("validation completes");
+
+    assert_eq!(reported.len(), 1);
+    let references = &reported[0].references;
+    assert_eq!(reported[0].id, DiagnosticId::AnyOf);
+    assert_eq!(references.len(), 2);
+
+    let DiagnosticReference::Rule { locator, matcher } = &references[0] else {
+        panic!("the first reference is the rule the constraint named first")
+    };
+    assert_eq!(locator.locator(), "body");
+    // A bare relative name resolves where the constraint is attached.
+    assert_eq!(locator.anchor(), RefAnchor::CurrentScope);
+    assert_eq!(locator.steps().first.id().as_str(), "body");
+    assert_eq!(locator.steps().first.position_digits(), None);
+    let Matcher::Exact(text) = matcher else {
+        panic!("the rule's matcher travels with the reference")
+    };
+    assert_eq!(text.0, "Body");
+
+    let DiagnosticReference::FrontmatterCapture(capture) = &references[1] else {
+        panic!("the second reference is the declared frontmatter capture")
+    };
+    assert_eq!(capture.locator(), "fm.released");
+    assert_eq!(capture.name().as_str(), "released");
+    assert_eq!(capture.type_name(), "bool");
+}

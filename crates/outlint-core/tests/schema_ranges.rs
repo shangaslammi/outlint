@@ -110,6 +110,19 @@ fn malformed_schema_error_ranges_match_the_committed_baseline() {
 /// YAML shapes whose acceptance or position the engine itself decides:
 /// duplicate keys, non-standard tags, aliases, a leading byte-order mark, more
 /// than one document, and plain syntax errors.
+///
+/// Interleaved with the first group are the two anchors §6.3 spells out for
+/// typed values, each in both of its positions. `invalid-capture` "anchors at
+/// the offending capture declaration, or at the `captures` key when the
+/// collection as a whole is invalid", and `invalid-order` "anchors at the
+/// offending entry, or at the `order` key when the collection as a whole is
+/// invalid". A valid schema publishes a capture and an order entry through
+/// `locations.nodes`, so the corpus baseline already pins where a *declaration*
+/// sits; what it cannot show is that a failure anchors at the same place rather
+/// than at the owning rule, nor where the collection-level anchor falls, since
+/// no node addresses a `captures` or `order` key. Each case below picks one
+/// unambiguous failure — an unknown type, an unknown order-entry field, an
+/// empty collection — so the recorded slice is read against exactly one error.
 const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
     (
         "document-field-version",
@@ -176,6 +189,14 @@ const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
         "version: 1\nfrontmatter:\n  required: true\n  allow: false\nsections: []\n",
     ),
     (
+        "frontmatter-capture-declaration",
+        "version: 1\nfrontmatter:\n  captures:\n    v:\n      type: nope\nsections: []\n",
+    ),
+    (
+        "frontmatter-captures-empty",
+        "version: 1\nfrontmatter:\n  captures: {}\nsections: []\n",
+    ),
+    (
         "rule-not-a-mapping",
         "version: 1\nsections:\n  - nope\n",
     ),
@@ -210,6 +231,22 @@ const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
     (
         "rule-field-unknown",
         "version: 1\nsections:\n  - match: Intro\n    unexpected: true\n",
+    ),
+    (
+        "rule-capture-declaration",
+        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures:\n      v: nope\n",
+    ),
+    (
+        "rule-captures-empty",
+        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures: {}\n",
+    ),
+    (
+        "rule-order-entry",
+        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order:\n      - by: v\n        unexpected: true\n",
+    ),
+    (
+        "rule-order-empty",
+        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order: []\n",
     ),
     (
         "nested-rule-field-invalid-matcher",

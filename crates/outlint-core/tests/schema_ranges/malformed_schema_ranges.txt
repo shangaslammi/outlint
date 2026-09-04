@@ -82,6 +82,16 @@ case frontmatter-conflicting-policy
   verdict invalid
   error conflicting-frontmatter 0:26..56 "required: true\n  allow: false\n" "frontmatter cannot be both required and forbidden"
 
+case frontmatter-capture-declaration
+  source "version: 1\nfrontmatter:\n  captures:\n    v:\n      type: nope\nsections: []\n"
+  verdict invalid
+  error invalid-capture 0:40..60 "v:\n      type: nope\n" "unknown capture type `nope` in frontmatter capture `v`; expected one of `int`, `bool`, `date`, `semver`, `dotted`, `text`"
+
+case frontmatter-captures-empty
+  source "version: 1\nfrontmatter:\n  captures: {}\nsections: []\n"
+  verdict invalid
+  error invalid-capture 0:36..38 "{}" "frontmatter.captures must be a non-empty mapping of capture declarations"
+
 case rule-not-a-mapping
   source "version: 1\nsections:\n  - nope\n"
   verdict invalid
@@ -126,6 +136,26 @@ case rule-field-unknown
   source "version: 1\nsections:\n  - match: Intro\n    unexpected: true\n"
   verdict invalid
   error invalid-document-shape 0:25..59 "match: Intro\n    unexpected: true\n" "unknown field `unexpected`"
+
+case rule-capture-declaration
+  source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures:\n      v: nope\n"
+  verdict invalid
+  error invalid-capture 0:67..74 "v: nope" "capture `v` declares unknown type `nope`"
+
+case rule-captures-empty
+  source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures: {}\n"
+  verdict invalid
+  error invalid-capture 0:61..63 "{}" "rule `captures` must declare at least one capture"
+
+case rule-order-entry
+  source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order:\n      - by: v\n        unexpected: true\n"
+  verdict invalid
+  error invalid-order 0:110..141 "by: v\n        unexpected: true\n" "unknown `order` entry field `unexpected`"
+
+case rule-order-empty
+  source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order: []\n"
+  verdict invalid
+  error invalid-order 0:102..104 "[]" "rule `order` must declare at least one entry"
 
 case nested-rule-field-invalid-matcher
   source "version: 1\nsections:\n  - match: Intro\n    sections:\n      - match: \"/[unclosed/\"\n"
