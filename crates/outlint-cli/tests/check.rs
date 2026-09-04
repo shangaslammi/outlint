@@ -59,10 +59,13 @@ fn json_check_has_stable_fields_and_order() {
     // §11.3: JSON output carries no ANSI escapes whatever `--color` says.
     assert!(!output.stdout.contains(&0x1b));
     // The whole envelope, compared as one value rather than field by field:
-    // an extra, missing, renamed, or reordered member cannot slip past an
-    // equality on the complete object the way it can past a member probe.
-    // This is the version 3 shape of §11.3, including the argument order of
-    // `results` and all four `summary` counts.
+    // an extra, missing, or renamed member cannot slip past an equality on
+    // the complete object the way it can past a member probe, and neither can
+    // a reordered *array* — which is what pins the argument order of
+    // `results` below. Object member order is not among the things this
+    // detects, and could not be: JSON leaves it insignificant and
+    // `serde_json::Map` does not retain it here. This is the version 3 shape
+    // of §11.3, including all four `summary` counts.
     assert_eq!(
         json_output(&output),
         serde_json::json!({

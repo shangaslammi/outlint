@@ -499,18 +499,28 @@ impl<'s, 'd> Resolved<'s, 'd> {
             context.match_case,
             &mut invalid,
         );
+        let message = format!(
+            "the frontmatter query `{}` selects a value that is not a `bool`: a bare \
+             `fm[...]` reads a boolean rather than testing presence",
+            proposition.query()
+        );
+        // §6.2 attributes this diagnostic to the containing constraint, which
+        // says *where* it came from but not *what* in there was responsible:
+        // a constraint may carry several queries. The responsible one is
+        // semantic reference data in §11.3's sense, so it travels as a
+        // structured member rather than only inside the message, which §11.3
+        // tells consumers not to read. Every invalid node of one query
+        // answers to that same query, so each of them carries that one
+        // reference — and a bare read has no equality to carry with it.
+        let reference = DiagnosticReference::FrontmatterQuery(proposition.clone());
         for pointer in invalid {
-            let message = format!(
-                "the frontmatter query `{}` selects a value that is not a `bool`: a bare \
-                 `fm[...]` reads a boolean rather than testing presence",
-                proposition.query()
-            );
             if let Some(diagnostic) = context.frontmatter.entry_diagnostic(
                 DiagnosticId::InvalidValue,
                 Some(pointer.clone()),
                 &pointer,
                 SchemaNode::Constraint(self.node.clone()),
-                message,
+                message.clone(),
+                vec![reference.clone()],
             ) {
                 self.pending.push(diagnostic);
             }

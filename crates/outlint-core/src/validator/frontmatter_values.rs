@@ -28,8 +28,8 @@ use crate::{
 
 use super::constraints::Truth;
 use super::diagnostic::{
-    Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticTarget, FrontmatterBlock,
-    FrontmatterLineRange,
+    Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticReference, DiagnosticTarget,
+    FrontmatterBlock, FrontmatterLineRange,
 };
 use super::engine::BoundValueState;
 
@@ -89,8 +89,11 @@ impl FrontmatterValues<'_> {
     /// `pointer` names the entry (§6.1) and `anchor` is the pointer whose
     /// position the reader is sent to; the two differ for `missing-value`,
     /// where the named path does not exist and the position comes from its
-    /// deepest resolving ancestor. Returns `None` when there is no mapping,
-    /// which is also when nothing inside one can be reported.
+    /// deepest resolving ancestor. `references` is what §11.3 calls the
+    /// diagnostic's semantic reference data, and is empty for a diagnostic
+    /// whose responsible declaration the schema node already names. Returns
+    /// `None` when there is no mapping, which is also when nothing inside one
+    /// can be reported.
     pub(super) fn entry_diagnostic(
         &self,
         id: DiagnosticId,
@@ -98,6 +101,7 @@ impl FrontmatterValues<'_> {
         anchor: &str,
         schema_node: SchemaNode,
         message: String,
+        references: Vec<DiagnosticReference>,
     ) -> Option<Diagnostic> {
         let (location, anchors) = self.positions?;
         let position = enclosing_anchor(anchors, anchor);
@@ -119,7 +123,7 @@ impl FrontmatterValues<'_> {
             },
             schema_node: Some(schema_node),
             involved_headers: Vec::new(),
-            references: Vec::new(),
+            references,
             message,
         })
     }

@@ -576,7 +576,9 @@ fn a_required_frontmatter_capture_missing_value_names_the_absent_path() {
 /// [...] Every non-boolean, non-null result node produces `invalid-value`".
 /// §6.2 targets `frontmatter` with that value's pointer and attributes the
 /// diagnostic to "the constraint containing the query" — not to any capture,
-/// because a query is not a declaration.
+/// because a query is not a declaration — while the responsible query itself
+/// travels as §11.3 reference data, which is what says *which* of a
+/// constraint's queries the value failed.
 #[test]
 fn a_boolean_query_invalid_value_is_attributed_to_its_containing_constraint() {
     let directory = TempDir::new("typed-boolean-query");
@@ -625,18 +627,21 @@ fn a_boolean_query_invalid_value_is_attributed_to_its_containing_constraint() {
         diagnostic["schema_node"],
         json!({"kind": "constraint", "scope": [], "index": 0})
     );
-    // §11.3 makes `references` present "when the corresponding semantic data
-    // exists"; the validator attributes this diagnostic to the constraint and
-    // supplies no reference, and the renderer will not invent one. The
-    // responsible query reaches consumers through the message, which §6.2
-    // requires to identify it.
-    assert!(
-        diagnostic
-            .as_object()
-            .expect("a diagnostic is a JSON object")
-            .get("references")
-            .is_none(),
-        "no reference is supplied for this diagnostic: {diagnostic}"
+    // The schema node says which constraint the diagnostic came from, but a
+    // constraint may carry several queries, so it does not say which of them
+    // was responsible. That query is semantic reference data in §11.3's
+    // sense, so it is present as a structured member — the array compared
+    // whole, since §11.3 tells consumers to read these rather than the
+    // message, and an extra reference or an invented `equals` would be as
+    // wrong as a missing one. A bare read has no equality, so none is
+    // rendered.
+    assert_eq!(
+        diagnostic["references"],
+        json!([{
+            "kind": "frontmatter_query",
+            "locator": "fm[$.flags.draft]",
+            "query": "$.flags.draft"
+        }])
     );
     let message = diagnostic["message"].as_str().expect("prose");
     assert!(
@@ -656,10 +661,15 @@ fn a_boolean_query_invalid_value_is_attributed_to_its_containing_constraint() {
         ],
     );
     let human = stdout(&human);
-    // The query is identified by the preserved core message rather than by
-    // the renderer reconstructing it, and the failing value is pointed at.
+    // The query is identified by the preserved core message and by the
+    // reference the renderer was given, in neither case by the renderer
+    // reconstructing it, and the failing value is pointed at.
     assert!(human.contains("$.flags.draft"), "{human}");
     assert!(human.contains("  value: \"/flags/draft\"\n"), "{human}");
+    assert!(
+        human.contains("  references:\n    - fm[$.flags.draft]\n"),
+        "{human}"
+    );
     assert!(human.contains("  constraint: schema.yml:"), "{human}");
 }
 

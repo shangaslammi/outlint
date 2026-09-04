@@ -422,7 +422,12 @@ impl<'a> Validator<'a> {
             ),
         };
         let node = SchemaNode::FrontmatterCapture(name);
-        if let Some(diagnostic) = values.entry_diagnostic(id, pointer, &anchor, node, message) {
+        // No reference: §6.2 attributes a capture diagnostic to its
+        // declaration, and the schema node above already names that
+        // declaration exactly.
+        if let Some(diagnostic) =
+            values.entry_diagnostic(id, pointer, &anchor, node, message, Vec::new())
+        {
             self.emit(diagnostic, None, false);
         }
     }

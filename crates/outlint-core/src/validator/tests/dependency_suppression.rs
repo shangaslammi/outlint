@@ -2,7 +2,7 @@
 //! on a cardinality that did not hold, and §5.3's whole-constraint tri-state.
 
 use crate::validator::{Diagnostic, DiagnosticId, DiagnosticReference, DiagnosticTarget};
-use crate::{ConstraintIndex, ConstraintPath, SchemaNode, ScopePath};
+use crate::{ConstraintIndex, ConstraintPath, ResolvedFrontmatterQuery, SchemaNode, ScopePath};
 
 use super::diagnostics;
 
@@ -246,6 +246,21 @@ fn query_ids(schema: &str, frontmatter: &str) -> Vec<DiagnosticId> {
     ids(&diagnostics(schema, &format!("{frontmatter}## Body\n")))
 }
 
+/// The one `fm[...]` reference a boolean-read `invalid-value` carries.
+///
+/// §6.2 attributes the diagnostic to the containing constraint, which says
+/// where it came from but not which of that constraint's queries was
+/// responsible; §11.3 makes the responsible query semantic reference data, so
+/// it travels as a structured member. Reading it through this panics on any
+/// other shape, so a second reference or a different kind fails the assertion
+/// that reads it.
+fn query_reference(diagnostic: &Diagnostic) -> &ResolvedFrontmatterQuery {
+    match diagnostic.references.as_slice() {
+        [DiagnosticReference::FrontmatterQuery(query)] => query,
+        other => panic!("expected exactly one frontmatter query reference, got {other:?}"),
+    }
+}
+
 /// The JSON pointer a frontmatter diagnostic named, if it named one.
 fn query_pointer(diagnostic: &Diagnostic) -> Option<&str> {
     match &diagnostic.target {
@@ -321,6 +336,14 @@ fn every_non_boolean_non_null_node_is_invalid_and_suppresses_the_constraint() {
             (Some("/flags/2"), 5),
         ]
     );
+    // What they do share is the query they all answer to: one reference each,
+    // naming the same query, since one query is what found all three.
+    for diagnostic in &reported {
+        let reference = query_reference(diagnostic);
+        assert_eq!(reference.locator(), "fm[$.flags[*]]");
+        assert_eq!(reference.query(), "$.flags[*]");
+        assert_eq!(reference.equals(), None);
+    }
 
     // Filtering variant: §6.3 — hiding the primary does not re-enable the
     // constraint that depended on it.
@@ -357,6 +380,12 @@ fn one_invalid_diagnostic_names_the_node_it_rejected() {
         "{}",
         diagnostic.message
     );
+    // The responsible query travels as reference data too, spelled as the
+    // author wrote it. A bare read has no equality, and none is invented.
+    let reference = query_reference(diagnostic);
+    assert_eq!(reference.locator(), "fm[$.a.b]");
+    assert_eq!(reference.query(), "$.a.b");
+    assert_eq!(reference.equals(), None);
 }
 
 #[test]

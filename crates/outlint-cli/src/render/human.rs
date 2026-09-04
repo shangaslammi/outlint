@@ -149,10 +149,12 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
 /// `invalid-value`, `missing-value`, and `order-violation` all anchor on a
 /// declaration rather than on a section, and their messages read badly
 /// without one: which of a rule's captures failed, or which `order` entry was
-/// violated, is not recoverable from a line and column. Nothing emits those
-/// ids yet, so this branch is inert today; it exists so the format is settled
-/// before the lane that emits them arrives, rather than being invented under
-/// the pressure of making a diagnostic legible.
+/// violated, is not recoverable from a line and column.
+///
+/// Not every such diagnostic reaches a branch here. A boolean-read
+/// `invalid-value` is attributed to its containing constraint rather than to
+/// a declaration (§6.2), so it falls through and names its query through
+/// reference data instead.
 ///
 /// The capture name is schema-controlled text and goes through the same
 /// quoting and control-character escaping as every other untrusted value.
