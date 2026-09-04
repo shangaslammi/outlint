@@ -8,8 +8,9 @@ use crate::typed_value::{
 use crate::{
     ByteOffset, CaptureName, CapturePath, Cardinality, Constraint, ConstraintIndex, ConstraintPath,
     Document, DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, HeaderLevel, Heading,
-    HeadingLocation, Matcher, OutlineProvenance, RuleIndex, RuleOutcome, RulePath, Schema,
-    SchemaNode, ScopePath, Section, SectionRule, TextRange, UpperBound,
+    HeadingLocation, Matcher, OrderEntryPath, OrderIndex, OutlineProvenance, RuleIndex,
+    RuleOutcome, RulePath, Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange,
+    UpperBound,
 };
 
 use super::constraints::EvalCtx;
@@ -18,6 +19,7 @@ use super::diagnostic::{
     FrontmatterLineRange, HeaderPath, InvolvedHeader,
 };
 use super::prepare::{PreparedRule, ValidationPlan};
+use super::value_order;
 
 /// Validates one parsed document against a schema and its prepared plan.
 pub(super) fn validate_document(
@@ -51,6 +53,12 @@ struct OrderCheck<'a, 'd> {
     schema_scope: &'a ScopePath,
     parent: Option<&'d Heading>,
     parent_path: &'a HeaderPath,
+}
+
+struct ValueOrderCheck<'a, 'd> {
+    rules: &'a [SectionRule],
+    occurrences: &'a [BoundSection<'d>],
+    schema_scope: &'a ScopePath,
 }
 
 struct CardinalityCheck<'a, 'd> {
@@ -642,6 +650,16 @@ impl<'a> Validator<'a> {
                 parent_path,
             });
         }
+        // §8 runs the typed order entries after cardinality and after the
+        // scope's own rule order, and §3.8 makes this mechanism "independent
+        // of the across-rule ordering in §3.7": it runs whether or not the
+        // scope is ordered, and it keeps every occurrence the cardinality
+        // check just complained about.
+        self.validate_value_order(ValueOrderCheck {
+            rules,
+            occurrences: &occurrences,
+            schema_scope,
+        });
         BoundScope { occurrences }
     }
 
@@ -787,6 +805,47 @@ impl<'a> Validator<'a> {
                     ),
                 },
                 parent,
+                true,
+            );
+        }
+    }
+
+    /// Reports every adjacent pair that violates a rule's `order` (§3.8).
+    ///
+    /// Which pairs those are is [`value_order`]'s answer; this places the
+    /// diagnostic §6.2 asks for: targeted and anchored at the pair's second
+    /// header, listing exactly the first and second headers in that order,
+    /// and attributed to the order entry rather than to the rule. Anchoring
+    /// at the second header is also what makes the pair's own
+    /// `outlint-disable` line the one that hides it.
+    fn validate_value_order(&mut self, check: ValueOrderCheck<'_, '_>) {
+        let ValueOrderCheck {
+            rules,
+            occurrences,
+            schema_scope,
+        } = check;
+        for violation in value_order::violations(rules, occurrences) {
+            let involved = [violation.first, violation.second]
+                .into_iter()
+                .map(|occurrence| InvolvedHeader {
+                    path: occurrence.path.clone(),
+                    location: heading_location(&occurrence.section.heading.location),
+                })
+                .collect();
+            self.emit(
+                Diagnostic {
+                    id: DiagnosticId::OrderViolation,
+                    target: DiagnosticTarget::Header(violation.second.path.clone()),
+                    location: heading_location(&violation.second.section.heading.location),
+                    schema_node: Some(SchemaNode::OrderEntry(OrderEntryPath {
+                        rule: rule_path(schema_scope, violation.rule_index),
+                        order_index: OrderIndex(violation.order_index),
+                    })),
+                    involved_headers: involved,
+                    references: Vec::new(),
+                    message: value_order::violation_message(&violation),
+                },
+                Some(&violation.second.section.heading),
                 true,
             );
         }
@@ -985,9 +1044,6 @@ pub(super) struct BoundSection<'d> {
     /// rather than recomputed per check because §3.8 ordering, value
     /// locators, and dependency suppression all read the same result and must
     /// all read the *same* one.
-    // Written by capture extraction and read by the value ordering that lands
-    // on top of it.
-    #[allow(dead_code)]
     pub(super) captures: BTreeMap<CaptureName, BoundValueState>,
 }
 

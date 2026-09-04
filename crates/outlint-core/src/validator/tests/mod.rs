@@ -6,6 +6,7 @@ mod engine;
 mod frontmatter;
 mod ordering;
 mod prepare;
+mod value_order;
 
 use crate::validator::{validate, Diagnostic, DiagnosticId, DiagnosticTarget};
 use crate::{load_schema, parse_markdown, MarkdownOptions};

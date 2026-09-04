@@ -7,6 +7,7 @@ mod constraints;
 mod diagnostic;
 mod engine;
 mod prepare;
+mod value_order;
 
 #[cfg(test)]
 mod tests;
