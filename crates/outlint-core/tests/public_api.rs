@@ -143,7 +143,7 @@ sections:
     match: "Guide*"
   - match: /Usage/
 constraints:
-  - one_of: [fm.count=01, guide]
+  - one_of: ["fm[$.count]=01", guide]
 "#,
     )
     .expect("schema is valid");
@@ -163,11 +163,14 @@ constraints:
     let outlint_core::Constraint::OneOf(items) = &loaded.schema.outline[0].constraints[0] else {
         panic!("expected one_of")
     };
-    let outlint_core::Proposition::Frontmatter(reference) = &items.first else {
-        panic!("expected a frontmatter proposition")
+    let outlint_core::Proposition::FrontmatterQuery(reference) = &items.first else {
+        panic!("expected a frontmatter query proposition")
     };
-    assert_eq!(reference.path.first.as_str(), "count");
-    let Some(outlint_core::FrontmatterScalar::Integer(value)) = &reference.equals else {
+    // The wrapper and the query are retained exactly as written; only the
+    // equality literal is normalized, through the YAML core-schema resolver.
+    assert_eq!(reference.locator(), "fm[$.count]=01");
+    assert_eq!(reference.query(), "$.count");
+    let Some(outlint_core::FrontmatterScalar::Integer(value)) = reference.equals() else {
         panic!("expected an integer equality")
     };
     assert_eq!(value.as_str(), "1");

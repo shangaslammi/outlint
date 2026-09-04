@@ -729,9 +729,10 @@ pub enum Constraint {
 /// The enum currently holds two generations at once, exactly as
 /// [`DiagnosticReference`] does. [`Self::Rule`] and [`Self::Frontmatter`] are
 /// the **compatibility** forms, which nothing builds once constraint binding
-/// has cut over; [`Self::ResolvedRule`] is the first of the **final** forms,
-/// one per §4.5/§4.6 proposition kind. The compatibility pair is removed with
-/// the rest of the legacy reference model.
+/// has cut over; [`Self::ResolvedRule`], [`Self::FrontmatterQuery`], and
+/// [`Self::FrontmatterCapture`] are the **final** forms, one per §4.5/§4.6
+/// proposition kind. The compatibility pair is removed with the rest of the
+/// legacy reference model.
 ///
 /// [`DiagnosticReference`]: crate::DiagnosticReference
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -745,6 +746,12 @@ pub enum Proposition {
     /// Final: an outline locator terminating at a rule id (§4.5), satisfied
     /// iff its terminal node list is non-empty.
     ResolvedRule(ResolvedRuleLocator),
+    /// Final: an `fm[query]` boolean read or `fm[query]=literal` equality
+    /// (§4.6).
+    FrontmatterQuery(ResolvedFrontmatterQuery),
+    /// Final: an `fm.<name>` reference to a declared frontmatter capture
+    /// (§4.6).
+    FrontmatterCapture(ResolvedFrontmatterCapture),
 }
 
 /// A normalized `fm.` frontmatter proposition.
@@ -1132,7 +1139,7 @@ impl ResolvedIntrinsicTextLocator {
 /// query source are retained exactly: §5.4 decides `duplicate-ref` on the
 /// query source, and §11.3 emits the query without its `fm[...]` wrapper, so
 /// neither text may be reconstructed from the other.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedFrontmatterQuery {
     locator: crate::locator::FrontmatterQueryLocator,
     equals: Option<FrontmatterScalar>,
@@ -1181,7 +1188,7 @@ impl ResolvedFrontmatterQuery {
 /// keeps it apart from [`ResolvedFrontmatterQuery`] deliberately: `fm[$.x]`
 /// performs a document-time query while `fm.x` is the typo-safe reference to
 /// a declaration, checked at schema load.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedFrontmatterCapture {
     locator: crate::locator::FrontmatterCaptureLocator,
     name: CaptureName,

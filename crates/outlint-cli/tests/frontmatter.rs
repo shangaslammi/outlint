@@ -315,7 +315,7 @@ fn frontmatter_reference_details_retain_typed_equality() {
     let directory = TempDir::new("frontmatter-reference");
     directory.write(
         "schema.yml",
-        "version: 1\ntitle: null\nsections:\n  - id: a\n    match: A\nconstraints:\n  - one_of: [fm.status=true, a]\n",
+        "version: 1\ntitle: null\nsections:\n  - id: a\n    match: A\nconstraints:\n  - one_of: [\"fm[$.status]=true\", a]\n",
     );
     directory.write("doc.md", "plain text\n");
 
@@ -332,8 +332,9 @@ fn frontmatter_reference_details_retain_typed_equality() {
     );
     assert_eq!(output.status.code(), Some(1));
     let reference = &json_output(&output)["results"][0]["diagnostics"][0]["references"][0];
-    assert_eq!(reference["kind"], "frontmatter");
-    assert_eq!(reference["path"], serde_json::json!(["status"]));
+    assert_eq!(reference["kind"], "frontmatter_query");
+    assert_eq!(reference["locator"], "fm[$.status]=true");
+    assert_eq!(reference["query"], "$.status");
     assert_eq!(
         reference["equals"],
         serde_json::json!({"type": "boolean", "value": true})

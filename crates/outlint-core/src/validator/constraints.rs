@@ -3,7 +3,7 @@
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
     BoundRuleStep, Constraint, FrontmatterRef, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
-    ResolvedRuleLocator, RuleRef, SectionRule,
+    ResolvedFrontmatterQuery, ResolvedRuleLocator, RuleRef, SectionRule,
 };
 
 use super::diagnostic::DiagnosticReference;
@@ -172,6 +172,63 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
             Proposition::ResolvedRule(locator) => {
                 !self.resolve_bound_occurrences(locator).is_empty()
             }
+            Proposition::FrontmatterQuery(proposition) => {
+                self.frontmatter_query_satisfied(proposition)
+            }
+            // PHASE 4A DEBT: capture evaluation does not exist yet, so a
+            // declared `fm.<name>` reads as unsatisfied. §4.6 makes it
+            // "satisfied iff the capture is valid and bound, except that a
+            // bound `bool` capture contributes its boolean value", and makes
+            // an invalid value, a missing required capture, invalid
+            // frontmatter, or an absent required block suppress the whole
+            // containing constraint after its primary diagnostic. None of
+            // that is implemented here; nothing observable depends on it
+            // until the lane that evaluates typed values lands.
+            Proposition::FrontmatterCapture(_) => false,
+        }
+    }
+
+    /// Evaluates an `fm[...]` proposition against the frontmatter view (§4.6).
+    ///
+    /// PHASE 4A DEBT, in the bare form only: §4.6 says "Every non-boolean,
+    /// non-null result node produces `invalid-value`, and the entire
+    /// constraint containing the proposition is suppressed". Neither the
+    /// diagnostic nor the suppression exists yet, so such a node reads as
+    /// unsatisfied here. The equality form is complete: it is existential
+    /// over non-null result nodes with §4.6's typed scalar equality, and
+    /// nothing about it is deferred.
+    fn frontmatter_query_satisfied(self, proposition: &ResolvedFrontmatterQuery) -> bool {
+        // §4.6: "If the block is absent, the query produces an empty result: a
+        // bare boolean read is unsatisfied, and an equality proposition is
+        // unsatisfied." An `invalid-frontmatter` block arrives here as `None`
+        // too; suppressing its containing constraint is 4A's.
+        let Some(frontmatter) = self.frontmatter else {
+            return false;
+        };
+        let Ok(prepared) = proposition.parsed().query().prepare() else {
+            // The source was validated when the schema loaded, so a provider
+            // that now refuses it is a provider bug, not an authoring one.
+            return false;
+        };
+        // PHASE 4A DEBT: the frontmatter view is rebuilt per proposition
+        // because the engine carries the mapping rather than a JSON document.
+        // Frontmatter is small and this is temporary; evaluation moves behind
+        // a prepared document in 4A.
+        let document = serde_json::Value::Object(frontmatter.clone());
+        let nodes = prepared.evaluate(&document);
+        match proposition.equals() {
+            // §4.6: "A bare `fm[...]` is a typed boolean read, not a presence
+            // test. It is satisfied iff at least one result node is the
+            // YAML/JSON boolean `true`."
+            None => nodes
+                .iter()
+                .any(|(_, value)| matches!(value, serde_json::Value::Bool(true))),
+            // §4.6: "Equality is existential over non-null result nodes [...]
+            // satisfied iff at least one such node has the same resolved
+            // scalar type and value."
+            Some(expected) => nodes.iter().any(|(_, value)| {
+                !value.is_null() && frontmatter_scalar_equals(value, expected, self.match_case)
+            }),
         }
     }
 
@@ -376,6 +433,12 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                         matcher: rule.matcher.clone(),
                     })
             }
+            Proposition::FrontmatterQuery(proposition) => {
+                Some(DiagnosticReference::FrontmatterQuery(proposition.clone()))
+            }
+            Proposition::FrontmatterCapture(proposition) => {
+                Some(DiagnosticReference::FrontmatterCapture(proposition.clone()))
+            }
         }
     }
 
@@ -416,7 +479,11 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
             Proposition::ResolvedRule(locator) => {
                 output.extend(self.resolve_bound_occurrences(locator));
             }
-            Proposition::Frontmatter(_) => {}
+            // A frontmatter proposition names no header, so it contributes
+            // no occurrence to a constraint's involved headers.
+            Proposition::Frontmatter(_)
+            | Proposition::FrontmatterQuery(_)
+            | Proposition::FrontmatterCapture(_) => {}
         }
     }
 }

@@ -20,10 +20,10 @@ use crate::schema::resolved_anchor;
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
     AtLeastTwo, BoundRuleStep, CaptureName, Cardinality, Constraint, ConstraintIndex,
-    ConstraintPath, FrontmatterKey, FrontmatterRef, FrontmatterScalar, NonEmpty, Proposition,
-    RefAnchor, ResolvedIntrinsicTextLocator, ResolvedRuleCaptureLocator, ResolvedRuleLocator,
-    RuleIndex, RuleOutcome, Schema, SchemaErrorKind, ScopePath, SectionRule, SourceRange,
-    UpperBound,
+    ConstraintPath, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
+    ResolvedFrontmatterCapture, ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator,
+    ResolvedRuleCaptureLocator, ResolvedRuleLocator, RuleIndex, RuleOutcome, Schema,
+    SchemaErrorKind, ScopePath, SectionRule, SourceRange, UpperBound,
 };
 
 use super::{Loader, RangeKey};
@@ -45,18 +45,6 @@ impl Loader {
                     index: ConstraintIndex(index),
                 }));
                 for reference in constraint_ref_strings(value) {
-                    // Compatibility: the legacy dotted `fm.key[=value]` form is
-                    // not locator syntax and keeps its own parser until the
-                    // frontmatter forms cut over.
-                    if reference.starts_with("fm.") {
-                        if parse_frontmatter_ref(reference).is_none() {
-                            self.shape_error_at(
-                                range,
-                                format!("invalid frontmatter ref `{reference}`"),
-                            );
-                        }
-                        continue;
-                    }
                     if let Err(error) = parse_locator(reference) {
                         self.shape_error_at(
                             range,
@@ -337,13 +325,14 @@ impl Loader {
                 Proposition::ResolvedRule(locator),
                 ResolvedIdentity::Rule(identity),
             )),
-            BoundOperand::LegacyFrontmatter {
-                reference,
-                identity,
-            } => Some((
-                Proposition::Frontmatter(reference),
-                ResolvedIdentity::Frontmatter(identity),
-            )),
+            BoundOperand::FrontmatterQuery(proposition) => {
+                let identity = query_identity(&proposition, schema.options.match_case);
+                Some((Proposition::FrontmatterQuery(proposition), identity))
+            }
+            BoundOperand::FrontmatterCapture(proposition) => {
+                let identity = ResolvedIdentity::FrontmatterCapture(proposition.name().clone());
+                Some((Proposition::FrontmatterCapture(proposition), identity))
+            }
             // §4.5: "Locators ending in a capture or intrinsic value are value
             // locators and are not propositions in this version", and §5's
             // table refuses them rather than projecting a value to a boolean.
@@ -385,20 +374,9 @@ impl Loader {
             self.shape_error_at(range, "constraint refs must be strings");
             return None;
         };
-        // Compatibility: the legacy dotted `fm.key[=value]` proposition keeps
-        // its own parser until the frontmatter forms cut over to `fm[...]` and
-        // `fm.<declared capture>`.
-        if source.starts_with("fm.") {
-            let Some(reference) = parse_frontmatter_ref(source) else {
-                self.shape_error_at(range, format!("invalid frontmatter ref `{source}`"));
-                return None;
-            };
-            let identity = frontmatter_identity(&reference, schema.options.match_case);
-            return Some(BoundOperand::LegacyFrontmatter {
-                reference,
-                identity,
-            });
-        }
+        // §4.4: invalid locator syntax is `invalid-document-shape`. That
+        // includes the retired dotted `fm.key=value` spelling, which `fm.`
+        // now reads as one capture name.
         let parsed = match parse_locator(source) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -406,17 +384,40 @@ impl Loader {
                 return None;
             }
         };
-        let ParsedLocator::Outline(outline) = &parsed else {
-            // Compatibility: `fm[...]` binds with the frontmatter forms, and
-            // until then keeps the answer it has always had.
-            self.error_at(
-                SchemaErrorKind::UnresolvedRef,
-                range,
-                format!("unresolved ref `{source}`"),
-            );
-            return None;
-        };
-        self.bind_outline(schema, scope, outline, context, range)
+        match &parsed {
+            ParsedLocator::Outline(outline) => {
+                self.bind_outline(schema, scope, outline, context, range)
+            }
+            // §4.6: "`fm[$.x]` performs a document-time query, while `fm.x` is
+            // the typo-safe reference to a declaration." Only the second binds
+            // a schema name; the query's contents are document data.
+            ParsedLocator::FrontmatterQuery(query) => {
+                let equals = query.equality().map(parse_frontmatter_scalar);
+                Some(BoundOperand::FrontmatterQuery(
+                    ResolvedFrontmatterQuery::new(query.clone(), equals),
+                ))
+            }
+            ParsedLocator::FrontmatterCapture(capture) => {
+                let name = CaptureName(capture.name().as_str().to_owned());
+                // §4.6: "Unknown capture names are `unresolved-ref`, even if a
+                // YAML key of the same name exists."
+                let Some(declaration) = schema.frontmatter.captures().get(&name) else {
+                    self.error_at(
+                        SchemaErrorKind::UnresolvedRef,
+                        range,
+                        format!("unresolved ref `{source}`"),
+                    );
+                    return None;
+                };
+                Some(BoundOperand::FrontmatterCapture(
+                    ResolvedFrontmatterCapture::new(
+                        capture.clone(),
+                        name,
+                        declaration.value_type(),
+                    ),
+                ))
+            }
+        }
     }
 
     /// Resolves an outline locator's names against the built rule forest.
@@ -622,11 +623,8 @@ enum BoundOperand {
     },
     Capture(ResolvedRuleCaptureLocator),
     IntrinsicText(ResolvedIntrinsicTextLocator),
-    /// Compatibility: a legacy dotted `fm.key[=value]` proposition.
-    LegacyFrontmatter {
-        reference: FrontmatterRef,
-        identity: FrontmatterRef,
-    },
+    FrontmatterQuery(ResolvedFrontmatterQuery),
+    FrontmatterCapture(ResolvedFrontmatterCapture),
 }
 
 /// One step of a locator's canonical §5.4 identity.
@@ -657,7 +655,38 @@ enum ScopeSelector {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ResolvedIdentity {
     Rule(Vec<CanonicalStep>),
-    Frontmatter(FrontmatterRef),
+    /// §5.4: "frontmatter captures duplicate when they name the same
+    /// declaration."
+    FrontmatterCapture(CaptureName),
+    /// §5.4: `fm[...]` propositions duplicate "when their query source is
+    /// identical and either both lack equality or their equality literals
+    /// resolve to values equal under §4.6".
+    ///
+    /// The query is compared as written, so "syntactically different JSONPath
+    /// queries are not treated as duplicates merely because they may select
+    /// the same nodes". A bare read carries no literal at all, which is what
+    /// keeps `fm[$.x]` and `fm[$.x]=` apart.
+    FrontmatterQuery {
+        query: String,
+        equals: Option<FrontmatterScalar>,
+    },
+}
+
+/// The §5.4 identity of one `fm[...]` proposition.
+///
+/// §4.6 makes string equality follow `options.match_case`, so two literals
+/// that compare equal against a document must also compare equal here.
+fn query_identity(proposition: &ResolvedFrontmatterQuery, match_case: bool) -> ResolvedIdentity {
+    let mut equals = proposition.equals().cloned();
+    if !match_case {
+        if let Some(FrontmatterScalar::String(value)) = &mut equals {
+            *value = crate::case_fold::simple_fold(value).collect();
+        }
+    }
+    ResolvedIdentity::FrontmatterQuery {
+        query: proposition.query().to_owned(),
+        equals,
+    }
 }
 
 /// Whether a rule's effective maximum makes an unnarrowed step singular.
@@ -771,39 +800,6 @@ fn constraints_in_rules_mut<'a>(
     } else {
         constraints_in_rules_mut(&mut rule.sections, rest)
     }
-}
-
-fn parse_frontmatter_ref(source: &str) -> Option<FrontmatterRef> {
-    let body = source.strip_prefix("fm.")?;
-    let (path, equals) = match body.split_once('=') {
-        Some((path, literal)) => (path, Some(parse_frontmatter_scalar(literal))),
-        None => (body, None),
-    };
-    let mut keys = path.split('.');
-    let first = keys.next()?;
-    if first.is_empty() {
-        return None;
-    }
-    let rest = keys
-        .map(|key| (!key.is_empty()).then(|| FrontmatterKey(key.to_owned())))
-        .collect::<Option<Vec<_>>>()?;
-    Some(FrontmatterRef {
-        path: NonEmpty {
-            first: FrontmatterKey(first.to_owned()),
-            rest,
-        },
-        equals,
-    })
-}
-
-fn frontmatter_identity(reference: &FrontmatterRef, match_case: bool) -> FrontmatterRef {
-    let mut identity = reference.clone();
-    if !match_case {
-        if let Some(FrontmatterScalar::String(value)) = &mut identity.equals {
-            *value = crate::case_fold::simple_fold(value).collect();
-        }
-    }
-    identity
 }
 
 fn scalar_or_sequence(value: &Value) -> Vec<&Value> {

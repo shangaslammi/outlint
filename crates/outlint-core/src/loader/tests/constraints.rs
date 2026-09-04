@@ -1,8 +1,8 @@
 use super::{error_kinds, invalid, source_slice, valid};
 use crate::CanonicalInteger;
 use crate::{
-    Constraint, FrontmatterKey, FrontmatterRef, FrontmatterScalar, NonEmpty, Proposition,
-    RefAnchor, ResolvedRuleLocator, Schema, SchemaErrorKind,
+    Constraint, FrontmatterScalar, Proposition, RefAnchor, ResolvedRuleLocator, Schema,
+    SchemaErrorKind,
 };
 
 /// The bound rule locator a root `any_of`'s first operand holds.
@@ -28,7 +28,7 @@ sections:
       - match: Goals
   - match: Deployment
 constraints:
-  - requires: { if: deployment, then: [$.overview.goals, fm.count=0x10] }
+  - requires: { if: deployment, then: [$.overview.goals, "fm[$.count]=0x10"] }
 "#,
     );
     let Constraint::Requires {
@@ -59,26 +59,31 @@ constraints:
             .collect::<Vec<_>>(),
         ["overview", "goals"]
     );
+    // §4.6: the wrapper is retained whole for diagnostics, the query is kept
+    // exactly as written, and the equality literal resolves as one YAML 1.2
+    // core-schema scalar.
+    let Proposition::FrontmatterQuery(query) = &consequences.rest[0] else {
+        panic!("expected a frontmatter query proposition")
+    };
+    assert_eq!(query.locator(), "fm[$.count]=0x10");
+    assert_eq!(query.query(), "$.count");
     assert_eq!(
-        consequences.rest[0],
-        Proposition::Frontmatter(FrontmatterRef {
-            path: NonEmpty {
-                first: FrontmatterKey("count".into()),
-                rest: vec![]
-            },
-            equals: Some(FrontmatterScalar::Integer(CanonicalInteger("16".into())))
-        })
+        query.equals(),
+        Some(&FrontmatterScalar::Integer(CanonicalInteger("16".into())))
     );
 }
 
 #[test]
-fn frontmatter_ref_identity_uses_simple_case_folding() {
+fn query_equality_identity_uses_simple_case_folding() {
+    // §5.4 compares equality literals "under §4.6", where string equality
+    // follows `options.match_case`, so two literals that a document cannot
+    // tell apart are one proposition.
     let duplicate = error_kinds(
         r#"
 version: 1
 sections: []
 constraints:
-  - any_of: [fm.key=ſ, fm.key=S]
+  - any_of: ["fm[$.key]=ſ", "fm[$.key]=S"]
 "#,
     );
     assert_eq!(duplicate, vec![SchemaErrorKind::DuplicateRef]);
@@ -88,10 +93,161 @@ constraints:
 version: 1
 sections: []
 constraints:
-  - any_of: [fm.key=ß, fm.key=ss]
+  - any_of: ["fm[$.key]=ß", "fm[$.key]=ss"]
 "#,
     );
     assert_eq!(schema.outline[0].constraints.len(), 1);
+
+    // With `match_case` on, the two spellings stay apart.
+    let sensitive = valid(
+        r#"
+version: 1
+options:
+  match_case: true
+sections: []
+constraints:
+  - any_of: ["fm[$.key]=ſ", "fm[$.key]=S"]
+"#,
+    );
+    assert_eq!(sensitive.outline[0].constraints.len(), 1);
+}
+
+#[test]
+fn query_sources_are_retained_and_compared_as_written() {
+    // §4.6: "The wrapper ends after parsing that complete query, not at the
+    // first `]` or `=` occurring inside it", so a quoted `]` or `=` reaches
+    // the provider intact.
+    let schema = valid(
+        r#"
+version: 1
+sections: []
+constraints:
+  - any_of: ["fm[$['a]b']]", "fm[$['c=d']]=x"]
+"#,
+    );
+    let Constraint::AnyOf(items) = &schema.outline[0].constraints[0] else {
+        panic!("expected any_of")
+    };
+    let Proposition::FrontmatterQuery(bracketed) = &items.first else {
+        panic!("expected a frontmatter query proposition")
+    };
+    assert_eq!(bracketed.query(), "$['a]b']");
+    assert_eq!(bracketed.equals(), None);
+    let Proposition::FrontmatterQuery(equality) = &items.second else {
+        panic!("expected a frontmatter query proposition")
+    };
+    assert_eq!(equality.query(), "$['c=d']");
+    assert_eq!(
+        equality.equals(),
+        Some(&FrontmatterScalar::String("x".into()))
+    );
+
+    // §5.4: "Syntactically different JSONPath queries are not treated as
+    // duplicates merely because they may select the same nodes."
+    valid(
+        r#"
+version: 1
+sections: []
+constraints:
+  - any_of: ["fm[$.a]", "fm[$['a']]"]
+"#,
+    );
+    // The same source twice is one proposition, though.
+    assert_eq!(
+        error_kinds(
+            r#"
+version: 1
+sections: []
+constraints:
+  - any_of: ["fm[$.a]", "fm[$.a]"]
+"#,
+        ),
+        vec![SchemaErrorKind::DuplicateRef]
+    );
+    // Canonically equal numeric literals duplicate; a differently typed one
+    // does not.
+    assert_eq!(
+        error_kinds(
+            r#"
+version: 1
+sections: []
+constraints:
+  - any_of: ["fm[$.a]=0x10", "fm[$.a]=16"]
+"#,
+        ),
+        vec![SchemaErrorKind::DuplicateRef]
+    );
+    valid(
+        r#"
+version: 1
+sections: []
+constraints:
+  - any_of: ["fm[$.a]=16", "fm[$.a]=16.0"]
+"#,
+    );
+}
+
+#[test]
+fn a_bare_query_is_not_an_equality_against_the_empty_scalar() {
+    // §5.4 duplicates two queries only when they "either both lack equality
+    // or their equality literals resolve to values equal under §4.6", so a
+    // bare read never duplicates an equality form.
+    valid(
+        r#"
+version: 1
+sections: []
+constraints:
+  - any_of: ["fm[$.a]", "fm[$.a]="]
+"#,
+    );
+    // YAML 1.2's core schema resolves the empty scalar to null, so `=` and
+    // `=null` are the same literal and do duplicate.
+    assert_eq!(
+        error_kinds(
+            r#"
+version: 1
+sections: []
+constraints:
+  - any_of: ["fm[$.a]=", "fm[$.a]=null"]
+"#,
+        ),
+        vec![SchemaErrorKind::DuplicateRef]
+    );
+}
+
+#[test]
+fn the_retired_dotted_frontmatter_spelling_is_invalid_syntax() {
+    // §10 migrates `fm.status=deprecated` to `fm[$.status]=deprecated`; the
+    // old spelling is now `fm.` followed by something that is not one capture
+    // name, which §4.4 makes `invalid-document-shape`.
+    assert_eq!(
+        error_kinds(
+            "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+             - any_of: [fm.status=deprecated, a]\n",
+        ),
+        vec![SchemaErrorKind::InvalidDocumentShape]
+    );
+    // A dotted key path is not a capture name either.
+    assert_eq!(
+        error_kinds(
+            "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+             - any_of: [fm.outer.inner, a]\n",
+        ),
+        vec![SchemaErrorKind::InvalidDocumentShape]
+    );
+}
+
+#[test]
+fn an_undeclared_frontmatter_capture_does_not_resolve() {
+    // §4.6: "Unknown capture names are `unresolved-ref`, even if a YAML key
+    // of the same name exists."
+    assert_eq!(
+        error_kinds(
+            "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+             - any_of: [fm.version, a]\n",
+        ),
+        vec![SchemaErrorKind::UnresolvedRef]
+    );
 }
 
 #[test]
@@ -318,7 +474,7 @@ fn ordered_refuses_value_terminals_with_its_own_error() {
     assert_eq!(text, vec![SchemaErrorKind::OrderedScopeMismatch]);
     let frontmatter = error_kinds(
         "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  \
-         - id: b\n    match: B\nconstraints:\n  - ordered: [fm.draft, b]\n",
+         - id: b\n    match: B\nconstraints:\n  - ordered: [\"fm[$.draft]\", b]\n",
     );
     assert_eq!(frontmatter, vec![SchemaErrorKind::OrderedScopeMismatch]);
 }

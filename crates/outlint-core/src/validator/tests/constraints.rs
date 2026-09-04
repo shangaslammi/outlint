@@ -142,7 +142,7 @@ fn deep_nesting_resolves_one_mapping_per_step() {
 fn frontmatter_constraints_fire_and_release_through_validation() {
     let loaded = load_schema(
         "version: 1\nsections:\n  - id: migration\n    match: Migration\n    \
-         required: false\nconstraints:\n  - requires: { if: fm.status=deprecated, \
+         required: false\nconstraints:\n  - requires: { if: \"fm[$.status]=deprecated\", \
          then: migration }\n",
     )
     .expect("test schema is valid");
@@ -159,9 +159,14 @@ fn frontmatter_constraints_fire_and_release_through_validation() {
     // uses the single-h1 document voice; the frontmatter side is named
     // among the references.
     assert_eq!(diagnostic.target, DiagnosticTarget::Document);
+    let DiagnosticReference::FrontmatterQuery(reference) = &diagnostic.references[0] else {
+        panic!("expected a frontmatter query reference")
+    };
+    assert_eq!(reference.locator(), "fm[$.status]=deprecated");
+    assert_eq!(reference.query(), "$.status");
     assert_eq!(
-        diagnostic.references[0],
-        DiagnosticReference::Frontmatter(fm_reference(&["status"], Some("deprecated"))),
+        reference.equals(),
+        Some(&crate::FrontmatterScalar::String("deprecated".into()))
     );
 
     // Unsatisfied condition: nothing fires.
@@ -184,21 +189,21 @@ fn frontmatter_constraints_fire_and_release_through_validation() {
 }
 
 #[test]
-fn fm_refs_read_frontmatter_even_when_a_nested_rule_is_addressable_as_fm_x() {
+fn frontmatter_queries_route_past_a_nested_rule_addressable_as_fm_x() {
     // A nested rule id `fm` with child `x` would make the rule path
-    // `fm.x` spellable — but `fm.` refs resolve via the frontmatter slot,
-    // never the rule forest, so the headers below cannot satisfy the
-    // condition.
+    // `fm.x` spellable — but §4.1 reserves the leading name `fm` for §4.6's
+    // frontmatter forms, so `fm[$.x]` reads the frontmatter and never the
+    // rule forest, and the headers below cannot satisfy the condition.
     let loaded = load_schema(
         "version: 1\nsections:\n  - id: outer\n    match: Outer\n    required: false\n    \
          sections:\n      - id: fm\n        match: FM\n        required: false\n        \
          sections:\n          - id: x\n            match: X\n            required: false\n    \
-         constraints:\n      - requires: { if: fm.x, then: fm.present }\n",
+         constraints:\n      - requires: { if: \"fm[$.x]=1\", then: \"fm[$.present]=1\" }\n",
     )
     .expect("only a top-level `fm` rule id is reserved");
 
     // Headers satisfy the rule path fm -> x in the constraint's scope; the
-    // frontmatter key `x` is absent. Were the ref a rule ref, the
+    // frontmatter key `x` is absent. Were the locator a rule locator, the
     // condition would hold and the unsatisfiable consequence would fire.
     let headers_only = parse_markdown(
         "# Doc\n## Outer\n### FM\n#### X\n",
