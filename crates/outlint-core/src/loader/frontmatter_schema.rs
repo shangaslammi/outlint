@@ -9,8 +9,8 @@ use crate::locator::AbsoluteSingularPath;
 use crate::typed_value::ValueType;
 use crate::{
     ByteOffset, CaptureName, FrontmatterCapture, FrontmatterCaptures, FrontmatterPolicy,
-    JsonSchemaResourceContents, LinkedJsonSchemaInput, NonEmpty, SchemaErrorKind, SchemaNode,
-    SourceId, SourceRange, TextRange,
+    JsonSchemaResourceContents, LinkedJsonSchemaInput, NonEmpty, RelatedLocation, SchemaErrorKind,
+    SchemaNode, SourceId, SourceRange, TextRange,
 };
 
 use super::constraints::non_empty;
@@ -516,11 +516,7 @@ impl Loader {
             .contains_key(&RangeKey::FrontmatterField(CAPTURES_FIELD.into()));
         let forbidden_captures = captures_declared && !allow;
         if forbidden_captures {
-            self.error_at(
-                SchemaErrorKind::ConflictingFrontmatter,
-                self.range(RangeKey::FrontmatterField(CAPTURES_FIELD.into())),
-                "frontmatter cannot declare captures and be forbidden",
-            );
+            self.report_forbidden_captures();
         }
         // Independent of the conflict above, and reported alongside it: a
         // declaration that is also malformed has two faults, and §6.3 asks
@@ -618,6 +614,34 @@ impl Loader {
             None if allow => FrontmatterPolicy::Optional { schema },
             None => FrontmatterPolicy::Forbidden { schema },
         })
+    }
+
+    /// Reports `captures` declared together with `allow: false` (§2.3).
+    ///
+    /// §6.3 anchors this "at whichever of those keys occurs second, following
+    /// the top-level conflict convention of §2": the second key is the one a
+    /// reader meets as the contradiction, and the first is attached as a
+    /// related location so the pair is visible at once. `allow` is spelled
+    /// whenever it is false, so both ranges exist here.
+    fn report_forbidden_captures(&mut self) {
+        let allow = self.range(RangeKey::FrontmatterField("allow".into()));
+        let captures = self.range(RangeKey::FrontmatterField(CAPTURES_FIELD.into()));
+        let (anchor, second, first_range, first) = if allow.range.start <= captures.range.start {
+            (captures, CAPTURES_FIELD, allow, "allow")
+        } else {
+            (allow, "allow", captures, CAPTURES_FIELD)
+        };
+        self.error_with_related_at(
+            SchemaErrorKind::ConflictingFrontmatter,
+            anchor,
+            format!(
+                "`frontmatter.{second}` cannot be declared together with `frontmatter.{first}`"
+            ),
+            vec![RelatedLocation {
+                range: first_range,
+                message: format!("`frontmatter.{first}` declared here"),
+            }],
+        );
     }
 
     /// Normalizes `frontmatter.captures` into the §2.3 collection.
