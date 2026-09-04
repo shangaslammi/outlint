@@ -3,8 +3,9 @@ use crate::loader::load_schema;
 use crate::loader::rules::{auto_id, is_capture_name, parse_repeat, regex_body};
 use crate::{
     CaptureName, Cardinality, ConstraintIndex, ConstraintPath, ExactText, InvalidSchema,
-    LoadedSchema, Matcher, OutlineProvenance, RegexPattern, RuleId, RuleIndex, RuleOutcome,
-    RulePath, SchemaError, SchemaErrorKind, SchemaNode, ScopePath, UpperBound,
+    LoadedSchema, Matcher, OrderEntryPath, OrderIndex, OutlineProvenance, RegexPattern, RuleId,
+    RuleIndex, RuleOutcome, RulePath, SchemaError, SchemaErrorKind, SchemaNode, ScopePath,
+    UpperBound, ValueOrderDirection, ValueOrderEntry,
 };
 use proptest::prelude::*;
 
@@ -1262,4 +1263,411 @@ proptest! {
             });
         prop_assert_eq!(is_capture_name(&candidate), expected);
     }
+}
+
+// --- §2.1/§3.8 value-order normalization ----------------------------------
+
+/// An entry declares only `by`; §3.8 supplies ascending and non-strict.
+#[test]
+fn order_defaults_to_ascending_and_non_strict() {
+    let schema = valid(
+        r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+    order:
+      - by: major
+"#,
+    );
+    assert_eq!(
+        schema.addressed_root_rules()[0].order,
+        vec![ValueOrderEntry {
+            by: capture_name("major"),
+            direction: ValueOrderDirection::Ascending,
+            strict: false,
+        }]
+    );
+}
+
+/// Explicit values normalize to the same shape, and §3.8 makes entry order
+/// semantic, so the list keeps the order it was written in.
+#[test]
+fn explicit_order_values_normalize_and_keep_their_list_order() {
+    let schema = valid(
+        r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)\\.(?<minor>[0-9]+)/"
+    captures:
+      major: int
+      minor: int
+    order:
+      - by: minor
+        dir: desc
+        strict: true
+      - by: major
+        dir: asc
+"#,
+    );
+    assert_eq!(
+        schema.addressed_root_rules()[0].order,
+        vec![
+            ValueOrderEntry {
+                by: capture_name("minor"),
+                direction: ValueOrderDirection::Descending,
+                strict: true,
+            },
+            ValueOrderEntry {
+                by: capture_name("major"),
+                direction: ValueOrderDirection::Ascending,
+                strict: false,
+            },
+        ]
+    );
+}
+
+/// The `order` collection must be a non-empty list (§2.1); a malformed
+/// collection anchors at the `order` value rather than at any entry.
+#[test]
+fn order_requires_a_list() {
+    for spelling in ["null", "major", "{by: major}"] {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+             \x20   captures:\n      major: int\n    order: {spelling}\n"
+        );
+        assert_anchored(&source, SchemaErrorKind::InvalidOrder, spelling);
+    }
+}
+
+#[test]
+fn order_must_be_nonempty() {
+    let source = "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+                  \x20   captures:\n      major: int\n    order: []\n";
+    let error = assert_anchored(source, SchemaErrorKind::InvalidOrder, "[]");
+    assert_eq!(
+        error.message,
+        "rule `order` must declare at least one entry"
+    );
+}
+
+#[test]
+fn order_entries_require_objects() {
+    let source = ORDER_RULE.replace("<ENTRY>", "- major");
+    assert_anchored(&source, SchemaErrorKind::InvalidOrder, "major");
+}
+
+#[test]
+fn order_entries_require_by() {
+    let source = ORDER_RULE.replace("<ENTRY>", "- dir: desc");
+    let error = assert_anchored(&source, SchemaErrorKind::InvalidOrder, "dir: desc\n");
+    assert_eq!(error.message, "each `order` entry must declare `by`");
+}
+
+/// §2.1 sends an unknown key inside an order entry to `invalid-order` rather
+/// than to the general unknown-key rule.
+#[test]
+fn unknown_order_entry_fields_are_invalid_order() {
+    let source = ORDER_RULE.replace("<ENTRY>", "- by: major\n        reverse: true");
+    let error = assert_anchored(
+        &source,
+        SchemaErrorKind::InvalidOrder,
+        "by: major\n        reverse: true\n",
+    );
+    assert_eq!(error.message, "unknown `order` entry field `reverse`");
+}
+
+#[test]
+fn order_by_must_be_a_string() {
+    for spelling in ["null", "1", "true", "[major]"] {
+        let source = ORDER_RULE.replace("<ENTRY>", &format!("- by: {spelling}"));
+        let error = assert_anchored(
+            &source,
+            SchemaErrorKind::InvalidOrder,
+            &format!("by: {spelling}\n"),
+        );
+        assert_eq!(
+            error.message,
+            "`order` entry `by` must be a capture name string"
+        );
+    }
+}
+
+#[test]
+fn order_direction_is_closed() {
+    for spelling in ["null", "ascending", "1", "DESC"] {
+        let source =
+            ORDER_RULE.replace("<ENTRY>", &format!("- by: major\n        dir: {spelling}"));
+        let error = assert_anchored(
+            &source,
+            SchemaErrorKind::InvalidOrder,
+            &format!("by: major\n        dir: {spelling}\n"),
+        );
+        assert_eq!(error.message, "`order` entry `dir` must be `asc` or `desc`");
+    }
+}
+
+#[test]
+fn order_strict_must_be_boolean() {
+    for spelling in ["null", "\"true\"", "1"] {
+        let source = ORDER_RULE.replace(
+            "<ENTRY>",
+            &format!("- by: major\n        strict: {spelling}"),
+        );
+        let error = assert_anchored(
+            &source,
+            SchemaErrorKind::InvalidOrder,
+            &format!("by: major\n        strict: {spelling}\n"),
+        );
+        assert_eq!(error.message, "`order` entry `strict` must be a bool");
+    }
+}
+
+/// §3.8: `by` must name one of the rule's own captures.
+#[test]
+fn order_by_must_name_declared_capture() {
+    let source = ORDER_RULE.replace("<ENTRY>", "- by: minor");
+    let error = assert_anchored(&source, SchemaErrorKind::InvalidOrder, "by: minor\n");
+    assert_eq!(
+        error.message,
+        "`order` entry `by: minor` names no capture declared by this rule"
+    );
+}
+
+/// §3.8 compares entries after defaults are applied, so a defaulted entry and
+/// its fully spelled equivalent are duplicates. Only the later one is the
+/// error.
+#[test]
+fn duplicate_order_is_checked_after_defaults() {
+    let source = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+    order:
+      - by: major
+      - by: major
+        dir: asc
+        strict: false
+"#;
+    let error = assert_anchored(
+        source,
+        SchemaErrorKind::InvalidOrder,
+        "by: major\n        dir: asc\n        strict: false\n",
+    );
+    assert_eq!(
+        error.message,
+        "`order` already declares this ordering of capture `major`"
+    );
+
+    // Entries differing in any normalized component are not duplicates.
+    let distinct = valid(
+        r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+    order:
+      - by: major
+      - by: major
+        dir: desc
+      - by: major
+        strict: true
+"#,
+    );
+    assert_eq!(distinct.addressed_root_rules()[0].order.len(), 3);
+}
+
+/// §3.8 orders a rule's repeated matches, so a rule that can match at most
+/// once has nothing to order. Every cardinality spelling bounded at one is
+/// refused, and each entry is reported.
+#[test]
+fn order_requires_repeatable_rule() {
+    for cardinality in ["required: true", "required: false", "repeat: \"0..1\""] {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n    {cardinality}\n\
+             \x20   captures:\n      major: int\n    order:\n      - by: major\n\
+             \x20     - by: major\n        dir: desc\n"
+        );
+        assert_errors(
+            &source,
+            &[
+                (SchemaErrorKind::InvalidOrder, "by: major\n      "),
+                (
+                    SchemaErrorKind::InvalidOrder,
+                    "by: major\n        dir: desc\n",
+                ),
+            ],
+        );
+    }
+
+    // The open default and every bounded maximum above one are accepted.
+    for cardinality in ["", "    repeat: \"0..2\"\n", "    repeat: \"1..n\"\n"] {
+        let source = format!(
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n{cardinality}\
+             \x20   captures:\n      major: int\n    order:\n      - by: major\n"
+        );
+        assert_eq!(valid(&source).addressed_root_rules()[0].order.len(), 1);
+    }
+}
+
+/// §6.3: a cardinality that never normalized supplies no maximum, so the
+/// maximum check is skipped rather than run against a guess. Nothing else
+/// about the order depends on it.
+#[test]
+fn invalid_repeat_suppresses_order_max_check() {
+    let source = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    repeat: 01..2
+    captures:
+      major: int
+    order:
+      - by: major
+"#;
+    assert_errors(source, &[(SchemaErrorKind::InvalidRepeat, "01..2")]);
+}
+
+#[test]
+fn conflicting_cardinality_suppresses_order_max_check() {
+    let source = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    required: true
+    repeat: "1..3"
+    captures:
+      major: int
+    order:
+      - by: major
+"#;
+    assert_errors(
+        source,
+        &[(SchemaErrorKind::ConflictingCardinality, "\"1..3\"")],
+    );
+}
+
+/// §6.3 again, from the other side: a capture mapping that never became one
+/// cannot answer `by`, so no `invalid-order` is invented for a well-shaped
+/// entry — while an entry that is independently malformed still reports.
+#[test]
+fn malformed_captures_suppress_only_capture_dependent_order_checks() {
+    let well_shaped = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: integer
+    order:
+      - by: major
+"#;
+    assert_errors(
+        well_shaped,
+        &[(SchemaErrorKind::InvalidCapture, "major: integer")],
+    );
+
+    let independently_malformed = r#"version: 1
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: integer
+    order:
+      - by: major
+        reverse: true
+"#;
+    assert_errors(
+        independently_malformed,
+        &[
+            (SchemaErrorKind::InvalidCapture, "major: integer"),
+            (
+                SchemaErrorKind::InvalidOrder,
+                "by: major\n        reverse: true\n",
+            ),
+        ],
+    );
+}
+
+/// Order entries are addressable by position, in every form a rule is spelled
+/// in.
+#[test]
+fn order_nodes_are_addressable_in_every_rule_form() {
+    let sugar = r#"version: 1
+title: Doc
+sections:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+    order:
+      - by: major
+    sections:
+      - match: "/r(?<minor>[0-9]+)/"
+        captures:
+          minor: int
+        order:
+          - by: minor
+            dir: desc
+"#;
+    let loaded = load_schema(sugar).expect("the sugar schema loads");
+    assert_eq!(
+        order_slice(&loaded, sugar, ScopePath(Vec::new()), 0, 0),
+        "by: major\n    "
+    );
+    assert_eq!(
+        order_slice(&loaded, sugar, ScopePath(vec![RuleIndex(0)]), 0, 0),
+        "by: minor\n            dir: desc\n"
+    );
+
+    let outline = r#"version: 1
+outline:
+  - match: "/v(?<major>[0-9]+)/"
+    captures:
+      major: int
+    order:
+      - by: major
+"#;
+    let loaded = load_schema(outline).expect("the outline schema loads");
+    assert_eq!(
+        order_slice(&loaded, outline, ScopePath(Vec::new()), 0, 0),
+        "by: major\n"
+    );
+}
+
+/// A rule with `<ENTRY>` substituted into a one-capture `order` list.
+const ORDER_RULE: &str = "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+                          \x20   captures:\n      major: int\n    order:\n      <ENTRY>\n";
+
+/// The source text one rule's order-entry node addresses.
+#[track_caller]
+fn order_slice<'a>(
+    loaded: &LoadedSchema,
+    source: &'a str,
+    scope: ScopePath,
+    index: usize,
+    order_index: usize,
+) -> &'a str {
+    let path = OrderEntryPath {
+        rule: RulePath {
+            scope,
+            index: RuleIndex(index),
+        },
+        order_index: OrderIndex(order_index),
+    };
+    let range = loaded
+        .locations
+        .nodes
+        .get(&SchemaNode::OrderEntry(path.clone()))
+        .unwrap_or_else(|| panic!("missing order node for {path:?}"));
+    source_slice(source, *range)
+}
+
+/// A validated capture name, taken from a schema that declares it: the type
+/// deliberately has no public constructor.
+#[track_caller]
+fn capture_name(name: &str) -> CaptureName {
+    valid(&format!(
+        "version: 1\nsections:\n  - match: \"/(?<{name}>.+)/\"\n    captures:\n      {name}: text\n"
+    ))
+    .addressed_root_rules()[0]
+        .captures
+        .keys()
+        .next()
+        .expect("the schema declares one capture")
+        .clone()
 }

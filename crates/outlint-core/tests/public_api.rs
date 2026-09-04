@@ -2,7 +2,7 @@ use outlint_core::{
     load_schema, parse_markdown, validate, ByteOffset, Diagnostic, DiagnosticId, Document,
     DocumentFrontmatter, FrontmatterAnchors, FrontmatterLocation, HeaderPath, MarkdownOptions,
     Options, PrepareValidationError, PreparedValidator, Schema, SchemaError, TextRange,
-    ValidationError, ValidationOperationalError,
+    ValidationError, ValidationOperationalError, ValueOrderDirection,
 };
 
 #[test]
@@ -311,15 +311,16 @@ fn non_string_capture_keys_fail_the_shape_rule_before_duplicate_classification()
         .all(|error| error.kind.to_string() != "invalid-capture"));
 }
 
-/// Pins that a rule's `captures` declarations reach the public model with
-/// their §2.4 types resolved, and that `order` and `frontmatter.captures`
-/// remain admitted as fields rather than refused as unknown keys.
+/// Pins that a rule's `captures` and `order` declarations reach the public
+/// model normalized — types resolved, direction and strictness defaulted —
+/// and that `frontmatter.captures` remains admitted as a field rather than
+/// refused as an unknown key.
 ///
-/// Those two are still unvalidated and unnormalized here: the loader lanes
-/// that read them land later, and pinning their admission keeps it a
-/// deliberate state rather than an accident nobody noticed.
+/// That last one is still unvalidated and unnormalized here: the loader lane
+/// that reads it lands later, and pinning its admission keeps it a deliberate
+/// state rather than an accident nobody noticed.
 #[test]
-fn rule_captures_reach_the_public_model() {
+fn rule_captures_and_order_reach_the_public_model() {
     let loaded = load_schema(
         r#"
 version: 1
@@ -345,7 +346,10 @@ sections:
         .map(|(name, capture)| (name.as_str(), capture.type_name()))
         .collect::<Vec<_>>();
     assert_eq!(captures, vec![("version", "semver")]);
-    assert!(rule.order.is_empty());
+    assert_eq!(rule.order.len(), 1);
+    assert_eq!(rule.order[0].by.as_str(), "version");
+    assert_eq!(rule.order[0].direction, ValueOrderDirection::Descending);
+    assert!(!rule.order[0].strict);
     assert!(loaded.schema.frontmatter.captures().is_empty());
 }
 
