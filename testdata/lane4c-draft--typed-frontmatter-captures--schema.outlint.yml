@@ -1,0 +1,28 @@
+version: 1
+# Typed frontmatter captures (spec 2.3, 2.4). Each capture names an absolute
+# RFC 9535 singular query; an omitted `path` defaults to the capture name as
+# one name segment.
+options:
+  ordered_sections: false
+title: null
+frontmatter:
+  captures:
+    version:
+      path: "$.release.version"
+      type: semver
+      required: true
+    count:
+      type: int
+      required: true
+    draft:
+      type: bool
+    label:
+      type: text
+    last_item:
+      path: "$.items[-1]"
+      type: text
+      required: true
+sections:
+  - id: doc
+    match: Doc
+    required: false
