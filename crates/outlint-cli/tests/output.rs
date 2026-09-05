@@ -196,6 +196,45 @@ fn guard_human_output_names_the_guard_and_its_declaration() {
     );
 }
 
+#[test]
+fn first_matching_guard_owns_the_version_4_schema_node() {
+    let directory = TempDir::new("first-guard-attribution");
+    directory.write(
+        "schema.yml",
+        "version: 2\ntitle: null\nforbid_sections:\n  - match: 'Secret*'\n  - match: '*'\nsections: []\n",
+    );
+    directory.write("doc.md", "## Secret plan\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let envelope = json_output(&output);
+    let diagnostics = envelope
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|results| results.first())
+        .and_then(|result| result.get("diagnostics"))
+        .and_then(serde_json::Value::as_array)
+        .expect("the envelope carries a diagnostic array");
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = diagnostics
+        .first()
+        .expect("one guard diagnostic was asserted");
+    assert_eq!(
+        diagnostic["schema_node"],
+        serde_json::json!({"kind": "guard", "scope": [], "index": 0})
+    );
+}
+
 // Windows refuses control characters in filenames (`fs::write` fails with
 // ERROR_INVALID_NAME before outlint runs), so this on-disk fixture can only
 // exist on Unix. The escaping under test is platform-independent.

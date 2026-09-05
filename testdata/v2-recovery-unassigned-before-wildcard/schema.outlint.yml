@@ -1,0 +1,7 @@
+version: 2
+title: null
+# §3.5/§8: recovery minimizes unassigned headings before wildcard cost.
+sections:
+  - match: "*"
+    repeat: 2..2
+    sections: []

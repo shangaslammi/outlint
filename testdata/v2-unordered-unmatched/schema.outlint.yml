@@ -1,0 +1,7 @@
+version: 2
+title: null
+# §3.4: an unmatched heading remains unexpected without extras.
+unordered: true
+sections:
+  - match: A
+    required: false

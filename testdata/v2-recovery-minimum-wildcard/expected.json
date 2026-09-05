@@ -1,0 +1,12 @@
+{
+  "recovery.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "*" }
+    },
+    {
+      "id": "too-few-sections",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "A" }
+    }
+  ]
+}

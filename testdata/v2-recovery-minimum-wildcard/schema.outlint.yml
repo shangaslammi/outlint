@@ -1,0 +1,9 @@
+version: 2
+title: null
+# §3.5/§8: at equal unassigned count, recovery minimizes wildcard cost.
+sections:
+  - match: "*"
+    repeat: 2..2
+    sections: []
+  - match: A
+    repeat: 2..2

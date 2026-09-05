@@ -1,0 +1,12 @@
+{
+  "excess.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["A two"] }
+    },
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["A two", "Excess child"] }
+    }
+  ]
+}

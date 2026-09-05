@@ -4,4 +4,6 @@ title: null
 sections:
   - match: "A *"
     repeat: 2..2
+    sections:
+      - match: Required child
 extras: anywhere

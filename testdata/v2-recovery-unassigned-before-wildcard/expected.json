@@ -1,0 +1,15 @@
+{
+  "recovery.md": [
+    {
+      "id": "too-few-sections",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "*" }
+    },
+    {
+      "id": "unexpected-section",
+      "target": {
+        "kind": "header",
+        "path": ["A", "Wildcard child"]
+      }
+    }
+  ]
+}

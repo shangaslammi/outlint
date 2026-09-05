@@ -1,0 +1,8 @@
+version: 2
+title: null
+# §3.5/§8: finite bounds larger than H produce ordinary cardinality results.
+sections:
+  - match: A
+    repeat: "1..4294967295"
+  - match: B
+    repeat: "100..4294967295"

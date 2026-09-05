@@ -1,0 +1,11 @@
+{
+  "contrast.md": [
+    {
+      "id": "unexpected-section",
+      "target": {
+        "kind": "header",
+        "path": ["Bound", "Same child", "Bound grandchild"]
+      }
+    }
+  ]
+}

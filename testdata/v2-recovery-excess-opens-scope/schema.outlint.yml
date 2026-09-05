@@ -1,0 +1,7 @@
+version: 2
+title: null
+# §3.5: recovery assigns excess occurrences, so their child scopes still open.
+sections:
+  - match: "A *"
+    repeat: 1..1
+    sections: []

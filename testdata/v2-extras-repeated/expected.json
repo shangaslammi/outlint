@@ -1,3 +1,20 @@
 {
-  "intervening.md": []
+  "intervening.md": [
+    {
+      "id": "missing-section",
+      "target": {
+        "kind": "missing_header",
+        "parent": ["A one"],
+        "matcher": "Required child"
+      }
+    },
+    {
+      "id": "missing-section",
+      "target": {
+        "kind": "missing_header",
+        "parent": ["A two"],
+        "matcher": "Required child"
+      }
+    }
+  ]
 }

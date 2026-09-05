@@ -1,6 +1,7 @@
 version: 2
 title: null
-# §3.5: one recovered repeating rule exposes all four cardinality outcomes.
+# §3.5: one repeated rule exposes all four outcomes across accepted and
+# recovered assignments.
 sections:
   - match: "A *"
     repeat: 2..2

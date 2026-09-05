@@ -1,0 +1,8 @@
+{
+  "tiny.md": [
+    {
+      "id": "too-few-sections",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "B" }
+    }
+  ]
+}

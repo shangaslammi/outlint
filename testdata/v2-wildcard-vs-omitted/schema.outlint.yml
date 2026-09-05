@@ -1,0 +1,10 @@
+version: 2
+title: null
+# §3.2/§3.3: an all-wildcard list binds and recurses; omission does neither.
+sections:
+  - match: Bound
+    sections:
+      - match: "*"
+        repeat: 0..n
+        sections: []
+  - match: Omitted

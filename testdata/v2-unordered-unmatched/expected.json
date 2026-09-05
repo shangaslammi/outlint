@@ -1,0 +1,8 @@
+{
+  "unmatched.md": [
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["X"] }
+    }
+  ]
+}
