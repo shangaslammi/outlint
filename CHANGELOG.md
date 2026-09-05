@@ -24,12 +24,16 @@ output shape, and the library API may all change in a minor release. See
   cardinality (`missing-cardinality`), while rules shadowed by an unordered
   wildcard are rejected as `unreachable-rule`. Migration removes `strict`,
   accepting-rule `allow`, rule-level `ordered`, and
-  `options.ordered_sections`; replaces denials with guards and open scopes with
-  `extras` or a positioned wildcard; marks locally unordered scopes; and
-  reviews formerly implicit exact-rule cardinalities. Overlapping v1 matchers
-  may require unordered classification plus an explicit `ordered` constraint,
-  while exception-before-denial has no exact translation because guards run
-  first (spec §§3, 6, 8, 10).
+  `options.ordered_sections`; deletes a trailing `{match: "*", allow: false}`
+  used only to close a scope, because every declared list is already
+  exhaustive; converts an intentional, unshadowed `allow: false` on a specific
+  matcher into a `forbid_sections` guard; replaces open scopes with `extras` or
+  a positioned wildcard; marks locally unordered scopes; and reviews formerly
+  implicit exact-rule cardinalities. Rules shadowed by an earlier wildcard,
+  their ids, and constraint references to those ids must be deleted.
+  Overlapping v1 matchers may require unordered classification plus an explicit
+  `ordered` constraint, while exception-before-denial has no exact translation
+  because guards run first (spec §§3, 6, 8, 10).
 - **Typed Values and unified locators.** Regex rules and frontmatter may now
   declare `int`, `bool`, `date`, `semver`, `dotted`, and `text` captures:
   `captures` on a regex rule binds its named groups, `frontmatter.captures`

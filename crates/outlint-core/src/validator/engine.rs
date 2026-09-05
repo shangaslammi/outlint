@@ -62,6 +62,9 @@ pub(super) struct WorkCounter {
     pub(super) guard_matcher_evaluations: usize,
     pub(super) accepting_matcher_evaluations: usize,
     pub(super) extras_classifications: usize,
+    pub(super) extras_matrix_cell_copies: usize,
+    pub(super) unordered_rule_inspections: usize,
+    pub(super) unordered_assignment_writes: usize,
     pub(super) sequence_operations: usize,
 }
 
@@ -71,6 +74,9 @@ impl WorkCounter {
         self.guard_matcher_evaluations
             .saturating_add(self.accepting_matcher_evaluations)
             .saturating_add(self.extras_classifications)
+            .saturating_add(self.extras_matrix_cell_copies)
+            .saturating_add(self.unordered_rule_inspections)
+            .saturating_add(self.unordered_assignment_writes)
             .saturating_add(self.sequence_operations)
     }
 }
@@ -664,43 +670,51 @@ impl<'a> Validator<'a> {
         }
         let columns = rules.len();
         let mut matrix = Vec::new();
+        let mut row_eligibility = Vec::with_capacity(retained.len());
         for pathed in &retained {
+            let mut eligible = false;
             for rule in prepared_rules {
                 #[cfg(test)]
                 {
                     self.work.accepting_matcher_evaluations =
                         self.work.accepting_matcher_evaluations.saturating_add(1);
                 }
-                matrix.push(rule.matcher.matches(&pathed.section.heading.text));
+                let matched = rule.matcher.matches(&pathed.section.heading.text);
+                eligible |= matched;
+                matrix.push(matched);
             }
+            row_eligibility.push(eligible);
         }
         if scope.extras == ExtrasMode::Anywhere {
-            let retained_rows = (0..retained.len())
-                .map(|heading_index| {
-                    #[cfg(test)]
-                    {
-                        self.work.extras_classifications =
-                            self.work.extras_classifications.saturating_add(1);
-                    }
-                    let start = heading_index.saturating_mul(columns);
-                    let end = heading_index.saturating_add(1).saturating_mul(columns);
-                    matrix
-                        .get(start..end)
-                        .is_some_and(|row| row.iter().any(|value| *value))
-                })
-                .collect::<Vec<_>>();
+            let mut retained_rows = Vec::with_capacity(row_eligibility.len());
+            for eligible in row_eligibility {
+                #[cfg(test)]
+                {
+                    self.work.extras_classifications =
+                        self.work.extras_classifications.saturating_add(1);
+                }
+                retained_rows.push(eligible);
+            }
             let mut row = 0usize;
             retained.retain(|_| {
                 let keep = retained_rows.get(row).copied().unwrap_or(false);
                 row = row.saturating_add(1);
                 keep
             });
-            matrix = matrix
-                .chunks(columns.max(1))
-                .zip(retained_rows)
-                .filter(|(_, keep)| *keep)
-                .flat_map(|(row, _)| row.iter().copied())
-                .collect();
+            let mut filtered_matrix = Vec::new();
+            for (matrix_row, keep) in matrix.chunks(columns.max(1)).zip(retained_rows) {
+                if keep {
+                    for cell in matrix_row {
+                        #[cfg(test)]
+                        {
+                            self.work.extras_matrix_cell_copies =
+                                self.work.extras_matrix_cell_copies.saturating_add(1);
+                        }
+                        filtered_matrix.push(*cell);
+                    }
+                }
+            }
+            matrix = filtered_matrix;
         }
         let assignment = match scope.mode {
             ScopeMode::Ordered => {
@@ -719,10 +733,23 @@ impl<'a> Validator<'a> {
                 }
             }
             ScopeMode::Unordered => {
+                #[cfg(test)]
+                {
+                    self.work.unordered_assignment_writes = self
+                        .work
+                        .unordered_assignment_writes
+                        .saturating_add(retained.len())
+                        .saturating_add(rules.len());
+                }
                 let mut assigned = vec![None; retained.len()];
                 let mut counts = vec![0; rules.len()];
                 for (heading_index, slot) in assigned.iter_mut().enumerate() {
                     if let Some(rule_index) = (0..rules.len()).find(|rule_index| {
+                        #[cfg(test)]
+                        {
+                            self.work.unordered_rule_inspections =
+                                self.work.unordered_rule_inspections.saturating_add(1);
+                        }
                         matrix
                             .get(
                                 heading_index
@@ -732,6 +759,11 @@ impl<'a> Validator<'a> {
                             .copied()
                             .unwrap_or(false)
                     }) {
+                        #[cfg(test)]
+                        {
+                            self.work.unordered_assignment_writes =
+                                self.work.unordered_assignment_writes.saturating_add(2);
+                        }
                         *slot = Some(rule_index);
                         if let Some(count) = counts.get_mut(rule_index) {
                             *count += 1;

@@ -844,6 +844,20 @@ fn v2_guard_precedes_accepting_assignment() {
 }
 
 #[test]
+fn sugar_scope_guards_never_inspect_the_title_slot() {
+    // §2: sugar-form top-level guards inspect the exposed h2 scope, never the
+    // synthesized h1 title slot, even when their matcher equals title text.
+    let schema = "version: 2\ntitle: Same\nforbid_sections:\n  - match: Same\nsections: []\n";
+    assert_eq!(
+        ids_and_targets(schema, "# Same\n## Same\n"),
+        [(
+            DiagnosticId::NotAllowed,
+            DiagnosticTarget::Header(HeaderPath(vec!["Same".into(), "Same".into()])),
+        )]
+    );
+}
+
+#[test]
 fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
     // §3.7: guard work is at most H×G, accepting-matrix work is H×R, and
     // extras classifies each post-guard heading once.
@@ -861,8 +875,11 @@ fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
     assert_eq!(work.guard_matcher_evaluations, 5 * 3);
     assert_eq!(work.accepting_matcher_evaluations, 5);
     assert_eq!(work.extras_classifications, 5);
+    assert_eq!(work.extras_matrix_cell_copies, 5);
+    assert_eq!(work.unordered_rule_inspections, 0);
+    assert_eq!(work.unordered_assignment_writes, 0);
     assert!(work.sequence_operations > 0);
-    assert!(work.sequence_operations <= 8 * (5 + 1) * (1 + 1));
+    assert!(work.sequence_operations <= 13 * (5 + 1) * (1 + 1));
 
     let guard_only = load_schema(
         "version: 2\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\n",
@@ -877,6 +894,9 @@ fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
             guard_matcher_evaluations: 5 * 3,
             accepting_matcher_evaluations: 0,
             extras_classifications: 0,
+            extras_matrix_cell_copies: 0,
+            unordered_rule_inspections: 0,
+            unordered_assignment_writes: 0,
             sequence_operations: 0,
         }
     );
@@ -933,11 +953,21 @@ fn measured_work(headings: usize, rules: usize, guards: usize, extras: bool) -> 
     validation_work_count(&loaded.schema, &document, &plan).expect("validation completes")
 }
 
+const WORK_FACTOR: usize = 16;
+
+fn work_bound(headings: usize, rules: usize, guards: usize) -> usize {
+    WORK_FACTOR
+        .saturating_mul((headings + 1).saturating_mul(rules + 1))
+        .saturating_add(headings.saturating_mul(guards))
+}
+
 #[test]
 fn adversarial_scope_work_scales_with_h_r_and_g_independently() {
     // §8 bounds ordered assignment by its (H+1)(R+1) tables; §3.3 checks at
-    // most H×G guards first. Matcher construction and extras add H×R and H,
-    // each already within the same constant-factor state-space bound.
+    // most H×G guards first. The counted ordered path uses at most 13 DP
+    // table/transition/result operations per state. Matrix construction,
+    // extras eligibility, and retained-row copying add at most three more,
+    // giving the complete bound 16(H+1)(R+1) + H·G.
     for (headings, rules, guards, extras) in [
         (0, 64, 0, false),
         (32, 64, 0, false),
@@ -952,21 +982,85 @@ fn adversarial_scope_work_scales_with_h_r_and_g_independently() {
         (256, 64, 65, false),
     ] {
         let work = measured_work(headings, rules, guards, extras);
-        let state_bound = (headings + 1)
-            .saturating_mul(rules + 1)
-            .saturating_add(headings.saturating_mul(guards));
         assert!(
-            work.total() <= 10 * state_bound,
-            "H={headings}, R={rules}, G={guards}, work={work:?}, bound={state_bound}"
+            work.total() <= work_bound(headings, rules, guards),
+            "H={headings}, R={rules}, G={guards}, work={work:?}"
         );
     }
 }
 
+fn unordered_adversarial_schema(rules: usize, guards: usize, extras: bool) -> String {
+    let mut schema = String::from("version: 2\ntitle: '*'\nunordered: true\n");
+    if guards > 0 {
+        schema.push_str("forbid_sections:\n");
+        for index in 0..guards {
+            schema.push_str(&format!("  - match: Guard{index}\n"));
+        }
+    }
+    if rules == 0 {
+        schema.push_str("sections: []\n");
+    } else {
+        schema.push_str("sections:\n");
+        for index in 0..rules.saturating_sub(1) {
+            schema.push_str(&format!(
+                "  - id: r{index}\n    match: Never {index}\n    required: false\n"
+            ));
+        }
+        let last = rules.saturating_sub(1);
+        schema.push_str(&format!(
+            "  - id: r{last}\n    match: A\n    required: false\n"
+        ));
+    }
+    if extras {
+        schema.push_str("extras: anywhere\n");
+    }
+    schema
+}
+
+fn measured_unordered_work(
+    headings: usize,
+    rules: usize,
+    guards: usize,
+    extras: bool,
+) -> WorkCounter {
+    let loaded = load_schema(&unordered_adversarial_schema(rules, guards, extras))
+        .expect("generated unordered schema is valid");
+    let document = parse_markdown(&adversarial_document(headings), MarkdownOptions::default());
+    let plan = ValidationPlan::new(&loaded.schema).expect("generated unordered schema prepares");
+    validation_work_count(&loaded.schema, &document, &plan).expect("validation completes")
+}
+
 #[test]
-fn one_large_adversarial_scope_finishes_within_a_sanity_bound() {
+fn unordered_last_match_scales_with_h_r_and_g_independently() {
+    // The last rule is the only match, so classification inspects every H×R
+    // cell. Matrix/extras/classification/result work is at most 7P, safely
+    // inside the shared complete bound 16P + H·G.
+    for (headings, rules, guards, extras) in [
+        (0, 64, 0, false),
+        (32, 64, 0, false),
+        (256, 64, 0, false),
+        (256, 1, 0, false),
+        (256, 8, 0, false),
+        (256, 64, 0, true),
+        (256, 64, 1, false),
+        (256, 64, 17, false),
+        (256, 64, 65, false),
+    ] {
+        let work = measured_unordered_work(headings, rules, guards, extras);
+        assert_eq!(
+            work.unordered_rule_inspections,
+            headings.saturating_mul(rules)
+        );
+        assert!(work.total() <= work_bound(headings, rules, guards));
+    }
+}
+
+#[test]
+#[ignore = "non-gating wall-clock benchmark; operation counts enforce complexity"]
+fn benchmark_one_large_adversarial_scope_finishes_within_a_sanity_bound() {
     let started = Instant::now();
     let work = measured_work(768, 384, 64, true);
-    assert!(work.total() <= 10 * ((769 * 385) + (768 * 64)));
+    assert!(work.total() <= work_bound(768, 384, 64));
     assert!(
         started.elapsed() < Duration::from_secs(20),
         "large adversarial validation took {:?}",
@@ -974,48 +1068,110 @@ fn one_large_adversarial_scope_finishes_within_a_sanity_bound() {
     );
 }
 
+fn nested_schema_and_document(depth: usize) -> (String, String) {
+    fn append_rule(schema: &mut String, level: usize, max_level: usize, indent: usize) {
+        let padding = " ".repeat(indent);
+        schema.push_str(&format!("{padding}- match: Level {level}\n"));
+        if level < max_level {
+            schema.push_str(&format!("{padding}  sections:\n"));
+            append_rule(schema, level + 1, max_level, indent + 4);
+        } else {
+            schema.push_str(&format!("{padding}  sections: []\n"));
+        }
+    }
+
+    let mut schema = String::from("version: 2\ntitle: Level 1\nsections:\n");
+    append_rule(&mut schema, 2, depth + 1, 2);
+    let mut document = String::new();
+    for level in 1..=depth + 1 {
+        document.push_str(&format!("{} Level {level}\n", "#".repeat(level)));
+    }
+    (schema, document)
+}
+
 #[test]
-fn all_six_heading_levels_bind_without_depth_dependent_work_growth() {
-    let schema = "version: 2\ntitle: Level 1\nsections:\n  - match: Level 2\n    sections:\n      - match: Level 3\n        sections:\n          - match: Level 4\n            sections:\n              - match: Level 5\n                sections:\n                  - match: Level 6\n                    sections: []\n";
-    let markdown =
-        "# Level 1\n## Level 2\n### Level 3\n#### Level 4\n##### Level 5\n###### Level 6\n";
-    assert!(ids_and_targets(schema, markdown).is_empty());
+fn nested_scope_work_is_the_sum_of_per_scope_bounds() {
+    let mut previous = 0;
+    for depth in 1..=5 {
+        let (schema_source, markdown) = nested_schema_and_document(depth);
+        let loaded = load_schema(&schema_source).expect("nested schema is valid");
+        let document = parse_markdown(&markdown, MarkdownOptions::default());
+        let plan = ValidationPlan::new(&loaded.schema).expect("nested schema prepares");
+        let work = validation_work_count(&loaded.schema, &document, &plan)
+            .expect("nested validation completes");
+
+        // There are `depth` scopes with H=R=1 and one leaf scope with H=R=0.
+        // Their state spaces add to 4·depth+1; they are never multiplied.
+        let summed_state_spaces = 4 * depth + 1;
+        assert!(work.total() <= WORK_FACTOR * summed_state_spaces);
+        assert!(work.total() > previous);
+        previous = work.total();
+    }
 }
 
 proptest! {
     #[test]
     fn generated_v2_schemas_and_documents_never_panic(
-        rule_kinds in proptest::collection::vec(0u8..4, 0..7),
+        rule_shapes in proptest::collection::vec((0u8..4, 0u8..4, any::<bool>()), 0..7),
         guard_names in proptest::collection::vec("[A-Z][a-z]{0,4}", 0..5),
-        headings in proptest::collection::vec("[ABXZ][a-z]{0,5}", 0..13),
+        headings in proptest::collection::vec(("[ABXZ][a-z]{0,5}", any::<bool>(), any::<bool>()), 0..13),
+        matching_guard in any::<bool>(),
+        extras in any::<bool>(),
+        unordered in any::<bool>(),
     ) {
         let mut schema = String::from("version: 2\ntitle: '*'\n");
-        if !guard_names.is_empty() {
+        if unordered {
+            schema.push_str("unordered: true\n");
+        }
+        if matching_guard || !guard_names.is_empty() {
             schema.push_str("forbid_sections:\n");
+            if matching_guard {
+                schema.push_str("  - match: 'A*'\n");
+            }
             for name in guard_names {
                 schema.push_str(&format!("  - match: '{name}'\n"));
             }
         }
-        if rule_kinds.is_empty() {
+        if rule_shapes.is_empty() {
             schema.push_str("sections: []\n");
         } else {
             schema.push_str("sections:\n");
-            for (index, kind) in rule_kinds.into_iter().enumerate() {
-                let matcher = match kind {
-                    0 => "'*'",
-                    1 => "'A*'",
-                    2 => "'/[ABXZ].*/'",
+            for (index, (kind, cardinality, nested)) in rule_shapes.into_iter().enumerate() {
+                let matcher = match (unordered, kind) {
+                    (true, 0) => "'Z*'",
+                    (false, 0) => "'*'",
+                    (_, 1) => "'A*'",
+                    (_, 2) => "'/[ABXZ].*/'",
                     _ => "A",
                 };
-                let repeat = if index % 2 == 0 { "0..n" } else { "0..4294967295" };
                 schema.push_str(&format!(
-                    "  - id: r{index}\n    match: {matcher}\n    repeat: {repeat}\n"
+                    "  - id: r{index}\n    match: {matcher}\n"
                 ));
+                match cardinality {
+                    0 => schema.push_str("    required: false\n"),
+                    1 => schema.push_str("    required: true\n"),
+                    2 => schema.push_str("    repeat: 1..3\n"),
+                    _ => schema.push_str("    repeat: 2..4294967295\n"),
+                }
+                if nested {
+                    schema.push_str(
+                        "    sections:\n      - match: Child\n        required: false\n        sections: []\n",
+                    );
+                }
             }
         }
+        if extras {
+            schema.push_str("extras: anywhere\n");
+        }
         let mut markdown = String::from("# Property\n");
-        for heading in headings {
+        for (heading, child, grandchild) in headings {
             markdown.push_str(&format!("## {heading}\n"));
+            if child {
+                markdown.push_str("### Child\n");
+                if grandchild {
+                    markdown.push_str("#### Grandchild\n");
+                }
+            }
         }
 
         let loaded = load_schema(&schema).expect("generated schema is valid");

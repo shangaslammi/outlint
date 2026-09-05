@@ -703,6 +703,24 @@ fn guards_and_declared_scope_modes_normalize_separately() {
 }
 
 #[test]
+fn empty_guard_lists_are_legal_and_semantically_inert_in_every_scope_form() {
+    // §2.1: an empty `forbid_sections` list is legal beside omitted, empty,
+    // or nonempty accepting grammars and contributes no guard state.
+    assert_eq!(
+        valid("version: 2\noutline: []\nforbid_sections: []\n"),
+        valid("version: 2\noutline: []\n")
+    );
+    assert_eq!(
+        valid("version: 2\ntitle: Doc\nforbid_sections: []\n"),
+        valid("version: 2\ntitle: Doc\n")
+    );
+    assert_eq!(
+        valid("version: 2\ntitle: Doc\nsections:\n  - match: Parent\n    forbid_sections: []\n"),
+        valid("version: 2\ntitle: Doc\nsections:\n  - match: Parent\n")
+    );
+}
+
+#[test]
 fn unordered_wildcard_shadows_every_later_rule() {
     let invalid = invalid("version: 2\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: A\n  - match: B\n");
     assert_eq!(

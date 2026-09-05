@@ -27,8 +27,9 @@ struct Table<T> {
 }
 
 impl<T: Clone> Table<T> {
-    fn filled(rows: usize, columns: usize, value: T) -> Option<Self> {
+    fn filled_counted(rows: usize, columns: usize, value: T, work: &mut usize) -> Option<Self> {
         let len = rows.checked_mul(columns)?;
+        *work = work.saturating_add(len);
         Some(Self {
             cells: vec![value; len],
             rows,
@@ -145,8 +146,8 @@ fn accepted_assignment(
     let columns = rules.len();
     let width = headings.checked_add(1)?;
     let rows = columns.checked_add(1)?;
-    let mut suffix = Table::filled(rows, width, None)?;
-    let mut endpoint = Table::filled(rows, width, None)?;
+    let mut suffix = Table::filled_counted(rows, width, None, work)?;
+    let mut endpoint = Table::filled_counted(rows, width, None, work)?;
     *suffix.cell_mut(columns, headings)? = Some(0usize);
 
     for rule_index in (0..columns).rev() {
@@ -159,7 +160,7 @@ fn accepted_assignment(
             }
             UpperBound::Unbounded => headings,
         };
-        let mut run_end = Table::filled(1, width, headings)?;
+        let mut run_end = Table::filled_counted(1, width, headings, work)?;
         for index in (0..headings).rev() {
             *work = work.saturating_add(1);
             let next = *run_end.cell(0, index.checked_add(1)?)?;
@@ -221,6 +222,7 @@ fn accepted_assignment(
         }
     }
     suffix.cell(0, 0).copied().flatten()?;
+    *work = work.saturating_add(headings).saturating_add(columns);
     let mut assignment = vec![None; headings];
     let mut counts = vec![0usize; columns];
     let mut index = 0;
@@ -228,8 +230,10 @@ fn accepted_assignment(
         *work = work.saturating_add(1);
         let chosen = endpoint.cell(rule_index, index).copied().flatten()?;
         for slot in assignment.get_mut(index..chosen)? {
+            *work = work.saturating_add(1);
             *slot = Some(rule_index);
         }
+        *work = work.saturating_add(1);
         *count = chosen - index;
         index = chosen;
     }
@@ -249,7 +253,7 @@ fn recover(
         unassigned: 0,
         wildcard: 0,
     };
-    let mut costs = Table::filled(rows, width, zero)?;
+    let mut costs = Table::filled_counted(rows, width, zero, work)?;
     for index in (0..=headings).rev() {
         for rule_index in (0..=columns).rev() {
             *work = work.saturating_add(1);
@@ -282,6 +286,7 @@ fn recover(
             *costs.cell_mut(index, rule_index)? = best.unwrap_or(zero);
         }
     }
+    *work = work.saturating_add(headings).saturating_add(columns);
     let mut assignment = vec![None; headings];
     let mut counts = vec![0usize; columns];
     let (mut index, mut rule_index) = (0, 0);
@@ -298,6 +303,7 @@ fn recover(
                 ))),
             };
             if consume == here {
+                *work = work.saturating_add(2);
                 *assignment.get_mut(index)? = Some(rule_index);
                 let count = counts.get_mut(rule_index)?;
                 *count = (*count).saturating_add(1);
@@ -727,7 +733,7 @@ mod tests {
             let assignment = assign_counted(&rules, &matches, headings, &mut work);
 
             assert!(assignment.accepted);
-            assert!(work <= 8 * (headings + 1) * (columns + 1));
+            assert!(work <= 13 * (headings + 1) * (columns + 1));
         }
     }
 
@@ -750,7 +756,7 @@ mod tests {
             }];
             let mut work = 0;
             let assigned = assign_counted(&rules, &[true; 8], 8, &mut work);
-            assert!(work <= 8 * (8 + 1) * (1 + 1));
+            assert!(work <= 13 * (8 + 1) * (1 + 1));
             assert_eq!(assigned.rules.len(), 8);
         }
     }
@@ -784,7 +790,13 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             let matches = (0..headings.saturating_mul(columns))
-                .map(|bit| matrix_bits & (1 << bit) != 0)
+                .map(|bit| {
+                    let column = bit % columns;
+                    rules
+                        .get(column)
+                        .is_some_and(|rule| matches!(rule.matcher, Matcher::Any))
+                        || matrix_bits & (1 << bit) != 0
+                })
                 .collect::<Vec<_>>();
             let actual = assign(&rules, &matches, headings);
 

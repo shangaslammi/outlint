@@ -38,7 +38,7 @@ Released as 0.1.0; the working tree implements specification v2. The
 pipeline in `outlint-core`: `load_schema` / `load_schema_with_resources`
 (`loader/`) turn schema text into a normalized `Schema` or an
 `InvalidSchema` carrying positioned `SchemaError`s; `parse_markdown`
-(`markdown.rs`) turns document text into a `Document` (section tree,
+(`markdown/`) turns document text into a `Document` (section tree,
 frontmatter, suppressions); `validate` / `PreparedValidator`
 (`validator/`, including `validator/sequence.rs`) map a `Schema` plus a
 `Document` to `Vec<Diagnostic>` using bounded ordered assignment.
@@ -46,7 +46,7 @@ frontmatter, suppressions); `validate` / `PreparedValidator`
 
 All YAML — schema files and frontmatter alike — goes through one
 saphyr-parser event reader. Its input limits (nesting depth, node budget,
-alias-expansion bound) live in `markdown.rs` and the loader shares them.
+alias-expansion bound) live in `markdown/` and the loader shares them.
 
 Frontmatter is implemented: the delimited block parses into
 `DocumentFrontmatter` with per-key anchors, and a schema's `frontmatter`
@@ -104,7 +104,7 @@ IO, the clock, the environment, the filesystem, process exit, and anything
 else non-deterministic to the outermost edge, where it does nothing but
 fetch inputs, call a pure function, and act on what comes back.
 
-`loader.rs` is the pattern to copy. `load_schema` and
+`loader/` is the pattern to copy. `load_schema` and
 `load_schema_with_resources` are total and pure: they consume schema text
 plus any already-loaded JSON Schema resources. The filesystem side is
 `crates/outlint-cli/src/schema_loading.rs`, which walks the `$ref` graph
@@ -209,7 +209,7 @@ exist; extend them rather than inventing a parallel harness.
   `expected.json` is genuinely wrong, fix it against the spec and say why.
 
 Matching and Markdown scanning parse untrusted input; the property tests
-in `loader.rs` and `markdown.rs` cover them — extend those when touching
+in `loader/` and `markdown/` cover them — extend those when touching
 either parser.
 
 ## Before completion

@@ -227,6 +227,12 @@ fn schema_v2_public_model_and_vocabulary_are_pinned() {
     assert_model_value::<ExtrasMode>();
     assert_model_value::<ScopeMode>();
     assert_model_value::<SchemaVersion>();
+    let extras_variants = [ExtrasMode::Reject, ExtrasMode::Anywhere];
+    assert!(matches!(extras_variants[0], ExtrasMode::Reject));
+    assert!(matches!(extras_variants[1], ExtrasMode::Anywhere));
+    let scope_variants = [ScopeMode::Ordered, ScopeMode::Unordered];
+    assert!(matches!(scope_variants[0], ScopeMode::Ordered));
+    assert!(matches!(scope_variants[1], ScopeMode::Unordered));
 
     let loaded = load_schema(
         "version: 2\noutline:\n  - match: A\nforbid_sections:\n  - match: X\nextras: anywhere\nunordered: true\n",
