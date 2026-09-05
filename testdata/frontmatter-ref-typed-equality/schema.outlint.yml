@@ -1,5 +1,6 @@
-version: 1
+version: 2
 title: null
 sections: []
+extras: anywhere
 constraints:
   - requires: { if: "fm[$.count]=1", then: "fm[$.checked]=true" }

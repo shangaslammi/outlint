@@ -1,5 +1,6 @@
-version: 1
+version: 2
 title: "*"
 sections:
   - match: "Overview"
     required: true
+extras: anywhere

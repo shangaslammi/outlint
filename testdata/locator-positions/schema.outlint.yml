@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # Positional narrowing in outline locators (spec 4.4, 4.5).
 #
 # `group` is a repeatable regex rule and so is statically plural. A bare
@@ -11,19 +11,21 @@ version: 1
 # never an error, and no work may be proportional to its numeric value. 11.3
 # additionally requires it to be serialized as an arbitrary-precision JSON
 # integer in `references[].positions`, not as a string.
-options:
-  ordered_sections: false
 title: null
+unordered: true
 sections:
   - id: group
     match: '/Group .+/'
+    repeat: "0..n"
     sections:
       - id: ready
         match: Ready
         required: false
+    extras: anywhere
   - id: fallback
     match: Fallback
     required: false
+extras: anywhere
 constraints:
   - requires: { if: "group[0]", then: "group[1]" }
   - conflicts: { if: "group[0].ready", then_not: "group[1].ready" }

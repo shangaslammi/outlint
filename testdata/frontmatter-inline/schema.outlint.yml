@@ -1,4 +1,4 @@
-version: 1
+version: 2
 frontmatter:
   required: true
   schema:
@@ -14,3 +14,4 @@ frontmatter:
         $dynamicAnchor: status
         enum: [draft, final]
 sections: []
+extras: anywhere

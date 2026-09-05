@@ -1,6 +1,7 @@
-version: 1
+version: 2
 title: null
 frontmatter:
   required: true
   schema: frontmatter.schema.json
 sections: []
+extras: anywhere

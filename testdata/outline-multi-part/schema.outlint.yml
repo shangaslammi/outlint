@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # The general form's new capability: any number of h1 headers, each `Part`
 # owning its own scope. Two `Overview` headers under two different parts
 # conform; two under one part exceed that part's own budget, reported with the
@@ -9,3 +9,5 @@ outline:
     sections:
       - match: "Overview"
         repeat: "0..1"
+    extras: anywhere
+extras: anywhere

@@ -1,4 +1,4 @@
-version: 1
+version: 2
 title: null
 sections:
   - id: a
@@ -10,6 +10,7 @@ sections:
   - id: c
     match: "C"
     required: false
+extras: anywhere
 constraints:
   - any_of: [a, b]
   - at_most_one: [a, b]

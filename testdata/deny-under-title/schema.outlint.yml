@@ -1,5 +1,6 @@
-version: 1
+version: 2
 title: "Title"
-sections:
+sections: []
+forbid_sections:
   - match: "Forbidden"
-    allow: false
+extras: anywhere

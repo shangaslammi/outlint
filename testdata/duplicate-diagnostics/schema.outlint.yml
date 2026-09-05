@@ -1,11 +1,6 @@
-version: 1
+version: 2
 title: null
 sections:
-  # Two headers with the same text and depth share one path, so denying them
-  # produces two byte-identical entries.
-  - id: banned
-    match: "Notes"
-    allow: false
   # Two rules with the same matcher label in one scope: when neither is
   # satisfied, both report the same missing header.
   - id: first-goal
@@ -14,3 +9,8 @@ sections:
   - id: second-goal
     match: "/Goal/"
     required: true
+forbid_sections:
+  # Two headers with the same text and depth share one path, so guarding them
+  # produces two byte-identical entries.
+  - match: "Notes"
+extras: anywhere

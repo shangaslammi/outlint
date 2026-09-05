@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # JSONPath frontmatter propositions (spec 4.6). Every query here stays inside
 # the guaranteed core of 4.6 — child segments with exactly one name, index, or
 # wildcard selector each. Filters, slices, descendant segments, multi-selectors
@@ -12,9 +12,8 @@ version: 1
 #
 # `match_case` keeps its `false` default, which 4.6 makes string equality
 # follow.
-options:
-  ordered_sections: false
 title: null
+unordered: true
 sections:
   - id: bool-proof
     match: Bool Proof
@@ -41,6 +40,7 @@ sections:
       - id: nested-proof
         match: Nested Proof
         required: false
+    extras: anywhere
     constraints:
       # Both frontmatter forms resolve identically from every constraint
       # scope (4.6); only the diagnostic's target follows the scope.
@@ -58,3 +58,4 @@ constraints:
   - requires: { if: "fm[$.number]=1", then: number-proof }
   # Equality with null is always false.
   - requires: { if: "fm[$.nothing]=null", then: null-proof }
+extras: anywhere

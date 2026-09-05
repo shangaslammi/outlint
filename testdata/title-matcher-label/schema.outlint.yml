@@ -1,5 +1,6 @@
-version: 1
+version: 2
 title: "/Handbook v[0-9]+/"
 sections:
   - match: "Overview"
     required: true
+extras: anywhere

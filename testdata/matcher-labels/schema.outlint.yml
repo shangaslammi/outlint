@@ -1,4 +1,4 @@
-version: 1
+version: 2
 title: null
 sections:
   - id: steps
@@ -13,7 +13,9 @@ sections:
     sections:
       - match: "/item [0-9]+/"
         required: true
+    extras: anywhere
   # First-match-wins: a wildcard rule swallows every header, so it goes last.
   - id: anything
     match: "*"
     required: true
+extras: anywhere

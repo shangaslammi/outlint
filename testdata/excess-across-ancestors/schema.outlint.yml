@@ -1,8 +1,7 @@
-version: 1
-# Unordered so that only cardinality speaks here: ordered by default, Beta's
-# `Note three` after `Step two` would also be out of order (§3.7).
-options:
-  ordered_sections: false
+version: 2
+# Unordered so that only cardinality speaks here: in ordered mode, Beta's
+# `Note three` after `Step two` would also be misplaced (§3.7).
+unordered: true
 sections:
   # Scopes bind per parent: each `h1` counts its own `Note`s and `Step`s.
   # `spread.md`'s four steps therefore conform — no single ancestor holds
@@ -18,3 +17,4 @@ sections:
   - id: steps
     match: "Step *"
     repeat: "0..2"
+extras: anywhere

@@ -1,8 +1,9 @@
-version: 1
+version: 2
 title: "Handbook"
 sections:
   - match: "Overview"
     required: true
-    strict: true
     sections:
       - match: "Goals"
+        repeat: "0..n"
+extras: anywhere

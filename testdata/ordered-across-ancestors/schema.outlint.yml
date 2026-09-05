@@ -1,5 +1,5 @@
-version: 1
-# The sugar `sections` scope is ordered by default (§3.7) and binds once per
+version: 2
+# The sugar `sections` scope is ordered (§3.2) and binds once per
 # enclosing `h1`: occurrences are compared within one instance, so ordering
 # never reaches across ancestors. `inverted.md` fires inside its one part;
 # `across.md` inverts the same pair across two parts and each instance holds
@@ -8,4 +8,7 @@ version: 1
 # `outline-parts-ordered/` orders the parts themselves.
 sections:
   - match: "Intro"
+    repeat: "0..n"
   - match: "Body"
+    repeat: "0..n"
+extras: anywhere

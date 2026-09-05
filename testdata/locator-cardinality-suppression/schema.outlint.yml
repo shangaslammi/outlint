@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # Dependency suppression for locator descent (spec 4.4, "Dependency
 # suppression").
 #
@@ -12,9 +12,8 @@ version: 1
 # step narrowed with `[i]` does not depend on the rule's cardinality holding
 # and remains evaluable." The two constraints therefore diverge exactly where
 # the cardinality bound is violated, and agree everywhere else.
-options:
-  ordered_sections: false
 title: null
+unordered: true
 sections:
   - id: group
     match: '/Group .+/'
@@ -23,9 +22,11 @@ sections:
       - id: ready
         match: Ready
         required: false
+    extras: anywhere
   - id: notice
     match: Notice
     required: false
+extras: anywhere
 constraints:
   - requires: { if: group.ready, then: notice }
   - requires: { if: "group[0].ready", then: notice }

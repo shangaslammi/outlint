@@ -1,8 +1,10 @@
-version: 1
-# No constraint: the `sections` list is ordered by default (§3.7), and the
-# check is §5.1's `last(A) < first(B)` over adjacent rules, so repeats of one
-# rule may sit together but not straddle the next rule's occurrences.
+version: 2
+# No constraint: the `sections` list is an ordered grammar (§3.2), so repeats
+# of one rule may sit together but not straddle the next rule's occurrences.
 title: null
 sections:
   - match: "A"
+    repeat: "0..n"
   - match: "B"
+    repeat: "0..n"
+extras: anywhere

@@ -1,36 +1,39 @@
-version: 1
+version: 2
 # Value ordering of a rule's repeated matches (spec 3.8). Each `order` entry
 # independently orders the occurrences its own rule matched; headers matched by
 # other rules and unmatched headers do not break adjacency.
 #
-# `ordered_sections: false` switches off the across-rule ordering of 3.7, so
+# `unordered: true` switches off the across-rule ordered grammar of 3.2, so
 # every `order-violation` here comes from a declared `order` entry and nothing
 # else. Every ordered rule keeps an effective maximum above one, which 3.8
 # requires: an `order` on a rule bounded to at most one match is `invalid-order`.
-options:
-  ordered_sections: false
 title: null
+unordered: true
 sections:
   - id: number
     match: '/Number (?<value>.+)/'
+    repeat: "0..n"
     captures:
       value: int
     order:
       - by: value
   - id: flag
     match: '/Flag (?<value>.+)/'
+    repeat: "0..n"
     captures:
       value: bool
     order:
       - by: value
   - id: date
     match: '/Date (?<value>.+)/'
+    repeat: "0..n"
     captures:
       value: date
     order:
       - by: value
   - id: version
     match: '/Version (?<value>.+)/'
+    repeat: "0..n"
     captures:
       value: semver
     order:
@@ -38,6 +41,7 @@ sections:
         dir: desc
   - id: dotted
     match: '/Dotted (?<value>.+)/'
+    repeat: "0..n"
     captures:
       value: dotted
     order:
@@ -45,6 +49,7 @@ sections:
         strict: true
   - id: text
     match: '/Text (?<value>.+)/'
+    repeat: "0..n"
     captures:
       value: text
     order:
@@ -58,10 +63,15 @@ sections:
       - by: value
   - id: series
     match: '/Series .+/'
+    repeat: "0..n"
+    unordered: true
     sections:
       - id: point
         match: '/Point (?<value>.+)/'
+        repeat: "0..n"
         captures:
           value: int
         order:
           - by: value
+    extras: anywhere
+extras: anywhere

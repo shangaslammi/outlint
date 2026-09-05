@@ -1,4 +1,4 @@
-version: 1
+version: 2
 title: null
 sections:
   - match: "ÉCOLE"
@@ -15,15 +15,14 @@ sections:
     required: true
   - match: "/Simple regex S.*/"
     required: true
-  - match: "Exact Straße"
-    allow: false
   - match: "Exact STRASSE"
     required: true
-  - match: "Full glob Straße*"
-    allow: false
   - match: "Full glob STRASSE result"
     required: true
-  - match: "/Full regex Straße.*/"
-    allow: false
   - match: "Full regex STRASSE result"
     required: true
+forbid_sections:
+  - match: "Exact Straße"
+  - match: "Full glob Straße*"
+  - match: "/Full regex Straße.*/"
+extras: anywhere

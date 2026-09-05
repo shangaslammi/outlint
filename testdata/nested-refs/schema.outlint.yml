@@ -1,4 +1,4 @@
-version: 1
+version: 2
 title: null
 sections:
   - id: group
@@ -8,10 +8,12 @@ sections:
       - id: child
         match: "Child"
         required: false
+    extras: anywhere
     constraints:
       - requires: { if: child, then: "$.other" }
   - id: other
     match: "Other"
     required: false
+extras: anywhere
 constraints:
   - any_of: [group.child, other]

@@ -1,10 +1,9 @@
-version: 1
+version: 2
 # The partial `ordered: [a, c]` below needs an unordered scope: an ordered
-# scope (the default) already orders every rule in it and refuses the
-# constraint as redundant.
-options:
-  ordered_sections: false
+# scope already orders every rule in it and refuses the constraint as
+# redundant.
 title: null
+unordered: true
 sections:
   - id: a
     match: "A"
@@ -15,6 +14,7 @@ sections:
   - id: c
     match: "C"
     required: false
+extras: anywhere
 constraints:
   - one_of: [a, b]
   - requires: { if: a, then: c }

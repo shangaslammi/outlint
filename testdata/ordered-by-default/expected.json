@@ -1,10 +1,10 @@
 {
   "pass.md": [],
   "inverted.md": [
-    { "id": "ordered", "target": { "kind": "document" } }
+    { "id": "misplaced-section", "target": { "kind": "header", "path": ["Title", "Usage"] } }
   ],
   "straddled.md": [
-    { "id": "ordered", "target": { "kind": "document" } }
+    { "id": "misplaced-section", "target": { "kind": "header", "path": ["Title", "API: Read"] } }
   ],
   "floating.md": [
     { "id": "not-allowed", "target": { "kind": "header", "path": ["Title", "Internal"] } }

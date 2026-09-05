@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # No `title:` is declared, so `sections` implies `title: "*"`: exactly one
 # `h1`, of any text — a document that loses its `# Title` must not silently
 # keep passing. A headless document is `missing-title`, anchored on the
@@ -9,3 +9,4 @@ version: 1
 sections:
   - match: "Overview"
     repeat: "0..n"
+extras: anywhere

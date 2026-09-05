@@ -1,5 +1,6 @@
-version: 1
+version: 2
 title: null
 frontmatter:
   schema: resources/frontmatter.schema.json
 sections: []
+extras: anywhere

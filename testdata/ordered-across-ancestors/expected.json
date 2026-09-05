@@ -2,8 +2,8 @@
   "in-order.md": [],
   "inverted.md": [
     {
-      "id": "ordered",
-      "target": { "kind": "document" }
+      "id": "misplaced-section",
+      "target": { "kind": "header", "path": ["Part", "Body"] }
     }
   ],
   "across.md": [

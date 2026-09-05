@@ -1,7 +1,9 @@
-version: 1
+version: 2
 outline:
   - match: "Guide *"
     required: true
     sections:
       - match: "Overview"
         required: true
+    extras: anywhere
+extras: anywhere

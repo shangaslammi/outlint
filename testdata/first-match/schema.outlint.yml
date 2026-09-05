@@ -1,9 +1,11 @@
-version: 1
+version: 2
 title: null
+unordered: true
 sections:
   - id: broad
     match: "API*"
     required: false
-  - id: denied-api
+  - id: exact
     match: "API"
-    allow: false
+    required: false
+extras: anywhere

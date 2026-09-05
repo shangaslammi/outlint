@@ -1,4 +1,4 @@
-version: 1
+version: 2
 title: null
 options:
   strip_inline_markup: true
@@ -11,8 +11,8 @@ sections:
   - id: raw
     match: "**Foo** [bar](x)"
     required: true
+forbid_sections:
   # Matches under either setting, so its reported path shows that diagnostic
   # text is stripped whatever the option says.
-  - id: banned
-    match: "*Ban*"
-    allow: false
+  - match: "*Ban*"
+extras: anywhere

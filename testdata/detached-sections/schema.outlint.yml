@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # The document root is a virtual level-0 section, so a top-level `h2` skips
 # a level against it exactly as an `h4` directly under an `h2` would:
 # `skipped-level` on the header itself, once per skipping sibling. A skipping
@@ -10,3 +10,4 @@ version: 1
 sections:
   - match: "Overview"
     required: true
+extras: anywhere

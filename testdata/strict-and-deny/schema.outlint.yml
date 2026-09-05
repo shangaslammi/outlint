@@ -1,13 +1,11 @@
-version: 1
+version: 2
 title: null
 sections:
   - match: "Overview"
     required: false
-    strict: true
     sections:
       - match: "Allowed"
+        repeat: "0..n"
+forbid_sections:
   - match: "Forbidden"
-    allow: false
-    sections:
-      - match: "Must not validate"
-        required: true
+extras: anywhere

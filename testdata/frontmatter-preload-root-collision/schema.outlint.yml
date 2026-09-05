@@ -1,5 +1,6 @@
-version: 1
+version: 2
 title: null
 frontmatter:
   schema: bundle/frontmatter.schema.json
 sections: []
+extras: anywhere

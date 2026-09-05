@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # Dependency suppression for value ordering (spec 3.8, last paragraphs).
 #
 # One rule declares two independent `order` entries over two captures of the
@@ -9,18 +9,22 @@ version: 1
 # The suppression is computed from typed validity *before* the
 # `outlint-disable` filtering of 6.3, so hiding an `invalid-value` never
 # re-enables the ordering that depended on it.
-options:
-  ordered_sections: false
 title: null
+unordered: true
 sections:
   - id: group
     match: '/Group .+/'
+    repeat: "0..n"
+    unordered: true
     sections:
       - id: item
         match: '/Item (?<version>\S+) rank=(?<rank>\S+)/'
+        repeat: "0..n"
         captures:
           version: semver
           rank: int
         order:
           - by: version
           - by: rank
+    extras: anywhere
+extras: anywhere

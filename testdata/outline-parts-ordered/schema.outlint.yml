@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # Distinct h1 rules with distinct child scopes. The outline scope is ordered
 # by default like any other (§3.7), so `# Guide` must precede `# Appendix`
 # with no constraint spelled. A violation targets the document: the virtual
@@ -10,8 +10,12 @@ outline:
     sections:
       - match: "Overview"
         required: true
+    extras: anywhere
   - id: appendix
     match: "Appendix"
     repeat: "0..1"
     sections:
       - match: "References"
+        repeat: "0..n"
+    extras: anywhere
+extras: anywhere

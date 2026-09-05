@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # Every document here has two `h1`s, so each carries one `too-many-sections`
 # on the second: bare `sections` implies `title: "*"`, exactly one `h1`.
 # What the fixture pins is attribution. The surplus `h1` withdraws nothing —
@@ -11,3 +11,4 @@ sections:
     sections:
       - match: "Goals"
         required: true
+extras: anywhere

@@ -1,4 +1,4 @@
-version: 1
+version: 2
 title: null
 sections:
   - id: migration
@@ -7,6 +7,7 @@ sections:
   - id: breaking-changes
     match: Breaking Changes
     required: false
+extras: anywhere
 constraints:
   - requires: { if: "fm[$.status]=deprecated", then: migration }
   - requires: { if: breaking-changes, then: "fm[$.semver]=major" }

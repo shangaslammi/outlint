@@ -1,4 +1,4 @@
-version: 1
+version: 2
 # Declared frontmatter captures used as propositions (spec 4.6).
 #
 # A capture proposition names a declaration and resolves at schema load, so a
@@ -10,9 +10,8 @@ version: 1
 # invalid value, a missing required capture, invalid frontmatter, or an absent
 # required block suppresses the whole containing constraint after its primary
 # diagnostic.
-options:
-  ordered_sections: false
 title: null
+unordered: true
 frontmatter:
   required: true
   captures:
@@ -40,9 +39,11 @@ sections:
       - id: nested-proof
         match: Nested Proof
         required: false
+    extras: anywhere
     constraints:
       - requires: { if: fm.label, then: nested-proof }
 constraints:
   - requires: { if: fm.draft, then: draft-proof }
   - requires: { if: fm.version, then: version-proof }
   - requires: { if: fm.label, then: label-proof }
+extras: anywhere
