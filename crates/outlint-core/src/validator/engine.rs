@@ -62,6 +62,17 @@ pub(super) struct WorkCounter {
     pub(super) guard_matcher_evaluations: usize,
     pub(super) accepting_matcher_evaluations: usize,
     pub(super) extras_classifications: usize,
+    pub(super) sequence_operations: usize,
+}
+
+#[cfg(test)]
+impl WorkCounter {
+    pub(super) fn total(self) -> usize {
+        self.guard_matcher_evaluations
+            .saturating_add(self.accepting_matcher_evaluations)
+            .saturating_add(self.extras_classifications)
+            .saturating_add(self.sequence_operations)
+    }
 }
 
 struct Validator<'a> {
@@ -692,7 +703,21 @@ impl<'a> Validator<'a> {
                 .collect();
         }
         let assignment = match scope.mode {
-            ScopeMode::Ordered => super::sequence::assign(rules, &matrix, retained.len()),
+            ScopeMode::Ordered => {
+                #[cfg(test)]
+                {
+                    super::sequence::assign_counted(
+                        rules,
+                        &matrix,
+                        retained.len(),
+                        &mut self.work.sequence_operations,
+                    )
+                }
+                #[cfg(not(test))]
+                {
+                    super::sequence::assign(rules, &matrix, retained.len())
+                }
+            }
             ScopeMode::Unordered => {
                 let mut assigned = vec![None; retained.len()];
                 let mut counts = vec![0; rules.len()];

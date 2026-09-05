@@ -34,13 +34,14 @@ invent, rename, or repurpose one without a spec change.
 
 ## Current state
 
-Released as 0.1.0 and feature-complete against specification v1. The
+Released as 0.1.0; the working tree implements specification v2. The
 pipeline in `outlint-core`: `load_schema` / `load_schema_with_resources`
-(`loader.rs`) turn schema text into a normalized `Schema` or an
+(`loader/`) turn schema text into a normalized `Schema` or an
 `InvalidSchema` carrying positioned `SchemaError`s; `parse_markdown`
 (`markdown.rs`) turns document text into a `Document` (section tree,
 frontmatter, suppressions); `validate` / `PreparedValidator`
-(`validator.rs`) map a `Schema` plus a `Document` to `Vec<Diagnostic>`.
+(`validator/`, including `validator/sequence.rs`) map a `Schema` plus a
+`Document` to `Vec<Diagnostic>` using bounded ordered assignment.
 `matcher.rs` and `case_fold.rs` are private helpers.
 
 All YAML — schema files and frontmatter alike — goes through one
@@ -72,14 +73,14 @@ diverge deliberately — do not "align" them.
 MSRV is declared: `rust-version = "1.86"` in `[workspace.package]`, with
 a pinned CI job running `cargo test --workspace --locked` on it.
 
-Test surface: unit tests sit next to the code in `loader.rs`,
-`markdown.rs`, and `validator.rs`, including property tests over header
-parsing and YAML/matcher normalization; `crates/outlint-core/tests/`
+Test surface: unit tests sit next to the code in `loader/`, `markdown/`, and
+`validator/`, including property tests over header parsing, YAML/matcher
+normalization, and ordered assignment; `crates/outlint-core/tests/`
 holds the public-API check and committed schema-range baselines
-(`schema_ranges/`); `crates/outlint-cli/tests/` holds end-to-end CLI
-tests (`cli.rs`) and the conformance runner (`conformance.rs`), which
-shells out to the built binary with `--format json` and compares
-order-insensitively against each `testdata/*/expected.json`.
+(`schema_ranges/`); `crates/outlint-cli/tests/` splits end-to-end CLI tests
+by command surface and holds the conformance runner (`conformance.rs`), which
+asserts envelope version 4 before comparing each result order-insensitively
+against its `testdata/*/expected.json` projection.
 
 Absent by design, do not add speculatively:
 
@@ -146,9 +147,10 @@ These are established by `schema.rs` and `load_result.rs`. Match them.
 
 Make invalid states unrepresentable. This is the crate's main design idea
 and it is deliberate, not over-engineering: `HeaderLevel` as an enum keeps
-levels outside h1–h6 out of a parsed schema; `RuleOutcome::Deny` carries no
-`Cardinality` so `allow: false` cannot combine with `required`;
-`NonEmpty<T>` makes empty constraint operand lists unrepresentable. Prefer
+levels outside h1–h6 out of a parsed schema; separate accepting
+`SectionRule`s from matcher-only `SectionGuard`s so a prohibition cannot
+carry cardinality; `NonEmpty<T>` makes empty constraint operand lists
+unrepresentable. Prefer
 extending this style over validating the same invariant at every use site.
 
 Wrap primitive values in newtypes when confusion is possible —

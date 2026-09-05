@@ -89,7 +89,7 @@ pub(super) fn assign(rules: &[SectionRule], matches: &[bool], headings: usize) -
     assign_counted(rules, matches, headings, &mut work)
 }
 
-fn assign_counted(
+pub(super) fn assign_counted(
     rules: &[SectionRule],
     matches: &[bool],
     headings: usize,
@@ -325,6 +325,7 @@ fn recover(
 mod tests {
     use super::*;
     use crate::{Cardinality, ChildScope, ExactText, Matcher, SectionRule};
+    use proptest::prelude::*;
     use std::cmp::Ordering;
     use std::collections::BTreeMap;
 
@@ -727,6 +728,77 @@ mod tests {
 
             assert!(assignment.accepted);
             assert!(work <= 8 * (headings + 1) * (columns + 1));
+        }
+    }
+
+    #[test]
+    fn adversarial_bounds_do_not_expand_occurrences() {
+        // §8 operates on the H-by-R state space. Bounds larger than H and
+        // `n` therefore affect transitions, never allocation dimensions.
+        for cardinality in [
+            Cardinality::new(u32::MAX, UpperBound::Bounded(u32::MAX)),
+            Cardinality::new(0, UpperBound::Bounded(u32::MAX)),
+            Cardinality::new(0, UpperBound::Unbounded),
+        ] {
+            let rules = [SectionRule {
+                id: None,
+                matcher: Matcher::Any,
+                cardinality: cardinality.expect("test cardinality is valid"),
+                children: ChildScope::Omitted,
+                captures: BTreeMap::new(),
+                order: Vec::new(),
+            }];
+            let mut work = 0;
+            let assigned = assign_counted(&rules, &[true; 8], 8, &mut work);
+            assert!(work <= 8 * (8 + 1) * (1 + 1));
+            assert_eq!(assigned.rules.len(), 8);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn random_small_assignments_agree_with_the_brute_force_oracle(
+            headings in 0usize..=4,
+            columns in 0usize..=4,
+            matrix_bits in any::<u32>(),
+            rule_shapes in proptest::collection::vec((any::<bool>(), 0u8..=5), 4),
+        ) {
+            let cardinalities = [
+                (0, UpperBound::Bounded(1)),
+                (1, UpperBound::Bounded(1)),
+                (0, UpperBound::Bounded(3)),
+                (2, UpperBound::Bounded(3)),
+                (5, UpperBound::Bounded(8)),
+                (0, UpperBound::Unbounded),
+            ];
+            let rules = rule_shapes
+                .into_iter()
+                .take(columns)
+                .map(|(wildcard, cardinality)| {
+                    let (min, max) = cardinalities[usize::from(cardinality)];
+                    if wildcard {
+                        rule(Matcher::Any, min, max)
+                    } else {
+                        exact("A", min, max)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let matches = (0..headings.saturating_mul(columns))
+                .map(|bit| matrix_bits & (1 << bit) != 0)
+                .collect::<Vec<_>>();
+            let actual = assign(&rules, &matches, headings);
+
+            if let Some(expected) = brute_accept(&rules, &matches, headings) {
+                prop_assert!(actual.accepted);
+                prop_assert_eq!(actual.rules, expected.assignment);
+                prop_assert_eq!(actual.counts, expected.counts);
+            } else {
+                let expected = brute_recover(&rules, &matches, headings);
+                prop_assert!(!actual.accepted);
+                prop_assert_eq!(actual.rules, expected.assignment);
+                prop_assert_eq!(actual.counts, expected.counts);
+                prop_assert_eq!(actual.recovery_cost, expected.cost);
+            }
         }
     }
 }

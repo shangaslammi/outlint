@@ -136,10 +136,10 @@ files and reading stdout is a design defect, not a fact about the problem.
 
 **Make invalid states unrepresentable.** This is the crate's central design
 idea, not over-engineering. `HeaderLevel` keeps levels outside h1–h6 out of a
-parsed schema; `RuleOutcome::Deny` carries no cardinality so `allow: false`
-cannot combine with `required`; `NonEmpty<T>` makes empty operand lists
-unrepresentable. Prefer extending this style over re-validating the same
-invariant at every use site.
+parsed schema; accepting `SectionRule`s and matcher-only `SectionGuard`s are
+distinct, so a prohibition cannot combine with cardinality; `NonEmpty<T>`
+makes empty operand lists unrepresentable. Prefer extending this style over
+re-validating the same invariant at every use site.
 
 **Wrap primitives in newtypes** when confusion is possible (`RuleId`,
 `ExactText`, `GlobPattern`, `RegexPattern`, `ByteOffset`, `RuleIndex`), with
