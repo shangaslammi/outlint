@@ -392,7 +392,7 @@ fn each_concrete_ancestor_instance_orders_its_own_sequence() {
 fn headers_outside_the_sequence_do_not_break_its_adjacency() {
     // §3.8: "Headers matched by other rules and unmatched headers do not
     // break adjacency; they do not belong to the sequence."
-    let schema = "version: 2\noptions:\n  ordered_sections: false\n\
+    let schema = "version: 2\nunordered: true\n\
                   sections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
                   captures:\n      v: semver\n    order:\n      - by: v\n        dir: desc\n  \
                   - match: Note\n    repeat: 0..n\n";
@@ -413,11 +413,10 @@ fn headers_outside_the_sequence_do_not_break_its_adjacency() {
 
 #[test]
 fn denied_and_unvisited_headings_contribute_nothing_to_a_sequence() {
-    // §3.8: "Headers matched by deny rules and every header in a skipped or
+    // §3.8: "Forbidden" headings and every header in a skipped or
     // otherwise unvisited subtree contribute nothing."
-    let denied = "version: 2\noptions:\n  ordered_sections: false\n\
-                  sections:\n  - match: Skip\n    allow: false\n  \
-                  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
+    let denied = "version: 2\nunordered: true\nforbid_sections:\n  - match: Skip\n\
+                  sections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
                   captures:\n      v: semver\n    order:\n      - by: v\n        dir: desc\n";
     // The denied header sits between two `V`s that are themselves in order:
     // were it in the sequence it could not be compared at all.
@@ -461,7 +460,7 @@ fn denied_and_unvisited_headings_contribute_nothing_to_a_sequence() {
 
     // An unmatched header's subtree is never visited, so the `V` rule below
     // it binds nothing and its sequence stays empty.
-    let nested = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+    let nested = "version: 2\nextras: anywhere\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
                   captures:\n          v: semver\n        order:\n          - by: v\n            \
                   dir: desc\n";

@@ -273,8 +273,7 @@ impl Loader {
                 SchemaErrorKind::OrderedScopeMismatch,
                 range,
                 "the scope these refs resolve in is already ordered by its rule list; \
-                 remove this constraint, or set `ordered: false` on the rule that owns \
-                 the scope (`options.ordered_sections: false` for the top-level scope)",
+                 remove this constraint, or set `unordered: true` on that scope",
             );
             return None;
         }

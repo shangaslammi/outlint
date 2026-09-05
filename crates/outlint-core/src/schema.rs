@@ -33,17 +33,14 @@ pub struct Schema {
 impl Schema {
     #[cfg(test)]
     pub(crate) fn outline(&self) -> &[SectionRule] {
-        match &self.document {
-            DocumentShape::Outline(scope) => &scope.rules,
-            DocumentShape::Title(_) => &[],
-        }
+        self.addressed_root_rules()
     }
 
     #[cfg(test)]
     pub(crate) fn constraints(&self) -> &[Constraint] {
         match &self.document {
             DocumentShape::Outline(scope) => &scope.constraints,
-            DocumentShape::Title(_) => &[],
+            DocumentShape::Title(title) => title.children.constraints(),
         }
     }
 

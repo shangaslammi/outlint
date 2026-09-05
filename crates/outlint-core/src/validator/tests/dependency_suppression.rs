@@ -11,8 +11,8 @@ use super::diagnostics;
 /// constraints out of. `constraints` is spelled by the caller.
 fn descent_schema(constraints: &str) -> String {
     format!(
-        "version: 2\noptions:\n  ordered_sections: false\noutline:\n  \
-         - id: part\n    match: Part\n    required: true\n    ordered: false\n    \
+        "version: 2\nunordered: true\noutline:\n  \
+         - id: part\n    match: Part\n    required: true\n    unordered: true\n    \
          sections:\n      - id: goal\n        match: Goal\n        required: false\n      \
          - id: note\n        match: Note\n        required: false\n  \
          - id: extra\n    match: Extra\n    required: false\n  \
@@ -101,7 +101,7 @@ fn a_positional_step_descends_through_the_same_cardinality_violation() {
 fn a_plural_terminal_step_is_an_ordinary_presence_proposition() {
     // §4.4: "Only the terminal step may remain plural", and §4.5 makes such a
     // locator "satisfied iff its terminal node list is non-empty".
-    let schema = "version: 2\noptions:\n  ordered_sections: false\noutline:\n  \
+    let schema = "version: 2\nunordered: true\noutline:\n  \
                   - id: part\n    match: Part\n    repeat: 0..n\n  \
                   - id: extra\n    match: Extra\n    required: false\n\
                   constraints:\n  - requires: { if: extra, then: part }\n";
@@ -118,8 +118,8 @@ fn an_unrelated_cardinality_failure_leaves_the_locator_alone() {
     // §4.4: dependency suppression "does not make every cardinality failure
     // suppress every later check". The rule in excess here is not on the
     // locator's path.
-    let schema = "version: 2\noptions:\n  ordered_sections: false\noutline:\n  \
-                  - id: part\n    match: Part\n    required: true\n    ordered: false\n    \
+    let schema = "version: 2\nunordered: true\noutline:\n  \
+                  - id: part\n    match: Part\n    required: true\n    unordered: true\n    \
                   sections:\n      - id: goal\n        match: Goal\n        required: false\n  \
                   - id: extra\n    match: Extra\n    required: false\n  \
                   - id: other\n    match: Other\n    required: false\n\

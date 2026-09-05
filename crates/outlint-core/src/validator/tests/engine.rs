@@ -196,6 +196,10 @@ fn an_unadmitted_top_level_header_takes_part_in_no_rule_matching_or_counting() {
                 DiagnosticTarget::Header(HeaderPath(vec!["Detached".into()])),
             ),
             (
+                DiagnosticId::UnexpectedSection,
+                DiagnosticTarget::Header(HeaderPath(vec!["Title".into(), "Attached".into()])),
+            ),
+            (
                 DiagnosticId::MissingSection,
                 DiagnosticTarget::MissingHeader {
                     parent: HeaderPath::default(),
@@ -227,7 +231,7 @@ fn an_unadmitted_subtree_is_reported_once_at_its_root() {
     // no skip at all.
     assert_eq!(
         ids_and_targets(
-            "version: 2\nsections:\n  - match: X\n    repeat: 0..n\n    strict: true\n    sections:\n      - match: Deep\n        required: true\n",
+            "version: 2\nsections:\n  - match: X\n    repeat: 0..n\n    sections:\n      - match: Deep\n        required: true\n",
             "## X\n### Surprise\n# Title\n",
         ),
         [(
@@ -266,7 +270,7 @@ fn a_nested_skipping_header_takes_part_in_no_rule() {
     // it does at the document root; the `h3` below is a child of the `h1` and
     // skips the `h2` level.
     let required = "version: 2\noutline:\n  - id: part\n    match: Part\n    required: true\n    \
-                    strict: true\n    sections:\n      - id: goal\n        match: Goal\n        \
+                    sections:\n      - id: goal\n        match: Goal\n        \
                     required: true\n";
     assert_eq!(
         ids_and_targets(required, "# Part\n### Goal\n"),
@@ -324,7 +328,7 @@ fn a_nested_skipping_headers_own_descendants_are_not_reported_for_its_skip() {
     // skips relative to a skipping parent is reported in its own right, but a
     // well-nested descendant yields no cascade of complaints about a
     // misplacement that is entirely its ancestor's."
-    let schema = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    strict: true\n    \
+    let schema = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"*\"\n        repeat: 0..n\n";
     // `Deep` sits one level under the skipping `Goal`, so it is no skip of
     // its own — one diagnostic for the subtree, at its root.
@@ -362,7 +366,7 @@ fn allowing_skipped_levels_admits_a_nested_skip_as_an_ordinary_sibling() {
     // an ordinary member of the enclosing scope and is matched against that
     // scope's rules like any sibling."
     let schema = "version: 2\noptions:\n  allow_skipped_levels: true\noutline:\n  \
-                  - match: Part\n    required: true\n    strict: true\n    \
+                  - match: Part\n    required: true\n    \
                   sections:\n      - match: Goal\n        repeat: 1..1\n";
     // The `h3` binds the `Goal` rule, so nothing is missing and nothing skips.
     assert_eq!(ids_and_targets(schema, "# Part\n### Goal\n"), []);
@@ -429,22 +433,27 @@ fn orphan_headers_skip_against_the_virtual_root() {
 }
 
 #[test]
-fn level_admission_leaves_unmatched_headers_to_strict_alone() {
-    // Structural admission is not a second gate on rule matching: a
-    // bound scope's header that matches no rule is the business of
-    // `strict`, which stays opt-in.
+fn declared_scopes_are_exhaustive_after_level_admission() {
+    // §3.3: v2 declared lists are exhaustive; unmatched admitted headings
+    // receive `unexpected-section` unless extras removes them first.
     let open = "version: 2\nsections:\n  - match: Known\n    repeat: 0..n\n";
     assert_eq!(
         ids_and_targets(open, "# Title\n## Known\n## Unmatched\n### Child\n"),
-        []
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Title".into(), "Unmatched".into()])),
+        )]
     );
     let open_headless = "version: 2\ntitle: null\nsections:\n  - match: Known\n    repeat: 0..n\n";
     assert_eq!(
         ids_and_targets(open_headless, "## Known\n## Unmatched\n"),
-        []
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Unmatched".into()])),
+        )]
     );
 
-    let closed = "version: 2\nsections:\n  - match: Known\n    repeat: 0..n\n    strict: true\n";
+    let closed = "version: 2\nsections:\n  - match: Known\n    repeat: 0..n\n    sections: []\n";
     assert_eq!(
         ids_and_targets(closed, "# Title\n## Known\n### Surprise\n"),
         [(
@@ -518,13 +527,19 @@ fn title_null_denies_h1_and_binds_top_level_h2s() {
     assert_eq!(ids_and_targets(schema, "## Overview\n"), []);
     assert_eq!(
         ids_and_targets(schema, "## Wrong\n"),
-        [(
-            DiagnosticId::MissingSection,
-            DiagnosticTarget::MissingHeader {
-                parent: HeaderPath::default(),
-                matcher: "Overview".into(),
-            },
-        )]
+        [
+            (
+                DiagnosticId::UnexpectedSection,
+                DiagnosticTarget::Header(HeaderPath(vec!["Wrong".into()])),
+            ),
+            (
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "Overview".into(),
+                },
+            ),
+        ]
     );
 
     // A present h1 is rejected wholesale at the title node, its subtree
@@ -596,20 +611,25 @@ fn bare_sections_implies_a_required_title() {
 }
 
 #[test]
-fn a_general_form_h1_that_matches_no_rule_is_an_open_scope_header() {
-    // No bespoke wrong-title verdict in the general form: an unmatched h1
-    // is simply not this schema's business unless a rule or `strict`
-    // makes it so, and the required rule reports its own absence.
+fn a_general_form_h1_that_matches_no_rule_is_unexpected() {
+    // §3.3: a general-form outline list is exhaustive just like any other
+    // declared scope; there is no v1 implicit openness.
     let schema = "version: 2\noutline:\n  - match: \"Guide *\"\n    required: true\n";
     assert_eq!(
         ids_and_targets(schema, "# Handbook\n## Anything\n"),
-        [(
-            DiagnosticId::MissingSection,
-            DiagnosticTarget::MissingHeader {
-                parent: HeaderPath::default(),
-                matcher: "Guide *".into(),
-            },
-        )]
+        [
+            (
+                DiagnosticId::UnexpectedSection,
+                DiagnosticTarget::Header(HeaderPath(vec!["Handbook".into()])),
+            ),
+            (
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "Guide *".into(),
+                },
+            ),
+        ]
     );
 }
 
@@ -703,12 +723,16 @@ fn an_admitted_top_level_h2_never_occupies_the_title_slot() {
     // — yielding a phantom surplus title plus a missing section. It now
     // binds into the `sections` scope instead, where `Overview` under the
     // real `h1` and the unmatched `Intro` are both ordinary open-scope
-    // members.
+    // members; because the declared list is exhaustive in v2, `Intro` is
+    // reported as unexpected but never as a title surplus.
     let schema = "version: 2\noptions:\n  allow_skipped_levels: true\ntitle: \"*\"\n\
                   sections:\n  - match: Overview\n    required: true\n";
     assert_eq!(
         ids_and_targets(schema, "## Intro\n# Doc\n## Overview\n"),
-        []
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Intro".into()])),
+        )]
     );
 }
 
@@ -788,7 +812,7 @@ fn root_scope_violations_name_the_document_rather_than_a_header() {
 
 #[test]
 fn unexpected_section_points_to_the_rule_that_closed_its_scope() {
-    let loaded = load_schema("version: 2\nsections:\n  - match: Parent\n    strict: true\n")
+    let loaded = load_schema("version: 2\nsections:\n  - match: Parent\n    sections: []\n")
         .expect("test schema is valid");
     let document = parse_markdown("## Parent\n### Surprise\n", MarkdownOptions::default());
     let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
@@ -833,4 +857,125 @@ fn v2_unordered_uses_first_matching_rule() {
     let schema = "version: 2\ntitle: '*'\nunordered: true\nsections:\n  - id: broad\n    match: 'A*'\n    repeat: 0..n\n  - id: exact\n    match: A\n    required: false\n";
     let diagnostics = ids_and_targets(schema, "# Doc\n## A\n");
     assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn v2_identity_matrix_controls_child_traversal_by_heading_class() {
+    // §4.2: canonical and recovery assignments inherit their rule identity
+    // and recurse; unassigned, forbidden, extra, and omitted-scope headings
+    // do not open a validation scope. An anonymous wildcard still recurses
+    // even though no name step can reach its occurrence.
+    let canonical = "version: 2\noutline:\n  - match: Parent\n    sections: []\n";
+    assert_eq!(
+        ids_and_targets(canonical, "# Parent\n## Child\n"),
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Parent".into(), "Child".into()])),
+        )]
+    );
+
+    let recovery =
+        "version: 2\noutline:\n  - match: Parent\n    required: false\n    sections: []\n";
+    let recovered = ids_and_targets(recovery, "# Parent\n# Parent\n## Child\n");
+    assert!(recovered
+        .iter()
+        .any(|(id, _)| *id == DiagnosticId::TooManySections));
+    assert!(recovered.iter().any(|(id, target)| {
+        *id == DiagnosticId::UnexpectedSection
+            && *target
+                == DiagnosticTarget::Header(HeaderPath(vec!["Parent".into(), "Child".into()]))
+    }));
+
+    let unassigned = "version: 2\noutline:\n  - match: A\n    required: false\n    sections: []\n  - match: B\n    required: false\n    sections: []\n";
+    assert_eq!(
+        ids_and_targets(unassigned, "# B\n## Child\n# A\n"),
+        [(
+            DiagnosticId::MisplacedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["B".into()])),
+        )]
+    );
+
+    let forbidden = "version: 2\nforbid_sections:\n  - match: Parent\noutline: []\n";
+    assert_eq!(
+        ids_and_targets(forbidden, "# Parent\n## Child\n"),
+        [(
+            DiagnosticId::NotAllowed,
+            DiagnosticTarget::Header(HeaderPath(vec!["Parent".into()])),
+        )]
+    );
+
+    let extra = "version: 2\nextras: anywhere\noutline: []\n";
+    assert!(ids_and_targets(extra, "# Parent\n## Child\n").is_empty());
+
+    let omitted = "version: 2\noutline:\n  - match: Parent\n";
+    assert!(ids_and_targets(omitted, "# Parent\n## Child\n").is_empty());
+
+    let anonymous = "version: 2\noutline:\n  - match: '*'\n    repeat: 0..n\n    sections: []\n";
+    assert_eq!(
+        ids_and_targets(anonymous, "# Parent\n## Child\n"),
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Parent".into(), "Child".into()])),
+        )]
+    );
+}
+
+#[test]
+fn v2_declared_rule_identity_wins_over_an_unassigned_concrete_id() {
+    // §4.2: the explicit schema id `x` wins over the unassigned heading whose
+    // concrete default id is also `x`; schema-resident locators bind only the
+    // declared rule, so that heading cannot satisfy the consequence.
+    let schema = "version: 2\nunordered: true\noutline:\n  - id: x\n    match: Assigned\n    required: false\n  - id: trigger\n    match: Trigger\nconstraints:\n  - requires: { if: trigger, then: x }\n";
+    let ids = ids_and_targets(schema, "# Trigger\n# X\n")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [DiagnosticId::UnexpectedSection, DiagnosticId::Requires]
+    );
+}
+
+#[test]
+fn v2_child_grammar_never_reassigns_an_overlapping_parent() {
+    // §3.2's final example: the canonical specific-rule count vector assigns
+    // the one `Part` to the first optional rule. A child matching only the
+    // second rule's grammar cannot make assignment backtrack.
+    let schema = "version: 2\noutline:\n  - id: first\n    match: Part\n    required: false\n    sections:\n      - match: First Child\n  - id: second\n    match: Part\n    required: false\n    sections:\n      - match: Second Child\n";
+    let ids = ids_and_targets(schema, "# Part\n## Second Child\n")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            DiagnosticId::UnexpectedSection,
+            DiagnosticId::MissingSection
+        ]
+    );
+}
+
+#[test]
+fn v2_recovery_binding_survives_diagnostic_suppression() {
+    // §§3.5, 4.2, 5.2, and 6.3: recovery assigns `A`, leaves the leading `B`
+    // unassigned, and the constraint reads that binding. Filtering the
+    // misplaced primary cannot reassign `B` or change the `requires` result.
+    let schema = "version: 2\noutline:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    match: B\n    required: false\nconstraints:\n  - requires: { if: a, then: b }\n";
+    let plain = ids_and_targets(schema, "# B\n# A\n")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        plain,
+        [DiagnosticId::MisplacedSection, DiagnosticId::Requires]
+    );
+
+    let suppressed = ids_and_targets(
+        schema,
+        "<!-- outlint-disable-file misplaced-section -->\n# B\n# A\n",
+    )
+    .into_iter()
+    .map(|(id, _)| id)
+    .collect::<Vec<_>>();
+    assert_eq!(suppressed, [DiagnosticId::Requires]);
 }

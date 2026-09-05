@@ -1,6 +1,6 @@
 use super::{invalid, source_slice, valid};
 use crate::loader::{linked_frontmatter_schema_path, load_schema};
-use crate::{ByteOffset, Matcher, SchemaErrorKind, SchemaVersion};
+use crate::{ByteOffset, DocumentShape, Matcher, SchemaErrorKind, SchemaVersion};
 
 #[test]
 fn yaml_syntax_error_ranges_convert_character_columns_to_bytes() {
@@ -278,10 +278,13 @@ fn non_standard_tags_are_rejected_anywhere_in_a_schema_document() {
     );
 
     // Core-schema tags keep their meaning.
-    let schema = valid("version: !!int 1\ntitle: !!str Doc\nsections: []\n");
+    let schema = valid("version: !!int 2\ntitle: !!str Doc\nsections: []\n");
     assert!(matches!(
-        schema.outline().first().map(|rule| &rule.matcher),
-        Some(Matcher::Exact(_))
+        schema.document,
+        DocumentShape::Title(crate::TitleSlot {
+            matcher: Some(Matcher::Exact(_)),
+            ..
+        })
     ));
 }
 

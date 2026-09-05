@@ -182,7 +182,7 @@ fn headings_that_bind_no_rule_contribute_no_capture_diagnostic() {
     // below it never sees the heading its capture would have read. §1.5: a
     // heading that skips a level "takes part in no rule", and neither does
     // anything below it.
-    let schema = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+    let schema = "version: 2\nextras: anywhere\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
                   captures:\n          v: semver\n";
     // Bound: one diagnostic. Below an unmatched sibling: none. Below a
@@ -227,10 +227,9 @@ fn headings_that_bind_no_rule_contribute_no_capture_diagnostic() {
         [DiagnosticId::InvalidValue]
     );
 
-    // A denied heading is rejected wholesale, and a capture cannot be
-    // declared on a denying rule at all (§2.1), so the subtree below one
-    // contributes nothing either.
-    let denied = "version: 2\noutline:\n  - match: Part\n    allow: false\n  - match: \"*\"\n    \
+    // §3.1: a guard removes the forbidden heading before accepting assignment,
+    // so its subtree contributes no capture either.
+    let denied = "version: 2\nforbid_sections:\n  - match: Part\noutline:\n  - match: \"*\"\n    \
                   repeat: 0..n\n    sections:\n      - match: \"/V (?<v>.+)/\"\n        \
                   repeat: 0..n\n        captures:\n          v: semver\n";
     let reported = diagnostics(denied, "# Part\n## V nope\n");
