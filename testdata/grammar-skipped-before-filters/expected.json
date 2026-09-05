@@ -1,0 +1,16 @@
+{
+  "skipped.md": [
+    {
+      "id": "skipped-level",
+      "target": { "kind": "header", "path": ["Skip"] }
+    },
+    {
+      "id": "skipped-level",
+      "target": { "kind": "header", "path": ["Extra"] }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "Need" }
+    }
+  ]
+}

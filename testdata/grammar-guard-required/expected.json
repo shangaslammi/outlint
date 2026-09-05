@@ -1,0 +1,12 @@
+{
+  "guarded.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["A"] }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "A" }
+    }
+  ]
+}

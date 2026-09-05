@@ -5,3 +5,5 @@ outline:
     sections:
       - match: "Overview"
         required: true
+    extras: anywhere
+extras: anywhere

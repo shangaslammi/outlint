@@ -164,7 +164,7 @@ fn optional_forbidden_and_file_suppression_apply_to_json_schema() {
     schema.frontmatter = FrontmatterPolicy::Optional {
         schema: Some(json_schema.clone()),
     };
-    let absent = parse_markdown("## Title\n", MarkdownOptions::default());
+    let absent = parse_markdown("", MarkdownOptions::default());
     assert!(validate(&schema, &absent)
         .expect("schema prepares")
         .is_empty());

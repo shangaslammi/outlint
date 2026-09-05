@@ -1,0 +1,18 @@
+{
+  "unexpected.md": [
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["X"] }
+    }
+  ],
+  "misplaced.md": [
+    {
+      "id": "misplaced-section",
+      "target": { "kind": "header", "path": ["B"] }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "B" }
+    }
+  ]
+}

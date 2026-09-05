@@ -73,7 +73,7 @@ fn ordered_human_output_distinguishes_expected_and_observed_order() {
     let directory = TempDir::new("ordered-human");
     directory.write(
         "schema.yml",
-        "version: 1\noptions:\n  ordered_sections: false\ntitle: \"*\"\nsections:\n  - id: context\n    match: Context\n  - id: decision\n    match: Decision\n  - id: consequences\n    match: Consequences\nconstraints:\n  - ordered: [context, decision, consequences]\n",
+        "version: 1\ntitle: \"*\"\nunordered: true\nsections:\n  - id: context\n    match: Context\n  - id: decision\n    match: Decision\n  - id: consequences\n    match: Consequences\nconstraints:\n  - ordered: [context, decision, consequences]\n",
     );
     directory.write(
         "docs/adr-0042.md",
@@ -110,7 +110,7 @@ fn ordered_human_output_distinguishes_expected_and_observed_order() {
             "\"ADR 0042: Retire the legacy upload API > Consequences\"\n",
             "    docs/adr-0042.md:11:1 ",
             "\"ADR 0042: Retire the legacy upload API > Decision\"\n",
-            "  constraint: schema.yml:13:5\n",
+            "  constraint: schema.yml:12:5\n",
             "\n",
             "1 diagnostic in 1 file\n"
         )
@@ -118,10 +118,9 @@ fn ordered_human_output_distinguishes_expected_and_observed_order() {
 }
 
 #[test]
-fn implicit_order_human_output_names_the_broken_pair() {
-    // The default-ordered scope (§3.7) carries no references to list as an
-    // expected order; its headline is the message naming the pair instead,
-    // and the schema location is the owning node — the title, for the sugar.
+fn ordered_recovery_human_output_names_missing_and_misplaced_sections() {
+    // The default-ordered scope (§3.5) reports recovery and the resulting
+    // cardinality independently, with the owning title as recovery attribution.
     let directory = TempDir::new("ordered-implicit-human");
     directory.write(
         "schema.yml",
@@ -150,17 +149,89 @@ fn implicit_order_human_output_names_the_broken_pair() {
     assert_eq!(
         stdout(&output),
         concat!(
-            "docs/adr-0042.md:1:1 [ordered] sections are out of the declared order: ",
-            "`Decision` must precede `Consequences`\n",
-            "  observed order:\n",
-            "    docs/adr-0042.md:7:1 ",
-            "\"ADR 0042: Retire the legacy upload API > Consequences\"\n",
-            "    docs/adr-0042.md:11:1 ",
-            "\"ADR 0042: Retire the legacy upload API > Decision\"\n",
+            "docs/adr-0042.md:1:1 [missing-section] matched 0 sections, but at least 1 are required\n",
+            "  expected: \"Consequences\"\n",
+            "  rule: schema.yml:6:5\n",
+            "\n",
+            "docs/adr-0042.md:7:1 [misplaced-section] the section matches a rule but cannot occupy its ordered phase\n",
+            "  section: \"ADR 0042: Retire the legacy upload API > Consequences\"\n",
             "  schema: schema.yml:2:8\n",
             "\n",
-            "1 diagnostic in 1 file\n"
+            "2 diagnostics in 1 file\n"
         )
+    );
+}
+
+#[test]
+fn guard_human_output_names_the_guard_and_its_declaration() {
+    let directory = TempDir::new("guard-human");
+    directory.write(
+        "schema.yml",
+        "version: 1\ntitle: null\nforbid_sections:\n  - match: Secret\nsections: []\n",
+    );
+    directory.write("doc.md", "## Secret\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--color",
+            "never",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "doc.md:1:1 [not-allowed] a prohibition guard rejects this section\n",
+            "  section: \"Secret\"\n",
+            "  guard: 0\n",
+            "  guard: schema.yml:4:12\n",
+            "\n",
+            "1 diagnostic in 1 file\n",
+        )
+    );
+}
+
+#[test]
+fn first_matching_guard_owns_the_version_4_schema_node() {
+    let directory = TempDir::new("first-guard-attribution");
+    directory.write(
+        "schema.yml",
+        "version: 1\ntitle: null\nforbid_sections:\n  - match: 'Secret*'\n  - match: '*'\nsections: []\n",
+    );
+    directory.write("doc.md", "## Secret plan\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let envelope = json_output(&output);
+    let diagnostics = envelope
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|results| results.first())
+        .and_then(|result| result.get("diagnostics"))
+        .and_then(serde_json::Value::as_array)
+        .expect("the envelope carries a diagnostic array");
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = diagnostics
+        .first()
+        .expect("one guard diagnostic was asserted");
+    assert_eq!(
+        diagnostic["schema_node"],
+        serde_json::json!({"kind": "guard", "scope": [], "index": 0})
     );
 }
 
@@ -252,6 +323,7 @@ fn human_output_escapes_untrusted_text_reaching_it_through_a_reference() {
             "sections:\n",
             "  - id: a\n",
             "    match: \"A\u{202e}B\\nC\\u001b\"\n",
+            "    required: false\n",
             "constraints:\n",
             "  - one_of: [\"fm[$['draft\u{202e}']]=x\", a]\n",
         ),

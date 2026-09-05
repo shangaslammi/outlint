@@ -15,7 +15,7 @@ body:
 
         Some things are out of scope on purpose: rewriting or fixing documents
         (outlint only reports), prose and formatting linting, directory
-        traversal in v1, implicit network access by the native CLI during
+        traversal, implicit network access by the native CLI during
         validation or resource retrieval, async or parallelism, and an LSP.
         This does not include a package-manager bootstrap such as npm's
         documented first-run acquisition of the released native binary.
@@ -70,9 +70,9 @@ body:
     attributes:
       label: Alternatives considered
       description: >-
-        Can this be expressed with today's matchers, cardinality, `strict`,
-        `allow: false`, or constraints? If it nearly works, say where it falls
-        short.
+        Can this be expressed with today's matchers, cardinality,
+        `forbid_sections`, `extras`, `unordered`, a positioned wildcard, or
+        constraints? If it nearly works, say where it falls short.
     validations:
       required: false
 

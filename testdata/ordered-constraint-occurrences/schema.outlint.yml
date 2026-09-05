@@ -4,13 +4,15 @@ version: 1
 # may sit together but not straddle the next ref's occurrences. The
 # implicit counterpart is `ordered-occurrences/`; the two are separate
 # machinery sharing one definition.
-options:
-  ordered_sections: false
 title: null
+unordered: true
 sections:
   - id: a
     match: "A"
+    repeat: "0..n"
   - id: b
     match: "B"
+    repeat: "0..n"
+extras: anywhere
 constraints:
   - ordered: [a, b]

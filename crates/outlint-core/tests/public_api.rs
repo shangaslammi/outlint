@@ -141,26 +141,34 @@ title: "*"
 sections:
   - id: guide
     match: "Guide*"
+    required: true
   - match: /Usage/
+    required: true
 constraints:
   - one_of: ["fm[$.count]=01", guide]
 "#,
     )
     .expect("schema is valid");
 
-    let guide = &loaded.schema.outline[0].sections[0];
+    let outlint_core::DocumentShape::Title(title) = &loaded.schema.document else {
+        panic!("expected title")
+    };
+    let guide = &title.children().rules()[0];
     assert_eq!(guide.id.as_ref().map(|id| id.as_str()), Some("guide"));
     let outlint_core::Matcher::Glob(glob) = &guide.matcher else {
         panic!("expected a glob matcher")
     };
     assert_eq!(glob.as_str(), "Guide*");
 
-    let outlint_core::Matcher::Regex(regex) = &loaded.schema.outline[0].sections[1].matcher else {
+    let outlint_core::Matcher::Regex(regex) = &title.children().rules()[1].matcher else {
         panic!("expected a regex matcher")
     };
     assert_eq!(regex.as_str(), "Usage");
 
-    let outlint_core::Constraint::OneOf(items) = &loaded.schema.outline[0].constraints[0] else {
+    let outlint_core::ChildScope::Declared(scope) = title.children() else {
+        panic!("expected declared scope")
+    };
+    let outlint_core::Constraint::OneOf(items) = &scope.constraints[0] else {
         panic!("expected one_of")
     };
     let outlint_core::Proposition::FrontmatterQuery(reference) = &items.first else {
@@ -182,17 +190,107 @@ fn semantic_options_default_to_the_specification_values() {
     assert!(!defaults.match_case);
     assert!(defaults.strip_inline_markup);
     assert!(!defaults.allow_skipped_levels);
-    assert!(defaults.ordered_sections);
 
     let customized = defaults
         .with_match_case(true)
         .with_strip_inline_markup(false)
-        .with_allow_skipped_levels(true)
-        .with_ordered_sections(false);
+        .with_allow_skipped_levels(true);
     assert!(customized.match_case);
     assert!(!customized.strip_inline_markup);
     assert!(customized.allow_skipped_levels);
-    assert!(!customized.ordered_sections);
+}
+
+#[test]
+fn cardinality_construction_enforces_its_normalized_range() {
+    use outlint_core::{Cardinality, UpperBound};
+
+    assert!(Cardinality::new(0, UpperBound::Bounded(0)).is_none());
+    assert!(Cardinality::new(2, UpperBound::Bounded(1)).is_none());
+    let cardinality = Cardinality::new(2, UpperBound::Unbounded)
+        .expect("an unbounded range with a finite minimum is valid");
+    assert_eq!(cardinality.min(), 2);
+    assert_eq!(cardinality.max(), UpperBound::Unbounded);
+}
+
+#[test]
+fn current_schema_public_model_and_vocabulary_are_pinned() {
+    use outlint_core::{
+        ChildScope, DeclaredScope, DocumentShape, ExtrasMode, Matcher, SchemaErrorKind,
+        SchemaVersion, ScopeMode, SectionGuard, TitleSlot,
+    };
+
+    fn assert_model_value<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
+    assert_model_value::<TitleSlot>();
+    assert_model_value::<ChildScope>();
+    assert_model_value::<DeclaredScope>();
+    assert_model_value::<SectionGuard>();
+    assert_model_value::<ExtrasMode>();
+    assert_model_value::<ScopeMode>();
+    assert_model_value::<SchemaVersion>();
+    let extras_variants = [ExtrasMode::Reject, ExtrasMode::Anywhere];
+    assert!(matches!(extras_variants[0], ExtrasMode::Reject));
+    assert!(matches!(extras_variants[1], ExtrasMode::Anywhere));
+    let scope_variants = [ScopeMode::Ordered, ScopeMode::Unordered];
+    assert!(matches!(scope_variants[0], ScopeMode::Ordered));
+    assert!(matches!(scope_variants[1], ScopeMode::Unordered));
+
+    let loaded = load_schema(
+        "version: 1\noutline:\n  - match: A\nforbid_sections:\n  - match: X\nextras: anywhere\nunordered: true\n",
+    )
+    .expect("the complete root scope is valid");
+    assert_eq!(loaded.schema.version, SchemaVersion::V1);
+    let DocumentShape::Outline(scope) = &loaded.schema.document else {
+        panic!("the general form exposes a declared outline scope")
+    };
+    assert_eq!(scope.extras, ExtrasMode::Anywhere);
+    assert_eq!(scope.mode, ScopeMode::Unordered);
+    assert!(scope.constraints.is_empty());
+    assert_eq!(scope.rules.len(), 1);
+    assert_eq!(scope.rules[0].cardinality.min(), 1);
+    assert_eq!(
+        scope.rules[0].cardinality.max(),
+        outlint_core::UpperBound::Bounded(1)
+    );
+    assert_eq!(scope.guards.len(), 1);
+    assert!(matches!(scope.guards[0].matcher, Matcher::Exact(_)));
+
+    let spelled = load_schema("version: 1\ntitle: Guide\n")
+        .expect("a spelled title without child declarations is valid");
+    assert!(matches!(
+        spelled.schema.document,
+        DocumentShape::Title(TitleSlot::Spelled {
+            children: ChildScope::Omitted,
+            ..
+        })
+    ));
+
+    let implied =
+        load_schema("version: 1\nsections: []\n").expect("bare sections imply a wildcard title");
+    assert!(matches!(
+        implied.schema.document,
+        DocumentShape::Title(TitleSlot::ImpliedBySections {
+            children: ChildScope::Declared(_)
+        })
+    ));
+
+    let guards_only = load_schema("version: 1\ntitle: null\nforbid_sections:\n  - match: Secret\n")
+        .expect("guards may be the only child declaration");
+    assert!(matches!(
+        guards_only.schema.document,
+        DocumentShape::Title(TitleSlot::Forbidden {
+            children: ChildScope::GuardsOnly(_)
+        })
+    ));
+
+    assert_eq!(DiagnosticId::MisplacedSection.as_str(), "misplaced-section");
+    assert_eq!(
+        SchemaErrorKind::MissingCardinality.as_str(),
+        "missing-cardinality"
+    );
+    assert_eq!(
+        SchemaErrorKind::UnreachableRule.as_str(),
+        "unreachable-rule"
+    );
 }
 
 /// Pins the typed-value declaration surface a schema without `captures` or
@@ -211,16 +309,17 @@ title: "*"
 sections:
   - id: guide
     match: /(?<version>.+)/
+    required: true
 "#,
     )
     .expect("schema is valid");
 
-    let guide = &loaded.schema.outline[0].sections[0];
+    let outlint_core::DocumentShape::Title(title) = &loaded.schema.document else {
+        panic!("expected title")
+    };
+    let guide = &title.children().rules()[0];
     assert!(guide.captures.is_empty());
     assert!(guide.order.is_empty());
-    // The synthesized title rule has no source declaration to carry either.
-    assert!(loaded.schema.outline[0].captures.is_empty());
-    assert!(loaded.schema.outline[0].order.is_empty());
 }
 
 /// Pins the frontmatter policy's capture inspection: every variant answers,
@@ -330,6 +429,7 @@ frontmatter:
       type: semver
 sections:
   - match: /Release (?<version>.+)/
+    repeat: 0..n
     captures:
       version: semver
     order:
@@ -339,7 +439,10 @@ sections:
     )
     .expect("captures and order are known fields");
 
-    let rule = &loaded.schema.outline[0].sections[0];
+    let outlint_core::DocumentShape::Title(title) = &loaded.schema.document else {
+        panic!("expected title")
+    };
+    let rule = &title.children().rules()[0];
     let captures = rule
         .captures
         .iter()
@@ -463,19 +566,23 @@ fn the_typed_value_ids_have_their_specified_spellings() {
 #[test]
 fn the_new_schema_node_addresses_are_constructible_and_ordered() {
     use outlint_core::{
-        CaptureName, CapturePath, ConstraintIndex, ConstraintPath, OrderEntryPath, OrderIndex,
-        RuleIndex, RulePath, SchemaNode, ScopePath,
+        CaptureName, CapturePath, ConstraintIndex, ConstraintPath, GuardIndex, GuardPath,
+        OrderEntryPath, OrderIndex, RuleIndex, RulePath, SchemaNode, ScopePath,
     };
 
     let rule = RulePath {
         scope: ScopePath(vec![RuleIndex(0)]),
         index: RuleIndex(1),
     };
-    // §11.3 declaration order: rule, capture, frontmatter_capture,
-    // order_entry, constraint. The derived `Ord` follows it, and a variant
-    // appended rather than inserted would fail here.
+    // §11.3 declaration order: rule, guard, capture, frontmatter_capture,
+    // order_entry, constraint. The derived `Ord` follows it.
+    let guard = GuardPath {
+        scope: ScopePath(vec![RuleIndex(0)]),
+        index: GuardIndex(0),
+    };
+    assert!(SchemaNode::Rule(rule.clone()) < SchemaNode::Guard(guard.clone()));
     assert!(
-        SchemaNode::Rule(rule.clone())
+        SchemaNode::Guard(guard)
             < SchemaNode::OrderEntry(OrderEntryPath {
                 rule: rule.clone(),
                 order_index: OrderIndex(0),
@@ -524,9 +631,11 @@ fn a_positional_rule_reference_survives_binding_and_validation_intact() {
     let document = parse_markdown("# Guide\n", MarkdownOptions::default());
     let reported = validate(&loaded.schema, &document).expect("validation completes");
 
-    assert_eq!(reported.len(), 1);
-    assert_eq!(reported[0].id, DiagnosticId::AnyOf);
-    let DiagnosticReference::Rule { locator, matcher } = &reported[0].references[0] else {
+    let diagnostic = reported
+        .iter()
+        .find(|item| item.id == DiagnosticId::AnyOf)
+        .expect("the constraint is unsatisfied");
+    let DiagnosticReference::Rule { locator, matcher } = &diagnostic.references[0] else {
         panic!("the first reference is the positional rule locator")
     };
     assert_eq!(locator.locator(), format!("$.alpha[{position}]"));

@@ -1,0 +1,15 @@
+{
+  "wrong.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Wrong"] }
+    },
+    {
+      "id": "unexpected-section",
+      "target": {
+        "kind": "header",
+        "path": ["Wrong", "Admitted child"]
+      }
+    }
+  ]
+}

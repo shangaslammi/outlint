@@ -1,4 +1,4 @@
-//! Typed Values against the version 3 envelope, end to end through the CLI.
+//! Typed Values against the version 4 envelope, end to end through the CLI.
 //!
 //! The unit fixtures beside the renderer pin each rendered shape in isolation;
 //! these pin the shapes the loader and validator actually produce, so a
@@ -31,7 +31,7 @@ fn diagnostic(output: &std::process::Output) -> Value {
 /// emitted `fm.version` locator can only be the spelling the author wrote and
 /// cannot have been rebuilt from the bound query.
 #[test]
-fn every_reference_kind_renders_its_exact_version_3_shape() {
+fn every_reference_kind_renders_its_exact_version_4_shape() {
     let directory = TempDir::new("typed-references");
     directory.write(
         "schema.yml",
@@ -46,17 +46,21 @@ fn every_reference_kind_renders_its_exact_version_3_shape() {
             "sections:\n",
             "  - id: exact\n",
             "    match: Release\n",
+            "    required: false\n",
             "    sections:\n",
             "      - id: notes\n",
             "        match: Notes\n",
             "  - id: glob\n",
             "    match: \"Step *\"\n",
+            "    repeat: 0..n\n",
             "  - id: regex\n",
             "    match: \"/Release (?<version>.+)/\"\n",
+            "    repeat: 0..n\n",
             "    captures:\n",
             "      version: semver\n",
             "  - id: any\n",
             "    match: \"*\"\n",
+            "    repeat: 0..n\n",
             "constraints:\n",
             "  - any_of:\n",
             "      - exact\n",
@@ -246,7 +250,7 @@ fn positional_narrowing_survives_as_an_arbitrary_precision_json_integer() {
 ///
 /// They are load-time failures about the schema document, so §6 gives them a
 /// positioned `schema_location` and no `target` at all — and they arrive in
-/// the same version 3 envelope as everything else. `invalid-capture` and
+/// the same version 4 envelope as everything else. `invalid-capture` and
 /// `invalid-order` are declared in separate schemas because §6.3 forbids
 /// reporting an order error for entries referring to a capture mapping that
 /// did not build.
@@ -274,6 +278,7 @@ fn typed_value_schema_errors_are_positioned_and_carry_no_document_target() {
             "title: null\n",
             "sections:\n",
             "  - match: \"/Release (?<version>.+)/\"\n",
+            "    repeat: 0..n\n",
             "    captures:\n",
             "      version: semver\n",
             "    order:\n",
@@ -284,14 +289,14 @@ fn typed_value_schema_errors_are_positioned_and_carry_no_document_target() {
 
     for (path, id, line, column) in [
         ("capture.yml", "invalid-capture", 6, 7),
-        ("order.yml", "invalid-order", 8, 9),
+        ("order.yml", "invalid-order", 9, 9),
     ] {
         let output = run(&directory, &["schema", "check", path, "--format", "json"]);
         assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
         assert_eq!(stderr(&output), "");
 
         let json = json_output(&output);
-        assert_eq!(json["version"], 3);
+        assert_eq!(json["version"], 4);
         assert_eq!(json["results"][0]["kind"], "schema");
         assert_eq!(json["results"][0]["path"], path);
         assert_eq!(json["results"][0]["schema"], path);
@@ -350,8 +355,10 @@ fn a_rule_capture_invalid_value_is_attributed_to_its_capture_declaration() {
             "    sections:\n",
             "      - id: other\n",
             "        match: Other\n",
+            "        required: false\n",
             "      - id: release\n",
             "        match: \"/Release (?<version>.+)/\"\n",
+            "        repeat: 0..n\n",
             "        captures:\n",
             "          version: semver\n",
         ),
@@ -688,6 +695,7 @@ fn a_value_order_violation_names_its_order_entry_and_adjacent_pair() {
             "sections:\n",
             "  - id: release\n",
             "    match: \"/Release (?<version>.+)/\"\n",
+            "    repeat: 0..n\n",
             "    captures:\n",
             "      version: semver\n",
             "    order:\n",
@@ -804,9 +812,11 @@ fn typed_value_presentation_escapes_untrusted_pointers_and_header_paths() {
             "sections:\n",
             "  - id: product\n",
             "    match: \"Product*\"\n",
+            "    required: true\n",
             "    sections:\n",
             "      - id: release\n",
             "        match: \"/Release (?<version>.+)/\"\n",
+            "        repeat: 0..n\n",
             "        captures:\n",
             "          version: semver\n",
             "        order:\n",

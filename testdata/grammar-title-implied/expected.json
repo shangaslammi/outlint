@@ -1,0 +1,9 @@
+{
+  "any-title.md": [],
+  "missing.md": [
+    {
+      "id": "missing-title",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "*" }
+    }
+  ]
+}

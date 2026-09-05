@@ -126,7 +126,7 @@ fn malformed_schema_error_ranges_match_the_committed_baseline() {
 const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
     (
         "document-field-version",
-        "version: 2\nsections: []\n",
+        "version: 1\nsections: []\n",
     ),
     (
         "document-field-title",
@@ -257,8 +257,24 @@ const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
         "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: { if: intro, then: missing }\n",
     ),
     (
-        "constraint-forbidden-ref",
-        "version: 1\nsections:\n  - id: intro\n    match: Intro\n  - id: gone\n    match: Gone\n    allow: false\nconstraints:\n  - requires: { if: intro, then: gone }\n",
+        "removed-rule-key",
+        "version: 1\nsections:\n  - match: Gone\n    allow: false\n",
+    ),
+    (
+        "rule-missing-cardinality",
+        "version: 1\nsections:\n  - match: '*'\n",
+    ),
+    (
+        "unordered-unreachable-rule",
+        "version: 1\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n",
+    ),
+    (
+        "guard-invalid-matcher",
+        "version: 1\nsections: []\nforbid_sections:\n  - match: '/[/'\n",
+    ),
+    (
+        "empty-outline-valid",
+        "version: 1\noutline: []\n",
     ),
     (
         "constraint-operand-shape",
@@ -282,11 +298,11 @@ const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "duplicate-key-document-field",
-        "version: 1\nversion: 2\nsections: []\n",
+        "version: 1\nversion: 1\nsections: []\n",
     ),
     (
         "duplicate-key-quoted-against-plain",
-        "version: 1\n\"version\": 2\nsections: []\n",
+        "version: 1\n\"version\": 1\nsections: []\n",
     ),
     (
         "duplicate-key-rule-field",
@@ -544,6 +560,7 @@ fn encode_node(node: &SchemaNode) -> String {
         SchemaNode::Rule(RulePath { scope, index }) => {
             format!("rule {}", index_path(scope, index.0))
         }
+        SchemaNode::Guard(path) => format!("guard {}", index_path(&path.scope, path.index.0)),
         SchemaNode::Capture(CapturePath { rule, name }) => format!(
             "capture {} {}",
             index_path(&rule.scope, rule.index.0),

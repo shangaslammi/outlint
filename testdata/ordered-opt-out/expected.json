@@ -1,6 +1,6 @@
 {
   "pass.md": [],
   "nested-inverted.md": [
-    { "id": "ordered", "target": { "kind": "header", "path": ["Title", "Steps"] } }
+    { "id": "misplaced-section", "target": { "kind": "header", "path": ["Title", "Steps", "Configure"] } }
   ]
 }

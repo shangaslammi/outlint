@@ -3,5 +3,6 @@ title: null
 sections:
   - match: "Need"
     required: true
+forbid_sections:
   - match: "Bad"
-    allow: false
+extras: anywhere

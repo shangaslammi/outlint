@@ -12,10 +12,12 @@ use std::{error::Error, fmt};
 pub enum DiagnosticId {
     /// A heading is more than one level below its nearest parent.
     SkippedLevel,
-    /// A present heading is denied by its first matching rule or title matcher.
+    /// A present heading is rejected by a prohibition guard or `title: null`.
     NotAllowed,
-    /// A heading has no matching rule in a strict scope.
+    /// A heading has no matching rule in an exhaustive declared scope.
     UnexpectedSection,
+    /// A heading matches an accepting rule but cannot occupy its ordered phase.
+    MisplacedSection,
     /// No heading matched a rule whose minimum is nonzero.
     MissingSection,
     /// Some headings matched a rule, but fewer than its minimum.
@@ -53,7 +55,7 @@ pub enum DiagnosticId {
     Requires,
     /// A `conflicts` condition and at least one exclusion are both satisfied.
     Conflicts,
-    /// Concrete occurrences violate an explicit constraint or a scope's rule order.
+    /// Concrete occurrences violate an explicit `ordered` constraint.
     Ordered,
 }
 
@@ -70,6 +72,7 @@ impl DiagnosticId {
             Self::SkippedLevel => "skipped-level",
             Self::NotAllowed => "not-allowed",
             Self::UnexpectedSection => "unexpected-section",
+            Self::MisplacedSection => "misplaced-section",
             Self::MissingSection => "missing-section",
             Self::TooFewSections => "too-few-sections",
             Self::TooManySections => "too-many-sections",

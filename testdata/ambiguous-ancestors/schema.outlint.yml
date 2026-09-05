@@ -11,3 +11,4 @@ sections:
     sections:
       - match: "Goals"
         required: true
+extras: anywhere

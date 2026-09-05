@@ -1,0 +1,9 @@
+{
+  "empty.md": [],
+  "heading.md": [
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["Part"] }
+    }
+  ]
+}

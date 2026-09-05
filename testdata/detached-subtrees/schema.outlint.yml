@@ -9,7 +9,7 @@ version: 1
 sections:
   - match: "Overview"
     required: true
-    strict: true
     sections:
       - match: "Goals"
         required: true
+extras: anywhere

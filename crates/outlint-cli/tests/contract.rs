@@ -10,7 +10,7 @@ use std::{
 #[test]
 fn schema_check_reports_schema_diagnostics_as_validation_output() {
     let directory = TempDir::new("schema-invalid");
-    directory.write("invalid.yml", "version: 2\nsections: []\n");
+    directory.write("invalid.yml", "version: 3\nsections: []\n");
 
     let output = run(
         &directory,
@@ -38,6 +38,53 @@ fn schema_check_reports_schema_diagnostics_as_validation_output() {
             .is_none(),
         "a schema-load diagnostic must omit `target`: {}",
         json["results"][0]["diagnostics"][0]
+    );
+}
+
+#[test]
+fn schema_check_reports_cardinality_and_reachability_errors() {
+    let directory = TempDir::new("schema-language-errors");
+    directory.write(
+        "missing.yml",
+        "version: 1\ntitle: null\nsections:\n  - match: '*'\n",
+    );
+    directory.write(
+        "unreachable.yml",
+        "version: 1\ntitle: null\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n",
+    );
+
+    let output = run(
+        &directory,
+        &[
+            "schema",
+            "check",
+            "missing.yml",
+            "unreachable.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stderr(&output), "");
+    let report = json_output(&output);
+    assert_eq!(report["version"], 4);
+    assert_eq!(
+        report["results"][0]["diagnostics"],
+        serde_json::json!([{
+            "id": "missing-cardinality",
+            "message": "regex, glob, and wildcard rules must declare `required` or `repeat`",
+            "location": {"line": 4, "column": 12},
+            "schema_location": {"path": "missing.yml", "line": 4, "column": 12}
+        }])
+    );
+    assert_eq!(
+        report["results"][1]["diagnostics"],
+        serde_json::json!([{
+            "id": "unreachable-rule",
+            "message": "rule is unreachable after the first wildcard in an unordered scope",
+            "location": {"line": 7, "column": 12},
+            "schema_location": {"path": "unreachable.yml", "line": 7, "column": 12}
+        }])
     );
 }
 
@@ -207,7 +254,7 @@ fn usage_directories_encoding_bom_help_and_version_follow_the_contract() {
 #[test]
 fn invalid_schema_is_grouped_once_and_document_preflight_still_completes() {
     let directory = TempDir::new("invalid-preflight");
-    directory.write("invalid.yml", "version: 2\nsections: []\n");
+    directory.write("invalid.yml", "version: 3\nsections: []\n");
     directory.write("one.md", "## One\n");
     directory.write("two.md", "## Two\n");
     directory.write("bad.md", [0xff]);
@@ -254,7 +301,7 @@ fn invalid_schema_is_grouped_once_and_document_preflight_still_completes() {
 #[test]
 fn discovered_invalid_schemas_are_grouped_by_resolved_path_in_input_order() {
     let directory = TempDir::new("invalid-discovery-groups");
-    directory.write("a/.outlint.yml", "version: 2\nsections: []\n");
+    directory.write("a/.outlint.yml", "version: 3\nsections: []\n");
     directory.write("a/one.md", "one\n");
     directory.write("a/two.md", "two\n");
     directory.write("a/bad.md", [0xff]);
@@ -353,13 +400,13 @@ fn non_utf8_command_line_paths_are_an_explicit_usage_error() {
     assert!(stderr(&output).contains("arguments must be valid UTF-8"));
 }
 
-/// Version 3 is a hard cut, so there is no `json-v2` escape hatch: §11.3 tells
+/// Version 4 is a hard cut, so there is no legacy JSON-format escape hatch: §11.3 tells
 /// consumers to reject an envelope version they do not know, and a second
 /// format name would be exactly the older shape it tells them not to read.
 /// Only `human` and `json` are accepted.
 #[test]
 fn the_replaced_envelope_version_is_not_reachable_through_a_format_name() {
-    let directory = TempDir::new("no-json-v2");
+    let directory = TempDir::new("no-legacy-json");
     directory.write("schema.yml", VALID_SCHEMA);
     directory.write("doc.md", "## Required\n");
 
@@ -381,7 +428,7 @@ fn the_replaced_envelope_version_is_not_reachable_through_a_format_name() {
         );
     }
 
-    // The two names that are accepted both still work, and `json` is v3.
+    // The two names that are accepted both still work, and `json` is v4.
     let human = run(
         &directory,
         &["check", "doc.md", "-s", "schema.yml", "--format", "human"],
@@ -392,7 +439,7 @@ fn the_replaced_envelope_version_is_not_reachable_through_a_format_name() {
         &["check", "doc.md", "-s", "schema.yml", "--format", "json"],
     );
     assert_eq!(json.status.code(), Some(0));
-    assert_eq!(json_output(&json)["version"], 3);
+    assert_eq!(json_output(&json)["version"], 4);
 }
 
 /// §4.6 provides for an implementation-specific limit on evaluating a

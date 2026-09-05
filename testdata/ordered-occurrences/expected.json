@@ -2,8 +2,8 @@
   "pass.md": [],
   "fail.md": [
     {
-      "id": "ordered",
-      "target": { "kind": "document" }
+      "id": "misplaced-section",
+      "target": { "kind": "header", "path": ["B"] }
     }
   ]
 }

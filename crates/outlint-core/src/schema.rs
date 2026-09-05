@@ -26,31 +26,24 @@ pub struct Schema {
     pub options: Options,
     /// The normalized frontmatter presence and value-validation policy.
     pub frontmatter: FrontmatterPolicy,
-    /// Rules for the document's `h1` headers, in first-match order.
-    ///
-    /// This is the canonical form of the schema's top level. The
-    /// `title:` + `sections:` sugar desugars into a single synthesized rule
-    /// here — its matcher is the title matcher (or any-text when no title is
-    /// declared), its cardinality is exactly one, and its child rules are the
-    /// top-level `sections` list. [`Schema::outline_provenance`] records which
-    /// spelling produced the list; public [`ScopePath`]s keep addressing what
-    /// the source spelled, so for sugar schemas the empty scope names the
-    /// synthesized rule's child scope rather than this list.
-    ///
-    /// [`ScopePath`]: crate::ScopePath
-    pub outline: Vec<SectionRule>,
-    /// Presence and ordering constraints attached to the outline (`h1`) scope.
-    ///
-    /// Only the general `outline:` form can declare these. A sugar schema's
-    /// top-level constraints attach to the synthesized rule's child scope
-    /// (its `constraints` field) — the scope the `sections` list describes —
-    /// so this list is empty for every sugar schema.
-    pub constraints: Vec<Constraint>,
-    /// How the source document declared its `h1` level.
-    pub outline_provenance: OutlineProvenance,
+    /// The normalized document-level grammar.
+    pub document: DocumentShape,
 }
 
 impl Schema {
+    #[cfg(test)]
+    pub(crate) fn outline(&self) -> &[SectionRule] {
+        self.addressed_root_rules()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn constraints(&self) -> &[Constraint] {
+        match &self.document {
+            DocumentShape::Outline(scope) => &scope.constraints,
+            DocumentShape::Title(title) => title.children().constraints(),
+        }
+    }
+
     /// Whether the h1 level was declared through sugar rather than `outline:`.
     ///
     /// Sugar schemas keep their pre-`outline` public addressing: the empty
@@ -61,7 +54,7 @@ impl Schema {
     /// [`ScopePath`]: crate::ScopePath
     /// [`SchemaNode::Title`]: crate::SchemaNode::Title
     pub(crate) fn is_sugar(&self) -> bool {
-        !matches!(self.outline_provenance, OutlineProvenance::Outline)
+        matches!(self.document, DocumentShape::Title(_))
     }
 
     /// The rules the empty public [`ScopePath`] (and the `$.` anchor) names.
@@ -73,44 +66,76 @@ impl Schema {
     ///
     /// [`ScopePath`]: crate::ScopePath
     pub(crate) fn addressed_root_rules(&self) -> &[SectionRule] {
-        if self.is_sugar() {
-            self.outline
-                .first()
-                .map_or(&[], |rule| rule.sections.as_slice())
-        } else {
-            &self.outline
+        match &self.document {
+            DocumentShape::Outline(scope) => &scope.rules,
+            DocumentShape::Title(title) => title.children().rules(),
+        }
+    }
+
+    /// The constraints in the empty public scope.
+    pub(crate) fn addressed_root_constraints(&self) -> &[Constraint] {
+        match &self.document {
+            DocumentShape::Outline(scope) => &scope.constraints,
+            DocumentShape::Title(title) => title.children().constraints(),
         }
     }
 }
 
-/// The surface form a schema used to declare its `h1` level.
+/// The two mutually exclusive document-level schema forms (§2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentShape {
+    /// The general form's declared `h1` grammar.
+    Outline(DeclaredScope),
+    /// The sugar form's special title slot and exposed `h2` scope.
+    Title(TitleSlot),
+}
+
+/// The sugar form's spelled, implied, or forbidden title slot.
 ///
-/// The loader normalizes every form into [`Schema::outline`], the canonical
-/// `h1`-rule list. The provenance records which spelling produced it: the
-/// validator keeps `missing-title` and the wrong-title diagnostics anchored at
-/// [`SchemaNode::Title`] for the sugar forms, preserves their lax handling of
-/// documents without an `h1`, and gives `outline:` and `title: null` their own
-/// semantics.
-///
-/// [`SchemaNode::Title`]: crate::SchemaNode::Title
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutlineProvenance {
-    /// `title: <matcher>` with `sections:` — sugar for a single required
-    /// `h1` rule whose child rules are the top-level `sections` list.
-    Title,
-    /// `sections:` without `title:` — desugars like [`Self::Title`] with an
-    /// any-text matcher: `title: "*"` implied, so the document must have
-    /// exactly one `h1`. A document with none writes `title: null` into its
-    /// schema instead. With no `title:` key to blame, title diagnostics
-    /// anchor on the `sections` key — the spelling that implied the rule.
-    BareSections,
-    /// `title: null` — the document is declared to have no `h1`. Desugars to
-    /// a denied any-text `h1` rule: a present `h1` is `not-allowed`, and the
-    /// `sections` list describes the document's top-level `h2` headers.
-    NoTitle,
-    /// The general `outline:` form: [`Schema::outline`] is exactly what the
-    /// source spelled.
-    Outline,
+/// The variants couple title cardinality, matcher presence, and source-form
+/// provenance so combinations that no schema spelling can produce cannot be
+/// constructed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TitleSlot {
+    /// A spelled `title: <matcher>` requires exactly one matching `h1`.
+    Spelled {
+        /// The normalized matcher supplied by `title`.
+        matcher: Matcher,
+        /// The exposed child scope written with top-level child-scope keys.
+        children: ChildScope,
+    },
+    /// Bare `sections` implies exactly one `h1` with the any-text matcher.
+    ///
+    /// Keeping this separate from [`Self::Spelled`] makes a non-wildcard
+    /// implied matcher unrepresentable.
+    ImpliedBySections {
+        /// The exposed child scope written with top-level child-scope keys.
+        children: ChildScope,
+    },
+    /// `title: null`: every `h1` is forbidden.
+    Forbidden {
+        /// The exposed child scope written with top-level child-scope keys.
+        children: ChildScope,
+    },
+}
+
+impl TitleSlot {
+    /// Returns the exposed child scope for either title policy.
+    pub fn children(&self) -> &ChildScope {
+        match self {
+            Self::Spelled { children, .. }
+            | Self::ImpliedBySections { children }
+            | Self::Forbidden { children } => children,
+        }
+    }
+
+    pub(crate) fn children_mut(&mut self) -> &mut ChildScope {
+        match self {
+            Self::Spelled { children, .. }
+            | Self::ImpliedBySections { children }
+            | Self::Forbidden { children } => children,
+        }
+    }
 }
 
 /// The document's normalized frontmatter policy.
@@ -455,7 +480,7 @@ pub struct FrontmatterSchema {
 /// A supported version of the Outlint schema language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SchemaVersion {
-    /// Version 1 of the schema language.
+    /// The version 1 language line.
     V1,
 }
 
@@ -469,9 +494,6 @@ pub struct Options {
     pub strip_inline_markup: bool,
     /// Whether a header may be more than one level below its parent.
     pub allow_skipped_levels: bool,
-    /// Whether a scope's rules bind in document order unless a rule's own
-    /// `ordered` says otherwise (specification §3.7).
-    pub ordered_sections: bool,
 }
 
 impl Options {
@@ -492,12 +514,6 @@ impl Options {
         self.allow_skipped_levels = allow_skipped_levels;
         self
     }
-
-    /// Sets the default for whether each scope's rules bind in document order.
-    pub const fn with_ordered_sections(mut self, ordered_sections: bool) -> Self {
-        self.ordered_sections = ordered_sections;
-        self
-    }
 }
 
 impl Default for Options {
@@ -507,7 +523,6 @@ impl Default for Options {
             match_case: false,
             strip_inline_markup: true,
             allow_skipped_levels: false,
-            ordered_sections: true,
         }
     }
 }
@@ -560,19 +575,10 @@ pub struct SectionRule {
     pub id: Option<RuleId>,
     /// The header matcher for this rule.
     pub matcher: Matcher,
-    /// Whether matching headers are accepted and, if so, their cardinality.
-    pub outcome: RuleOutcome,
-    /// Whether headers unmatched by a child rule are rejected.
-    pub strict: bool,
-    /// Whether the child rules bind in document order: every header matched
-    /// by an earlier accepting rule must precede every header matched by a
-    /// later one (specification §3.7). Resolved from the rule's own `ordered`
-    /// key or, absent that, [`Options::ordered_sections`].
-    pub ordered: bool,
-    /// Rules for direct child headers, in first-match order.
-    pub sections: Vec<SectionRule>,
-    /// Presence and ordering constraints attached to the child scope.
-    pub constraints: Vec<Constraint>,
+    /// The resolved number of headings this accepting rule consumes.
+    pub cardinality: Cardinality,
+    /// The explicitly represented grammar for direct children.
+    pub children: ChildScope,
     /// Typed values this rule's matcher exports (§2.1, §2.4), keyed by name.
     ///
     /// Empty for a rule that declares no `captures`. The mapping's source
@@ -587,25 +593,136 @@ pub struct SectionRule {
     pub order: Vec<ValueOrderEntry>,
 }
 
-/// The result of matching a header against a section rule.
-///
-/// A denied rule has no cardinality, making the invalid combination of
-/// `allow: false` and `required`/`repeat` unrepresentable here.
+/// A matcher-only prohibition guard (§2.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionGuard {
+    /// The matcher whose first match removes and rejects a heading subtree.
+    pub matcher: Matcher,
+}
+
+/// Whether and how an accepting child grammar was declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildScope {
+    /// No accepting list or guards were declared; children are not visited.
+    Omitted,
+    /// Only guards were declared; survivors remain unassigned and unvisited.
+    GuardsOnly(NonEmpty<SectionGuard>),
+    /// A `sections` list was declared, including an explicitly empty list.
+    Declared(DeclaredScope),
+}
+
+impl ChildScope {
+    /// Returns accepting rules, or an empty view when no list was declared.
+    pub fn rules(&self) -> &[SectionRule] {
+        match self {
+            Self::Declared(scope) => &scope.rules,
+            Self::Omitted | Self::GuardsOnly(_) => &[],
+        }
+    }
+
+    /// Returns guards, or an empty view when none were declared.
+    pub fn guards(&self) -> impl Iterator<Item = &SectionGuard> {
+        match self {
+            Self::Omitted => GuardIter::Empty(std::iter::empty()),
+            Self::GuardsOnly(guards) => {
+                GuardIter::NonEmpty(std::iter::once(&guards.first).chain(guards.rest.iter()))
+            }
+            Self::Declared(scope) => GuardIter::Slice(scope.guards.iter()),
+        }
+    }
+
+    /// Returns constraints for a declared scope, otherwise an empty view.
+    pub(crate) fn constraints(&self) -> &[Constraint] {
+        match self {
+            Self::Declared(scope) => &scope.constraints,
+            Self::Omitted | Self::GuardsOnly(_) => &[],
+        }
+    }
+}
+
+enum GuardIter<'a> {
+    Empty(std::iter::Empty<&'a SectionGuard>),
+    NonEmpty(
+        std::iter::Chain<std::iter::Once<&'a SectionGuard>, std::slice::Iter<'a, SectionGuard>>,
+    ),
+    Slice(std::slice::Iter<'a, SectionGuard>),
+}
+
+impl<'a> Iterator for GuardIter<'a> {
+    type Item = &'a SectionGuard;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty(iter) => iter.next(),
+            Self::NonEmpty(iter) => iter.next(),
+            Self::Slice(iter) => iter.next(),
+        }
+    }
+}
+
+/// One declared accepting scope with all local behavior resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredScope {
+    /// Accepting rules in declaration order; the list may be empty.
+    pub rules: Vec<SectionRule>,
+    /// Prohibition guards in declaration order.
+    pub guards: Vec<SectionGuard>,
+    /// Whether headings matching no accepting rule are admitted as extras.
+    pub extras: ExtrasMode,
+    /// Whether assignment is ordered or declaration-first unordered.
+    pub mode: ScopeMode,
+    /// Constraints attached to this concrete scope.
+    pub constraints: Vec<Constraint>,
+}
+
+/// Whether unmatched headings remain in a declared scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleOutcome {
-    /// Matching headings are accepted subject to the carried cardinality.
-    Allow(Cardinality),
-    /// Matching headings are rejected, so no cardinality applies.
-    Deny,
+pub enum ExtrasMode {
+    /// Retain unmatched headings so they receive diagnostics.
+    Reject,
+    /// Remove unmatched headings before assignment.
+    Anywhere,
+}
+
+/// The assignment algorithm used by a declared scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeMode {
+    /// Consume headings through cardinality-bounded phases.
+    Ordered,
+    /// Classify each heading with the first matching rule.
+    Unordered,
 }
 
 /// The permitted number of sibling headers matched by one rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Cardinality {
     /// Inclusive minimum number of matching sibling headings.
-    pub min: u32,
+    min: u32,
     /// Inclusive maximum number of matching sibling headings.
-    pub max: UpperBound,
+    max: UpperBound,
+}
+
+impl Cardinality {
+    /// Constructs a cardinality when its inclusive range is nonempty.
+    ///
+    /// A bounded maximum must be nonzero and at least `min`.
+    pub fn new(min: u32, max: UpperBound) -> Option<Self> {
+        match max {
+            UpperBound::Bounded(0) => None,
+            UpperBound::Bounded(value) if value < min => None,
+            UpperBound::Bounded(_) | UpperBound::Unbounded => Some(Self { min, max }),
+        }
+    }
+
+    /// Returns the inclusive minimum occurrence count.
+    pub fn min(self) -> u32 {
+        self.min
+    }
+
+    /// Returns the inclusive maximum occurrence count.
+    pub fn max(self) -> UpperBound {
+        self.max
+    }
 }
 
 /// The inclusive upper bound of a rule's cardinality.

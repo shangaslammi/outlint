@@ -332,7 +332,7 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
                 };
                 for occurrence in selected {
                     found.push(occurrence);
-                    next_scopes.push((&occurrence.child, &rule.sections[..]));
+                    next_scopes.push((&occurrence.child, rule.children.rules()));
                 }
             }
             if !terminal {
@@ -415,7 +415,7 @@ impl<'s, 'd> EvalCtx<'s, 'd> {
         let mut target = None;
         for step in locator.steps().iter() {
             target = rules.get(step.index().0);
-            rules = &target?.sections;
+            rules = target?.children.rules();
         }
         target
     }

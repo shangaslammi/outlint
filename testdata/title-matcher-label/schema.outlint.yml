@@ -3,3 +3,4 @@ title: "/Handbook v[0-9]+/"
 sections:
   - match: "Overview"
     required: true
+extras: anywhere

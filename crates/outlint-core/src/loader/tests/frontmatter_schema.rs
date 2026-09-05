@@ -1221,7 +1221,7 @@ fn frontmatter_captures_do_not_collide_with_outline_names() {
         "  - match: Overview\n",
     ));
     assert_eq!(schema.frontmatter.captures().len(), 1);
-    assert_eq!(schema.outline.len(), 1);
+    assert_eq!(schema.outline().len(), 1);
 }
 
 // ---------------------------------------------------------------------------

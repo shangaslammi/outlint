@@ -1,6 +1,9 @@
-use crate::validator::engine::root_location;
+use crate::validator::engine::{root_location, validation_work_count, WorkCounter};
+use crate::validator::prepare::ValidationPlan;
 use crate::validator::{validate, Diagnostic, DiagnosticId, DiagnosticTarget, HeaderPath};
 use crate::{load_schema, parse_markdown, MarkdownOptions, RuleIndex, SchemaNode, ScopePath};
+use proptest::prelude::*;
+use std::time::{Duration, Instant};
 
 use super::ids_and_targets;
 
@@ -196,6 +199,10 @@ fn an_unadmitted_top_level_header_takes_part_in_no_rule_matching_or_counting() {
                 DiagnosticTarget::Header(HeaderPath(vec!["Detached".into()])),
             ),
             (
+                DiagnosticId::UnexpectedSection,
+                DiagnosticTarget::Header(HeaderPath(vec!["Title".into(), "Attached".into()])),
+            ),
+            (
                 DiagnosticId::MissingSection,
                 DiagnosticTarget::MissingHeader {
                     parent: HeaderPath::default(),
@@ -227,7 +234,7 @@ fn an_unadmitted_subtree_is_reported_once_at_its_root() {
     // no skip at all.
     assert_eq!(
         ids_and_targets(
-            "version: 1\nsections:\n  - match: X\n    repeat: 0..n\n    strict: true\n    sections:\n      - match: Deep\n        required: true\n",
+            "version: 1\nsections:\n  - match: X\n    repeat: 0..n\n    sections:\n      - match: Deep\n        required: true\n",
             "## X\n### Surprise\n# Title\n",
         ),
         [(
@@ -266,7 +273,7 @@ fn a_nested_skipping_header_takes_part_in_no_rule() {
     // it does at the document root; the `h3` below is a child of the `h1` and
     // skips the `h2` level.
     let required = "version: 1\noutline:\n  - id: part\n    match: Part\n    required: true\n    \
-                    strict: true\n    sections:\n      - id: goal\n        match: Goal\n        \
+                    sections:\n      - id: goal\n        match: Goal\n        \
                     required: true\n";
     assert_eq!(
         ids_and_targets(required, "# Part\n### Goal\n"),
@@ -324,7 +331,7 @@ fn a_nested_skipping_headers_own_descendants_are_not_reported_for_its_skip() {
     // skips relative to a skipping parent is reported in its own right, but a
     // well-nested descendant yields no cascade of complaints about a
     // misplacement that is entirely its ancestor's."
-    let schema = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    strict: true\n    \
+    let schema = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"*\"\n        repeat: 0..n\n";
     // `Deep` sits one level under the skipping `Goal`, so it is no skip of
     // its own — one diagnostic for the subtree, at its root.
@@ -362,7 +369,7 @@ fn allowing_skipped_levels_admits_a_nested_skip_as_an_ordinary_sibling() {
     // an ordinary member of the enclosing scope and is matched against that
     // scope's rules like any sibling."
     let schema = "version: 1\noptions:\n  allow_skipped_levels: true\noutline:\n  \
-                  - match: Part\n    required: true\n    strict: true\n    \
+                  - match: Part\n    required: true\n    \
                   sections:\n      - match: Goal\n        repeat: 1..1\n";
     // The `h3` binds the `Goal` rule, so nothing is missing and nothing skips.
     assert_eq!(ids_and_targets(schema, "# Part\n### Goal\n"), []);
@@ -429,22 +436,27 @@ fn orphan_headers_skip_against_the_virtual_root() {
 }
 
 #[test]
-fn level_admission_leaves_unmatched_headers_to_strict_alone() {
-    // Structural admission is not a second gate on rule matching: a
-    // bound scope's header that matches no rule is the business of
-    // `strict`, which stays opt-in.
+fn declared_scopes_are_exhaustive_after_level_admission() {
+    // §3.3: declared lists are exhaustive; unmatched admitted headings
+    // receive `unexpected-section` unless extras removes them first.
     let open = "version: 1\nsections:\n  - match: Known\n    repeat: 0..n\n";
     assert_eq!(
         ids_and_targets(open, "# Title\n## Known\n## Unmatched\n### Child\n"),
-        []
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Title".into(), "Unmatched".into()])),
+        )]
     );
     let open_headless = "version: 1\ntitle: null\nsections:\n  - match: Known\n    repeat: 0..n\n";
     assert_eq!(
         ids_and_targets(open_headless, "## Known\n## Unmatched\n"),
-        []
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Unmatched".into()])),
+        )]
     );
 
-    let closed = "version: 1\nsections:\n  - match: Known\n    repeat: 0..n\n    strict: true\n";
+    let closed = "version: 1\nsections:\n  - match: Known\n    repeat: 0..n\n    sections: []\n";
     assert_eq!(
         ids_and_targets(closed, "# Title\n## Known\n### Surprise\n"),
         [(
@@ -518,13 +530,19 @@ fn title_null_denies_h1_and_binds_top_level_h2s() {
     assert_eq!(ids_and_targets(schema, "## Overview\n"), []);
     assert_eq!(
         ids_and_targets(schema, "## Wrong\n"),
-        [(
-            DiagnosticId::MissingSection,
-            DiagnosticTarget::MissingHeader {
-                parent: HeaderPath::default(),
-                matcher: "Overview".into(),
-            },
-        )]
+        [
+            (
+                DiagnosticId::UnexpectedSection,
+                DiagnosticTarget::Header(HeaderPath(vec!["Wrong".into()])),
+            ),
+            (
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "Overview".into(),
+                },
+            ),
+        ]
     );
 
     // A present h1 is rejected wholesale at the title node, its subtree
@@ -596,20 +614,25 @@ fn bare_sections_implies_a_required_title() {
 }
 
 #[test]
-fn a_general_form_h1_that_matches_no_rule_is_an_open_scope_header() {
-    // No bespoke wrong-title verdict in the general form: an unmatched h1
-    // is simply not this schema's business unless a rule or `strict`
-    // makes it so, and the required rule reports its own absence.
+fn a_general_form_h1_that_matches_no_rule_is_unexpected() {
+    // §3.3: a general-form outline list is exhaustive just like any other
+    // declared scope; there is no v1 implicit openness.
     let schema = "version: 1\noutline:\n  - match: \"Guide *\"\n    required: true\n";
     assert_eq!(
         ids_and_targets(schema, "# Handbook\n## Anything\n"),
-        [(
-            DiagnosticId::MissingSection,
-            DiagnosticTarget::MissingHeader {
-                parent: HeaderPath::default(),
-                matcher: "Guide *".into(),
-            },
-        )]
+        [
+            (
+                DiagnosticId::UnexpectedSection,
+                DiagnosticTarget::Header(HeaderPath(vec!["Handbook".into()])),
+            ),
+            (
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "Guide *".into(),
+                },
+            ),
+        ]
     );
 }
 
@@ -703,12 +726,16 @@ fn an_admitted_top_level_h2_never_occupies_the_title_slot() {
     // — yielding a phantom surplus title plus a missing section. It now
     // binds into the `sections` scope instead, where `Overview` under the
     // real `h1` and the unmatched `Intro` are both ordinary open-scope
-    // members.
+    // members; because the declared list is exhaustive, `Intro` is
+    // reported as unexpected but never as a title surplus.
     let schema = "version: 1\noptions:\n  allow_skipped_levels: true\ntitle: \"*\"\n\
                   sections:\n  - match: Overview\n    required: true\n";
     assert_eq!(
         ids_and_targets(schema, "## Intro\n# Doc\n## Overview\n"),
-        []
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Intro".into()])),
+        )]
     );
 }
 
@@ -788,7 +815,7 @@ fn root_scope_violations_name_the_document_rather_than_a_header() {
 
 #[test]
 fn unexpected_section_points_to_the_rule_that_closed_its_scope() {
-    let loaded = load_schema("version: 1\nsections:\n  - match: Parent\n    strict: true\n")
+    let loaded = load_schema("version: 1\nsections:\n  - match: Parent\n    sections: []\n")
         .expect("test schema is valid");
     let document = parse_markdown("## Parent\n### Surprise\n", MarkdownOptions::default());
     let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
@@ -804,4 +831,492 @@ fn unexpected_section_points_to_the_rule_that_closed_its_scope() {
             index: RuleIndex(0),
         }))
     );
+}
+
+#[test]
+fn guards_precede_accepting_assignment() {
+    let schema =
+        "version: 1\ntitle: '*'\nforbid_sections:\n  - match: A\nsections:\n  - match: A\n";
+    let diagnostics = ids_and_targets(schema, "# Doc\n## A\n");
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(diagnostics[0].0, DiagnosticId::NotAllowed);
+    assert_eq!(diagnostics[1].0, DiagnosticId::MissingSection);
+}
+
+#[test]
+fn sugar_scope_guards_never_inspect_the_title_slot() {
+    // §2: sugar-form top-level guards inspect the exposed h2 scope, never the
+    // synthesized h1 title slot, even when their matcher equals title text.
+    let schema = "version: 1\ntitle: Same\nforbid_sections:\n  - match: Same\nsections: []\n";
+    assert_eq!(
+        ids_and_targets(schema, "# Same\n## Same\n"),
+        [(
+            DiagnosticId::NotAllowed,
+            DiagnosticTarget::Header(HeaderPath(vec!["Same".into(), "Same".into()])),
+        )]
+    );
+}
+
+#[test]
+fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
+    // §3.7: guard work is at most H×G, accepting-matrix work is H×R, and
+    // extras classifies each post-guard heading once.
+    let loaded = load_schema(
+        "version: 1\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\nsections:\n  - match: A\n    repeat: 0..n\nextras: anywhere\n",
+    )
+    .expect("test schema is valid");
+    let document = parse_markdown(
+        "# Doc\n## A\n## A\n## A\n## A\n## A\n",
+        MarkdownOptions::default(),
+    );
+    let plan = ValidationPlan::new(&loaded.schema).expect("schema prepares");
+    let work =
+        validation_work_count(&loaded.schema, &document, &plan).expect("validation completes");
+    assert_eq!(work.guard_matcher_evaluations, 5 * 3);
+    assert_eq!(work.accepting_matcher_evaluations, 5);
+    assert_eq!(work.extras_classifications, 5);
+    assert_eq!(work.extras_matrix_cell_copies, 5);
+    assert_eq!(work.unordered_rule_inspections, 0);
+    assert_eq!(work.unordered_assignment_writes, 0);
+    assert!(work.sequence_operations > 0);
+    assert!(work.sequence_operations <= 13 * (5 + 1) * (1 + 1));
+
+    let guard_only = load_schema(
+        "version: 1\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\n",
+    )
+    .expect("test schema is valid");
+    let guard_only_plan = ValidationPlan::new(&guard_only.schema).expect("schema prepares");
+    let guard_only_work = validation_work_count(&guard_only.schema, &document, &guard_only_plan)
+        .expect("validation completes");
+    assert_eq!(
+        guard_only_work,
+        WorkCounter {
+            guard_matcher_evaluations: 5 * 3,
+            accepting_matcher_evaluations: 0,
+            extras_classifications: 0,
+            extras_matrix_cell_copies: 0,
+            unordered_rule_inspections: 0,
+            unordered_assignment_writes: 0,
+            sequence_operations: 0,
+        }
+    );
+}
+
+fn adversarial_schema(rules: usize, guards: usize, extras: bool) -> String {
+    let mut schema = String::from("version: 1\ntitle: '*'\n");
+    if guards > 0 {
+        schema.push_str("forbid_sections:\n");
+        for index in 0..guards {
+            schema.push_str(&format!("  - match: Guard{index}\n"));
+        }
+    }
+    if rules == 0 {
+        schema.push_str("sections: []\n");
+    } else {
+        schema.push_str("sections:\n");
+        for index in 0..rules {
+            let matcher = match index % 4 {
+                0 => "'*'",
+                1 => "'A*'",
+                2 => "'/A.*/'",
+                _ => "A",
+            };
+            let repeat = match index % 3 {
+                0 => "0..n",
+                1 => "0..4294967295",
+                _ => "0..1",
+            };
+            schema.push_str(&format!(
+                "  - id: r{index}\n    match: {matcher}\n    repeat: {repeat}\n"
+            ));
+        }
+    }
+    if extras {
+        schema.push_str("extras: anywhere\n");
+    }
+    schema
+}
+
+fn adversarial_document(headings: usize) -> String {
+    let mut document = String::from("# Document\n");
+    for _ in 0..headings {
+        document.push_str("## A\n");
+    }
+    document
+}
+
+fn measured_work(headings: usize, rules: usize, guards: usize, extras: bool) -> WorkCounter {
+    let loaded = load_schema(&adversarial_schema(rules, guards, extras))
+        .expect("generated adversarial schema is valid");
+    let document = parse_markdown(&adversarial_document(headings), MarkdownOptions::default());
+    let plan = ValidationPlan::new(&loaded.schema).expect("generated schema prepares");
+    validation_work_count(&loaded.schema, &document, &plan).expect("validation completes")
+}
+
+const WORK_FACTOR: usize = 16;
+
+fn work_bound(headings: usize, rules: usize, guards: usize) -> usize {
+    WORK_FACTOR
+        .saturating_mul((headings + 1).saturating_mul(rules + 1))
+        .saturating_add(headings.saturating_mul(guards))
+}
+
+#[test]
+fn adversarial_scope_work_scales_with_h_r_and_g_independently() {
+    // §8 bounds ordered assignment by its (H+1)(R+1) tables; §3.3 checks at
+    // most H×G guards first. The counted ordered path uses at most 13 DP
+    // table/transition/result operations per state. Matrix construction,
+    // extras eligibility, and retained-row copying add at most three more,
+    // giving the complete bound 16(H+1)(R+1) + H·G.
+    for (headings, rules, guards, extras) in [
+        (0, 64, 0, false),
+        (32, 64, 0, false),
+        (256, 64, 0, false),
+        (256, 0, 0, false),
+        (256, 8, 0, false),
+        (256, 0, 0, true),
+        (256, 8, 0, true),
+        (256, 64, 0, true),
+        (256, 64, 1, false),
+        (256, 64, 17, false),
+        (256, 64, 65, false),
+    ] {
+        let work = measured_work(headings, rules, guards, extras);
+        assert!(
+            work.total() <= work_bound(headings, rules, guards),
+            "H={headings}, R={rules}, G={guards}, work={work:?}"
+        );
+    }
+}
+
+fn unordered_adversarial_schema(rules: usize, guards: usize, extras: bool) -> String {
+    let mut schema = String::from("version: 1\ntitle: '*'\nunordered: true\n");
+    if guards > 0 {
+        schema.push_str("forbid_sections:\n");
+        for index in 0..guards {
+            schema.push_str(&format!("  - match: Guard{index}\n"));
+        }
+    }
+    if rules == 0 {
+        schema.push_str("sections: []\n");
+    } else {
+        schema.push_str("sections:\n");
+        for index in 0..rules.saturating_sub(1) {
+            schema.push_str(&format!(
+                "  - id: r{index}\n    match: Never {index}\n    required: false\n"
+            ));
+        }
+        let last = rules.saturating_sub(1);
+        schema.push_str(&format!(
+            "  - id: r{last}\n    match: A\n    required: false\n"
+        ));
+    }
+    if extras {
+        schema.push_str("extras: anywhere\n");
+    }
+    schema
+}
+
+fn measured_unordered_work(
+    headings: usize,
+    rules: usize,
+    guards: usize,
+    extras: bool,
+) -> WorkCounter {
+    let loaded = load_schema(&unordered_adversarial_schema(rules, guards, extras))
+        .expect("generated unordered schema is valid");
+    let document = parse_markdown(&adversarial_document(headings), MarkdownOptions::default());
+    let plan = ValidationPlan::new(&loaded.schema).expect("generated unordered schema prepares");
+    validation_work_count(&loaded.schema, &document, &plan).expect("validation completes")
+}
+
+#[test]
+fn unordered_last_match_scales_with_h_r_and_g_independently() {
+    // The last rule is the only match, so classification inspects every H×R
+    // cell. Matrix/extras/classification/result work is at most 7P, safely
+    // inside the shared complete bound 16P + H·G.
+    for (headings, rules, guards, extras) in [
+        (0, 64, 0, false),
+        (32, 64, 0, false),
+        (256, 64, 0, false),
+        (256, 1, 0, false),
+        (256, 8, 0, false),
+        (256, 64, 0, true),
+        (256, 64, 1, false),
+        (256, 64, 17, false),
+        (256, 64, 65, false),
+    ] {
+        let work = measured_unordered_work(headings, rules, guards, extras);
+        assert_eq!(
+            work.unordered_rule_inspections,
+            headings.saturating_mul(rules)
+        );
+        assert!(work.total() <= work_bound(headings, rules, guards));
+    }
+}
+
+#[test]
+#[ignore = "non-gating wall-clock benchmark; operation counts enforce complexity"]
+fn benchmark_one_large_adversarial_scope_finishes_within_a_sanity_bound() {
+    let started = Instant::now();
+    let work = measured_work(768, 384, 64, true);
+    assert!(work.total() <= work_bound(768, 384, 64));
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "large adversarial validation took {:?}",
+        started.elapsed()
+    );
+}
+
+fn nested_schema_and_document(depth: usize) -> (String, String) {
+    fn append_rule(schema: &mut String, level: usize, max_level: usize, indent: usize) {
+        let padding = " ".repeat(indent);
+        schema.push_str(&format!("{padding}- match: Level {level}\n"));
+        if level < max_level {
+            schema.push_str(&format!("{padding}  sections:\n"));
+            append_rule(schema, level + 1, max_level, indent + 4);
+        } else {
+            schema.push_str(&format!("{padding}  sections: []\n"));
+        }
+    }
+
+    let mut schema = String::from("version: 1\ntitle: Level 1\nsections:\n");
+    append_rule(&mut schema, 2, depth + 1, 2);
+    let mut document = String::new();
+    for level in 1..=depth + 1 {
+        document.push_str(&format!("{} Level {level}\n", "#".repeat(level)));
+    }
+    (schema, document)
+}
+
+#[test]
+fn nested_scope_work_is_the_sum_of_per_scope_bounds() {
+    let mut previous = 0;
+    for depth in 1..=5 {
+        let (schema_source, markdown) = nested_schema_and_document(depth);
+        let loaded = load_schema(&schema_source).expect("nested schema is valid");
+        let document = parse_markdown(&markdown, MarkdownOptions::default());
+        let plan = ValidationPlan::new(&loaded.schema).expect("nested schema prepares");
+        let work = validation_work_count(&loaded.schema, &document, &plan)
+            .expect("nested validation completes");
+
+        // There are `depth` scopes with H=R=1 and one leaf scope with H=R=0.
+        // Their state spaces add to 4·depth+1; they are never multiplied.
+        let summed_state_spaces = 4 * depth + 1;
+        assert!(work.total() <= WORK_FACTOR * summed_state_spaces);
+        assert!(work.total() > previous);
+        previous = work.total();
+    }
+}
+
+proptest! {
+    #[test]
+    fn generated_schemas_and_documents_never_panic(
+        rule_shapes in proptest::collection::vec((0u8..4, 0u8..4, any::<bool>()), 0..7),
+        guard_names in proptest::collection::vec("[A-Z][a-z]{0,4}", 0..5),
+        headings in proptest::collection::vec(("[ABXZ][a-z]{0,5}", any::<bool>(), any::<bool>()), 0..13),
+        matching_guard in any::<bool>(),
+        extras in any::<bool>(),
+        unordered in any::<bool>(),
+    ) {
+        let mut schema = String::from("version: 1\ntitle: '*'\n");
+        if unordered {
+            schema.push_str("unordered: true\n");
+        }
+        if matching_guard || !guard_names.is_empty() {
+            schema.push_str("forbid_sections:\n");
+            if matching_guard {
+                schema.push_str("  - match: 'A*'\n");
+            }
+            for name in guard_names {
+                schema.push_str(&format!("  - match: '{name}'\n"));
+            }
+        }
+        if rule_shapes.is_empty() {
+            schema.push_str("sections: []\n");
+        } else {
+            schema.push_str("sections:\n");
+            for (index, (kind, cardinality, nested)) in rule_shapes.into_iter().enumerate() {
+                let matcher = match (unordered, kind) {
+                    (true, 0) => "'Z*'",
+                    (false, 0) => "'*'",
+                    (_, 1) => "'A*'",
+                    (_, 2) => "'/[ABXZ].*/'",
+                    _ => "A",
+                };
+                schema.push_str(&format!(
+                    "  - id: r{index}\n    match: {matcher}\n"
+                ));
+                match cardinality {
+                    0 => schema.push_str("    required: false\n"),
+                    1 => schema.push_str("    required: true\n"),
+                    2 => schema.push_str("    repeat: 1..3\n"),
+                    _ => schema.push_str("    repeat: 2..4294967295\n"),
+                }
+                if nested {
+                    schema.push_str(
+                        "    sections:\n      - match: Child\n        required: false\n        sections: []\n",
+                    );
+                }
+            }
+        }
+        if extras {
+            schema.push_str("extras: anywhere\n");
+        }
+        let mut markdown = String::from("# Property\n");
+        for (heading, child, grandchild) in headings {
+            markdown.push_str(&format!("## {heading}\n"));
+            if child {
+                markdown.push_str("### Child\n");
+                if grandchild {
+                    markdown.push_str("#### Grandchild\n");
+                }
+            }
+        }
+
+        let loaded = load_schema(&schema).expect("generated schema is valid");
+        let document = parse_markdown(&markdown, MarkdownOptions::default());
+        let result = validate(&loaded.schema, &document);
+        prop_assert!(result.is_ok());
+    }
+}
+
+#[test]
+fn ordered_recovery_distinguishes_misplaced_from_unexpected() {
+    let schema = "version: 1\ntitle: '*'\nsections:\n  - match: A\n  - match: B\n";
+    let diagnostics = ids_and_targets(schema, "# Doc\n## B\n## X\n## A\n");
+    assert!(diagnostics
+        .iter()
+        .any(|(id, _)| *id == DiagnosticId::MisplacedSection));
+    assert!(diagnostics
+        .iter()
+        .any(|(id, _)| *id == DiagnosticId::UnexpectedSection));
+}
+
+#[test]
+fn unordered_uses_first_matching_rule() {
+    let schema = "version: 1\ntitle: '*'\nunordered: true\nsections:\n  - id: broad\n    match: 'A*'\n    repeat: 0..n\n  - id: exact\n    match: A\n    required: false\n";
+    let diagnostics = ids_and_targets(schema, "# Doc\n## A\n");
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn identity_matrix_controls_child_traversal_by_heading_class() {
+    // §4.2: canonical and recovery assignments inherit their rule identity
+    // and recurse; unassigned, forbidden, extra, and omitted-scope headings
+    // do not open a validation scope. An anonymous wildcard still recurses
+    // even though no name step can reach its occurrence.
+    let canonical = "version: 1\noutline:\n  - match: Parent\n    sections: []\n";
+    assert_eq!(
+        ids_and_targets(canonical, "# Parent\n## Child\n"),
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Parent".into(), "Child".into()])),
+        )]
+    );
+
+    let recovery =
+        "version: 1\noutline:\n  - match: Parent\n    required: false\n    sections: []\n";
+    let recovered = ids_and_targets(recovery, "# Parent\n# Parent\n## Child\n");
+    assert!(recovered
+        .iter()
+        .any(|(id, _)| *id == DiagnosticId::TooManySections));
+    assert!(recovered.iter().any(|(id, target)| {
+        *id == DiagnosticId::UnexpectedSection
+            && *target
+                == DiagnosticTarget::Header(HeaderPath(vec!["Parent".into(), "Child".into()]))
+    }));
+
+    let unassigned = "version: 1\noutline:\n  - match: A\n    required: false\n    sections: []\n  - match: B\n    required: false\n    sections: []\n";
+    assert_eq!(
+        ids_and_targets(unassigned, "# B\n## Child\n# A\n"),
+        [(
+            DiagnosticId::MisplacedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["B".into()])),
+        )]
+    );
+
+    let forbidden = "version: 1\nforbid_sections:\n  - match: Parent\noutline: []\n";
+    assert_eq!(
+        ids_and_targets(forbidden, "# Parent\n## Child\n"),
+        [(
+            DiagnosticId::NotAllowed,
+            DiagnosticTarget::Header(HeaderPath(vec!["Parent".into()])),
+        )]
+    );
+
+    let extra = "version: 1\nextras: anywhere\noutline: []\n";
+    assert!(ids_and_targets(extra, "# Parent\n## Child\n").is_empty());
+
+    let omitted = "version: 1\noutline:\n  - match: Parent\n";
+    assert!(ids_and_targets(omitted, "# Parent\n## Child\n").is_empty());
+
+    let anonymous = "version: 1\noutline:\n  - match: '*'\n    repeat: 0..n\n    sections: []\n";
+    assert_eq!(
+        ids_and_targets(anonymous, "# Parent\n## Child\n"),
+        [(
+            DiagnosticId::UnexpectedSection,
+            DiagnosticTarget::Header(HeaderPath(vec!["Parent".into(), "Child".into()])),
+        )]
+    );
+}
+
+#[test]
+fn declared_rule_identity_wins_over_an_unassigned_concrete_id() {
+    // §4.2: the explicit schema id `x` wins over the unassigned heading whose
+    // concrete default id is also `x`; schema-resident locators bind only the
+    // declared rule, so that heading cannot satisfy the consequence.
+    let schema = "version: 1\nunordered: true\noutline:\n  - id: x\n    match: Assigned\n    required: false\n  - id: trigger\n    match: Trigger\nconstraints:\n  - requires: { if: trigger, then: x }\n";
+    let ids = ids_and_targets(schema, "# Trigger\n# X\n")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [DiagnosticId::UnexpectedSection, DiagnosticId::Requires]
+    );
+}
+
+#[test]
+fn child_grammar_never_reassigns_an_overlapping_parent() {
+    // §3.2's final example: the canonical specific-rule count vector assigns
+    // the one `Part` to the first optional rule. A child matching only the
+    // second rule's grammar cannot make assignment backtrack.
+    let schema = "version: 1\noutline:\n  - id: first\n    match: Part\n    required: false\n    sections:\n      - match: First Child\n  - id: second\n    match: Part\n    required: false\n    sections:\n      - match: Second Child\n";
+    let ids = ids_and_targets(schema, "# Part\n## Second Child\n")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            DiagnosticId::UnexpectedSection,
+            DiagnosticId::MissingSection
+        ]
+    );
+}
+
+#[test]
+fn recovery_binding_survives_diagnostic_suppression() {
+    // §§3.5, 4.2, 5.2, and 6.3: recovery assigns `A`, leaves the leading `B`
+    // unassigned, and the constraint reads that binding. Filtering the
+    // misplaced primary cannot reassign `B` or change the `requires` result.
+    let schema = "version: 1\noutline:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    match: B\n    required: false\nconstraints:\n  - requires: { if: a, then: b }\n";
+    let plain = ids_and_targets(schema, "# B\n# A\n")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        plain,
+        [DiagnosticId::MisplacedSection, DiagnosticId::Requires]
+    );
+
+    let suppressed = ids_and_targets(
+        schema,
+        "<!-- outlint-disable-file misplaced-section -->\n# B\n# A\n",
+    )
+    .into_iter()
+    .map(|(id, _)| id)
+    .collect::<Vec<_>>();
+    assert_eq!(suppressed, [DiagnosticId::Requires]);
 }

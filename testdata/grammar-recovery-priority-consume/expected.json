@@ -1,0 +1,12 @@
+{
+  "consume.md": [
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["A", "First-rule child"] }
+    },
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "A" }
+    }
+  ]
+}

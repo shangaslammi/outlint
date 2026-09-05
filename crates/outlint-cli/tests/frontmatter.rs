@@ -346,7 +346,7 @@ fn frontmatter_reference_details_retain_typed_equality() {
     let directory = TempDir::new("frontmatter-reference");
     directory.write(
         "schema.yml",
-        "version: 1\ntitle: null\nsections:\n  - id: a\n    match: A\nconstraints:\n  - one_of: [\"fm[$.status]=true\", \"fm[$.status]\", a]\n",
+        "version: 1\ntitle: null\nsections:\n  - id: a\n    match: A\n    required: false\nconstraints:\n  - one_of: [\"fm[$.status]=true\", \"fm[$.status]\", a]\n",
     );
     directory.write("doc.md", "plain text\n");
 

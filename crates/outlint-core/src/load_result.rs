@@ -166,6 +166,8 @@ pub enum SchemaNode {
     FrontmatterSchemaDocument,
     /// A section rule at a structural path.
     Rule(RulePath),
+    /// A prohibition guard at a structural path.
+    Guard(GuardPath),
     /// One capture declared by a section rule (§2.1).
     Capture(CapturePath),
     /// One capture declared by `frontmatter.captures` (§2.3).
@@ -187,6 +189,15 @@ pub struct RulePath {
     pub scope: ScopePath,
     /// The rule's zero-based index within that scope.
     pub index: RuleIndex,
+}
+
+/// The structural address of a prohibition guard.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GuardPath {
+    /// The scope containing the guard.
+    pub scope: ScopePath,
+    /// The guard's zero-based declaration index.
+    pub index: GuardIndex,
 }
 
 /// The structural address of one rule capture declaration.
@@ -226,7 +237,7 @@ pub struct ConstraintPath {
 /// A path to a rule-owned child scope.
 ///
 /// Each index selects a rule whose child scope contains the next index. For an
-/// `outline:` schema, the empty path denotes [`Schema::outline`]. For a
+/// `outline:` schema, the empty path denotes the rules in [`crate::DocumentShape::Outline`]. For a
 /// `title:` + `sections:` sugar schema, it denotes the synthesized title
 /// rule's child scope — the source's top-level `sections:` list. This preserves
 /// the public addressing of the source form after normalization.
@@ -238,6 +249,11 @@ pub struct ScopePath(pub Vec<RuleIndex>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct RuleIndex(pub usize);
+
+/// A zero-based guard index within one scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct GuardIndex(pub usize);
 
 /// A zero-based constraint index within one scope's constraint list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -316,8 +332,6 @@ pub enum SchemaErrorKind {
     DuplicateId,
     /// A constraint reference does not resolve to a rule.
     UnresolvedRef,
-    /// A constraint references a rule that denies matching sections.
-    ForbiddenRef,
     /// A constraint contains the same resolved proposition more than once.
     DuplicateRef,
     /// A top-level rule uses the reserved `fm` identifier.
@@ -331,6 +345,10 @@ pub enum SchemaErrorKind {
     InvalidCapture,
     /// An `order` list, or one of its entries, is malformed (§2.1).
     InvalidOrder,
+    /// A collection-shaped matcher omitted an explicit cardinality.
+    MissingCardinality,
+    /// An unordered rule follows a wildcard and can never receive a heading.
+    UnreachableRule,
     /// An ordered constraint uses a non-positional frontmatter proposition,
     /// mixes scopes, descends through a repeatable ancestor, or targets a
     /// scope already ordered by its rule list.
@@ -354,13 +372,14 @@ impl SchemaErrorKind {
             Self::UnsupportedVersion => "unsupported-version",
             Self::DuplicateId => "duplicate-id",
             Self::UnresolvedRef => "unresolved-ref",
-            Self::ForbiddenRef => "forbidden-ref",
             Self::DuplicateRef => "duplicate-ref",
             Self::ReservedId => "reserved-id",
             Self::InvalidMatcher => "invalid-matcher",
             Self::InvalidRepeat => "invalid-repeat",
             Self::InvalidCapture => "invalid-capture",
             Self::InvalidOrder => "invalid-order",
+            Self::MissingCardinality => "missing-cardinality",
+            Self::UnreachableRule => "unreachable-rule",
             Self::OrderedScopeMismatch => "ordered-scope-mismatch",
             Self::ConflictingCardinality => "conflicting-cardinality",
             Self::ConflictingFrontmatter => "conflicting-frontmatter",
@@ -391,13 +410,14 @@ mod tests {
             (SchemaErrorKind::UnsupportedVersion, "unsupported-version"),
             (SchemaErrorKind::DuplicateId, "duplicate-id"),
             (SchemaErrorKind::UnresolvedRef, "unresolved-ref"),
-            (SchemaErrorKind::ForbiddenRef, "forbidden-ref"),
             (SchemaErrorKind::DuplicateRef, "duplicate-ref"),
             (SchemaErrorKind::ReservedId, "reserved-id"),
             (SchemaErrorKind::InvalidMatcher, "invalid-matcher"),
             (SchemaErrorKind::InvalidRepeat, "invalid-repeat"),
             (SchemaErrorKind::InvalidCapture, "invalid-capture"),
             (SchemaErrorKind::InvalidOrder, "invalid-order"),
+            (SchemaErrorKind::MissingCardinality, "missing-cardinality"),
+            (SchemaErrorKind::UnreachableRule, "unreachable-rule"),
             (
                 SchemaErrorKind::OrderedScopeMismatch,
                 "ordered-scope-mismatch",

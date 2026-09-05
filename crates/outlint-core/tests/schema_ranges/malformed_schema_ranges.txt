@@ -1,7 +1,7 @@
 case document-field-version
-  source "version: 2\nsections: []\n"
-  verdict invalid
-  error unsupported-version 0:9..10 "2" "unsupported schema version 2; expected 1"
+  source "version: 1\nsections: []\n"
+  verdict valid
+  node title 0:21..23 "[]"
 
 case document-field-title
   source "version: 1\ntitle: [nope]\nsections: []\n"
@@ -37,7 +37,6 @@ case document-missing-required-field
   source "title: Doc\n"
   verdict invalid
   error invalid-document-shape 0:0..11 "title: Doc\n" "missing required field `version`"
-  error invalid-document-shape 0:0..11 "title: Doc\n" "missing required field `sections`"
 
 case document-not-a-mapping
   source "- version: 1\n"
@@ -106,6 +105,7 @@ case rule-field-invalid-matcher
   source "version: 1\nsections:\n  - match: \"/[unclosed/\"\n"
   verdict invalid
   error invalid-matcher 0:32..45 "\"/[unclosed/\"" "invalid regex matcher `/[unclosed/`: regex parse error:\n    \\A(?:[unclosed)\\z\n         ^\nerror: unclosed character class"
+  error missing-cardinality 0:32..45 "\"/[unclosed/\"" "regex, glob, and wildcard rules must declare `required` or `repeat`"
 
 case rule-field-invalid-repeat
   source "version: 1\nsections:\n  - match: Intro\n    repeat: \"3..1\"\n"
@@ -140,11 +140,13 @@ case rule-field-unknown
 case rule-capture-declaration
   source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures:\n      v: nope\n"
   verdict invalid
+  error missing-cardinality 0:32..46 "\"/V (?<v>.+)/\"" "regex, glob, and wildcard rules must declare `required` or `repeat`"
   error invalid-capture 0:67..74 "v: nope" "capture `v` declares unknown type `nope`"
 
 case rule-captures-empty
   source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures: {}\n"
   verdict invalid
+  error missing-cardinality 0:32..46 "\"/V (?<v>.+)/\"" "regex, glob, and wildcard rules must declare `required` or `repeat`"
   error invalid-capture 0:61..63 "{}" "rule `captures` must declare at least one capture"
 
 case rule-order-entry
@@ -161,16 +163,36 @@ case nested-rule-field-invalid-matcher
   source "version: 1\nsections:\n  - match: Intro\n    sections:\n      - match: \"/[unclosed/\"\n"
   verdict invalid
   error invalid-matcher 0:67..80 "\"/[unclosed/\"" "invalid regex matcher `/[unclosed/`: regex parse error:\n    \\A(?:[unclosed)\\z\n         ^\nerror: unclosed character class"
+  error missing-cardinality 0:67..80 "\"/[unclosed/\"" "regex, glob, and wildcard rules must declare `required` or `repeat`"
 
 case constraint-unresolved-ref
   source "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: { if: intro, then: missing }\n"
   verdict invalid
   error unresolved-ref 0:69..108 "requires: { if: intro, then: missing }\n" "unresolved ref `missing`"
 
-case constraint-forbidden-ref
-  source "version: 1\nsections:\n  - id: intro\n    match: Intro\n  - id: gone\n    match: Gone\n    allow: false\nconstraints:\n  - requires: { if: intro, then: gone }\n"
+case removed-rule-key
+  source "version: 1\nsections:\n  - match: Gone\n    allow: false\n"
   verdict invalid
-  error forbidden-ref 0:115..151 "requires: { if: intro, then: gone }\n" "ref `gone` passes through or targets an allow: false rule"
+  error invalid-document-shape 0:25..54 "match: Gone\n    allow: false\n" "unknown field `allow`"
+
+case rule-missing-cardinality
+  source "version: 1\nsections:\n  - match: '*'\n"
+  verdict invalid
+  error missing-cardinality 0:32..35 "'*'" "regex, glob, and wildcard rules must declare `required` or `repeat`"
+
+case unordered-unreachable-rule
+  source "version: 1\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n"
+  verdict invalid
+  error unreachable-rule 0:80..85 "Later" "rule is unreachable after the first wildcard in an unordered scope"
+
+case guard-invalid-matcher
+  source "version: 1\nsections: []\nforbid_sections:\n  - match: '/[/'\n"
+  verdict invalid
+  error invalid-matcher 0:52..57 "'/[/'" "invalid regex matcher `/[/`: regex parse error:\n    \\A(?:[)\\z\n         ^\nerror: unclosed character class"
+
+case empty-outline-valid
+  source "version: 1\noutline: []\n"
+  verdict valid
 
 case constraint-operand-shape
   source "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: intro\n"
@@ -185,7 +207,7 @@ case constraint-duplicate-ref
 case constraint-ordered-scope-mismatch
   source "version: 1\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n  - id: other\n    match: Other\nconstraints:\n  - ordered: [intro.deep, other]\n"
   verdict invalid
-  error ordered-scope-mismatch 0:151..180 "ordered: [intro.deep, other]\n" "ref `intro.deep` descends through the repeatable rule `intro`; narrow that step with `[i]`"
+  error ordered-scope-mismatch 0:151..180 "ordered: [intro.deep, other]\n" "all ordered refs must resolve in the same concrete scope"
 
 case constraint-not-a-mapping
   source "version: 1\nsections: []\nconstraints:\n  - nope\n"
@@ -198,12 +220,12 @@ case nested-constraint-unresolved-ref
   error unresolved-ref 0:128..166 "requires: { if: deep, then: missing }\n" "unresolved ref `missing`"
 
 case duplicate-key-document-field
-  source "version: 1\nversion: 2\nsections: []\n"
+  source "version: 1\nversion: 1\nsections: []\n"
   verdict invalid
   error syntax 0:11..18 "version" "invalid YAML: duplicate mapping key `version`"
 
 case duplicate-key-quoted-against-plain
-  source "version: 1\n\"version\": 2\nsections: []\n"
+  source "version: 1\n\"version\": 1\nsections: []\n"
   verdict invalid
   error syntax 0:11..20 "\"version\"" "invalid YAML: duplicate mapping key `version`"
 

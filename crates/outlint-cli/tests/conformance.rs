@@ -234,6 +234,12 @@ fn run_cli(directory: &Path, markdown_names: &BTreeSet<String>) -> BTreeMap<Stri
             directory.display()
         )
     });
+    assert_eq!(
+        report["version"],
+        4,
+        "outlint report in {} is not envelope version 4",
+        directory.display()
+    );
     let results = report["results"]
         .as_array()
         .unwrap_or_else(|| panic!("outlint report in {} has no results", directory.display()));

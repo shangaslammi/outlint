@@ -29,9 +29,10 @@ diagnostic is about, and is the same tagged object the CLI reports under
 members. The expected object must name every and only the Markdown files
 in its directory.
 
-The runner consumes the CLI's **version 3** JSON envelope (§11.3) and projects
-each diagnostic down to `{id, target}`. That narrowing is deliberate, not a
-simplification waiting to be undone. A version 3 diagnostic also carries
+The runner consumes the CLI's **version 4** JSON envelope (§11.3) and projects
+each diagnostic down to `{id, target}`. A runner MUST assert the envelope
+version is 4 before performing that projection. That narrowing is deliberate,
+not a simplification waiting to be undone. A version 4 diagnostic also carries
 `message` and `location`, and — whenever the corresponding semantic data
 exists — `schema_node`, `schema_location`, `involved_headers`, and
 `references`. Those members are normatively specified by §11.3; they are
@@ -178,7 +179,7 @@ Never by piping the CLI into the file. The order is:
    target, multiplicity, and which dependent diagnostics are suppressed — and
    write it down **before** running anything.
 2. Run the documents through the real binary into a scratch directory.
-3. Compare the two, entry by entry, and also read the raw version 3 records
+3. Compare the two, entry by entry, and also read the raw version 4 records
    behind them: target shapes, pointer omission versus the empty pointer,
    one-based line and byte-column anchors, `schema_node` and `references`
    kinds, and the absence of every diagnostic the specification suppresses.

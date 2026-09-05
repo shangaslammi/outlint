@@ -19,11 +19,11 @@ use crate::locator::{parse_locator, ParsedLocator, UnboundOutlineLocator};
 use crate::schema::resolved_anchor;
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
-    AtLeastTwo, BoundRuleStep, CaptureName, Cardinality, Constraint, ConstraintIndex,
-    ConstraintPath, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
-    ResolvedFrontmatterCapture, ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator,
-    ResolvedRuleCaptureLocator, ResolvedRuleLocator, RuleIndex, RuleOutcome, Schema,
-    SchemaErrorKind, ScopePath, SectionRule, SourceRange, UpperBound,
+    AtLeastTwo, BoundRuleStep, CaptureName, Constraint, ConstraintIndex, ConstraintPath,
+    FrontmatterScalar, NonEmpty, Proposition, RefAnchor, ResolvedFrontmatterCapture,
+    ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator, ResolvedRuleCaptureLocator,
+    ResolvedRuleLocator, RuleIndex, Schema, SchemaErrorKind, ScopePath, SectionRule, SourceRange,
+    UpperBound,
 };
 
 use super::{Loader, RangeKey};
@@ -273,8 +273,7 @@ impl Loader {
                 SchemaErrorKind::OrderedScopeMismatch,
                 range,
                 "the scope these refs resolve in is already ordered by its rule list; \
-                 remove this constraint, or set `ordered: false` on the rule that owns \
-                 the scope (`options.ordered_sections: false` for the top-level scope)",
+                 remove this constraint, or set `unordered: true` on that scope",
             );
             return None;
         }
@@ -457,7 +456,6 @@ impl Loader {
         let mut first_step = None;
         let mut rest_steps = Vec::new();
         let mut singular: Vec<bool> = Vec::new();
-        let mut denied = false;
         let mut capture = None;
         let name_steps = parsed.name_steps();
         let step_count = name_steps.rest.len() + 1;
@@ -494,9 +492,8 @@ impl Loader {
                 } else {
                     first_step = Some(bound_step);
                 }
-                denied |= matches!(rule.outcome, RuleOutcome::Deny);
                 captures = Some(&rule.captures);
-                rules = &rule.sections;
+                rules = rule.children.rules();
                 continue;
             }
             let capture_name = CaptureName(name.to_owned());
@@ -548,18 +545,6 @@ impl Loader {
             );
             return None;
         }
-        // §4.3: "a reference through a rule with `allow: false` is
-        // `forbidden-ref`", so a denied step is refused whether it is the
-        // target or merely on the way.
-        if denied {
-            self.error_at(
-                SchemaErrorKind::ForbiddenRef,
-                range,
-                format!("ref `{source}` passes through or targets an allow: false rule"),
-            );
-            return None;
-        }
-
         // §4.4: "Every non-terminal step MUST be singular [...] Only the
         // terminal step may remain plural." A capture and `/text` are terminal
         // values, so the rule step in front of either is itself non-terminal
@@ -752,13 +737,7 @@ fn query_identity(proposition: &ResolvedFrontmatterQuery, match_case: bool) -> R
 
 /// Whether a rule's effective maximum makes an unnarrowed step singular.
 fn is_statically_singular(rule: &SectionRule) -> bool {
-    matches!(
-        rule.outcome,
-        RuleOutcome::Allow(Cardinality {
-            max: UpperBound::Bounded(0 | 1),
-            ..
-        })
-    )
+    matches!(rule.cardinality.max(), UpperBound::Bounded(0 | 1))
 }
 
 /// Reduces a step's selector to the occurrence it can actually denote.
@@ -800,7 +779,7 @@ fn attachment_identity(schema: &Schema, scope: &ScopePath) -> Vec<CanonicalStep>
                 ScopeSelector::CurrentOccurrence
             },
         });
-        rules = &rule.sections;
+        rules = rule.children.rules();
     }
     identity
 }
@@ -809,17 +788,25 @@ fn attachment_identity(schema: &Schema, scope: &ScopePath) -> Vec<CanonicalStep>
 /// order.
 ///
 /// The empty path is the addressed root — the outline scope or the sugar's
-/// `sections` scope — which follows `options.ordered_sections`, as the
-/// synthesized title rule does.
+/// `sections` scope — and every declared scope carries its own local mode.
 fn scope_is_ordered(schema: &Schema, structural_scope: &[CanonicalStep]) -> bool {
     let mut rules = schema.addressed_root_rules();
-    let mut ordered = schema.options.ordered_sections;
+    let mut ordered = match &schema.document {
+        crate::DocumentShape::Outline(scope) => scope.mode == crate::ScopeMode::Ordered,
+        crate::DocumentShape::Title(title) => match title.children() {
+            crate::ChildScope::Declared(scope) => scope.mode == crate::ScopeMode::Ordered,
+            _ => true,
+        },
+    };
     for step in structural_scope {
         let Some(rule) = rules.get(step.index) else {
             return ordered;
         };
-        ordered = rule.ordered;
-        rules = &rule.sections;
+        ordered = match &rule.children {
+            crate::ChildScope::Declared(scope) => scope.mode == crate::ScopeMode::Ordered,
+            _ => true,
+        };
+        rules = rule.children.rules();
     }
     ordered
 }
@@ -828,7 +815,7 @@ fn rules_at_scope<'a>(schema: &'a Schema, scope: &ScopePath) -> Option<&'a [Sect
     let mut rules = schema.addressed_root_rules();
     for index in &scope.0 {
         let rule = rules.get(index.0)?;
-        rules = &rule.sections;
+        rules = rule.children.rules();
     }
     Some(rules)
 }
@@ -844,7 +831,7 @@ fn rule_at_scope<'a>(schema: &'a Schema, scope: &ScopePath) -> Option<&'a Sectio
     for index in &scope.0 {
         let rule = rules.get(index.0)?;
         owner = Some(rule);
-        rules = &rule.sections;
+        rules = rule.children.rules();
     }
     owner
 }
@@ -859,17 +846,17 @@ pub(super) fn constraints_mut<'a>(
     schema: &'a mut Schema,
     scope: &ScopePath,
 ) -> Option<&'a mut Vec<Constraint>> {
-    if schema.is_sugar() {
-        let rule = schema.outline.first_mut()?;
-        if scope.0.is_empty() {
-            return Some(&mut rule.constraints);
-        }
-        constraints_in_rules_mut(&mut rule.sections, &scope.0)
+    let root = match &mut schema.document {
+        crate::DocumentShape::Outline(root) => root,
+        crate::DocumentShape::Title(title) => match title.children_mut() {
+            crate::ChildScope::Declared(root) => root,
+            _ => return None,
+        },
+    };
+    if scope.0.is_empty() {
+        Some(&mut root.constraints)
     } else {
-        if scope.0.is_empty() {
-            return Some(&mut schema.constraints);
-        }
-        constraints_in_rules_mut(&mut schema.outline, &scope.0)
+        constraints_in_rules_mut(&mut root.rules, &scope.0)
     }
 }
 
@@ -880,9 +867,18 @@ fn constraints_in_rules_mut<'a>(
     let (index, rest) = path.split_first()?;
     let rule = rules.get_mut(index.0)?;
     if rest.is_empty() {
-        Some(&mut rule.constraints)
+        match &mut rule.children {
+            crate::ChildScope::Declared(scope) => Some(&mut scope.constraints),
+            _ => None,
+        }
     } else {
-        constraints_in_rules_mut(&mut rule.sections, rest)
+        constraints_in_rules_mut(
+            match &mut rule.children {
+                crate::ChildScope::Declared(scope) => &mut scope.rules,
+                _ => return None,
+            },
+            rest,
+        )
     }
 }
 

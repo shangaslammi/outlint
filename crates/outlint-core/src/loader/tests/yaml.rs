@@ -1,6 +1,6 @@
 use super::{invalid, source_slice, valid};
 use crate::loader::{linked_frontmatter_schema_path, load_schema};
-use crate::{ByteOffset, Matcher, SchemaErrorKind, SchemaVersion};
+use crate::{ByteOffset, DocumentShape, Matcher, SchemaErrorKind, SchemaVersion};
 
 #[test]
 fn yaml_syntax_error_ranges_convert_character_columns_to_bytes() {
@@ -280,8 +280,11 @@ fn non_standard_tags_are_rejected_anywhere_in_a_schema_document() {
     // Core-schema tags keep their meaning.
     let schema = valid("version: !!int 1\ntitle: !!str Doc\nsections: []\n");
     assert!(matches!(
-        schema.outline.first().map(|rule| &rule.matcher),
-        Some(Matcher::Exact(_))
+        schema.document,
+        DocumentShape::Title(crate::TitleSlot::Spelled {
+            matcher: Matcher::Exact(_),
+            ..
+        })
     ));
 }
 
@@ -311,24 +314,52 @@ fn a_standard_tag_on_a_schema_collection_must_name_the_collection_kind() {
 }
 
 #[test]
-fn an_oversized_version_is_a_shape_error_at_the_value() {
-    // The engine preserves a number's exact spelling, so an integer of any
-    // magnitude parses; one that does not fit the schema's own 64-bit
-    // field is now a shape complaint against the value — the serde-era
-    // engine refused the whole parse as a syntax error instead.
+fn an_oversized_integer_version_is_unsupported_at_the_value() {
+    // §2: every integer other than exactly 1 is `unsupported-version`,
+    // including values outside machine integer ranges.
     let source = "version: 99999999999999999999999999\nsections: []\n";
     let invalid = invalid(source);
     assert_eq!(
         invalid.errors.first.kind,
-        SchemaErrorKind::InvalidDocumentShape
+        SchemaErrorKind::UnsupportedVersion
     );
     assert_eq!(
         invalid.errors.first.message,
-        "version must be an integer that fits in 64 bits and cannot be null"
+        "unsupported schema version 99999999999999999999999999; expected 1"
     );
     assert_eq!(
         source_slice(source, invalid.errors.first.range),
         "99999999999999999999999999"
+    );
+}
+
+#[test]
+fn unsupported_version_is_collected_with_independent_shape_errors() {
+    // §6.3: version classification precedes the top-level shape gate.
+    let source = "version: 3\ntitle: []\nsections: []\n";
+    let invalid = invalid(source);
+    assert_eq!(
+        invalid
+            .errors
+            .iter()
+            .map(|error| (
+                error.kind,
+                source_slice(source, error.range),
+                error.message.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (
+                SchemaErrorKind::UnsupportedVersion,
+                "3",
+                "unsupported schema version 3; expected 1",
+            ),
+            (
+                SchemaErrorKind::InvalidDocumentShape,
+                "[]",
+                "title must be a string or null",
+            ),
+        ]
     );
 }
 
@@ -355,8 +386,8 @@ fn duplicate_keys_are_rejected_on_resolved_text_at_the_duplicate() {
     // `a` and `"a"` are one key however differently they are spelled; the
     // refusal names the key and anchors at the duplicate occurrence.
     for source in [
-        "version: 1\nversion: 2\nsections: []\n",
-        "version: 1\n\"version\": 2\nsections: []\n",
+        "version: 1\nversion: 1\nsections: []\n",
+        "version: 1\n\"version\": 1\nsections: []\n",
     ] {
         let refused = invalid(source);
         assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);

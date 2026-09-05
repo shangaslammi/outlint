@@ -13,6 +13,32 @@ output shape, and the library API may all change in a minor release. See
 
 ### Added
 
+- **Incompatible schema-language revision.** Schema files keep `version: 1`;
+  the schema language changed incompatibly in this release. Before release
+  1.0, such changes are tracked by the release version and this changelog
+  rather than by incrementing the schema field. Ordered scopes are now
+  consuming rule phases with canonical assignment and deterministic recovery;
+  headings that
+  match a rule but cannot occupy its phase report `misplaced-section`.
+  Prohibitions move to first-class `forbid_sections` guards, unmatched headings
+  can be admitted with `extras: anywhere`, and `unordered: true` selects a
+  declaration-first classifier where explicit `ordered` constraints remain
+  available. Omitted and empty `sections` are now distinct, and `outline: []`
+  is the explicit empty root grammar. Collection-shaped matchers must spell a
+  cardinality (`missing-cardinality`), while rules shadowed by an unordered
+  wildcard are rejected as `unreachable-rule`. Migration removes `strict`,
+  accepting-rule `allow`, rule-level `ordered`, and
+  `options.ordered_sections`; deletes a trailing `{match: "*", allow: false}`
+  used only to close a scope, because every declared list is already
+  exhaustive; converts an intentional, unshadowed `allow: false` on a specific
+  matcher into a `forbid_sections` guard; replaces open scopes with `extras` or
+  a positioned wildcard; marks locally unordered scopes; and reviews formerly
+  implicit exact-rule cardinalities. Rules shadowed by an earlier wildcard,
+  their ids, and constraint references to those ids must be deleted.
+  Overlapping matchers from the 0.1.0 language may require unordered
+  classification plus an explicit `ordered` constraint, while
+  exception-before-denial has no exact translation
+  because guards run first (spec §§3, 6, 8, 10).
 - **Typed Values and unified locators.** Regex rules and frontmatter may now
   declare `int`, `bool`, `date`, `semver`, `dotted`, and `text` captures:
   `captures` on a regex rule binds its named groups, `frontmatter.captures`
@@ -32,12 +58,12 @@ output shape, and the library API may all change in a minor release. See
   resource-bounded; exceeding the bound is an operational failure with exit
   code 2 and no partial verdict. Meanwhile, `fm.<name>` now refers only to a
   declared frontmatter capture: the former dynamic-key meaning is gone and
-  legacy `fm.key=value` is invalid. CLI machine output is envelope version 3,
+  legacy `fm.key=value` is invalid. CLI machine output is envelope version 4,
   whose diagnostics carry tagged `rule`,
   `frontmatter_query`, and `frontmatter_capture` references preserving the
-  written locator and its typed-value metadata; there is no version 2 mode,
-  so consumers must reject envelope versions they do not support (spec
-  §§2.3–2.4, 3.8, 4.4–4.6, 6, 11.3–11.4).
+  written locator and its typed-value metadata, plus guard schema nodes; there
+  is no earlier-envelope compatibility mode, so consumers must reject envelope
+  versions they do not support (spec §§2.3–2.4, 3.8, 4.4–4.6, 6, 11.3–11.4).
 - **Per-document schema discovery.** Without `--schema`, discovery now checks
   each ancestor directory for `<stem>.outlint.yml` — the document's file name
   with its final extension removed, so `CHANGELOG.md` discovers
@@ -59,8 +85,8 @@ output shape, and the library API may all change in a minor release. See
 ### Added
 
 - **Specification.** [`spec/outlint-spec.md`](spec/outlint-spec.md) defines
-  Outlint Schema Specification v1: the document model, schema format, matching
-  semantics, rule identifiers and reference paths, constraints, diagnostics,
+  the initial Outlint Schema language: the document model, schema format,
+  matching semantics, rule identifiers and reference paths, constraints, diagnostics,
   options, a normative validation algorithm, and the command-line contract.
 - **Schema language.** A top-level `outline:` list of `h1` rules — carrying
   cardinality, `strict`, denial, and child `sections` like any nested rule —

@@ -8,6 +8,7 @@ mod diagnostic;
 mod engine;
 mod frontmatter_values;
 mod prepare;
+mod sequence;
 mod value_order;
 
 #[cfg(test)]

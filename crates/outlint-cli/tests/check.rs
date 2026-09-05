@@ -64,12 +64,12 @@ fn json_check_has_stable_fields_and_order() {
     // a reordered *array* — which is what pins the argument order of
     // `results` below. Object member order is not among the things this
     // detects, and could not be: JSON leaves it insignificant and
-    // `serde_json::Map` does not retain it here. This is the version 3 shape
+    // `serde_json::Map` does not retain it here. This is the version 4 shape
     // of §11.3, including all four `summary` counts.
     assert_eq!(
         json_output(&output),
         serde_json::json!({
-            "version": 3,
+            "version": 4,
             "results": [
                 {
                     "kind": "document",

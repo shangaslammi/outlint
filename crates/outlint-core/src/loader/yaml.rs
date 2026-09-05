@@ -12,8 +12,8 @@ use crate::yaml::{
     ExactYamlScalar, YamlValueError,
 };
 use crate::{
-    ByteOffset, ConstraintIndex, ConstraintPath, OrderIndex, RuleIndex, RulePath, SchemaErrorKind,
-    ScopePath, SourceId, SourceRange, TextRange,
+    ByteOffset, ConstraintIndex, ConstraintPath, GuardIndex, GuardPath, OrderIndex, RuleIndex,
+    RulePath, SchemaErrorKind, ScopePath, SourceId, SourceRange, TextRange,
 };
 
 use super::shape::{
@@ -105,6 +105,12 @@ impl RangeIndex {
                 );
             }
         }
+        if let Some(node) = schema_mapping_get(mapping, "forbid_sections") {
+            let expansion = subtree_expansion(node, expansion);
+            if let Some(guards) = node.as_sequence() {
+                index.collect_guards(guards, &ScopePath(Vec::new()), expansion, char_offsets);
+            }
+        }
         index
     }
 
@@ -158,6 +164,12 @@ impl RangeIndex {
                     self.collect_constraints(constraints, &child_scope, expansion, char_offsets);
                 }
             }
+            if let Some(node) = schema_mapping_get(mapping, "forbid_sections") {
+                let expansion = subtree_expansion(node, expansion);
+                if let Some(guards) = node.as_sequence() {
+                    self.collect_guards(guards, &child_scope, expansion, char_offsets);
+                }
+            }
         }
     }
 
@@ -205,6 +217,40 @@ impl RangeIndex {
                 let expansion = subtree_expansion(node, expansion);
                 if let Some(constraints) = node.as_sequence() {
                     self.collect_constraints(constraints, &child_scope, expansion, char_offsets);
+                }
+            }
+            if let Some(node) = schema_mapping_get(mapping, "forbid_sections") {
+                let expansion = subtree_expansion(node, expansion);
+                if let Some(guards) = node.as_sequence() {
+                    self.collect_guards(guards, &child_scope, expansion, char_offsets);
+                }
+            }
+        }
+    }
+
+    fn collect_guards(
+        &mut self,
+        guards: &[SchemaYamlNode],
+        scope: &ScopePath,
+        expansion: Option<(usize, usize)>,
+        char_offsets: &[usize],
+    ) {
+        for (index, node) in guards.iter().enumerate() {
+            let path = GuardPath {
+                scope: scope.clone(),
+                index: GuardIndex(index),
+            };
+            self.ranges.insert(
+                RangeKey::Guard(path.clone()),
+                node_range(node, expansion, char_offsets),
+            );
+            let expansion = subtree_expansion(node, expansion);
+            if let Some(mapping) = node.as_mapping() {
+                if let Some(matcher) = schema_mapping_get(mapping, "match") {
+                    self.ranges.insert(
+                        RangeKey::GuardField(path, "match".into()),
+                        node_range(matcher, expansion, char_offsets),
+                    );
                 }
             }
         }

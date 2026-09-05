@@ -9,7 +9,6 @@ sections:
   - id: unreleased
     match: "Unreleased"
     required: true
-    strict: true
     sections: &categories
       - match: "Added"
         required: false
@@ -27,5 +26,4 @@ sections:
   - id: release
     match: "/[0-9]+\\.[0-9]+\\.[0-9]+.*/"
     repeat: "1..n"
-    strict: true
     sections: *categories

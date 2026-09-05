@@ -3,3 +3,4 @@ title: null
 frontmatter:
   schema: bundle/frontmatter.schema.json
 sections: []
+extras: anywhere

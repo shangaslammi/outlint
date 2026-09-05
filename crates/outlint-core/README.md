@@ -19,9 +19,9 @@ where the two disagree, the specification wins.
 
 - **Outline structure** — the section tree built from ATX and Setext
   headings, including skipped heading levels.
-- **Section rules** — first-match-wins matchers (exact, glob, regex, `*`),
-  `allow: false` denials, and `strict` scopes that reject unmatched
-  headings.
+- **Section rules** — ordered phase matching or declaration-first unordered
+  matching (exact, glob, regex, `*`), prohibition guards, exhaustive declared
+  scopes, and optional `extras: anywhere` filtering.
 - **Cardinality** — `required` and `repeat: "min..max"` per rule, per scope.
 - **Cross-section logic** — `one_of`, `any_of`, `at_most_one`,
   `all_or_none`, `requires`, `conflicts`, and `ordered` constraints over

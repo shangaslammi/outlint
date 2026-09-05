@@ -3,3 +3,4 @@ title: "Project"
 sections:
   - match: "Item"
     repeat: "2..2"
+extras: anywhere
