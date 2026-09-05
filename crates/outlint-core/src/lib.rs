@@ -35,11 +35,10 @@ pub use schema::{
     ChildScope, Constraint, DeclaredScope, DocumentShape, ExactText, ExtrasMode,
     FrontmatterCapture, FrontmatterCaptureView, FrontmatterCaptures, FrontmatterPolicy,
     FrontmatterScalar, FrontmatterSchema, GlobPattern, HeaderLevel, Matcher, NonEmpty, Options,
-    OutlineProvenance, Proposition, RefAnchor, RegexPattern, ResolvedFrontmatterCapture,
-    ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator, ResolvedOutlineLocator,
-    ResolvedRuleCaptureLocator, ResolvedRuleLocator, RuleCapture, RuleId, Schema, SchemaVersion,
-    ScopeMode, SectionGuard, SectionRule, TitleSlot, UpperBound, ValueOrderDirection,
-    ValueOrderEntry,
+    Proposition, RefAnchor, RegexPattern, ResolvedFrontmatterCapture, ResolvedFrontmatterQuery,
+    ResolvedIntrinsicTextLocator, ResolvedOutlineLocator, ResolvedRuleCaptureLocator,
+    ResolvedRuleLocator, RuleCapture, RuleId, Schema, SchemaVersion, ScopeMode, SectionGuard,
+    SectionRule, TitleSlot, UpperBound, ValueOrderDirection, ValueOrderEntry,
 };
 pub use validator::{
     validate, Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticReference, DiagnosticTarget,

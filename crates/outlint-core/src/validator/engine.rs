@@ -44,16 +44,24 @@ pub(super) fn validate_document(
 }
 
 #[cfg(test)]
-pub(super) fn guard_evaluation_count(
+pub(super) fn validation_work_count(
     schema: &Schema,
     document: &Document,
     plan: &ValidationPlan,
-) -> Result<usize, ValidationOperationalError> {
+) -> Result<WorkCounter, ValidationOperationalError> {
     let mut validator = Validator::new(schema, document);
     validator
         .run(plan)
         .map_err(|limit| ValidationOperationalError::new(limit.to_string()))?;
-    Ok(validator.guard_evaluations)
+    Ok(validator.work)
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WorkCounter {
+    pub(super) guard_matcher_evaluations: usize,
+    pub(super) accepting_matcher_evaluations: usize,
+    pub(super) extras_classifications: usize,
 }
 
 struct Validator<'a> {
@@ -61,7 +69,7 @@ struct Validator<'a> {
     document: &'a Document,
     diagnostics: Vec<Diagnostic>,
     #[cfg(test)]
-    guard_evaluations: usize,
+    work: WorkCounter,
 }
 
 struct BindScopeInput<'a, 'd> {
@@ -98,7 +106,7 @@ impl<'a> Validator<'a> {
             document,
             diagnostics: Vec::new(),
             #[cfg(test)]
-            guard_evaluations: 0,
+            work: WorkCounter::default(),
         }
     }
 
@@ -125,7 +133,9 @@ impl<'a> Validator<'a> {
         let root_level = match &self.schema.document {
             DocumentShape::Outline(_) => 0,
             DocumentShape::Title(TitleSlot::Forbidden { .. }) => 1,
-            DocumentShape::Title(TitleSlot::Required { .. }) => u8::from(!has_h1),
+            DocumentShape::Title(
+                TitleSlot::Spelled { .. } | TitleSlot::ImpliedBySections { .. },
+            ) => u8::from(!has_h1),
         };
         if !self.schema.options.allow_skipped_levels {
             // Structural and schema-independent: the walk covers the whole
@@ -231,9 +241,8 @@ impl<'a> Validator<'a> {
                     admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
                 return self.bind_sugar_sections(&admitted, children, frontmatter, plan, None);
             }
-            TitleSlot::Required {
-                matcher, children, ..
-            } => (matcher, children),
+            TitleSlot::Spelled { matcher, children } => (matcher, children),
+            TitleSlot::ImpliedBySections { children } => (&Matcher::Any, children),
         };
         if !has_h1 {
             self.emit(
@@ -643,18 +652,31 @@ impl<'a> Validator<'a> {
             }
         }
         let columns = rules.len();
-        let mut matrix = retained
-            .iter()
-            .flat_map(|pathed| {
-                prepared_rules
-                    .iter()
-                    .map(move |rule| rule.matcher.matches(&pathed.section.heading.text))
-            })
-            .collect::<Vec<_>>();
+        let mut matrix = Vec::new();
+        for pathed in &retained {
+            for rule in prepared_rules {
+                #[cfg(test)]
+                {
+                    self.work.accepting_matcher_evaluations =
+                        self.work.accepting_matcher_evaluations.saturating_add(1);
+                }
+                matrix.push(rule.matcher.matches(&pathed.section.heading.text));
+            }
+        }
         if scope.extras == ExtrasMode::Anywhere {
-            let retained_rows = matrix
-                .chunks(columns.max(1))
-                .map(|row| row.iter().any(|value| *value))
+            let retained_rows = (0..retained.len())
+                .map(|heading_index| {
+                    #[cfg(test)]
+                    {
+                        self.work.extras_classifications =
+                            self.work.extras_classifications.saturating_add(1);
+                    }
+                    let start = heading_index.saturating_mul(columns);
+                    let end = heading_index.saturating_add(1).saturating_mul(columns);
+                    matrix
+                        .get(start..end)
+                        .is_some_and(|row| row.iter().any(|value| *value))
+                })
                 .collect::<Vec<_>>();
             let mut row = 0usize;
             retained.retain(|_| {
@@ -815,7 +837,8 @@ impl<'a> Validator<'a> {
         for (index, guard) in guards.iter().enumerate() {
             #[cfg(test)]
             {
-                self.guard_evaluations = self.guard_evaluations.saturating_add(1);
+                self.work.guard_matcher_evaluations =
+                    self.work.guard_matcher_evaluations.saturating_add(1);
             }
             if guard.matches(heading) {
                 return Some(index);
@@ -851,10 +874,8 @@ impl<'a> Validator<'a> {
             },
             ChildScope::GuardsOnly(_) => {
                 for pathed in sections {
-                    if let Some((index, _)) = prepared_guards
-                        .iter()
-                        .enumerate()
-                        .find(|(_, guard)| guard.matches(&pathed.section.heading.text))
+                    if let Some(index) =
+                        self.first_matching_guard(prepared_guards, &pathed.section.heading.text)
                     {
                         self.emit_present(
                             DiagnosticId::NotAllowed,

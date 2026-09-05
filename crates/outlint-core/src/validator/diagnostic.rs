@@ -55,7 +55,7 @@ pub enum DiagnosticId {
     Requires,
     /// A `conflicts` condition and at least one exclusion are both satisfied.
     Conflicts,
-    /// Concrete occurrences violate an explicit constraint or a scope's rule order.
+    /// Concrete occurrences violate an explicit `ordered` constraint.
     Ordered,
 }
 

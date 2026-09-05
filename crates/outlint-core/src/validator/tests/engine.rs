@@ -1,4 +1,4 @@
-use crate::validator::engine::{guard_evaluation_count, root_location};
+use crate::validator::engine::{root_location, validation_work_count, WorkCounter};
 use crate::validator::prepare::ValidationPlan;
 use crate::validator::{validate, Diagnostic, DiagnosticId, DiagnosticTarget, HeaderPath};
 use crate::{load_schema, parse_markdown, MarkdownOptions, RuleIndex, SchemaNode, ScopePath};
@@ -842,10 +842,11 @@ fn v2_guard_precedes_accepting_assignment() {
 }
 
 #[test]
-fn guard_evaluations_are_bounded_by_headings_times_guards() {
-    // §3.7: each admitted heading is tested against each guard at most once.
+fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
+    // §3.7: guard work is at most H×G, accepting-matrix work is H×R, and
+    // extras classifies each post-guard heading once.
     let loaded = load_schema(
-        "version: 2\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\nsections:\n  - match: A\n    repeat: 0..n\n",
+        "version: 2\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\nsections:\n  - match: A\n    repeat: 0..n\nextras: anywhere\n",
     )
     .expect("test schema is valid");
     let document = parse_markdown(
@@ -853,9 +854,32 @@ fn guard_evaluations_are_bounded_by_headings_times_guards() {
         MarkdownOptions::default(),
     );
     let plan = ValidationPlan::new(&loaded.schema).expect("schema prepares");
-    let evaluations =
-        guard_evaluation_count(&loaded.schema, &document, &plan).expect("validation completes");
-    assert_eq!(evaluations, 5 * 3);
+    let work =
+        validation_work_count(&loaded.schema, &document, &plan).expect("validation completes");
+    assert_eq!(
+        work,
+        WorkCounter {
+            guard_matcher_evaluations: 5 * 3,
+            accepting_matcher_evaluations: 5,
+            extras_classifications: 5,
+        }
+    );
+
+    let guard_only = load_schema(
+        "version: 2\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\n",
+    )
+    .expect("test schema is valid");
+    let guard_only_plan = ValidationPlan::new(&guard_only.schema).expect("schema prepares");
+    let guard_only_work = validation_work_count(&guard_only.schema, &document, &guard_only_plan)
+        .expect("validation completes");
+    assert_eq!(
+        guard_only_work,
+        WorkCounter {
+            guard_matcher_evaluations: 5 * 3,
+            accepting_matcher_evaluations: 0,
+            extras_classifications: 0,
+        }
+    );
 }
 
 #[test]

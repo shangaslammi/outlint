@@ -281,7 +281,7 @@ fn non_standard_tags_are_rejected_anywhere_in_a_schema_document() {
     let schema = valid("version: !!int 2\ntitle: !!str Doc\nsections: []\n");
     assert!(matches!(
         schema.document,
-        DocumentShape::Title(crate::TitleSlot::Required {
+        DocumentShape::Title(crate::TitleSlot::Spelled {
             matcher: Matcher::Exact(_),
             ..
         })

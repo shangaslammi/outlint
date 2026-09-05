@@ -171,8 +171,6 @@ sections:
     required: false
   - match: "Appendix *"        # glob
     required: false
-forbid_sections:
-  - match: "*"                 # guards reject before accepting assignment
 
 constraints:
   - one_of: [changelog, history]
@@ -325,7 +323,7 @@ filesystem location, discovery is impossible and `--schema` is required:
 git show HEAD:README.md | outlint check - --schema .outlint.yml
 ```
 
-**Paths only.** v1 takes individual files, not directories. Use your shell
+**Paths only.** v2 takes individual files, not directories. Use your shell
 or `find` to expand:
 
 ```sh
@@ -433,7 +431,7 @@ including the complete `--help` surface.
 
 ## Status and stability
 
-outlint is at version 0.1.0. It implements Outlint Schema Specification v1,
+outlint is at version 0.1.0. It implements Outlint Schema Specification v2,
 including its command-line contract in §11, and the shared conformance corpus
 in `testdata/` runs in CI.
 

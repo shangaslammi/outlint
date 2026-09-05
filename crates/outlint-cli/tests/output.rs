@@ -118,7 +118,7 @@ fn ordered_human_output_distinguishes_expected_and_observed_order() {
 }
 
 #[test]
-fn implicit_order_human_output_names_the_broken_pair() {
+fn ordered_recovery_human_output_names_missing_and_misplaced_sections() {
     // The default-ordered scope (§3.5) reports recovery and the resulting
     // cardinality independently, with the owning title as recovery attribution.
     let directory = TempDir::new("ordered-implicit-human");

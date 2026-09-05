@@ -69,20 +69,22 @@ fn schema_check_reports_v2_cardinality_and_reachability_errors() {
     let report = json_output(&output);
     assert_eq!(report["version"], 4);
     assert_eq!(
-        report["results"][0]["diagnostics"][0]["id"],
-        "missing-cardinality"
+        report["results"][0]["diagnostics"],
+        serde_json::json!([{
+            "id": "missing-cardinality",
+            "message": "regex, glob, and wildcard rules must declare `required` or `repeat`",
+            "location": {"line": 4, "column": 12},
+            "schema_location": {"path": "missing.yml", "line": 4, "column": 12}
+        }])
     );
     assert_eq!(
-        report["results"][0]["diagnostics"][0]["schema_location"],
-        serde_json::json!({"path": "missing.yml", "line": 4, "column": 12})
-    );
-    assert_eq!(
-        report["results"][1]["diagnostics"][0]["id"],
-        "unreachable-rule"
-    );
-    assert_eq!(
-        report["results"][1]["diagnostics"][0]["schema_location"],
-        serde_json::json!({"path": "unreachable.yml", "line": 7, "column": 12})
+        report["results"][1]["diagnostics"],
+        serde_json::json!([{
+            "id": "unreachable-rule",
+            "message": "rule is unreachable after the first wildcard in an unordered scope",
+            "location": {"line": 7, "column": 12},
+            "schema_location": {"path": "unreachable.yml", "line": 7, "column": 12}
+        }])
     );
 }
 

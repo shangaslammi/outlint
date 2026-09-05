@@ -21,10 +21,10 @@ use serde_json::Value;
 
 use crate::{
     ByteOffset, ConstraintIndex, ConstraintPath, DocumentShape, GuardPath, InvalidSchema,
-    JsonSchemaResourceContents, LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, Matcher,
-    NonEmpty, OrderIndex, OutlineProvenance, RelatedLocation, RuleIndex, RulePath, Schema,
-    SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
-    SchemaVersion, ScopePath, SourceId, SourceLabel, SourceRange, TextRange, TitleSlot,
+    JsonSchemaResourceContents, LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, NonEmpty,
+    OrderIndex, RelatedLocation, RuleIndex, RulePath, Schema, SchemaError, SchemaErrorKind,
+    SchemaLocations, SchemaNode, SchemaSource, SchemaSources, SchemaVersion, ScopePath, SourceId,
+    SourceLabel, SourceRange, TextRange, TitleSlot,
 };
 
 use self::constraints::constraints_mut;
@@ -415,20 +415,18 @@ impl Loader {
                 match_case,
                 None,
             );
-            children.map(|children| {
-                DocumentShape::Title(if title_null {
-                    TitleSlot::Forbidden { children }
+            children.and_then(|children| {
+                if title_null {
+                    Some(DocumentShape::Title(TitleSlot::Forbidden { children }))
+                } else if raw.title.is_some() {
+                    title.map(|matcher| {
+                        DocumentShape::Title(TitleSlot::Spelled { matcher, children })
+                    })
                 } else {
-                    TitleSlot::Required {
-                        matcher: title.unwrap_or(Matcher::Any),
-                        spelled: if raw.title.is_some() {
-                            OutlineProvenance::Spelled
-                        } else {
-                            OutlineProvenance::ImpliedBySections
-                        },
+                    Some(DocumentShape::Title(TitleSlot::ImpliedBySections {
                         children,
-                    }
-                })
+                    }))
+                }
             })
         };
 

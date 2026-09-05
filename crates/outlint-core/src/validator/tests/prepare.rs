@@ -174,14 +174,14 @@ fn a_nested_rule_constraint_query_is_compiled_too() {
 
 #[test]
 fn malformed_manually_constructed_regex_fails_preparation() {
-    let mut schema = load_schema("version: 2\nsections: []\n")
+    let mut schema = load_schema("version: 2\ntitle: Doc\nsections: []\n")
         .expect("test schema is valid")
         .schema;
     let crate::DocumentShape::Title(title) = &mut schema.document else {
         panic!("expected title")
     };
-    let crate::TitleSlot::Required { matcher, .. } = title else {
-        panic!("expected required title")
+    let crate::TitleSlot::Spelled { matcher, .. } = title else {
+        panic!("expected spelled title")
     };
     *matcher = Matcher::Regex(RegexPattern("(".into()));
     let error = PreparedValidator::new(&schema)

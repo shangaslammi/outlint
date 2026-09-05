@@ -3,9 +3,9 @@ use crate::loader::load_schema;
 use crate::loader::rules::{auto_id, is_capture_name, parse_repeat, regex_body};
 use crate::{
     CaptureName, Cardinality, ConstraintIndex, ConstraintPath, DocumentShape, ExactText,
-    InvalidSchema, LoadedSchema, Matcher, OrderEntryPath, OrderIndex, OutlineProvenance,
-    RegexPattern, RuleId, RuleIndex, RulePath, SchemaError, SchemaErrorKind, SchemaNode, ScopePath,
-    UpperBound, ValueOrderDirection, ValueOrderEntry,
+    InvalidSchema, LoadedSchema, Matcher, OrderEntryPath, OrderIndex, RegexPattern, RuleId,
+    RuleIndex, RulePath, SchemaError, SchemaErrorKind, SchemaNode, ScopePath, UpperBound,
+    ValueOrderDirection, ValueOrderEntry,
 };
 use proptest::prelude::*;
 
@@ -27,9 +27,7 @@ forbid_sections:
     assert!(!schema.options.match_case);
     assert!(schema.options.strip_inline_markup);
     assert!(!schema.options.allow_skipped_levels);
-    let DocumentShape::Title(crate::TitleSlot::Required {
-        matcher: Matcher::Any,
-        spelled: OutlineProvenance::ImpliedBySections,
+    let DocumentShape::Title(crate::TitleSlot::ImpliedBySections {
         children: crate::ChildScope::Declared(scope),
     }) = &schema.document
     else {
@@ -256,22 +254,16 @@ fn title_null_declares_a_document_without_h1() {
 }
 
 #[test]
-fn sugar_forms_carry_their_provenance() {
+fn sugar_forms_use_distinct_title_variants() {
     let titled = valid("version: 2\ntitle: Doc\nsections: []\n");
     assert!(matches!(
         titled.document,
-        DocumentShape::Title(crate::TitleSlot::Required {
-            spelled: OutlineProvenance::Spelled,
-            ..
-        })
+        DocumentShape::Title(crate::TitleSlot::Spelled { .. })
     ));
     let bare = valid("version: 2\nsections: []\n");
     assert!(matches!(
         bare.document,
-        DocumentShape::Title(crate::TitleSlot::Required {
-            spelled: OutlineProvenance::ImpliedBySections,
-            ..
-        })
+        DocumentShape::Title(crate::TitleSlot::ImpliedBySections { .. })
     ));
 }
 

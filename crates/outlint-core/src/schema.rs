@@ -90,19 +90,25 @@ pub enum DocumentShape {
     Title(TitleSlot),
 }
 
-/// The sugar form's exact-one or forbidden title slot.
+/// The sugar form's spelled, implied, or forbidden title slot.
 ///
 /// The variants couple title cardinality, matcher presence, and source-form
 /// provenance so combinations that no schema spelling can produce cannot be
 /// constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TitleSlot {
-    /// Exactly one `h1` is required and checked against `matcher`.
-    Required {
-        /// The normalized title matcher; implied titles use [`Matcher::Any`].
+    /// A spelled `title: <matcher>` requires exactly one matching `h1`.
+    Spelled {
+        /// The normalized matcher supplied by `title`.
         matcher: Matcher,
-        /// Whether the matcher was spelled or implied by bare `sections`.
-        spelled: OutlineProvenance,
+        /// The exposed child scope written with top-level child-scope keys.
+        children: ChildScope,
+    },
+    /// Bare `sections` implies exactly one `h1` with the any-text matcher.
+    ///
+    /// Keeping this separate from [`Self::Spelled`] makes a non-wildcard
+    /// implied matcher unrepresentable.
+    ImpliedBySections {
         /// The exposed child scope written with top-level child-scope keys.
         children: ChildScope,
     },
@@ -117,34 +123,19 @@ impl TitleSlot {
     /// Returns the exposed child scope for either title policy.
     pub fn children(&self) -> &ChildScope {
         match self {
-            Self::Required { children, .. } | Self::Forbidden { children } => children,
+            Self::Spelled { children, .. }
+            | Self::ImpliedBySections { children }
+            | Self::Forbidden { children } => children,
         }
     }
 
     pub(crate) fn children_mut(&mut self) -> &mut ChildScope {
         match self {
-            Self::Required { children, .. } | Self::Forbidden { children } => children,
+            Self::Spelled { children, .. }
+            | Self::ImpliedBySections { children }
+            | Self::Forbidden { children } => children,
         }
     }
-}
-
-/// How a required sugar-form title matcher entered the schema.
-///
-/// The loader normalizes each source form into [`DocumentShape`]. The
-/// The validator uses this distinction to preserve the declared matcher while
-/// source anchoring remains in [`SchemaLocations`](crate::SchemaLocations).
-///
-/// [`SchemaNode::Title`]: crate::SchemaNode::Title
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutlineProvenance {
-    /// A `title: <matcher>` declaration supplied the matcher.
-    Spelled,
-    /// `sections:` without `title:` — desugars with an
-    /// any-text matcher: `title: "*"` implied, so the document must have
-    /// exactly one `h1`. A document with none writes `title: null` into its
-    /// schema instead. With no `title:` key to blame, title diagnostics
-    /// anchor on the `sections` key — the spelling that implied the rule.
-    ImpliedBySections,
 }
 
 /// The document's normalized frontmatter policy.
