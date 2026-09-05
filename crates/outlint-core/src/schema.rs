@@ -40,15 +40,7 @@ impl Schema {
     pub(crate) fn constraints(&self) -> &[Constraint] {
         match &self.document {
             DocumentShape::Outline(scope) => &scope.constraints,
-            DocumentShape::Title(title) => title.children.constraints(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn outline_provenance(&self) -> OutlineProvenance {
-        match &self.document {
-            DocumentShape::Outline(_) => OutlineProvenance::Outline,
-            DocumentShape::Title(title) => title.provenance,
+            DocumentShape::Title(title) => title.children().constraints(),
         }
     }
 
@@ -76,7 +68,7 @@ impl Schema {
     pub(crate) fn addressed_root_rules(&self) -> &[SectionRule] {
         match &self.document {
             DocumentShape::Outline(scope) => &scope.rules,
-            DocumentShape::Title(title) => title.children.rules(),
+            DocumentShape::Title(title) => title.children().rules(),
         }
     }
 
@@ -84,7 +76,7 @@ impl Schema {
     pub(crate) fn addressed_root_constraints(&self) -> &[Constraint] {
         match &self.document {
             DocumentShape::Outline(scope) => &scope.constraints,
-            DocumentShape::Title(title) => title.children.constraints(),
+            DocumentShape::Title(title) => title.children().constraints(),
         }
     }
 }
@@ -99,45 +91,60 @@ pub enum DocumentShape {
 }
 
 /// The sugar form's exact-one or forbidden title slot.
+///
+/// The variants couple title cardinality, matcher presence, and source-form
+/// provenance so combinations that no schema spelling can produce cannot be
+/// constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TitleSlot {
-    /// `None` represents `title: null`; otherwise every `h1` occupies this
-    /// exact-one slot and is checked against the matcher.
-    pub matcher: Option<Matcher>,
-    /// The exposed child scope written with top-level child-scope keys.
-    pub children: ChildScope,
-    /// Whether the title was explicit, implied by bare `sections`, or null.
-    pub provenance: OutlineProvenance,
+pub enum TitleSlot {
+    /// Exactly one `h1` is required and checked against `matcher`.
+    Required {
+        /// The normalized title matcher; implied titles use [`Matcher::Any`].
+        matcher: Matcher,
+        /// Whether the matcher was spelled or implied by bare `sections`.
+        spelled: OutlineProvenance,
+        /// The exposed child scope written with top-level child-scope keys.
+        children: ChildScope,
+    },
+    /// `title: null`: every `h1` is forbidden.
+    Forbidden {
+        /// The exposed child scope written with top-level child-scope keys.
+        children: ChildScope,
+    },
 }
 
-/// The surface form a schema used to declare its `h1` level.
+impl TitleSlot {
+    /// Returns the exposed child scope for either title policy.
+    pub fn children(&self) -> &ChildScope {
+        match self {
+            Self::Required { children, .. } | Self::Forbidden { children } => children,
+        }
+    }
+
+    pub(crate) fn children_mut(&mut self) -> &mut ChildScope {
+        match self {
+            Self::Required { children, .. } | Self::Forbidden { children } => children,
+        }
+    }
+}
+
+/// How a required sugar-form title matcher entered the schema.
 ///
 /// The loader normalizes each source form into [`DocumentShape`]. The
-/// provenance records which sugar spelling produced it: the
-/// validator keeps `missing-title` and the wrong-title diagnostics anchored at
-/// [`SchemaNode::Title`] for the sugar forms, preserves their lax handling of
-/// documents without an `h1`, and gives `outline:` and `title: null` their own
-/// semantics.
+/// The validator uses this distinction to preserve the declared matcher while
+/// source anchoring remains in [`SchemaLocations`](crate::SchemaLocations).
 ///
 /// [`SchemaNode::Title`]: crate::SchemaNode::Title
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutlineProvenance {
-    /// `title: <matcher>` with `sections:` — sugar for a single required
-    /// `h1` rule whose child rules are the top-level `sections` list.
-    Title,
-    /// `sections:` without `title:` — desugars like [`Self::Title`] with an
+    /// A `title: <matcher>` declaration supplied the matcher.
+    Spelled,
+    /// `sections:` without `title:` — desugars with an
     /// any-text matcher: `title: "*"` implied, so the document must have
     /// exactly one `h1`. A document with none writes `title: null` into its
     /// schema instead. With no `title:` key to blame, title diagnostics
     /// anchor on the `sections` key — the spelling that implied the rule.
-    BareSections,
-    /// `title: null` — the document is declared to have no `h1`. Desugars to
-    /// a denied any-text `h1` rule: a present `h1` is `not-allowed`, and the
-    /// `sections` list describes the document's top-level `h2` headers.
-    NoTitle,
-    /// The general `outline:` form, whose declared scope is exactly what the
-    /// source spelled.
-    Outline,
+    ImpliedBySections,
 }
 
 /// The document's normalized frontmatter policy.
@@ -699,9 +706,32 @@ pub enum ScopeMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Cardinality {
     /// Inclusive minimum number of matching sibling headings.
-    pub min: u32,
+    min: u32,
     /// Inclusive maximum number of matching sibling headings.
-    pub max: UpperBound,
+    max: UpperBound,
+}
+
+impl Cardinality {
+    /// Constructs a cardinality when its inclusive range is nonempty.
+    ///
+    /// A bounded maximum must be nonzero and at least `min`.
+    pub fn new(min: u32, max: UpperBound) -> Option<Self> {
+        match max {
+            UpperBound::Bounded(0) => None,
+            UpperBound::Bounded(value) if value < min => None,
+            UpperBound::Bounded(_) | UpperBound::Unbounded => Some(Self { min, max }),
+        }
+    }
+
+    /// Returns the inclusive minimum occurrence count.
+    pub fn min(self) -> u32 {
+        self.min
+    }
+
+    /// Returns the inclusive maximum occurrence count.
+    pub fn max(self) -> UpperBound {
+        self.max
+    }
 }
 
 /// The inclusive upper bound of a rule's cardinality.

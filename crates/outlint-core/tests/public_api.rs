@@ -153,19 +153,19 @@ constraints:
     let outlint_core::DocumentShape::Title(title) = &loaded.schema.document else {
         panic!("expected title")
     };
-    let guide = &title.children.rules()[0];
+    let guide = &title.children().rules()[0];
     assert_eq!(guide.id.as_ref().map(|id| id.as_str()), Some("guide"));
     let outlint_core::Matcher::Glob(glob) = &guide.matcher else {
         panic!("expected a glob matcher")
     };
     assert_eq!(glob.as_str(), "Guide*");
 
-    let outlint_core::Matcher::Regex(regex) = &title.children.rules()[1].matcher else {
+    let outlint_core::Matcher::Regex(regex) = &title.children().rules()[1].matcher else {
         panic!("expected a regex matcher")
     };
     assert_eq!(regex.as_str(), "Usage");
 
-    let outlint_core::ChildScope::Declared(scope) = &title.children else {
+    let outlint_core::ChildScope::Declared(scope) = title.children() else {
         panic!("expected declared scope")
     };
     let outlint_core::Constraint::OneOf(items) = &scope.constraints[0] else {
@@ -200,6 +200,18 @@ fn semantic_options_default_to_the_specification_values() {
     assert!(customized.allow_skipped_levels);
 }
 
+#[test]
+fn cardinality_construction_enforces_its_normalized_range() {
+    use outlint_core::{Cardinality, UpperBound};
+
+    assert!(Cardinality::new(0, UpperBound::Bounded(0)).is_none());
+    assert!(Cardinality::new(2, UpperBound::Bounded(1)).is_none());
+    let cardinality = Cardinality::new(2, UpperBound::Unbounded)
+        .expect("an unbounded range with a finite minimum is valid");
+    assert_eq!(cardinality.min(), 2);
+    assert_eq!(cardinality.max(), UpperBound::Unbounded);
+}
+
 /// Pins the typed-value declaration surface a schema without `captures` or
 /// `order` must expose: present, inspectable, and empty. §2.1 makes both
 /// declarations optional, so the absent case is a shape a caller meets on
@@ -224,7 +236,7 @@ sections:
     let outlint_core::DocumentShape::Title(title) = &loaded.schema.document else {
         panic!("expected title")
     };
-    let guide = &title.children.rules()[0];
+    let guide = &title.children().rules()[0];
     assert!(guide.captures.is_empty());
     assert!(guide.order.is_empty());
 }
@@ -349,7 +361,7 @@ sections:
     let outlint_core::DocumentShape::Title(title) = &loaded.schema.document else {
         panic!("expected title")
     };
-    let rule = &title.children.rules()[0];
+    let rule = &title.children().rules()[0];
     let captures = rule
         .captures
         .iter()

@@ -94,7 +94,8 @@ pub fn load_schema_with_resources(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSchema {
-    version: i64,
+    #[serde(rename = "version")]
+    _version: Value,
     title: Option<String>,
     #[serde(default)]
     options: RawOptions,
@@ -340,6 +341,7 @@ impl Loader {
             }
         };
 
+        let version = self.classify_version(&value);
         self.validate_document_shape(&value);
         if !self.errors.is_empty() {
             return self.failure();
@@ -368,18 +370,6 @@ impl Loader {
             }
         };
 
-        let version_range = self.range(RangeKey::DocumentField("version".into()));
-        let version = if raw.version == 2 {
-            Some(SchemaVersion::V2)
-        } else {
-            self.error_at(
-                SchemaErrorKind::UnsupportedVersion,
-                version_range,
-                format!("unsupported schema version {}; expected 2", raw.version),
-            );
-            None
-        };
-
         let frontmatter = self.build_frontmatter(raw.frontmatter, frontmatter_declared);
 
         let options = Self::build_options(&raw.options);
@@ -398,13 +388,6 @@ impl Loader {
             )
             .map(DocumentShape::Outline)
         } else {
-            let provenance = if title_null {
-                OutlineProvenance::NoTitle
-            } else if raw.title.is_some() {
-                OutlineProvenance::Title
-            } else {
-                OutlineProvenance::BareSections
-            };
             let title = raw.title.as_deref().and_then(|matcher| {
                 let range = self.range(RangeKey::DocumentField("title".into()));
                 self.nodes.insert(SchemaNode::Title, range);
@@ -414,7 +397,7 @@ impl Loader {
                 let range = self.range(RangeKey::DocumentField("title".into()));
                 self.nodes.insert(SchemaNode::Title, range);
             }
-            if provenance == OutlineProvenance::BareSections {
+            if !title_null && raw.title.is_none() {
                 // Bare `sections:` implies `title: "*"`, but there is no
                 // `title:` key to anchor title diagnostics on. The `sections`
                 // key is the spelling that implied the rule, so it carries
@@ -433,14 +416,18 @@ impl Loader {
                 None,
             );
             children.map(|children| {
-                DocumentShape::Title(TitleSlot {
-                    matcher: if title_null {
-                        None
-                    } else {
-                        Some(title.unwrap_or(Matcher::Any))
-                    },
-                    children,
-                    provenance,
+                DocumentShape::Title(if title_null {
+                    TitleSlot::Forbidden { children }
+                } else {
+                    TitleSlot::Required {
+                        matcher: title.unwrap_or(Matcher::Any),
+                        spelled: if raw.title.is_some() {
+                            OutlineProvenance::Spelled
+                        } else {
+                            OutlineProvenance::ImpliedBySections
+                        },
+                        children,
+                    }
                 })
             })
         };
@@ -497,6 +484,29 @@ impl Loader {
                 nodes: self.nodes,
             },
         })
+    }
+
+    /// Classifies a present integer version independently of other shape
+    /// errors, preserving serde_json's arbitrary-precision spelling.
+    fn classify_version(&mut self, value: &Value) -> Option<SchemaVersion> {
+        let mapping = value.as_object()?;
+        let raw = mapping.get("version")?;
+        if !self::shape::is_yaml_integer(raw) {
+            return None;
+        }
+        if raw
+            .as_number()
+            .is_some_and(|number| number.to_string() == "2")
+        {
+            Some(SchemaVersion::V2)
+        } else {
+            self.error_at(
+                SchemaErrorKind::UnsupportedVersion,
+                self.range(RangeKey::DocumentField("version".into())),
+                format!("unsupported schema version {raw}; expected 2"),
+            );
+            None
+        }
     }
 
     /// Reports a refusal from the YAML engine against the source's bytes.

@@ -9,8 +9,8 @@ use crate::{
     ByteOffset, CaptureName, CapturePath, Cardinality, ChildScope, Constraint, ConstraintIndex,
     ConstraintPath, DeclaredScope, Document, DocumentFrontmatter, DocumentShape, ExtrasMode,
     FrontmatterAnchor, FrontmatterLocation, GuardIndex, GuardPath, HeaderLevel, Heading,
-    HeadingLocation, Matcher, OrderEntryPath, OrderIndex, OutlineProvenance, RuleIndex, RulePath,
-    Schema, SchemaNode, ScopeMode, ScopePath, Section, SectionRule, TextRange, UpperBound,
+    HeadingLocation, Matcher, OrderEntryPath, OrderIndex, RuleIndex, RulePath, Schema, SchemaNode,
+    ScopeMode, ScopePath, Section, SectionRule, TextRange, TitleSlot, UpperBound,
 };
 
 use crate::locator::QueryLimitExceeded;
@@ -37,15 +37,31 @@ pub(super) fn validate_document(
     document: &Document,
     plan: &ValidationPlan,
 ) -> Result<Vec<Diagnostic>, ValidationOperationalError> {
-    Validator::new(schema, document)
+    let mut validator = Validator::new(schema, document);
+    validator
         .run(plan)
         .map_err(|limit| ValidationOperationalError::new(limit.to_string()))
+}
+
+#[cfg(test)]
+pub(super) fn guard_evaluation_count(
+    schema: &Schema,
+    document: &Document,
+    plan: &ValidationPlan,
+) -> Result<usize, ValidationOperationalError> {
+    let mut validator = Validator::new(schema, document);
+    validator
+        .run(plan)
+        .map_err(|limit| ValidationOperationalError::new(limit.to_string()))?;
+    Ok(validator.guard_evaluations)
 }
 
 struct Validator<'a> {
     schema: &'a Schema,
     document: &'a Document,
     diagnostics: Vec<Diagnostic>,
+    #[cfg(test)]
+    guard_evaluations: usize,
 }
 
 struct BindScopeInput<'a, 'd> {
@@ -81,10 +97,12 @@ impl<'a> Validator<'a> {
             schema,
             document,
             diagnostics: Vec::new(),
+            #[cfg(test)]
+            guard_evaluations: 0,
         }
     }
 
-    fn run(mut self, plan: &ValidationPlan) -> Result<Vec<Diagnostic>, QueryLimitExceeded> {
+    fn run(&mut self, plan: &ValidationPlan) -> Result<Vec<Diagnostic>, QueryLimitExceeded> {
         self.validate_frontmatter(plan.frontmatter.as_ref());
         // §8 evaluates the declared frontmatter captures once, straight after
         // the block's own checks and before the outline walk. §2.3 keeps this
@@ -106,11 +124,8 @@ impl<'a> Validator<'a> {
         // contains.
         let root_level = match &self.schema.document {
             DocumentShape::Outline(_) => 0,
-            DocumentShape::Title(title) => match title.provenance {
-                OutlineProvenance::NoTitle => 1,
-                OutlineProvenance::Title | OutlineProvenance::BareSections => u8::from(!has_h1),
-                OutlineProvenance::Outline => 0,
-            },
+            DocumentShape::Title(TitleSlot::Forbidden { .. }) => 1,
+            DocumentShape::Title(TitleSlot::Required { .. }) => u8::from(!has_h1),
         };
         if !self.schema.options.allow_skipped_levels {
             // Structural and schema-independent: the walk covers the whole
@@ -129,15 +144,14 @@ impl<'a> Validator<'a> {
                 self.validate_sugar_root(&top, has_h1, title, plan, &values)?
             }
         }
-        Ok(self.diagnostics)
+        Ok(std::mem::take(&mut self.diagnostics))
     }
 
     /// Binds the general form's outline scope: `h1` rules on the virtual root.
     ///
-    /// Ordinary scope semantics apply — the outline scope is open unless a
-    /// rule closes its own, an unmatched `h1` is nobody's business, and
-    /// top-level constraints attach here, targeting the document since the
-    /// virtual root has no header to name.
+    /// Ordinary exhaustive scope semantics apply, and top-level constraints
+    /// attach here, targeting the document since the virtual root has no
+    /// header to name.
     fn validate_outline_root(
         &mut self,
         top: &[PathedSection<'a>],
@@ -198,38 +212,10 @@ impl<'a> Validator<'a> {
         frontmatter: &FrontmatterValues<'a>,
     ) -> Result<(), QueryLimitExceeded> {
         let schema = self.schema;
-        let provenance = title.provenance;
-
-        if provenance == OutlineProvenance::NoTitle || !has_h1 {
-            // The headless scope: the virtual root stands in at level 1 and
-            // the `sections` rules bind the document's top-level `h2`s.
-            // One scope instance, so the legacy document voice is unambiguous.
-            // Bare `sections:` implies `title: "*"`, so a headless document
-            // is missing its title there exactly as under a spelled title.
-            if provenance != OutlineProvenance::NoTitle {
-                self.emit(
-                    Diagnostic {
-                        id: DiagnosticId::MissingTitle,
-                        // A missing `h1` belongs to the document root's scope,
-                        // whose virtual parent has no header path.
-                        target: DiagnosticTarget::MissingHeader {
-                            parent: HeaderPath::default(),
-                            matcher: matcher_label(title.matcher.as_ref().unwrap_or(&Matcher::Any)),
-                        },
-                        location: root_location(),
-                        schema_node: Some(SchemaNode::Title),
-                        involved_headers: Vec::new(),
-                        references: Vec::new(),
-                        message: "the document has no required title".into(),
-                    },
-                    None,
-                    false,
-                );
-            }
-            if provenance == OutlineProvenance::NoTitle {
-                // `title: null` desugars to a denied `h1` rule: a present
-                // `h1` is rejected wholesale, its subtree validated no
-                // further, like any header a deny rule matches.
+        let (matcher, title_children) = match title {
+            TitleSlot::Forbidden { children } => {
+                // The headless scope: the virtual root stands in at level 1
+                // and `sections` binds the document's top-level `h2`s.
                 for pathed in top {
                     if pathed.section.heading.level == HeaderLevel::H1 {
                         self.emit_present(
@@ -241,10 +227,34 @@ impl<'a> Validator<'a> {
                         );
                     }
                 }
+                let admitted =
+                    admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
+                return self.bind_sugar_sections(&admitted, children, frontmatter, plan, None);
             }
+            TitleSlot::Required {
+                matcher, children, ..
+            } => (matcher, children),
+        };
+        if !has_h1 {
+            self.emit(
+                Diagnostic {
+                    id: DiagnosticId::MissingTitle,
+                    target: DiagnosticTarget::MissingHeader {
+                        parent: HeaderPath::default(),
+                        matcher: matcher_label(matcher),
+                    },
+                    location: root_location(),
+                    schema_node: Some(SchemaNode::Title),
+                    involved_headers: Vec::new(),
+                    references: Vec::new(),
+                    message: "the document has no required title".into(),
+                },
+                None,
+                false,
+            );
             let admitted =
                 admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
-            return self.bind_sugar_sections(&admitted, &title.children, frontmatter, plan, None);
+            return self.bind_sugar_sections(&admitted, title_children, frontmatter, plan, None);
         }
 
         // The titled scope: every `h1` occupies the synthesized rule, a
@@ -328,7 +338,7 @@ impl<'a> Validator<'a> {
                 children = merged;
             }
             let owner = attribute.then_some((&occurrence.section.heading, &occurrence.path));
-            self.bind_sugar_sections(&children, &title.children, frontmatter, plan, owner)?;
+            self.bind_sugar_sections(&children, title_children, frontmatter, plan, owner)?;
         }
         Ok(())
     }
@@ -616,11 +626,8 @@ impl<'a> Validator<'a> {
         let allow_skipped = self.schema.options.allow_skipped_levels;
         let mut retained = Vec::new();
         for pathed in sections {
-            let guarded = prepared_guards
-                .iter()
-                .enumerate()
-                .find(|(_, guard)| guard.matches(&pathed.section.heading.text));
-            if let Some((guard_index, _)) = guarded {
+            let guarded = self.first_matching_guard(prepared_guards, &pathed.section.heading.text);
+            if let Some(guard_index) = guarded {
                 self.emit_present(
                     DiagnosticId::NotAllowed,
                     pathed.path.clone(),
@@ -636,7 +643,7 @@ impl<'a> Validator<'a> {
             }
         }
         let columns = rules.len();
-        let matrix = retained
+        let mut matrix = retained
             .iter()
             .flat_map(|pathed| {
                 prepared_rules
@@ -645,23 +652,23 @@ impl<'a> Validator<'a> {
             })
             .collect::<Vec<_>>();
         if scope.extras == ExtrasMode::Anywhere {
+            let retained_rows = matrix
+                .chunks(columns.max(1))
+                .map(|row| row.iter().any(|value| *value))
+                .collect::<Vec<_>>();
             let mut row = 0usize;
             retained.retain(|_| {
-                let matched = matrix
-                    .get(row.saturating_mul(columns)..row.saturating_add(1).saturating_mul(columns))
-                    .is_some_and(|values| values.iter().any(|value| *value));
-                row += 1;
-                matched
+                let keep = retained_rows.get(row).copied().unwrap_or(false);
+                row = row.saturating_add(1);
+                keep
             });
+            matrix = matrix
+                .chunks(columns.max(1))
+                .zip(retained_rows)
+                .filter(|(_, keep)| *keep)
+                .flat_map(|(row, _)| row.iter().copied())
+                .collect();
         }
-        let matrix = retained
-            .iter()
-            .flat_map(|pathed| {
-                prepared_rules
-                    .iter()
-                    .map(move |rule| rule.matcher.matches(&pathed.section.heading.text))
-            })
-            .collect::<Vec<_>>();
         let assignment = match scope.mode {
             ScopeMode::Ordered => super::sequence::assign(rules, &matrix, retained.len()),
             ScopeMode::Unordered => {
@@ -798,6 +805,23 @@ impl<'a> Validator<'a> {
             occurrences,
             singular,
         }
+    }
+
+    fn first_matching_guard(
+        &mut self,
+        guards: &[super::prepare::PreparedMatcher],
+        heading: &str,
+    ) -> Option<usize> {
+        for (index, guard) in guards.iter().enumerate() {
+            #[cfg(test)]
+            {
+                self.guard_evaluations = self.guard_evaluations.saturating_add(1);
+            }
+            if guard.matches(heading) {
+                return Some(index);
+            }
+        }
+        None
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -965,7 +989,7 @@ impl<'a> Validator<'a> {
             parent_path,
         } = check;
         let schema_node = Some(SchemaNode::Rule(rule_path(schema_scope, rule_index)));
-        if count < cardinality.min as usize {
+        if count < cardinality.min() as usize {
             let id = if count == 0 {
                 DiagnosticId::MissingSection
             } else {
@@ -988,14 +1012,14 @@ impl<'a> Validator<'a> {
                     references: Vec::new(),
                     message: format!(
                         "matched {count} sections, but at least {} are required",
-                        cardinality.min
+                        cardinality.min()
                     ),
                 },
                 None,
                 false,
             );
         }
-        let UpperBound::Bounded(max) = cardinality.max else {
+        let UpperBound::Bounded(max) = cardinality.max() else {
             return;
         };
         if count <= max as usize {

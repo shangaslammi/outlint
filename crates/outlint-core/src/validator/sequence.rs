@@ -20,6 +20,70 @@ pub(super) struct Assignment {
     pub(super) recovery_cost: RecoveryCost,
 }
 
+struct Table<T> {
+    cells: Vec<T>,
+    rows: usize,
+    columns: usize,
+}
+
+impl<T: Clone> Table<T> {
+    fn filled(rows: usize, columns: usize, value: T) -> Option<Self> {
+        let len = rows.checked_mul(columns)?;
+        Some(Self {
+            cells: vec![value; len],
+            rows,
+            columns,
+        })
+    }
+}
+
+impl<T> Table<T> {
+    fn cell(&self, row: usize, column: usize) -> Option<&T> {
+        if row >= self.rows || column >= self.columns {
+            return None;
+        }
+        row.checked_mul(self.columns)
+            .and_then(|offset| offset.checked_add(column))
+            .and_then(|index| self.cells.get(index))
+    }
+
+    fn cell_mut(&mut self, row: usize, column: usize) -> Option<&mut T> {
+        if row >= self.rows || column >= self.columns {
+            return None;
+        }
+        row.checked_mul(self.columns)
+            .and_then(|offset| offset.checked_add(column))
+            .and_then(|index| self.cells.get_mut(index))
+    }
+}
+
+struct MatchTable<'a> {
+    cells: &'a [bool],
+    rows: usize,
+    columns: usize,
+}
+
+impl<'a> MatchTable<'a> {
+    fn new(cells: &'a [bool], rows: usize, columns: usize) -> Option<Self> {
+        (rows.checked_mul(columns)? == cells.len()).then_some(Self {
+            cells,
+            rows,
+            columns,
+        })
+    }
+
+    fn matches(&self, row: usize, column: usize) -> bool {
+        if row >= self.rows || column >= self.columns {
+            return false;
+        }
+        row.checked_mul(self.columns)
+            .and_then(|offset| offset.checked_add(column))
+            .and_then(|index| self.cells.get(index))
+            .copied()
+            .unwrap_or(false)
+    }
+}
+
 pub(super) fn assign(rules: &[SectionRule], matches: &[bool], headings: usize) -> Assignment {
     let mut work = 0;
     assign_counted(rules, matches, headings, &mut work)
@@ -31,7 +95,18 @@ fn assign_counted(
     headings: usize,
     work: &mut usize,
 ) -> Assignment {
-    if let Some((assignment, counts)) = accepted_assignment(rules, matches, headings, work) {
+    let Some(matches) = MatchTable::new(matches, headings, rules.len()) else {
+        return Assignment {
+            rules: vec![None; headings],
+            counts: vec![0; rules.len()],
+            accepted: false,
+            recovery_cost: RecoveryCost {
+                unassigned: headings,
+                wildcard: 0,
+            },
+        };
+    };
+    if let Some((assignment, counts)) = accepted_assignment(rules, &matches, headings, work) {
         return Assignment {
             rules: assignment,
             counts,
@@ -42,7 +117,17 @@ fn assign_counted(
             },
         };
     }
-    let (assignment, counts, recovery_cost) = recover(rules, matches, headings, work);
+    let Some((assignment, counts, recovery_cost)) = recover(rules, &matches, headings, work) else {
+        return Assignment {
+            rules: vec![None; headings],
+            counts: vec![0; rules.len()],
+            accepted: false,
+            recovery_cost: RecoveryCost {
+                unassigned: headings,
+                wildcard: 0,
+            },
+        };
+    };
     Assignment {
         rules: assignment,
         counts,
@@ -53,49 +138,55 @@ fn assign_counted(
 
 fn accepted_assignment(
     rules: &[SectionRule],
-    matches: &[bool],
+    matches: &MatchTable<'_>,
     headings: usize,
     work: &mut usize,
 ) -> Option<(Vec<Option<usize>>, Vec<usize>)> {
     let columns = rules.len();
     let width = headings.checked_add(1)?;
-    let cells = columns.checked_add(1)?.checked_mul(width)?;
-    let mut suffix = vec![None; cells];
-    let mut endpoint = vec![None; cells];
-    suffix[columns * width + headings] = Some(0usize);
+    let rows = columns.checked_add(1)?;
+    let mut suffix = Table::filled(rows, width, None)?;
+    let mut endpoint = Table::filled(rows, width, None)?;
+    *suffix.cell_mut(columns, headings)? = Some(0usize);
 
     for rule_index in (0..columns).rev() {
         let rule = rules.get(rule_index)?;
         let wildcard = usize::from(matches!(rule.matcher, Matcher::Any));
-        let min = usize::try_from(rule.cardinality.min).unwrap_or(usize::MAX);
-        let max = match rule.cardinality.max {
+        let min = usize::try_from(rule.cardinality.min()).unwrap_or(usize::MAX);
+        let max = match rule.cardinality.max() {
             UpperBound::Bounded(value) => {
                 usize::try_from(value).unwrap_or(usize::MAX).min(headings)
             }
             UpperBound::Unbounded => headings,
         };
-        let mut run_end = vec![headings; width];
+        let mut run_end = Table::filled(1, width, headings)?;
         for index in (0..headings).rev() {
             *work = work.saturating_add(1);
-            run_end[index] = if matrix(matches, columns, index, rule_index) {
-                run_end[index + 1]
+            let next = *run_end.cell(0, index.checked_add(1)?)?;
+            *run_end.cell_mut(0, index)? = if matches.matches(index, rule_index) {
+                next
             } else {
                 index
             };
         }
-        let next_row = (rule_index + 1) * width;
-        let row = rule_index * width;
         let mut deque: VecDeque<(usize, usize)> = VecDeque::new();
         let mut previous_lo = headings.saturating_add(1);
         for index in (0..=headings).rev() {
             *work = work.saturating_add(1);
             let lo = index.saturating_add(min);
-            let hi = index.saturating_add(max).min(headings).min(run_end[index]);
+            let hi = index
+                .saturating_add(max)
+                .min(headings)
+                .min(*run_end.cell(0, index)?);
             let add_high = previous_lo.min(headings.saturating_add(1));
             if lo <= headings {
                 for candidate in (lo..add_high).rev() {
                     *work = work.saturating_add(1);
-                    let Some(base) = suffix[next_row + candidate] else {
+                    let Some(base) = suffix
+                        .cell(rule_index.checked_add(1)?, candidate)
+                        .copied()
+                        .flatten()
+                    else {
                         continue;
                     };
                     let Some(weighted) = wildcard.checked_mul(candidate) else {
@@ -122,22 +213,20 @@ fn accepted_assignment(
             }
             if lo <= hi {
                 if let Some(&(chosen, key)) = deque.front() {
-                    suffix[row + index] = key.checked_sub(wildcard.saturating_mul(index));
-                    endpoint[row + index] = Some(chosen);
+                    *suffix.cell_mut(rule_index, index)? =
+                        key.checked_sub(wildcard.saturating_mul(index));
+                    *endpoint.cell_mut(rule_index, index)? = Some(chosen);
                 }
             }
         }
     }
-    suffix.first().copied().flatten()?;
+    suffix.cell(0, 0).copied().flatten()?;
     let mut assignment = vec![None; headings];
-    let mut counts = vec![0; columns];
+    let mut counts = vec![0usize; columns];
     let mut index = 0;
     for (rule_index, count) in counts.iter_mut().enumerate() {
         *work = work.saturating_add(1);
-        let chosen = endpoint
-            .get(rule_index * width + index)
-            .copied()
-            .flatten()?;
+        let chosen = endpoint.cell(rule_index, index).copied().flatten()?;
         for slot in assignment.get_mut(index..chosen)? {
             *slot = Some(rule_index);
         }
@@ -149,19 +238,18 @@ fn accepted_assignment(
 
 fn recover(
     rules: &[SectionRule],
-    matches: &[bool],
+    matches: &MatchTable<'_>,
     headings: usize,
     work: &mut usize,
-) -> (Vec<Option<usize>>, Vec<usize>, RecoveryCost) {
+) -> Option<(Vec<Option<usize>>, Vec<usize>, RecoveryCost)> {
     let columns = rules.len();
-    let width = columns + 1;
-    let mut costs = vec![
-        RecoveryCost {
-            unassigned: 0,
-            wildcard: 0
-        };
-        (headings + 1) * width
-    ];
+    let rows = headings.checked_add(1)?;
+    let width = columns.checked_add(1)?;
+    let zero = RecoveryCost {
+        unassigned: 0,
+        wildcard: 0,
+    };
+    let mut costs = Table::filled(rows, width, zero)?;
     for index in (0..=headings).rev() {
         for rule_index in (0..=columns).rev() {
             *work = work.saturating_add(1);
@@ -169,59 +257,58 @@ fn recover(
                 continue;
             }
             let mut best = None;
-            if index < headings
-                && rule_index < columns
-                && matrix(matches, columns, index, rule_index)
-            {
-                let next = costs[(index + 1) * width + rule_index];
+            if index < headings && rule_index < columns && matches.matches(index, rule_index) {
+                let next = *costs.cell(index.checked_add(1)?, rule_index)?;
                 best = Some(RecoveryCost {
                     unassigned: next.unassigned,
-                    wildcard: next.wildcard
-                        + usize::from(matches!(rules[rule_index].matcher, Matcher::Any)),
+                    wildcard: next.wildcard.saturating_add(usize::from(matches!(
+                        rules.get(rule_index).map(|rule| &rule.matcher),
+                        Some(Matcher::Any)
+                    ))),
                 });
             }
             if index < headings {
-                let next = costs[(index + 1) * width + rule_index];
+                let next = *costs.cell(index.checked_add(1)?, rule_index)?;
                 let leave = RecoveryCost {
-                    unassigned: next.unassigned + 1,
+                    unassigned: next.unassigned.saturating_add(1),
                     wildcard: next.wildcard,
                 };
                 best = Some(best.map_or(leave, |old| old.min(leave)));
             }
             if rule_index < columns {
-                let advance = costs[index * width + rule_index + 1];
+                let advance = *costs.cell(index, rule_index.checked_add(1)?)?;
                 best = Some(best.map_or(advance, |old| old.min(advance)));
             }
-            costs[index * width + rule_index] = best.unwrap_or(RecoveryCost {
-                unassigned: 0,
-                wildcard: 0,
-            });
+            *costs.cell_mut(index, rule_index)? = best.unwrap_or(zero);
         }
     }
     let mut assignment = vec![None; headings];
-    let mut counts = vec![0; columns];
+    let mut counts = vec![0usize; columns];
     let (mut index, mut rule_index) = (0, 0);
     while index < headings || rule_index < columns {
         *work = work.saturating_add(1);
-        let here = costs[index * width + rule_index];
-        if index < headings && rule_index < columns && matrix(matches, columns, index, rule_index) {
-            let next = costs[(index + 1) * width + rule_index];
+        let here = *costs.cell(index, rule_index)?;
+        if index < headings && rule_index < columns && matches.matches(index, rule_index) {
+            let next = *costs.cell(index.checked_add(1)?, rule_index)?;
             let consume = RecoveryCost {
                 unassigned: next.unassigned,
-                wildcard: next.wildcard
-                    + usize::from(matches!(rules[rule_index].matcher, Matcher::Any)),
+                wildcard: next.wildcard.saturating_add(usize::from(matches!(
+                    rules.get(rule_index).map(|rule| &rule.matcher),
+                    Some(Matcher::Any)
+                ))),
             };
             if consume == here {
-                assignment[index] = Some(rule_index);
-                counts[rule_index] += 1;
+                *assignment.get_mut(index)? = Some(rule_index);
+                let count = counts.get_mut(rule_index)?;
+                *count = (*count).saturating_add(1);
                 index += 1;
                 continue;
             }
         }
         if index < headings {
-            let next = costs[(index + 1) * width + rule_index];
+            let next = *costs.cell(index.checked_add(1)?, rule_index)?;
             if (RecoveryCost {
-                unassigned: next.unassigned + 1,
+                unassigned: next.unassigned.saturating_add(1),
                 wildcard: next.wildcard,
             }) == here
             {
@@ -229,17 +316,9 @@ fn recover(
                 continue;
             }
         }
-        rule_index += 1;
+        rule_index = rule_index.checked_add(1)?;
     }
-    (assignment, counts, costs[0])
-}
-
-fn matrix(matches: &[bool], columns: usize, row: usize, column: usize) -> bool {
-    row.checked_mul(columns)
-        .and_then(|offset| offset.checked_add(column))
-        .and_then(|index| matches.get(index))
-        .copied()
-        .unwrap_or(false)
+    Some((assignment, counts, *costs.cell(0, 0)?))
 }
 
 #[cfg(test)]
@@ -249,11 +328,20 @@ mod tests {
     use std::cmp::Ordering;
     use std::collections::BTreeMap;
 
+    fn matrix(matches: &[bool], columns: usize, row: usize, column: usize) -> bool {
+        MatchTable::new(
+            matches,
+            matches.len().checked_div(columns).unwrap_or(0),
+            columns,
+        )
+        .is_some_and(|table| table.matches(row, column))
+    }
+
     fn rule(matcher: Matcher, min: u32, max: UpperBound) -> SectionRule {
         SectionRule {
             id: None,
             matcher,
-            cardinality: Cardinality { min, max },
+            cardinality: Cardinality::new(min, max).expect("test cardinality is valid"),
             children: ChildScope::Omitted,
             captures: BTreeMap::new(),
             order: Vec::new(),
@@ -428,11 +516,11 @@ mod tests {
                 return;
             }
             let rule = &rules[rule_index];
-            let max = match rule.cardinality.max {
+            let max = match rule.cardinality.max() {
                 UpperBound::Bounded(value) => usize::try_from(value).unwrap_or(usize::MAX),
                 UpperBound::Unbounded => headings,
             };
-            for count in usize::try_from(rule.cardinality.min).unwrap_or(usize::MAX)
+            for count in usize::try_from(rule.cardinality.min()).unwrap_or(usize::MAX)
                 ..=max.min(headings.saturating_sub(heading_index))
             {
                 let all_match = (heading_index..heading_index + count)
@@ -571,12 +659,18 @@ mod tests {
         let cardinalities = [
             (0, UpperBound::Bounded(1)),
             (1, UpperBound::Bounded(1)),
+            (0, UpperBound::Bounded(2)),
+            (2, UpperBound::Bounded(2)),
+            (4, UpperBound::Bounded(4)),
+            (0, UpperBound::Bounded(5)),
+            (2, UpperBound::Bounded(5)),
             (0, UpperBound::Unbounded),
         ];
         for headings in 0..=3 {
             for columns in 0..=3 {
                 let matrix_count = 1usize << (headings * columns);
-                let cardinality_count = 3usize.pow(u32::try_from(columns).unwrap_or(0));
+                let cardinality_count =
+                    cardinalities.len().pow(u32::try_from(columns).unwrap_or(0));
                 for matrix_bits in 0..matrix_count {
                     let matches = (0..headings * columns)
                         .map(|bit| matrix_bits & (1 << bit) != 0)
@@ -613,17 +707,26 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_heavy_work_is_bounded_by_the_dp_table_size() {
-        let headings = 257;
-        let columns = 129;
-        let rules = (0..columns)
-            .map(|_| rule(Matcher::Any, 0, UpperBound::Unbounded))
-            .collect::<Vec<_>>();
-        let matches = vec![true; headings * columns];
-        let mut work = 0;
-        let assignment = assign_counted(&rules, &matches, headings, &mut work);
+    fn wildcard_heavy_work_scales_with_each_dp_dimension() {
+        // §3.7: independently varying H and R stays within one constant
+        // multiple of the (H+1)(R+1) table size.
+        for (headings, columns) in [
+            (1, 129),
+            (17, 129),
+            (257, 129),
+            (257, 1),
+            (257, 17),
+            (257, 129),
+        ] {
+            let rules = (0..columns)
+                .map(|_| rule(Matcher::Any, 0, UpperBound::Unbounded))
+                .collect::<Vec<_>>();
+            let matches = vec![true; headings * columns];
+            let mut work = 0;
+            let assignment = assign_counted(&rules, &matches, headings, &mut work);
 
-        assert!(assignment.accepted);
-        assert!(work <= 8 * (headings + 1) * (columns + 1));
+            assert!(assignment.accepted);
+            assert!(work <= 8 * (headings + 1) * (columns + 1));
+        }
     }
 }

@@ -19,11 +19,11 @@ use crate::locator::{parse_locator, ParsedLocator, UnboundOutlineLocator};
 use crate::schema::resolved_anchor;
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
-    AtLeastTwo, BoundRuleStep, CaptureName, Cardinality, Constraint, ConstraintIndex,
-    ConstraintPath, FrontmatterScalar, NonEmpty, Proposition, RefAnchor,
-    ResolvedFrontmatterCapture, ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator,
-    ResolvedRuleCaptureLocator, ResolvedRuleLocator, RuleIndex, Schema, SchemaErrorKind, ScopePath,
-    SectionRule, SourceRange, UpperBound,
+    AtLeastTwo, BoundRuleStep, CaptureName, Constraint, ConstraintIndex, ConstraintPath,
+    FrontmatterScalar, NonEmpty, Proposition, RefAnchor, ResolvedFrontmatterCapture,
+    ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator, ResolvedRuleCaptureLocator,
+    ResolvedRuleLocator, RuleIndex, Schema, SchemaErrorKind, ScopePath, SectionRule, SourceRange,
+    UpperBound,
 };
 
 use super::{Loader, RangeKey};
@@ -737,13 +737,7 @@ fn query_identity(proposition: &ResolvedFrontmatterQuery, match_case: bool) -> R
 
 /// Whether a rule's effective maximum makes an unnarrowed step singular.
 fn is_statically_singular(rule: &SectionRule) -> bool {
-    matches!(
-        rule.cardinality,
-        Cardinality {
-            max: UpperBound::Bounded(0 | 1),
-            ..
-        }
-    )
+    matches!(rule.cardinality.max(), UpperBound::Bounded(0 | 1))
 }
 
 /// Reduces a step's selector to the occurrence it can actually denote.
@@ -794,13 +788,12 @@ fn attachment_identity(schema: &Schema, scope: &ScopePath) -> Vec<CanonicalStep>
 /// order.
 ///
 /// The empty path is the addressed root — the outline scope or the sugar's
-/// `sections` scope — which follows `options.ordered_sections`, as the
-/// synthesized title rule does.
+/// `sections` scope — and every declared scope carries its own local mode.
 fn scope_is_ordered(schema: &Schema, structural_scope: &[CanonicalStep]) -> bool {
     let mut rules = schema.addressed_root_rules();
     let mut ordered = match &schema.document {
         crate::DocumentShape::Outline(scope) => scope.mode == crate::ScopeMode::Ordered,
-        crate::DocumentShape::Title(title) => match &title.children {
+        crate::DocumentShape::Title(title) => match title.children() {
             crate::ChildScope::Declared(scope) => scope.mode == crate::ScopeMode::Ordered,
             _ => true,
         },
@@ -855,7 +848,7 @@ pub(super) fn constraints_mut<'a>(
 ) -> Option<&'a mut Vec<Constraint>> {
     let root = match &mut schema.document {
         crate::DocumentShape::Outline(root) => root,
-        crate::DocumentShape::Title(title) => match &mut title.children {
+        crate::DocumentShape::Title(title) => match title.children_mut() {
             crate::ChildScope::Declared(root) => root,
             _ => return None,
         },

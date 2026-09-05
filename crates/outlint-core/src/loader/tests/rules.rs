@@ -27,16 +27,27 @@ forbid_sections:
     assert!(!schema.options.match_case);
     assert!(schema.options.strip_inline_markup);
     assert!(!schema.options.allow_skipped_levels);
-    let rules = schema.addressed_root_rules();
+    let DocumentShape::Title(crate::TitleSlot::Required {
+        matcher: Matcher::Any,
+        spelled: OutlineProvenance::ImpliedBySections,
+        children: crate::ChildScope::Declared(scope),
+    }) = &schema.document
+    else {
+        panic!("bare sections must normalize to an implied title and declared child scope")
+    };
+    let rules = &scope.rules;
     assert_eq!(rules[0].id, Some(RuleId("api-reference".into())));
     assert_eq!(
         rules[0].cardinality,
-        Cardinality {
-            min: 1,
-            max: UpperBound::Bounded(1)
-        }
+        Cardinality::new(1, UpperBound::Bounded(1)).expect("singleton is valid")
     );
-    assert_eq!(schema.document, schema.document.clone());
+    assert_eq!(rules[1].id, Some(RuleId("api".into())));
+    assert_eq!(
+        rules[1].matcher,
+        Matcher::Regex(RegexPattern("API: .+".into()))
+    );
+    assert_eq!(scope.guards.len(), 1);
+    assert_eq!(scope.guards[0].matcher, Matcher::Any);
 }
 
 #[test]
@@ -227,12 +238,10 @@ fn title_null_declares_a_document_without_h1() {
     let DocumentShape::Title(title) = &loaded.schema.document else {
         panic!("expected title form")
     };
-    assert!(title.matcher.is_none());
-    assert_eq!(title.children.rules().len(), 1);
-    assert_eq!(
-        loaded.schema.outline_provenance(),
-        OutlineProvenance::NoTitle
-    );
+    let crate::TitleSlot::Forbidden { children } = title else {
+        panic!("title: null must be forbidden")
+    };
+    assert_eq!(children.rules().len(), 1);
     assert_eq!(
         source_slice(
             source,
@@ -249,9 +258,21 @@ fn title_null_declares_a_document_without_h1() {
 #[test]
 fn sugar_forms_carry_their_provenance() {
     let titled = valid("version: 2\ntitle: Doc\nsections: []\n");
-    assert_eq!(titled.outline_provenance(), OutlineProvenance::Title);
+    assert!(matches!(
+        titled.document,
+        DocumentShape::Title(crate::TitleSlot::Required {
+            spelled: OutlineProvenance::Spelled,
+            ..
+        })
+    ));
     let bare = valid("version: 2\nsections: []\n");
-    assert_eq!(bare.outline_provenance(), OutlineProvenance::BareSections);
+    assert!(matches!(
+        bare.document,
+        DocumentShape::Title(crate::TitleSlot::Required {
+            spelled: OutlineProvenance::ImpliedBySections,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -266,17 +287,14 @@ outline:
 "#;
     let loaded = load_schema(source).expect("a single-rule outline loads");
     let schema = &loaded.schema;
-    assert_eq!(schema.outline_provenance(), OutlineProvenance::Outline);
+    assert!(matches!(schema.document, DocumentShape::Outline(_)));
     assert_eq!(
         schema.outline()[0].matcher,
         Matcher::Exact(ExactText("Part".into()))
     );
     assert_eq!(
         schema.outline()[0].cardinality,
-        Cardinality {
-            min: 1,
-            max: UpperBound::Bounded(1)
-        }
+        Cardinality::new(1, UpperBound::Bounded(1)).expect("singleton is valid")
     );
     assert_eq!(
         schema.outline()[0].children.rules()[0].matcher,
@@ -346,8 +364,8 @@ outline:
       - any_of: [overview, second]
 "#,
     );
-    assert_eq!(sugar.outline_provenance(), OutlineProvenance::Title);
-    assert_eq!(general.outline_provenance(), OutlineProvenance::Outline);
+    assert!(matches!(sugar.document, DocumentShape::Title(_)));
+    assert!(matches!(general.document, DocumentShape::Outline(_)));
     assert_ne!(sugar, general);
 }
 
@@ -365,10 +383,7 @@ outline:
     assert_eq!(schema.outline().len(), 2);
     assert_eq!(
         schema.outline()[0].cardinality,
-        Cardinality {
-            min: 1,
-            max: UpperBound::Unbounded
-        }
+        Cardinality::new(1, UpperBound::Unbounded).expect("unbounded repeat is valid")
     );
     assert_eq!(schema.outline()[1].id, Some(RuleId("appendix".into())));
 }
@@ -484,19 +499,13 @@ fn outline_rules_take_every_cardinality_spelling() {
     let schema = valid("version: 2\noutline:\n  - match: Doc\n    repeat: \"1..1\"\n");
     assert_eq!(
         schema.outline()[0].cardinality,
-        Cardinality {
-            min: 1,
-            max: UpperBound::Bounded(1)
-        }
+        Cardinality::new(1, UpperBound::Bounded(1)).expect("singleton is valid")
     );
     // Exact matchers use the exact-one default.
     let default = valid("version: 2\noutline:\n  - match: Doc\n");
     assert_eq!(
         default.outline()[0].cardinality,
-        Cardinality {
-            min: 1,
-            max: UpperBound::Bounded(1)
-        }
+        Cardinality::new(1, UpperBound::Bounded(1)).expect("singleton is valid")
     );
 }
 
@@ -624,10 +633,8 @@ sections:
     );
     assert_eq!(
         schema.addressed_root_rules()[0].cardinality,
-        Cardinality {
-            min: u32::MAX,
-            max: UpperBound::Bounded(u32::MAX)
-        }
+        Cardinality::new(u32::MAX, UpperBound::Bounded(u32::MAX))
+            .expect("equal u32 bounds are valid")
     );
     let kinds = error_kinds(
         r#"
@@ -646,7 +653,7 @@ fn unordered_is_local_to_the_declared_scope() {
     let DocumentShape::Title(title) = schema.document else {
         panic!("expected title form")
     };
-    let crate::ChildScope::Declared(scope) = title.children else {
+    let crate::ChildScope::Declared(scope) = title.children() else {
         panic!("expected declared scope")
     };
     assert_eq!(scope.mode, crate::ScopeMode::Unordered);
@@ -689,7 +696,7 @@ fn guards_and_declared_scope_modes_normalize_separately() {
     let DocumentShape::Title(title) = schema.document else {
         panic!("expected title")
     };
-    let crate::ChildScope::Declared(scope) = title.children else {
+    let crate::ChildScope::Declared(scope) = title.children() else {
         panic!("expected declared scope")
     };
     assert_eq!(scope.guards.len(), 1);
@@ -700,7 +707,7 @@ fn guards_and_declared_scope_modes_normalize_separately() {
     let DocumentShape::Title(title) = guard_only.document else {
         panic!("expected title")
     };
-    assert!(matches!(title.children, crate::ChildScope::GuardsOnly(_)));
+    assert!(matches!(title.children(), crate::ChildScope::GuardsOnly(_)));
 }
 
 #[test]
@@ -714,6 +721,30 @@ fn unordered_wildcard_shadows_every_later_rule() {
             .count(),
         2
     );
+}
+
+#[test]
+fn unordered_reachability_uses_each_independently_parsed_matcher() {
+    // §2.1/§6.3: unrelated rule errors do not suppress reachability.
+    let source = "version: 2\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n    captures: nope\n";
+    let rejected = invalid(source);
+    assert_eq!(
+        rejected
+            .errors
+            .iter()
+            .map(|error| error.kind)
+            .collect::<Vec<_>>(),
+        [
+            SchemaErrorKind::UnreachableRule,
+            SchemaErrorKind::InvalidCapture,
+        ]
+    );
+    let unreachable = rejected
+        .errors
+        .iter()
+        .find(|error| error.kind == SchemaErrorKind::UnreachableRule)
+        .expect("reachability is independently reported");
+    assert_eq!(source_slice(source, unreachable.range), "Later");
 }
 
 #[test]
@@ -794,10 +825,7 @@ proptest! {
         let source = format!("{min}..{max}");
         prop_assert_eq!(
             parse_repeat(&source),
-            Some(Cardinality {
-                min,
-                max: UpperBound::Bounded(max),
-            })
+            Cardinality::new(min, UpperBound::Bounded(max))
         );
     }
 
@@ -806,10 +834,7 @@ proptest! {
         let source = format!("{min}..n");
         prop_assert_eq!(
             parse_repeat(&source),
-            Some(Cardinality {
-                min,
-                max: UpperBound::Unbounded,
-            })
+            Cardinality::new(min, UpperBound::Unbounded)
         );
     }
 }
@@ -1253,14 +1278,21 @@ sections: []
 "#;
     let rejected = invalid(source);
     assert_eq!(
-        rejected.errors.first.kind,
-        SchemaErrorKind::InvalidDocumentShape
+        rejected
+            .errors
+            .iter()
+            .map(|error| (
+                error.kind,
+                source_slice(source, error.range),
+                error.message.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [(
+            SchemaErrorKind::InvalidDocumentShape,
+            source,
+            "unknown field `captures`",
+        )]
     );
-    assert!(rejected
-        .errors
-        .first
-        .message
-        .contains("unknown field `captures`"));
 }
 
 /// §2.2: capture names have no reserved words. `fm` and `linkdefs` are

@@ -23,8 +23,8 @@ use super::{Loader, RangeKey, RawOptions, RawRule};
 impl Loader {
     /// Builds the general `outline:` form: the canonical `h1`-rule list.
     ///
-    /// Outline rules are ordinary rules — `id`, `strict`, any cardinality and
-    /// nested constraints all mean what they mean in every other scope — so
+    /// Outline rules are ordinary accepting rules — ids, cardinality, and
+    /// nested declarations mean what they mean in every other scope — so
     /// the list is built by the same scope builder, at the empty scope the
     /// rules semantically live in. Only their source spelling differs, which
     /// [`Loader::source_key`] maps on range lookup.
@@ -146,27 +146,8 @@ impl Loader {
         } else {
             ScopeMode::Ordered
         };
-        let semantic_rules = self.build_named_scope(rules, scope, match_case, owner);
+        let semantic_rules = self.build_named_scope(rules, scope, match_case, owner, mode);
         let semantic_guards = self.build_guards(guards, scope, match_case);
-        if mode == ScopeMode::Unordered {
-            let mut wildcard_seen = false;
-            if let Some(built) = semantic_rules.as_ref() {
-                for (index, rule) in built.iter().enumerate() {
-                    if wildcard_seen {
-                        let path = RulePath {
-                            scope: scope.clone(),
-                            index: RuleIndex(index),
-                        };
-                        self.error_at(
-                            SchemaErrorKind::UnreachableRule,
-                            self.range(RangeKey::RuleField(path, "match".into())),
-                            "rule is unreachable after the first wildcard in an unordered scope",
-                        );
-                    }
-                    wildcard_seen |= matches!(rule.matcher, Matcher::Any);
-                }
-            }
-        }
         match (semantic_rules, semantic_guards) {
             (Some(rules), Some(guards)) => Some(DeclaredScope {
                 rules,
@@ -219,6 +200,7 @@ impl Loader {
         scope: &ScopePath,
         match_case: bool,
         owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
+        mode: ScopeMode,
     ) -> Option<Vec<SectionRule>> {
         let mut semantic = Vec::with_capacity(rules.len());
         // Collected for every rule, not only the ones that built: an id is a
@@ -226,6 +208,7 @@ impl Loader {
         // out to be constructible, and §4.3 compares declarations.
         let mut ids = Vec::with_capacity(rules.len());
         let mut complete = true;
+        let mut wildcard_seen = false;
         for (index, raw) in rules.into_iter().enumerate() {
             let rule_path = RulePath {
                 scope: scope.clone(),
@@ -239,6 +222,16 @@ impl Loader {
 
             let matcher_range = self.range(RangeKey::RuleField(rule_path.clone(), "match".into()));
             let matcher = self.build_matcher(&raw.matcher, match_case, matcher_range);
+            if mode == ScopeMode::Unordered {
+                if wildcard_seen && matcher.is_some() {
+                    self.error_at(
+                        SchemaErrorKind::UnreachableRule,
+                        matcher_range,
+                        "rule is unreachable after the first wildcard in an unordered scope",
+                    );
+                }
+                wildcard_seen |= matches!(matcher, Some(Matcher::Any));
+            }
             let id_range = self.range(RangeKey::RuleField(
                 rule_path.clone(),
                 if raw.id.is_some() { "id" } else { "match" }.into(),
@@ -695,7 +688,7 @@ impl Loader {
         // normalized supplies no maximum to test, so the check is skipped
         // rather than run against an invented one.
         if let Some(cardinality) = cardinality {
-            if matches!(cardinality.max, UpperBound::Bounded(max) if max <= 1) {
+            if matches!(cardinality.max(), UpperBound::Bounded(max) if max <= 1) {
                 for report in reports.iter_mut().filter(|report| report.entry.is_some()) {
                     report.faults.push(
                         "`order` needs a rule that can match more than once, and this rule's \
@@ -869,14 +862,8 @@ impl Loader {
             return None;
         }
         let cardinality = match (required, repeat) {
-            (Some(true), None) => Cardinality {
-                min: 1,
-                max: UpperBound::Bounded(1),
-            },
-            (Some(false), None) => Cardinality {
-                min: 0,
-                max: UpperBound::Bounded(1),
-            },
+            (Some(true), None) => Cardinality::new(1, UpperBound::Bounded(1))?,
+            (Some(false), None) => Cardinality::new(0, UpperBound::Bounded(1))?,
             (None, Some(repeat)) => match parse_repeat(repeat) {
                 Some(cardinality) => cardinality,
                 None => {
@@ -888,10 +875,9 @@ impl Loader {
                     return None;
                 }
             },
-            (None, None) if matches!(matcher, Some(Matcher::Exact(_))) => Cardinality {
-                min: 1,
-                max: UpperBound::Bounded(1),
-            },
+            (None, None) if matches!(matcher, Some(Matcher::Exact(_))) => {
+                Cardinality::new(1, UpperBound::Bounded(1))?
+            }
             (None, None) => {
                 self.error_at(
                     SchemaErrorKind::MissingCardinality,
@@ -1092,7 +1078,7 @@ pub(super) fn parse_repeat(source: &str) -> Option<Cardinality> {
         }
         UpperBound::Bounded(max)
     };
-    Some(Cardinality { min, max })
+    Cardinality::new(min, max)
 }
 
 fn valid_decimal(value: &str) -> bool {

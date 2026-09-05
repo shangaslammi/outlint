@@ -83,7 +83,7 @@ impl Loader {
             if !is_yaml_integer(value) {
                 self.shape_error_at(
                     self.range(RangeKey::DocumentField("version".into())),
-                    "version must be an integer that fits in 64 bits and cannot be null",
+                    "version must be an integer and cannot be null",
                 );
             }
         }
@@ -457,15 +457,17 @@ impl Loader {
     }
 }
 
-/// Whether a value is an integer the schema's own fields can hold.
+/// Whether a value is an integer in the YAML core-schema domain.
 ///
 /// The engine preserves a number's exact spelling, so an integer of any
-/// magnitude arrives here as a number rather than failing the parse; one that
-/// does not fit the 64-bit fields is a shape complaint against the value, not
-/// a syntax error against the document.
-fn is_yaml_integer(value: &Value) -> bool {
+/// magnitude arrives here as a number rather than failing the parse.
+pub(super) fn is_yaml_integer(value: &Value) -> bool {
     match value {
-        Value::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
+        Value::Number(number) => {
+            let spelling = number.to_string();
+            let digits = spelling.strip_prefix('-').unwrap_or(&spelling);
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        }
         _ => false,
     }
 }

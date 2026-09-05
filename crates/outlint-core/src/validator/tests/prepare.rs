@@ -180,7 +180,10 @@ fn malformed_manually_constructed_regex_fails_preparation() {
     let crate::DocumentShape::Title(title) = &mut schema.document else {
         panic!("expected title")
     };
-    title.matcher = Some(Matcher::Regex(RegexPattern("(".into())));
+    let crate::TitleSlot::Required { matcher, .. } = title else {
+        panic!("expected required title")
+    };
+    *matcher = Matcher::Regex(RegexPattern("(".into()));
     let error = PreparedValidator::new(&schema)
         .err()
         .expect("malformed regex must fail preparation");

@@ -28,12 +28,11 @@ impl ValidationPlan {
             rules: prepare_rules(schema.addressed_root_rules(), schema.options.match_case)?,
             guards: prepare_guards(schema, schema.options.match_case)?,
             title: match &schema.document {
-                DocumentShape::Title(title) => title
-                    .matcher
-                    .as_ref()
-                    .map(|matcher| PreparedMatcher::new(matcher, schema.options.match_case))
-                    .transpose()?,
-                DocumentShape::Outline(_) => None,
+                DocumentShape::Title(crate::TitleSlot::Required { matcher, .. }) => {
+                    Some(PreparedMatcher::new(matcher, schema.options.match_case)?)
+                }
+                DocumentShape::Title(crate::TitleSlot::Forbidden { .. })
+                | DocumentShape::Outline(_) => None,
             },
             frontmatter: schema
                 .frontmatter
@@ -227,7 +226,7 @@ fn prepare_guards(
             .map(|guard| PreparedMatcher::new(&guard.matcher, match_case))
             .collect(),
         DocumentShape::Title(title) => title
-            .children
+            .children()
             .guards()
             .map(|guard| PreparedMatcher::new(&guard.matcher, match_case))
             .collect(),

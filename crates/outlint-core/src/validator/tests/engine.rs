@@ -1,4 +1,5 @@
-use crate::validator::engine::root_location;
+use crate::validator::engine::{guard_evaluation_count, root_location};
+use crate::validator::prepare::ValidationPlan;
 use crate::validator::{validate, Diagnostic, DiagnosticId, DiagnosticTarget, HeaderPath};
 use crate::{load_schema, parse_markdown, MarkdownOptions, RuleIndex, SchemaNode, ScopePath};
 
@@ -838,6 +839,23 @@ fn v2_guard_precedes_accepting_assignment() {
     assert_eq!(diagnostics.len(), 2);
     assert_eq!(diagnostics[0].0, DiagnosticId::NotAllowed);
     assert_eq!(diagnostics[1].0, DiagnosticId::MissingSection);
+}
+
+#[test]
+fn guard_evaluations_are_bounded_by_headings_times_guards() {
+    // §3.7: each admitted heading is tested against each guard at most once.
+    let loaded = load_schema(
+        "version: 2\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\nsections:\n  - match: A\n    repeat: 0..n\n",
+    )
+    .expect("test schema is valid");
+    let document = parse_markdown(
+        "# Doc\n## A\n## A\n## A\n## A\n## A\n",
+        MarkdownOptions::default(),
+    );
+    let plan = ValidationPlan::new(&loaded.schema).expect("schema prepares");
+    let evaluations =
+        guard_evaluation_count(&loaded.schema, &document, &plan).expect("validation completes");
+    assert_eq!(evaluations, 5 * 3);
 }
 
 #[test]

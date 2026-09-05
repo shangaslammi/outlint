@@ -12,9 +12,9 @@ use std::{error::Error, fmt};
 pub enum DiagnosticId {
     /// A heading is more than one level below its nearest parent.
     SkippedLevel,
-    /// A present heading is denied by its first matching rule or title matcher.
+    /// A present heading is rejected by a prohibition guard or `title: null`.
     NotAllowed,
-    /// A heading has no matching rule in a strict scope.
+    /// A heading has no matching rule in an exhaustive declared scope.
     UnexpectedSection,
     /// A heading matches an accepting rule but cannot occupy its ordered phase.
     MisplacedSection,

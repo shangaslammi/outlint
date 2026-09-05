@@ -281,8 +281,8 @@ fn non_standard_tags_are_rejected_anywhere_in_a_schema_document() {
     let schema = valid("version: !!int 2\ntitle: !!str Doc\nsections: []\n");
     assert!(matches!(
         schema.document,
-        DocumentShape::Title(crate::TitleSlot {
-            matcher: Some(Matcher::Exact(_)),
+        DocumentShape::Title(crate::TitleSlot::Required {
+            matcher: Matcher::Exact(_),
             ..
         })
     ));
@@ -314,24 +314,52 @@ fn a_standard_tag_on_a_schema_collection_must_name_the_collection_kind() {
 }
 
 #[test]
-fn an_oversized_version_is_a_shape_error_at_the_value() {
-    // The engine preserves a number's exact spelling, so an integer of any
-    // magnitude parses; one that does not fit the schema's own 64-bit
-    // field is now a shape complaint against the value — the serde-era
-    // engine refused the whole parse as a syntax error instead.
+fn an_oversized_integer_version_is_unsupported_at_the_value() {
+    // §2: every integer other than exactly 2 is `unsupported-version`,
+    // including values outside machine integer ranges.
     let source = "version: 99999999999999999999999999\nsections: []\n";
     let invalid = invalid(source);
     assert_eq!(
         invalid.errors.first.kind,
-        SchemaErrorKind::InvalidDocumentShape
+        SchemaErrorKind::UnsupportedVersion
     );
     assert_eq!(
         invalid.errors.first.message,
-        "version must be an integer that fits in 64 bits and cannot be null"
+        "unsupported schema version 99999999999999999999999999; expected 2"
     );
     assert_eq!(
         source_slice(source, invalid.errors.first.range),
         "99999999999999999999999999"
+    );
+}
+
+#[test]
+fn unsupported_version_is_collected_with_independent_shape_errors() {
+    // §6.3: version classification precedes the top-level shape gate.
+    let source = "version: 3\ntitle: []\nsections: []\n";
+    let invalid = invalid(source);
+    assert_eq!(
+        invalid
+            .errors
+            .iter()
+            .map(|error| (
+                error.kind,
+                source_slice(source, error.range),
+                error.message.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (
+                SchemaErrorKind::UnsupportedVersion,
+                "3",
+                "unsupported schema version 3; expected 2",
+            ),
+            (
+                SchemaErrorKind::InvalidDocumentShape,
+                "[]",
+                "title must be a string or null",
+            ),
+        ]
     );
 }
 

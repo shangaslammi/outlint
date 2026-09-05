@@ -137,9 +137,22 @@ fn unordered_is_local_and_each_undeclared_child_scope_remains_ordered() {
     assert_eq!(ids_and_targets(unordered, "# T\n## B\n## A\n"), []);
 
     let opted_in = "version: 2\nunordered: true\nsections:\n  - match: S\n    sections:\n      - match: A\n      - match: B\n";
-    assert!(ids_and_targets(opted_in, "# T\n## S\n### B\n### A\n")
-        .iter()
-        .any(|(id, _)| *id == DiagnosticId::MisplacedSection));
+    assert_eq!(
+        ids_and_targets(opted_in, "# T\n## S\n### B\n### A\n"),
+        [
+            (
+                DiagnosticId::MisplacedSection,
+                DiagnosticTarget::Header(HeaderPath(vec!["T".into(), "S".into(), "B".into(),])),
+            ),
+            (
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath(vec!["T".into(), "S".into()]),
+                    matcher: "B".into(),
+                },
+            ),
+        ]
+    );
     let opted_out = "version: 2\nsections:\n  - match: S\n    unordered: true\n    sections:\n      - match: A\n      - match: B\n";
     assert_eq!(ids_and_targets(opted_out, "# T\n## S\n### B\n### A\n"), []);
 }
@@ -164,7 +177,7 @@ fn implicit_order_is_suppressible_at_the_owning_header() {
     assert_eq!(
         ids_and_targets(
             schema,
-            "<!-- outlint-disable-file misplaced-section -->\n# T\n## S\n### B\n### A\n"
+            "# T\n## S\n<!-- outlint-disable misplaced-section -->\n### B\n### A\n"
         ),
         []
     );
