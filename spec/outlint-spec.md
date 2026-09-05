@@ -1,4 +1,4 @@
-# Outlint Schema — Specification v1
+# Outlint Schema — Specification v2
 
 Status: Normative public specification; may change before 1.0. The reference
 implementation in this repository may lag newly specified features.
@@ -59,8 +59,9 @@ the schema's top-level rules (§2) are the rule list of its scope, and every
 mechanism of §3 applies there exactly as it does one level down. Nothing is
 implicitly outside the schema, because there is no outside: every header is
 some parent's child, and what its parent's scope has to say about it is
-decided by the ordinary machinery — matching, cardinality, open versus
-closed scopes — not by a separate reachability notion.
+decided by the ordinary machinery — matching, cardinality, declared versus
+omitted scopes, guards, and explicit openness — not by a separate reachability
+notion.
 
 Which diagnostics the h1 level produces therefore depends only on how the
 schema declares it (§2). Under the general `outline` form, h1s are matched
@@ -78,17 +79,18 @@ scope, each h1 binding its own instance (§3.1).
 level exceeds its parent's level by more than 1 is a structural error
 (diagnostic `skipped-level`), independent of any rules. The document root is
 level 0, so a top-level h2 skips a level against the root exactly as an h4
-directly under an h2 does — with one exception. Under the sugar (§2), a
-document with no h1 at all is validated with the root standing at level 1:
-its top-level h2s are the children of the `sections` scope, whether the
-schema declared `title: null` or declared a title the document merely lacks
-(which is then `missing-title`, the h2s still validated), and only a
-top-level h3 or deeper skips a level there. This is what makes `title: null`
-usable under the default: a document whose title lives in its frontmatter
-and whose body starts at `##` is exactly the document that declaration
-exists to describe. The general form has no such exception — a top-level h2
-under `outline` skips a level against the level-0 root. A skipping header
-takes part in no rule — it
+directly under an h2 does — with two sugar cases. Under `title: null`, the
+root stands at level 1 unconditionally: top-level h2s are children of the
+`sections` scope whether or not a prohibited h1 also occurs, and only a
+top-level h3 or deeper skips a level there. Under non-null title sugar, the
+root stands at level 1 only when the document has no h1: its top-level h2s
+are then children of the `sections` scope, the absent title produces
+`missing-title`, and only a top-level h3 or deeper skips a level. This is what
+makes `title: null` usable under the default: a document whose title lives in
+its frontmatter and whose body starts at `##` is exactly the document that
+declaration exists to describe. The general form has no such exception — a
+top-level h2 under `outline` skips a level against the level-0 root. A
+skipping header takes part in no rule — it
 matches none, counts toward no cardinality, and satisfies no constraint
 locator — and neither does anything below it; §1.5 itself still applies inside
 the subtree, so a header that skips relative to a skipping parent is
@@ -111,9 +113,9 @@ the section tree. If present it MUST parse as a YAML mapping; a scalar or
 sequence at top level is diagnostic `invalid-frontmatter`. Empty YAML content,
 including comment-only content, is not a mapping and is `invalid-frontmatter`;
 an explicit `{}` is a valid empty mapping. TOML (`+++`)
-frontmatter is out of scope for v1. A first-line opening delimiter without a
-closing `---` line is `invalid-frontmatter` spanning the remainder of the
-document. For delegated JSON Schema validation, mapping keys MUST be strings;
+frontmatter is out of scope for this version. A first-line opening delimiter
+without a closing `---` line is `invalid-frontmatter` spanning the remainder
+of the document. For delegated JSON Schema validation, mapping keys MUST be strings;
 a non-string key is `invalid-frontmatter` because JSON object member names are
 strings. YAML integer and finite decimal scalars are converted to JSON numbers
 without an implementation-sized integer limit or binary floating-point
@@ -153,99 +155,119 @@ its text is written at.
 
 ## 2. Schema format
 
-A schema is a YAML (or JSON) document with one of two top-level shapes. The
-**general form** declares `outline`, a list of rule objects (§2.1) for the
-document's h1 headers:
+A schema is a YAML (or JSON) document with `version: 2` and one of two
+top-level shapes. An implementation of this version MUST reject every other
+version, including `version: 1`, as schema error `unsupported-version`; it
+MUST NOT silently invoke a legacy matching model. The **general form**
+declares `outline`, the accepting rule list (§2.1) for the document's h1
+scope:
 
 ```yaml
-version: 1                # required, integer, currently 1
-options:                  # optional, see §7
+version: 2                         # required, integer, currently 2
+options:                           # optional, see §7
   match_case: false
   strip_inline_markup: true
   allow_skipped_levels: false
-  ordered_sections: true
 frontmatter: <frontmatter-object>  # optional, see §2.3
-outline: [<rule>, ...]    # rules for h1 headers
+outline: [<rule>, ...]             # accepting rules for h1 headers
+forbid_sections: [<guard>, ...]    # optional guards for the h1 scope
+extras: anywhere                   # optional openness for unmatched h1s
+unordered: true                    # optional whole-scope classifier
 constraints: [<constraint>, ...]   # optional, see §5
 ```
 
-`outline` is not a special construct: it is the rule list of the document
-root's scope (§1.4, §3.1), so everything a rule can say one level down —
-cardinality, `allow: false`, nested `sections`, child `constraints` — it
-can say about h1s, with the same meaning. It is named `outline` rather than
-`sections` so that the general form and the sugar below are syntactically
-disjoint: which shape a schema has is decided by which key it spells. An
-empty `outline: []` is schema error `invalid-document-shape` rather than a
-legal degenerate case, because an empty open scope would accept every
-document while appearing to constrain it; a document with no h1s at all is
-declared with `title: null` (below), which says what it means.
+`outline` is the declared rule list of the document root's scope (§1.4,
+§3.1). It is named differently from nested `sections` so that the general
+form and the sugar below are syntactically disjoint. `outline: []` is legal:
+after skipped-level pruning, guards, and extras filtering, its retained h1
+sequence MUST be empty. A top-level h2 under it still skips a level against
+the level-0 document root under §1.5.
 
 The **sugar form** serves the common document with exactly one h1 — a
 title:
 
 ```yaml
-version: 1
-title: <matcher>          # optional; or null — the document has no h1
+version: 2
+title: <matcher>                   # optional; or null — no h1 is allowed
 options: ...
 frontmatter: ...
-sections: [<rule>, ...]   # rules for h2 headers
+sections: [<rule>, ...]            # optional accepting rules for h2s
+forbid_sections: [<guard>, ...]    # optional guards for that h2 scope
+extras: anywhere                   # optional openness for unmatched h2s
+unordered: true                    # optional whole-scope classifier
 constraints: [<constraint>, ...]
 ```
 
-`title:` plus `sections:` is permanent sugar for one required h1 rule:
+`title:` plus `sections:` is permanent sugar for one exact-one h1 rule:
 
 ```yaml
 title: <matcher>          #     outline:
 sections: [<rule>, ...]   #  ≡    - match: <matcher>
-                          #       required: true
                           #       sections: [<rule>, ...]
 ```
 
-— exactly one h1, matching `<matcher>`, whose h2 children `sections`
-describes. The sugar is not transitional: it spares every single-title
-schema the boilerplate rule and a level of indentation forever, and it
-declares intent — `title:` says the document is the kind that has one.
+The synthesized rule uses the v2 exact-one default. It is exempt from
+`missing-cardinality` even when its matcher is a regex, glob, or wildcard.
+Its child `forbid_sections`, `extras`, `unordered`, and `constraints` are the
+corresponding top-level sugar members.
 
-The desugared rule is an ordinary rule in every respect but one: its scope
-is closed to h1s. Every h1 occupies the title rule whether or not its text
-matches, so an h1 the matcher rejects is `not-allowed` at the title node
-rather than an unmatched header an open root scope would let pass — and,
-unlike a header a deny rule matches (§3.3), it withdraws nothing: it still
-counts toward the exactly-one bound, so no `missing-title` accompanies it,
-and its subtree is still validated against `sections`. The author asked for
-one titled document; a wrong title is a document whose title is wrong, not
-a document with no title and an unexplained stray tree. Under bare
-`sections` the implied `"*"` accepts every h1, so the case cannot arise
-there.
+The title slot retains special mismatch behavior. Every h1 occupies the slot
+whether or not its text matches. An h1 rejected by the matcher produces
+`not-allowed` at the title node, still satisfies the title cardinality, and
+still opens the declared or omitted h2 scope. A missing h1 is
+`missing-title`; a second h1 is `too-many-sections`.
 
-`sections` without `title` implies `title: "*"`: still exactly one h1, of
-any text. Bare `sections` is not a way to opt out of having a title — a
-document that loses its `# Title` must not silently keep passing — and a
-document with genuinely no h1 says so with `title: null`. Under
-`title: null` the document MUST have no h1: a present h1 is `not-allowed`,
-at the title node, and its subtree is validated no further, like any header
-a deny rule matches; `sections` then describes the document's own top-level
-h2s, the root standing at level 1 (§1.5).
+`sections` without `title` implies `title: "*"`: it is not a headless
+declaration. A schema with `title` and omitted `sections` validates the title
+but does not validate its h2 scope. `title: null` retains its distinct
+contract: the document MUST contain no h1. A present h1 is `not-allowed` at
+the title node and its subtree is not validated. `sections`, when present,
+describes the document's top-level h2s with the root standing at level 1
+(§1.5). With omitted `sections` those h2 scopes are not validated; with
+`sections: []` the retained h2 sequence MUST be empty.
 
-The two forms are mutually exclusive: declaring `outline` together with
-`title` or `sections` is schema error `conflicting-outline`, anchored at
-whichever of the conflicting keys is declared second — the first key
-established the schema's shape, and the later one contradicts it.
+Declaration presence is semantically significant in every child scope:
 
-Every Outlint mapping — the top level, `options`, `frontmatter`, each rule
-object, each constraint — admits only the keys this specification names for
-it. An unknown key is schema error `invalid-document-shape`, so a misspelled
-`required` cannot silently leave a rule at its `0..n` default. An inline
-`frontmatter.schema` is JSON Schema, not an Outlint mapping, and its unknown
-keywords are that dialect's business.
+- omitted `sections` performs no accepting-grammar, cardinality, constraint,
+  or recursive validation there and creates no child-rule assignments;
+- `sections: []` validates the retained direct-child sequence and requires it
+  to be empty; and
+- a nonempty `sections` validates the complete retained direct-child sequence
+  against the declared grammar.
 
-**Title diagnostics.** The desugared title rule is an ordinary rule, but
-its diagnostics keep the title vocabulary, because the author spelled (or
-implied) a title, not a rule: a missing h1 is `missing-title` rather than
-`missing-section`, a surplus h1 reads as a surplus title (§1.4), and both
-are attributed to the title schema node. When the title is implied by bare
-`sections`, there is no `title` key to attribute them to, so they are
-anchored on the `sections` entry — the spelling that implied the rule.
+An independently declared `forbid_sections` is still evaluated when
+`sections` is omitted. It is then the only section-language validation in
+that child scope; non-forbidden headings remain unassigned and unvisited.
+The skipped-level check of §1.5 remains independent. A rule that declares
+child-scope `constraints` MUST also declare `sections`; otherwise it is
+`invalid-document-shape`. The same requirement applies to top-level
+`constraints` in the sugar form.
+
+The forms are mutually exclusive. `outline` together with `title` or
+`sections` is `conflicting-outline`, anchored at the later shape-defining
+key. Top-level `forbid_sections`, `extras`, `unordered`, and `constraints` do
+not select a form. Without `outline`, `title`, or `sections`, any of them is
+`invalid-document-shape`. `extras` and `unordered` additionally require a
+declared accepting list in the scope to which they apply; either beside an
+omitted sugar `sections` is `invalid-document-shape`. `sections: []` is a
+declared accepting list.
+
+Every Outlint mapping — the top level, `options`, `frontmatter`, each rule,
+each guard, each order entry, and each constraint — admits only the keys this
+specification names for it. An unknown key is
+`invalid-document-shape`, except where a construct assigns a more specific
+schema error. In particular, v1 rule members `strict`, `allow`, and `ordered`
+and `options.ordered_sections` are rejected as `invalid-document-shape`
+regardless of their values. Frontmatter `allow` is the separate presence
+policy of §2.3 and is unaffected. An inline `frontmatter.schema` is JSON
+Schema, not an Outlint mapping, and its unknown keywords are that dialect's
+business.
+
+**Title diagnostics.** The synthesized title rule keeps the title vocabulary:
+a missing h1 is `missing-title` rather than `missing-section`, a surplus h1
+reads as a surplus title, and both are attributed to the title schema node.
+When bare `sections` implies the title, those diagnostics anchor on the
+`sections` entry.
 
 A schema document is read as YAML on the same terms as frontmatter, so an
 implementation MAY refuse one nesting deeper than the limit of §1.6, and the
@@ -261,11 +283,8 @@ than the six header levels of §1.2 can address.
 ```yaml
 - id: <slug>              # optional; see §4
   match: <matcher>        # required
-  allow: true             # optional bool, default true; false = matched header is a violation
-  required: <bool>        # optional; sugar for repeat (see below)
+  required: <bool>        # optional; cardinality (see below)
   repeat: "<min>..<max>"  # optional; max is integer or "n" (unbounded)
-  strict: <bool>          # optional, default false; closes the child scope (§3.4)
-  ordered: <bool>         # optional, default options.ordered_sections; orders the child scope (§3.7)
   captures:               # optional non-empty mapping; regex rules only (§2.2, §2.4)
     <name>: <type>
   order:                  # optional non-empty list; orders this rule's matches by capture (§3.8)
@@ -273,6 +292,10 @@ than the six header levels of §1.2 can address.
       dir: asc            # optional: asc or desc; default asc
       strict: false       # optional bool; default false
   sections: [<rule>...]   # optional; rules for this section's children (one level deeper)
+  forbid_sections:        # optional matcher-only guards for those children
+    - match: <matcher>
+  extras: anywhere        # optional; admit otherwise unmatched children
+  unordered: true         # optional bool; classify children without document order
   constraints: [...]      # optional; scoped to this rule's children (§5)
 ```
 
@@ -281,32 +304,32 @@ The same rule object serves at two levels: as an entry of `outline`, where
 `sections` list, one level deeper each time. Nothing in the object is
 level-specific.
 
-Cardinality resolution (count of sibling headers matched by this rule within
-one parent scope):
+Cardinality resolution counts sibling headings assigned to a rule within one
+concrete parent scope:
 
-| Declared                  | Effective `repeat` |
-|---------------------------|--------------------|
-| (nothing)                 | `0..n`             |
-| `required: true`          | `1..1`             |
-| `required: false`         | `0..1`             |
-| `repeat: "a..b"`          | `a..b`             |
+| Declaration | Effective cardinality |
+|---|---:|
+| nothing, exact matcher | `1..1` |
+| nothing, regex/glob/wildcard matcher | schema error `missing-cardinality` |
+| `required: true` | `1..1` |
+| `required: false` | `0..1` |
+| `repeat: "a..b"` | `a..b` |
 
-`required: false` is not the default: it narrows the rule to at most one
-occurrence. Write it for a section that may appear once; for a rule whose
-matches may repeat — a pattern matcher, usually — leave `required` out and
-take the `0..n` default (§10).
+The language has one default, `1..1`; `missing-cardinality` prevents a
+collection-shaped matcher from invoking it silently. It anchors at the
+rule's `match`. The synthesized title rule is exempt. `required: true` is an
+explicit assertion of exact-one intent, and `required: false` expresses
+optional singularity.
 
-Specifying both `required` and `repeat` is a schema error
-`conflicting-cardinality`. `allow: false` with `required`/`repeat` is a
-schema error `conflicting-cardinality`. Rules with `allow: false` cannot be
-referenced by constraints (§4.4).
+Specifying both `required` and `repeat` is schema error
+`conflicting-cardinality`.
 
 `captures`, when present, MUST be a non-empty mapping from capture names to
 typed-value names (§2.4). `order`, when present, MUST be a non-empty list of
 objects having exactly the required key `by` and the optional keys `dir` and
 `strict`. A malformed or empty `captures` mapping, a duplicate capture key,
-an unsupported capture declaration, or a capture declared on a non-regex or
-`allow: false` rule is `invalid-capture`. A malformed or empty `order` list is
+an unsupported capture declaration, or a capture declared on a non-regex rule
+is `invalid-capture`. A malformed or empty `order` list is
 `invalid-order`. Unknown keys inside an order entry are `invalid-order`; the
 general unknown-key rule of §2 applies outside these two constructs.
 
@@ -327,6 +350,44 @@ leading zeros or whitespace; `n` denotes unbounded. If `max` is an integer,
 `invalid-repeat`. Finite bounds MUST be no greater than 4,294,967,295; this
 limit permits implementations to store section counts and bounds in unsigned
 32-bit integers. A larger bound is `invalid-repeat`.
+
+`forbid_sections` is a list of guard objects for the same child scope as
+`sections`. It MAY accompany omitted, empty, or nonempty `sections`; an empty
+guard list is legal. Each guard MUST contain exactly `match`. Any `id`,
+cardinality, captures, `order`, child rules, constraints, or other member is
+`invalid-document-shape`; an invalid guard matcher is `invalid-matcher`.
+Guards have no cardinality, ids, captures, or locator bindings. They are
+evaluated as §3.3 specifies.
+
+On a rule, guards inspect that rule's direct children. At the general-form
+top level they inspect the document root's h1 scope beside `outline`. At the
+sugar top level they inspect the exposed h2 scope beside `sections`, including
+the level-1 root scope under `title: null`; they never inspect the synthesized
+title slot.
+
+`extras`, when present, MUST be the scalar `anywhere`; every other value is
+`invalid-document-shape`. It applies to this rule's direct-child scope and
+admits only a heading that matches no accepting rule there. It does not bind
+or recursively validate that heading. In a scope containing a wildcard
+accepting rule, every heading matches a rule, so `extras: anywhere` is inert
+but legal.
+
+On a rule, `extras` and `unordered` apply only to that rule's direct-child
+scope. At the general-form top level they apply to the h1 scope beside
+`outline`; at the sugar top level they apply to the exposed h2 scope beside
+`sections` and never to the title slot.
+
+`unordered` MUST be boolean; every other value is
+`invalid-document-shape`. It defaults to false. `true` makes the whole exposed
+child scope the declaration-ordered classifier of §3.4; `false` is inert.
+It is local and is never inherited. In an unordered scope, every accepting
+rule after the first wildcard rule is `unreachable-rule`, anchored at that
+later rule's `match`. Implementations MUST NOT attempt general overlap
+detection for exact, glob, or regex matchers.
+
+An exposed parsed-schema API MUST represent accepting rules and guards as
+distinct types, represent `extras` and `unordered` on every exposed scope,
+and MUST NOT deserialize removed v1 members into ignored fields.
 
 ### 2.2 Matcher forms
 
@@ -424,13 +485,13 @@ support draft 2020-12 and MAY support earlier drafts; an unsupported `$schema`
 is schema error `invalid-frontmatter-schema`.
 
 For a linked schema, the base URI is its lexical path as reached from the
-Outlint schema, before resolving filesystem symlinks. V1 resolves local file
+Outlint schema, before resolving filesystem symlinks. This version resolves local file
 and fragment references, including cycles within or between files. Network
 retrieval is not performed; a remote reference is schema error
 `invalid-frontmatter-schema`. An unreadable, invalid-UTF-8, or invalid-JSON
 linked schema is also `invalid-frontmatter-schema`.
 
-An inline schema is self-contained in V1. Every object member named `$ref` or
+An inline schema is self-contained in this version. Every object member named `$ref` or
 `$dynamicRef` anywhere in the inline mapping is lexically reserved, regardless
 of whether its containing object appears under a recognized JSON Schema
 keyword. Its value MUST be a string beginning with `#`; this permits references
@@ -557,85 +618,192 @@ The following boundary cases are consequences of these rules:
 
 ## 3. Matching semantics
 
-3.1. **Scope.** Validation proceeds per scope. A scope is (parent section,
-its list of child headers, the rule list attached to the parent's matched
-rule). The outermost scope is the document root (§1.4) paired with the
-schema's `outline` rules — under the sugar, with the one rule that `title`
-and `sections` desugar to (§2). Scopes are bound per parent at every level,
-the h1 level included: two h1s matched by the same rule open two separate
-child scopes, so a nested rule's cardinality and a nested constraint hold
-within each h1 on its own and are never pooled across ancestors. A skipping
-subtree under the default of §1.5 is in no scope, so §3.2 through §3.8
-never see it.
+3.1. **Scope and retained input.** Validation proceeds per concrete scope. A
+scope consists of a parent section, its direct child headings, and the
+accepting list, guards, extras mode, unordered mode, and constraints exposed
+by the parent's assigned rule. The outermost general-form scope is the
+document root paired with `outline`; the sugar gives the title slot the
+special treatment of §2 and exposes its h2 scope as the outermost named
+scope. Scopes are bound per parent: repeated parent headings open independent
+child scopes, so nested cardinality and constraints are never pooled across
+instances.
 
-3.2. **First match wins.** For each child header, in document order, the
-rules in the `sections` list are tried in list order; the first rule whose
-matcher matches the header text is the header's **matched rule**. Later
-rules are not consulted. Consequently, specific rules MUST precede
-catch-alls; a trailing `match: "*"` acts as a default.
+For every assigned heading, process its rule's declared child guards, then
+stop if the accepting list is omitted, otherwise visit the child scope. An
+omitted list assigns or visits none of the surviving children. Every declared
+list, including an empty one, consumes the complete **retained sequence**
+produced in this order:
 
-3.3. **Effects of matching:**
-- Matched rule has `allow: false` → diagnostic `not-allowed` on that header.
-- No rule matches → header is **unmatched**: legal in an open scope (§3.4),
-  diagnostic `unexpected-section` in a closed one. Unmatched sections are
-  not recursed into.
-- Otherwise, the header's children are validated against the matched rule's
-  `sections` (recursion), the matched rule's per-scope match count is
-  incremented, and every declared capture is parsed (§2.4).
+1. skipped-level pruning (§1.5) removes every skipped heading and its subtree;
+2. prohibition guards remove forbidden headings and their subtrees (§3.3);
+3. the extras filter removes eligible extra headings and their subtrees from
+   section validation (§3.3); and
+4. ordered matching or unordered classification operates on what remains.
 
-3.4. **Open vs. closed scopes.** A scope is **open** by default: unmatched
-headers pass. A scope is **closed** if its parent rule has `strict: true`.
-`strict: true` accepts exactly the documents that appending
-`{ match: "*", allow: false }` to the `sections` list would accept; if both
-are present the explicit rule is redundant but legal. The two differ only in
-what they report: a header no rule matches in a strict scope is
-`unexpected-section` (§3.3), while one the explicit deny rule matches is
-`not-allowed`, attributed to that rule. The document root has no rule of its
-own to carry `strict`, so the outermost scope is closed by writing the deny
-rule itself — a trailing `{ match: "*", allow: false }` at the end of
-`outline` — and a stray h1 there is accordingly `not-allowed`.
+The fifth and final stage computes cardinality, sequence, typed-order, and
+constraint diagnostics from the resulting assignment. Every stage MUST use
+the preceding stage's output. Structural pruning is independent and still
+reports `skipped-level` inside a skipped subtree as §1.5 specifies.
 
-3.5. **Cardinality check.** After all children of a scope are matched, for
-each rule: if match count < min → `missing-section` when the count is zero,
-`too-few-sections` when it is nonzero (some headers matched, just not
-enough); if count > max → `too-many-sections`. A rule's count
-covers only the headers for which it is the matched rule (§3.2); for a
-trailing `match: "*"` that means the children not matched by any earlier
-rule. "At least one child of any name" is therefore `match: "*"` with
-`repeat: "1..n"` — note `required: true` means exactly one (§2.1).
+3.2. **Ordered consuming grammar and canonical assignment.** A declared scope
+is ordered unless it declares `unordered: true`. In an ordered scope the
+accepting list is the concatenation of cardinality-bounded matcher phases.
+The scope is accepted iff the retained sequence has a complete partition in
+which every heading is consumed exactly once, every heading matches the rule
+that consumes it, every rule consumes within its effective cardinality, and
+no heading remains before, between, or after phases. A wildcard is a
+positioned consuming phase; after leaving it, matching cannot re-enter it.
+Overlapping matchers are legal, and acceptance is existential rather than an
+irrevocable first-match decision.
 
-3.6. Duplicate header texts among siblings are legal per se; the matched
-rule's `repeat` governs whether the multiplicity is valid.
+For every successful partition, its **wildcard cost** is the number of
+heading assignments to rules whose matcher is `"*"`, and its **count vector**
+lists the number assigned to each rule in declaration order. The canonical
+successful partition is selected by these priorities:
 
-3.7. **Ordered scopes.** A scope's rule list is also its document order. By
-default every scope is **ordered**: for each adjacent pair (A, B) of the
-scope's accepting rules (`allow: true`) that matched at least one header,
-in list order, every header matched by A MUST precede every header matched
-by B — `last(A) < first(B)`, exactly the test §5.1 defines for the
-`ordered` constraint. Rules that matched nothing drop out of the pairing,
-so an absent optional section constrains nothing; unmatched headers match
-no rule and float freely; a deny rule matches nothing that counts. Each
-violated pair is one diagnostic `ordered`, targeted and anchored like a
-constraint of the scope (§6.2), listing both rules' headers as involved
-headers, and attributed to the rule that owns the scope — the `title` node
-under the sugar, and no schema node at all for the general form's root,
-which is nobody's rule.
+1. minimize wildcard cost; then
+2. at the first differing count, prefer the smaller count when that rule is a
+   wildcard and the larger count when it is not.
 
-`options.ordered_sections` (§7) sets the default for every scope, the
-outermost included; a rule's `ordered: <bool>` overrides it for that rule's
-child scope, in either direction. The outermost scope has no rule to carry
-`ordered`, so it follows the option alone.
+Contiguous phases make one count vector identify one partition. No further
+tie remains. Exact, glob, and regex matchers all have zero wildcard cost; the
+second priority is a declaration-order tie-break, not a ranking among those
+matcher forms. Assignment considers only current-scope heading texts,
+matchers, and cardinalities. Captures, ids, constraints, and whether a
+candidate rule's child grammar would accept MUST NOT influence it.
 
-List order thereby does double duty: it is matching precedence (§3.2) and
-document order at once. The two agree wherever matchers do not overlap,
-which is the usual case, and a trailing accepting `match: "*"` reads as
-"anything else comes last". Where a specific rule must precede a general
-one for matching but follow it in the document, declare the scope
-unordered and spell the order with an `ordered` constraint (§5.1): set
-`ordered: false` on the rule that owns a child scope, or set
-`options.ordered_sections: false` for the outermost scope. The constraint
-exists for exactly the orders a list cannot express: partial ones, and any
-order in an unordered scope.
+Brace expressions below are abstract grammar notation. Concrete adjacent
+exact rules with the same matcher would receive colliding default ids and
+therefore MUST declare distinct explicit ids (§4.3).
+
+For example, `A{1..n}, A{1..1}` over `A, A, A` has vector `(2, 1)`.
+Identical `A{0..2}, A{0..2}` over `A, A` chooses `(2, 0)`. For
+`*{0..n}, A{1..1}, *{0..n}` over `A, A`, the minimum-cost vectors
+`(0, 1, 1)` and `(1, 1, 0)` tie at cost one, so the reluctant leading
+wildcard makes `(0, 1, 1)` canonical and the specific rule binds the first
+heading. If two optional `Part` rules both match but expose different child
+grammars, one `Part` is assigned to the first rule by the same tie-break; a
+child that satisfies only the second rule does not cause reassignment and is
+diagnosed against the first rule's child grammar.
+
+3.3. **Guards and extras.** After structural pruning, each admitted direct
+child is tested against guards in declaration order. A heading matching one
+or more guards produces exactly one `not-allowed`, attributed to the first
+matching guard, and is removed with its subtree. A guard is never shadowed by
+an accepting rule, wildcard, extras declaration, or unordered mode.
+
+For example, with one heading `A`, this scope reports `not-allowed` for the
+guard and then `missing-section` for the exact-one accepting rule, because the
+guard removes `A` before matching:
+
+```yaml
+sections:
+  - match: "A"
+forbid_sections:
+  - match: "A"
+```
+
+For every remaining heading, accepting-rule matcher results are computed.
+When the scope declares `extras: anywhere`, exactly a heading for which all
+those results are false is removed as an **extra**. An extra passes without a
+section diagnostic, remains unassigned, contributes no capture or constraint
+node, and its subtree is not validated. Its concrete document identity is
+retained under §4.2. A heading matching any accepting rule is ineligible to
+be extra and remains subject to sequence position and cardinality. The
+relative order of retained headings is unchanged.
+
+Guards are checked even when `sections` is omitted. In that case headings
+that survive them remain unassigned and unvisited; there is no extras filter,
+because `extras` requires a declared accepting list.
+
+3.4. **Unordered assignment.** In a scope declaring `unordered: true`, each
+retained heading is assigned to the first accepting rule in declaration
+order whose matcher matches it. A heading matching none is unassigned and
+produces `unexpected-section`. Declaration order is matcher precedence only;
+heading document order does not affect assignment or cardinality. Every
+heading has exactly one assigned rule or the unmatched outcome. A wildcard
+therefore consumes every retained heading it reaches and statically makes
+every later rule `unreachable-rule` (§2.1).
+
+Each rule's assigned count is checked against its effective cardinality.
+There is no complete-sequence search, canonical partition, or recovery, and
+`misplaced-section` cannot arise. `extras: anywhere` composes directly: an
+otherwise unmatched heading was already filtered out, while a heading
+matching any rule remains subject to first-match precedence.
+
+3.5. **Invalid ordered scopes and cardinality.** If an ordered scope has no
+successful partition, downstream binding and diagnostics use the canonical
+relaxed recovery of §8. Recovery permits every rule `0..n` and permits each
+heading to remain unassigned. It minimizes, in order, the number unassigned,
+wildcard cost, and the transition trace under the fixed priority consume,
+leave unassigned, advance rule. Recovery is diagnostic attribution only and
+does not make the scope valid.
+
+For canonical success, recovery, or unordered classification, each rule
+below its real minimum produces exactly one `missing-section` when its count
+is zero or one `too-few-sections` when nonzero. A rule above a finite maximum
+produces exactly one `too-many-sections`, anchored at its first assigned
+heading in document order in excess. In ordered recovery, each unassigned
+heading matching no accepting rule produces `unexpected-section`; each
+unassigned heading matching at least one produces `misplaced-section`.
+Duplicate heading texts are legal per se; assignment and cardinality decide
+their validity.
+
+3.6. **Dependent features and recursion.** Every assigned heading opens the
+child declaration of its assigned rule. This applies to exact, glob, regex,
+and wildcard rules, including recovery assignments beyond a maximum. Omitted
+`sections` leaves that child scope unvalidated; `sections: []` applies the
+retained-sequence rule; and a nonempty list validates its exhaustive grammar.
+Forbidden, extra, and unassigned headings open no child validation scope. A
+wildcard constrains only the sibling heading it consumes and has no
+implicit recursive meaning.
+
+Omitted `sections` and an explicit all-wildcard list can admit the same child
+heading texts but do not create the same bindings. Omission assigns and visits
+nothing. The wildcard list assigns each retained child to that rule and
+therefore applies its id, captures, constraints, guards, and any declared
+child grammar.
+
+Captures bind through successful, recovered, or unordered assignment and are
+parsed for every assigned heading, including excess headings. Unassigned,
+extra, and forbidden headings contribute no capture. Rule ids and constraints
+use the same assignment (§4); child validity never causes reassignment.
+Constraints evaluate after assignment and cardinality diagnostics under the
+dependency-suppression rules of §§4–5.
+
+3.7. **Complexity and resource exhaustion.** Let `H` be the number of
+structurally admitted direct children after skipped-level pruning and before
+guards, `R` the number of accepting rules, and `G` the number of guards in
+one scope. Guards take at most `H * G` matcher evaluations; accepting results
+take at most `H * R` and also decide extras eligibility.
+
+Ordered implementations MUST use the bounded prefix/rule dynamic program of
+§8 or an algorithm with the same bounds. Its per-scope matcher-evaluation and
+dynamic-program bound is `O((H + 1)(R + 1) + H * G)`. Acceptance alone MAY
+use `O(H + 1)` memory; canonical reconstruction and recovery MAY use
+`O((H + 1)(R + 1))`. Unordered classification has the same time bound and
+uses `O(R + 1)` count memory in addition to document bindings. An
+implementation MAY retain `O(H + 1)` assignment indices.
+
+An unbounded or larger finite maximum is clamped to `H` for state-space
+purposes. Minimums larger than `H` are compared arithmetically and make the
+corresponding acceptance states unreachable. An implementation MUST NOT
+expand a repeat into one state per permitted occurrence. Regexes retain the
+linear-time dialect of §2.2; matcher input length is accounted for by summing
+the cost of each invoked matcher over its processed heading text. Document
+cost is the sum over concrete scopes, never a product across ancestors.
+
+An implementation MAY impose a documented work or memory limit. Exhausting
+it is an operational error: no document verdict exists and the implementation
+MUST NOT return a truncated diagnostic set. It is not a schema error or
+document diagnostic (§11.5).
+
+A conformance suite for this algorithm MUST cover overlapping matchers,
+adjacent nullable phases, wildcard-heavy lists, finite maxima above `H`, all
+six heading levels, `R = 0`, `H = 0`, and independently increasing `H`, `R`,
+and `G` cases that demonstrate the bound. Unordered cases MUST cover overlap
+precedence, wildcard shadowing and `unreachable-rule`, extras, guards, and an
+`ordered` constraint.
 
 3.8. **Ordering repeated matches by captured value.** Each `order` entry on a
 rule independently orders the occurrences matched by that rule. `by` MUST
@@ -645,15 +813,16 @@ normalized `(by, dir, strict)` values are equal are duplicates. An undeclared
 `by`, duplicate entry, invalid field value, or `order` on a rule whose
 effective maximum is at most one is schema error `invalid-order`.
 
-For one order entry in one concrete parent scope, form the sequence of headers
-whose first matching rule (§3.2) is this rule, in document order. Headers
-matched by other rules and unmatched headers do not break adjacency; they do
-not belong to the sequence. Headers beyond the rule's cardinality maximum
-remain in it, so `too-many-sections` does not suppress value ordering. Headers
-matched by deny rules and every header in a skipped or otherwise unvisited
-subtree contribute nothing. When an ancestor repeats, each concrete ancestor
-instance supplies a separate sequence; occurrences are never flattened
-across instances.
+For one order entry in one concrete parent scope, form in document order the
+sequence of headings assigned to that rule by canonical success, recovery, or
+unordered classification. Headings assigned to other rules do not break
+adjacency. Headings beyond the rule's cardinality maximum remain in it, so
+`too-many-sections` does not suppress value ordering. Unassigned, extra,
+forbidden, skipped, and otherwise unvisited headings contribute nothing. When
+an ancestor repeats, each concrete ancestor instance supplies a separate
+sequence; occurrences are never flattened across instances. In an unordered
+scope this preserves document order within one assigned set even though the
+scope discards order between rules.
 
 Parse the selected capture of every header in that sequence according to
 §2.4. For each adjacent pair `(A, B)`, ascending order requires `A ≤ B` and
@@ -666,8 +835,8 @@ Each violating adjacent pair produces one `order-violation`, targeted and
 anchored at the pair's second header and listing both headers as involved.
 Its message MUST identify both parsed values. One misplaced value can
 therefore produce two diagnostics. This mechanism is
-independent of the across-rule ordering in §3.7 and the `ordered` constraint
-in §5.1.
+independent of the consuming grammar in §3.2 and the `ordered` constraint in
+§5.1.
 
 If any selected capture in a sequence is invalid, the corresponding order
 entry produces no `order-violation` in that scope. Skipping only the invalid
@@ -681,6 +850,23 @@ For example, under a SemVer capture ordered descending, the sequence
 `2.0.0`, `not-a-version`, `1.0.0` produces `invalid-value` for the middle
 header and no `order-violation` for that entry and scope. It does not compare
 the first and third values as if they were adjacent.
+
+3.9. **Reserved content-sequence contract.** This version introduces no
+preamble paragraph or list rule syntax. If such validation is added, its
+declared `content` list MUST reuse §3.2's consuming-sequence core and §8's
+acceptance, canonical partition, bounded dynamic program, and recovery
+priorities over visible blocks. Content rules MUST default to `1..1`;
+declared `content` MUST be exhaustive; omitted `content` MUST be unvalidated;
+and `content: []` MUST require emptiness. `block: any` is reserved as its
+visible-block wildcard and `one_of` as its local-alternative form; content
+violations will use their own block diagnostic taxonomy. Content rules MUST
+NOT admit `allow` or `strict`. Their feature-specific edge-cost function MAY
+distinguish specific from wildcard alternatives — for example, cost 0 for a
+specific `one_of` alternative and 1 only when its wildcard alternative is
+required — but MUST minimize total wildcard cost before applying the
+count-vector tie-break.
+Content-level prohibition guards, extras, and unordered scopes remain
+undefined; using them in such a context has no v2 semantics.
 
 ---
 
@@ -701,13 +887,24 @@ characters outside `[a-z0-9]` with `-`, and trim leading/trailing `-`
 the result is empty, the rule has no default id. Regex, glob, and `"*"`
 rules likewise have no default id.
 
-The same algorithm gives an unmatched concrete heading its document-side
-default id. Conceptually it is an implicit singleton rule. This permits a
-document-bound consumer to address headings in the absence of a schema, but
-does not make such a name available while loading a schema (§4.4). Markdown
-provides no corresponding default identity below headings; future content or
-item rules are explicit-id-or-unnameable, while concrete block and item nodes
-are reached structurally.
+The same algorithm gives eligible concrete headings a document-side implicit
+id. The complete classification is:
+
+| Heading class | Implicit document-side id | Document-bound reach and subtree traversal |
+|---|---|---|
+| Ordered-canonical or unordered first-match assigned | None; the assigned rule supplies identity | Reachable when that rule has an explicit or nonempty default id; traversal may continue |
+| Recovery-assigned | None; the recovery rule supplies identity | Reachable when that rule is named, subject to cardinality-dependent suppression for unnarrowed descent |
+| Unassigned with `unexpected-section` or `misplaced-section` | The concrete default id, when nonempty | Reachable by a unique concrete id; traversal may continue |
+| Forbidden by a guard | The concrete default id, when nonempty | Reachable by a unique concrete id; guard removal affects validation, not the document tree |
+| Admitted by `extras: anywhere` | The concrete default id, when nonempty | Reachable by a unique concrete id; traversal may continue through the unvalidated subtree |
+| In a scope with omitted `sections` | The concrete default id, when nonempty | Reachable by a unique concrete id; non-visitation does not remove the heading or subtree |
+| Assigned to an anonymous wildcard rule | None | No name step reaches it from the enclosing scope, so locator traversal cannot descend through it |
+
+A declared rule id wins over a colliding implicit concrete id. Skipped
+subtrees removed by §1.5 are unreachable. Schema-resident locators cannot use
+an implicit document-side id. Markdown provides no corresponding default
+identity below headings; future content or item rules are
+explicit-id-or-unnameable, while concrete nodes are reached structurally.
 
 4.3. **Named scopes and uniqueness.** The schema root and every section rule
 open a named scope. A rule's child section ids and the captures declared by
@@ -728,9 +925,7 @@ item rule syntax.
 Frontmatter captures occupy a separate named scope rooted at `fm`; they do
 not collide with names at the schema root. A declared capture is a terminal
 typed value, not a child scope. A reference to a nonexistent name is
-`unresolved-ref`; a reference through a rule with `allow: false` is
-`forbidden-ref`. Both are load-time schema errors for schema-resident
-locators.
+`unresolved-ref`, a load-time schema error for schema-resident locators.
 
 ### 4.4 Locator syntax and binding
 
@@ -760,8 +955,9 @@ not accepted by any constraint in this version. The former `@` prefix is not
 part of the locator language.
 
 A name step resolves only in the current named scope. There is no implicit
-upward or downward search. Rule-id steps produce the concrete headers whose
-first matched rule has that id. A capture-name step produces the typed value
+upward or downward search. Rule-id steps produce the concrete headers
+assigned to that rule by ordered canonical matching, recovery, or unordered
+classification. A capture-name step produces the typed value
 declared by the rule that owns the current named scope; after a rule-id step,
 that rule owns the next scope. A structural kind step filters
 the current nodes' direct structural children by the kind allocated by the
@@ -773,7 +969,8 @@ Other structural kinds and intrinsic members, including `/label`, remain
 unallocated until the document features that own them are specified.
 
 Every non-terminal step MUST be singular. It is singular statically when a
-schema-declared rule's effective maximum is at most one, or dynamically for a
+schema-declared rule's effective maximum is at most one — including every
+rule using the omitted exact-matcher cardinality — or dynamically for a
 document-bound locator when the concrete default id is unique; `[i]` makes
 any step singular. Only the terminal step may remain plural. Implementations
 MUST NOT concatenate results across a plural intermediate step. This is the
@@ -788,8 +985,8 @@ context assigns a more specific error.
 condition that an upstream check holds, failure of the upstream check leaves
 its diagnostic standing and suppresses the dependent evaluation. In
 particular, an unnarrowed non-terminal locator step may be statically singular
-because its rule has effective maximum one. If that rule nevertheless matches
-several headers in a cardinality-violating concrete scope,
+because its rule has effective maximum one. If recovery nevertheless assigns
+several headings to that rule in a cardinality-violating concrete scope,
 `too-many-sections` stands and every constraint evaluation that depends on
 descending through that step is suppressed in that scope; it emits no
 constraint diagnostic. This dependency is decided before the
@@ -809,7 +1006,7 @@ rule id and capture name, and every structural kind required by such a
 schema-side traversal, is checked at schema load. Concrete indices, whether a
 matched set is empty, frontmatter queries, and equality literals are document
 data and are evaluated during validation. Consequently a schema-resident
-locator cannot use the implicit id of an unmatched document heading. A
+locator cannot use any implicit document-side id. A
 schema-resident structural kind step MUST land on a declared structural rule
 of that kind; a document-bound consumer instead traverses the concrete
 document freely. Because this version declares no content or item rules, it
@@ -829,11 +1026,10 @@ treated as outermost, while the general form writes `$.part.overview` for a
 rule nested beneath h1 `part`. In a schemaless document `$` is the physical
 document root and an h1 is an ordinary default-id segment.
 
-An unmatched heading whose default id equals a sibling declared rule id is
-not separately name-addressable: the declared rule id wins. Skipped subtrees
-are in no validation scope and contribute no nodes. A deny-matched header can
-be addressed by a document-bound consumer, but a schema constraint naming its
-deny rule remains `forbidden-ref`.
+A heading with an implicit document-side id equal to a sibling declared rule
+id is not separately name-addressable: the declared rule id wins. Skipped
+subtrees are unreachable. The heading classes that retain implicit identity
+and permit document-bound subtree traversal are exactly those in §4.2.
 
 When an outline locator ending in a rule id is used as a proposition, it is
 satisfied iff its terminal node list is non-empty. Positional narrowing does
@@ -997,15 +1193,13 @@ or typed value, or otherwise lacking header position is schema error
 `[i]` MAY narrow a repeated ancestor, and a bare terminal rule MAY remain
 plural.
 
-An `ordered` constraint whose locators resolve in an ordered scope (§3.7) is
-likewise schema error `ordered-scope-mismatch`: that scope already orders
-every rule in it, so the constraint is either redundant — the same failure
-reported twice — or contradicts the list order. When the rules witnessing a
-reversed pair are present, at least one of the two orders necessarily fails;
-absent optional rules can make both orders vacuously satisfied. Declare the
-scope unordered to order it by constraint instead: set `ordered: false` on
-the rule that owns a child scope, or `options.ordered_sections: false` for
-the outermost scope.
+An `ordered` constraint is legal only when all its locators resolve in the
+same scope and that scope declares `unordered: true`. In an ordered consuming
+scope it is schema error `ordered-scope-mismatch`: the sequence grammar
+already defines complete order, so the constraint would be redundant or
+contradictory. In an unordered scope the constraint evaluates the referenced
+assigned sets in document order and can express a partial order independently
+of first-match classification.
 
 That rule needs no special case at the h1 level. A root `ordered` over
 `outline` rules orders the parts of a document, and a listed rule may
@@ -1132,7 +1326,7 @@ whatever that fallback names.
 
 | Diagnostic | Target | Source anchor |
 |---|---|---|
-| `skipped-level`, `not-allowed`, `unexpected-section` | `header` of the offending header | that header's line |
+| `skipped-level`, `not-allowed`, `unexpected-section`, `misplaced-section` | `header` of the offending header | that header's line |
 | `too-many-sections` | `header` of the first header in excess of the bound | that header's line |
 | `missing-section`, `too-few-sections` | `missing_header`: `parent` is the enclosing scope's path, `matcher` the unsatisfied rule's label | the parent section's header line; line 1 when `parent` is empty |
 | `missing-title` | `missing_header` with empty `parent` and the label of the `title` matcher, spelled or implied (§2) | line 1 |
@@ -1143,7 +1337,16 @@ whatever that fallback names.
 | `missing-value` | `frontmatter` with the absent capture's pointer when one can be normalized | deepest resolving positioned ancestor of the addressed path; block's first line as floor |
 | `order-violation` | `header` of the violating adjacent pair's second header | that second header's line |
 | constraint keywords | `header` of the scope's parent section; `document` for a constraint whose scope is the document root's, which has no parent header, and under the sugar's single-h1 voice (below) | the parent section's header line; line 1 for a `document` target |
-| `ordered` from an ordered scope (§3.7) | as a constraint of that scope | as a constraint of that scope |
+
+`unexpected-section` and `misplaced-section` are attributed to the owner of
+the declared scope, not to a possibly overlapping rule. At the general root
+there is no owning rule and no schema node; under the sugar the owner is the
+title node. Cardinality diagnostics are attributed to their accepting rule.
+A guard `not-allowed` is attributed to the first matching guard; a title
+mismatch is attributed to the title node. `misplaced-section` has no
+`involved_headers`, because its target already identifies the one offending
+heading. A guard-attributed diagnostic's schema location is that guard's
+`match` declaration.
 
 An `invalid-value` message MUST identify the expected type and the responsible
 capture or frontmatter query. A rule-capture diagnostic is attributed to that
@@ -1204,9 +1407,11 @@ that is itself an opening quote; only the scalar's style, reported alongside
 its position, tells a scalar that spells its breaks from one whose indicator
 merely kept them.
 
-**The sugar's document voice.** Under the sugar with at most one h1 — a lone
-h1, or none, the root standing at level 1 (§1.5) — diagnostics from the
-`sections` scope speak as if its rules bound the document itself:
+**The sugar's document voice.** Under non-null title sugar with at most one h1
+— a lone h1, or none (with the root then standing at level 1 under §1.5) —
+and under `title: null` regardless of prohibited h1s (with the root always
+standing at level 1), diagnostics from the `sections` scope speak as if its
+rules bound the document itself:
 cardinality misses carry an empty `parent` and anchor at line 1, and a
 root-declared constraint violation targets the document. The author wrote
 "the document has an Overview", and the report should not read "the title
@@ -1226,6 +1431,7 @@ Which diagnostics the `title` rule produces, and in what voice, is defined in
 ### 6.3 Reserved ids
 
 Diagnostic ids: `skipped-level`, `not-allowed`, `unexpected-section`,
+`misplaced-section`,
 `missing-section`, `too-few-sections`, `too-many-sections`,
 `missing-title`, `missing-frontmatter`,
 `forbidden-frontmatter`, `invalid-frontmatter`, `frontmatter-schema`,
@@ -1234,9 +1440,9 @@ the constraint keywords `one_of`, `any_of`, `at_most_one`, `all_or_none`,
 `requires`, `conflicts`, `ordered`.
 
 Schema errors: `syntax`, `invalid-document-shape`, `unsupported-version`,
-`duplicate-id`, `unresolved-ref`, `forbidden-ref`, `duplicate-ref`,
+`duplicate-id`, `unresolved-ref`, `duplicate-ref`,
 `reserved-id`, `invalid-matcher`, `invalid-repeat`, `invalid-capture`,
-`invalid-order`,
+`invalid-order`, `missing-cardinality`, `unreachable-rule`,
 `ordered-scope-mismatch`, `conflicting-cardinality`, `conflicting-outline`,
 `conflicting-frontmatter`, `invalid-frontmatter-schema`. These are load-time
 failures reported against the schema document and share the stability
@@ -1246,6 +1452,13 @@ Independent schema errors MUST be collected together, but a check whose input
 could not be built MUST NOT be attempted. Thus a malformed `captures` mapping
 does not additionally produce `invalid-order` for entries that would refer to
 it, and an invalid regex does not produce capture-group errors.
+
+`missing-cardinality` anchors at the `match` of an accepting regex, glob, or
+wildcard rule that declares neither `required` nor `repeat`.
+`unreachable-rule` anchors at each accepting rule declared after the first
+wildcard in an unordered scope. Removed v1 members, malformed guards, and
+invalid `extras` or `unordered` declarations use
+`invalid-document-shape`.
 
 `invalid-capture` anchors at the offending capture declaration, or at the
 `captures` key when the collection as a whole is invalid. `invalid-order`
@@ -1261,8 +1474,9 @@ following the top-level conflict convention of §2.
 **Suppression.** An HTML comment
 `<!-- outlint-disable <diag-id>[, <diag-id>...] -->` on the line
 immediately preceding a header suppresses the listed diagnostics *anchored
-to that header* (consequently, absence diagnostics are not suppressible per
-header — only file-wide). `<!-- outlint-disable-file <diag-id>... -->`
+to that header*, including `misplaced-section` (consequently, absence
+diagnostics are not suppressible per header — only file-wide).
+`<!-- outlint-disable-file <diag-id>... -->`
 anywhere in the file suppresses the listed diagnostics file-wide. Schema
 errors are load-time failures and are never suppressible. Dependency
 suppression (§3.8, §4.4, §4.6, §5.3) is decided before these comments filter
@@ -1271,6 +1485,9 @@ dependent `order-violation`; suppressing `too-many-sections` never re-enables
 a locator descent that depended on singularity; and suppressing
 `invalid-value`, `missing-value`, `missing-frontmatter`, or
 `invalid-frontmatter` never re-enables a dependent constraint.
+Suppression filtering likewise does not change canonical assignment,
+recovery, unordered classification, captures, locator binding, or dependency
+suppression.
 
 ---
 
@@ -1281,7 +1498,6 @@ a locator descent that depended on singularity; and suppressing
 | `match_case` | bool | `false` | case-sensitive matching for all matcher forms |
 | `strip_inline_markup` | bool | `true` | reduce inline markup to text before matching (§1.3) |
 | `allow_skipped_levels` | bool | `false` | permit e.g. h4 directly under h2 |
-| `ordered_sections` | bool | `true` | every scope's rules bind in document order unless a rule's own `ordered` says otherwise (§3.7) |
 
 ---
 
@@ -1289,15 +1505,14 @@ a locator descent that depended on singularity; and suppressing
 
 ```
 load_schema:
-  parse YAML; check version; reject unknown keys (§2)
+  parse YAML; require version 2; reject unknown and removed keys (§2)
   settle the top-level shape (§2):
     outline beside title/sections -> conflicting-outline
-    empty outline -> invalid-document-shape
-    desugar title/sections to one required outline rule whose scope is
-      closed to h1s (bare sections implies title "*"; title null becomes
-      a deny-all h1 rule; a mismatched h1 is not-allowed yet still
-      occupies the rule), remembering the sugar for diagnostic voice
-      (§6.2)
+    outline, including [], is a declared exhaustive h1 scope
+    desugar a non-null title to one exact-one title slot; bare sections
+      implies title "*"; retain title-null behavior and diagnostic voice
+    require a declared accepting list beside extras, unordered, or
+      child-scope constraints
   load frontmatter.schema if given; for an inline schema reject every
     $ref/$dynamicRef that is not fragment-only; compile JSON Schema
     (dialect per $schema)
@@ -1305,16 +1520,19 @@ load_schema:
     query; assign defaults; build the separate fm capture namespace
   walk rules (outline and every nested sections):
               validate matchers (incl. regex dialect), repeat grammar,
+              matcher-sensitive cardinality declarations,
               capture declarations and mandatory participation; normalize
               order entries; assign default ids; check named-scope
-              uniqueness; reject reserved root ids "fm" and "linkdefs"
+              uniqueness; reject reserved root ids "fm" and "linkdefs";
+              validate guards, extras, and unordered; in each unordered
+              scope reject every rule after its first wildcard
   bind every schema locator (§4): submit full RFC 9535 queries to the JSONPath
     provider; enforce the §4.6 guaranteed core's index bound and semantics;
     admit vendor-tier constructs without a subset gate;
     reject unknown functions and implementation-specific operators, dangling
-    names, locators through allow:false rules, plural non-terminal steps,
-    duplicate locators, arity < 2 in set forms, ordered locators crossing
-    scopes or resolving in an ordered scope (§3.7)
+    names, plural non-terminal steps, duplicate locators, arity < 2 in set
+    forms, and ordered locators crossing scopes or resolving outside an
+    unordered scope
 
 validate(doc):
   split frontmatter (§1.6); parse markdown -> header tree under the
@@ -1324,40 +1542,134 @@ validate(doc):
     compiled, run JSON Schema validation -> frontmatter-schema diagnostics
   if frontmatter is a valid mapping, evaluate each frontmatter capture ->
     missing-value or invalid-value as applicable
-  check skipped levels (§1.5; under the sugar with no h1 the root
-    stands at level 1)
-  visit(scope = the document root's children, rules = schema.outline,
-        constraints = schema.constraints):
-    for each header in document order:
-      rule := first rule in list whose matcher matches header.text
-      if rule is None: report unexpected-section if scope closed; skip subtree
-      elif rule.allow == false: report not-allowed; skip subtree
-      else:
-        counts[rule] += 1
-        parse rule's declared captures -> invalid-value as applicable
-        visit(header.children, rule.sections or [], rule.constraints or [])
-    for each rule: check counts[rule] against repeat -> missing/too-many
-    if the scope is ordered (§3.7): for each adjacent pair of accepting
-      rules that matched, check last(A) < first(B) -> ordered
+  check skipped levels (§1.5; under title:null the root always stands at
+    level 1; under non-null title sugar it does so only when no h1 exists)
+  process the sugar's title slot under §2, or visit the general root
+  visit(each concrete exposed child scope):
+    structurally prune skipped headings and subtrees
+    test guards in declaration order; report one not-allowed for each
+      matching heading at its first guard; remove it and its subtree
+    if sections is omitted: leave all survivors unassigned and stop
+    compute every survivor/rule matcher result
+    if extras is anywhere: remove exactly the all-false headings
+    if unordered: assign each retained heading to its first matching rule
+    else: compute the canonical complete partition below; if none exists,
+      compute the canonical relaxed recovery below
+    compute cardinality and unassigned-heading diagnostics (§3.5)
+    parse captures for every assigned heading
     for each rule order entry not suppressed by an invalid capture:
       compare every adjacent value pair -> order-violation
+    for every assigned heading, process its rule's declared child guards,
+      then stop if the accepting list is omitted, otherwise visit the child scope
     for each constraint: evaluate locator propositions (§4.4–§4.6),
       suppressing the whole constraint on a failed cardinality or typed-value
       dependency -> report
+  sort serialized diagnostics by §11.4 after suppression filtering
 ```
 
-Outline matching performs O(H × R) matcher tests, H = headers and R = the
-maximum sibling rule count. Typed parsing and ordering are linear in the
-number of captured occurrences per order entry. Guaranteed-core JSONPath
-evaluation follows §4.6; vendor-tier cost and results depend on the JSONPath
-provider and on the query and frontmatter value.
+The following dynamic programs are normative. Indices are zero-based here.
+Within these recurrences, let retained headings be `h[0..H)`; this `H` is no
+larger than the pre-guard `H` used for the whole-scope bound in §3.7. Let
+rules be `r[0..R)`, and let `a[j]` and `b[j]`
+be rule `j`'s real minimum and maximum, and `M[i,j]` say whether heading `i`
+matches rule `j`. For state-space purposes, replace an unbounded or finite
+`b[j] > H` by `H`; do not clamp `a[j]`. Let `w(i,j)` be 1 when rule `j` is a
+wildcard and 0 otherwise. A sum involving unreachable state infinity remains
+infinity.
+
+For ordered acceptance, `D[j,q]` is the minimum wildcard cost with which the
+first `j` rules consume exactly the first `q` headings. Initialize
+`D[0,0] = 0` and `D[0,q] = infinity` for `q > 0`. For `j` from 0 through
+`R-1`, compute:
+
+```text
+D[j+1,q] = min over p of
+             D[j,p] + sum(i=p..q-1, w(i,j))
+where a[j] <= q-p <= b[j]
+  and M[i,j] is true for every p <= i < q.
+```
+
+The scope is accepted exactly when `D[R,H]` is finite. This recurrence MUST
+be evaluated in `O((H + 1)(R + 1))`, not by enumerating every `p`. For one
+rule, form prefix costs `P[q] = sum(i=0..q-1, w(i,j))`. For each `q`, let
+`F[q]` be one plus the greatest index `< q` whose matcher result is false, or
+0 if none. The valid predecessors are the interval
+`[max(0, q-b[j], F[q]), q-a[j]]`; within it the minimized expression is
+`D[j,p] - P[p]`, plus the constant `P[q]`. A sliding range-minimum deque (or
+an equivalent linear-time interval-minimum method) therefore computes the
+whole next row in `O(H + 1)`. Empty intervals yield infinity. The same
+construction in reverse computes a suffix table `S[j,i]`, the minimum cost
+to consume `h[i..H)` with `r[j..R)`. Precisely,
+`S[R,H] = 0`, `S[R,i] = infinity` for `i < H`, and
+
+```text
+S[j,i] = min over k of
+           sum(t=i..i+k-1, w(t,j)) + S[j+1,i+k]
+where a[j] <= k <= b[j], i+k <= H,
+  and M[t,j] is true for every i <= t < i+k.
+```
+
+The reverse interval-minimum construction evaluates this recurrence within
+the same bound.
+
+Canonical reconstruction starts at `(j,i) = (0,0)`. For each rule, consider
+exactly the counts `k` within its real cardinality, clamped maximum, and
+consecutive matching run for which
+
+```text
+sum(t=i..i+k-1, w(t,j)) + S[j+1,i+k] = S[j,i].
+```
+
+Choose the smallest such `k` for a wildcard rule and the largest for every
+other rule, assign those `k` consecutive headings, and continue at
+`(j+1,i+k)`. This reconstructs minimum wildcard cost and then the required
+wildcard-ascending/specific-descending count vector. Suffix prefix sums and
+range extrema MUST keep reconstruction within `O((H + 1)(R + 1))`; an
+implementation MUST NOT rescan an unbounded range per state.
+
+If `D[R,H]` is infinite, compute recovery over states `K[i,j]`. Its value is
+the lexicographically minimum pair `(unassigned_count, wildcard_cost)` from
+heading `i` and rule `j` to the end when every rule has relaxed cardinality
+`0..n`. The terminal is `K[H,R] = (0,0)`. Missing rows or columns follow the
+same transitions: with no rule left, headings can only be left unassigned;
+with no heading left, rules can only be advanced. At every other state take
+the lexicographic minimum cost among applicable transitions:
+
+```text
+consume:          (0, w(i,j)) + K[i+1,j]     if M[i,j]
+leave unassigned: (1, 0)      + K[i+1,j]
+advance rule:                  K[i,j+1]
+```
+
+Reconstruct forward by choosing, among transitions preserving `K[i,j]`, the
+first in the fixed order consume, leave unassigned, advance rule. Thus an
+overlapping heading binds to an earlier rule when the two numeric costs do not
+worsen, and that rule remains available across an equally costly unassigned
+heading. This table and reconstruction have
+`O((H + 1)(R + 1))` time and memory bounds. The recovered assignment opens
+child scopes and supplies captures and locator bindings; its counts are then
+checked against the real cardinalities. Unassigned headings use the complete
+matcher table to distinguish `unexpected-section` from
+`misplaced-section`.
+
+For an unordered scope, scan retained headings independently. For each, scan
+rules from index 0 and assign it to the first true `M[i,j]`, or leave it
+unassigned if none is true. Increment assigned counts, check real
+cardinalities, and report `unexpected-section` for each unmatched retained
+heading. Do not run ordered acceptance or recovery. This is
+`O((H + 1)(R + 1))` including empty dimensions.
+
+Typed parsing and ordering are linear in captured occurrences per order
+entry. Guaranteed-core JSONPath evaluation follows §4.6; vendor-tier cost and
+results depend on the provider and query. The guard and matcher bounds,
+memory bounds, matcher-text costs, and operational-limit rule are §3.7.
 
 ---
 
 ## 9. Complete examples
 
 ```yaml
-version: 1
+version: 2
 title: "*"
 
 frontmatter:
@@ -1371,22 +1683,19 @@ frontmatter:
 sections:
   - id: overview
     match: "Overview"
-    required: true
-    strict: true
     sections:
       - match: "Goals"           # default id: goals
-        required: true
       - match: "Non-goals"       # default id: non-goals
-        required: false          # 0..1 — default 0..n would allow repeats
+        required: false
 
   - id: api
     match: "/API: .+/"
     repeat: "0..n"
+    extras: anywhere
     sections:
       - id: errors
         match: "Errors"
         required: false
-      - match: "*"               # any other h3 permitted
 
   - match: "Changelog"           # default id: changelog
     required: false
@@ -1410,8 +1719,6 @@ sections:
     required: false
   - match: "Roadmap"             # default id: roadmap
     required: false
-  - match: "*"
-    allow: false                 # closes the scope: no other h2 allowed
 
 constraints:
   - one_of: [changelog, history]
@@ -1436,26 +1743,26 @@ if frontmatter says `status: deprecated` a `## Deprecated` section exists; if
 the captured `release.date` is present a Changelog exists; a true captured
 `draft` forbids a Roadmap; and the h2s come in the order the rules are listed —
 Overview, then any API sections, then Changelog or History, then Deployment —
-because a scope is ordered by default (§3.7), with nothing more to spell.
+because a declared scope is an ordered consuming grammar by default (§3.2).
+Each API section may contain an optional `Errors`; other h3s are admitted as
+extras, unassigned and unvalidated. No other h2 is accepted because the
+top-level declared list is exhaustive.
 
 The same machinery one level up — a multi-part handbook, written in the
 general form because it has several h1s:
 
 ```yaml
-version: 1
+version: 2
 outline:
   - id: intro
     match: "Introduction"
-    required: true
   - id: part
     match: "Part *"
     repeat: "1..n"
     sections:
       - match: "Overview"        # per part: each h1 binds its own scope
-        required: true
       - match: "*"
-  - match: "*"
-    allow: false                 # closes the outline (§3.4)
+        repeat: "0..n"
 ```
 
 Every `# Part …` must contain its own `## Overview` — two parts, two
@@ -1463,33 +1770,89 @@ obligations, never pooled across parts — the introduction precedes every
 part, the outline scope being ordered like any other, and no other h1
 exists.
 
+An ordered scope with non-positional extras:
+
+```yaml
+version: 2
+title: "Guide"
+extras: anywhere
+sections:
+  - match: "Introduction"
+  - match: "Conclusion"
+```
+
+`Introduction` and `Conclusion` are each required exactly once and in that
+order. Any h2 matching neither rule may occur anywhere; it is admitted
+unassigned and does not interrupt the sequence. A heading matching either
+declared rule is never an extra and remains subject to position and
+cardinality.
+
+An unordered open presence schema:
+
+```yaml
+version: 2
+title: "*"
+unordered: true
+extras: anywhere
+sections:
+  - match: "Overview"
+  - match: "Installation"
+  - match: "Usage"
+```
+
+The three named h2s are each required exactly once in any document order.
+Other h2s are extras. If accepting matchers overlap, declaration order — not
+document order — selects the assigned rule.
+
 ---
 
 ## 10. Authoring guidance (non-normative)
 
 - Prefer the sugar. `title:` + `sections:` says at a glance that the
   document is a single-title one; reach for `outline:` only when the
-  document genuinely has several h1s. No h1 at all is `title: null` — not
-  an empty outline, and not bare `sections`, which implies a title.
+  document genuinely has several h1s. In the sugar, no h1 is `title: null`;
+  bare `sections` still implies a title. In the general form, `outline: []`
+  is the explicit empty h1 grammar.
 - Prefer explicit `id` on any rule referenced by constraints; rely on
   default ids only for throwaway exact matchers. Renaming a header text changes
   its default id and breaks locators (loudly, at load time). Avoid using future
   structural kind words such as `list` or `item` as ids even though the two
   syntactic roads cannot collide.
-- Order rules specific → general; end with `match: "*"` only when you need
-  a default or a closed scope.
-- Use `strict: true` rather than a manual `"*"`/`allow: false` pair.
-- List rules in the order the sections should appear: that order is
-  enforced by default. For a child scope whose sections may come in any order,
-  set `ordered: false` on its owning rule; for the outermost scope, set
-  `options.ordered_sections: false`. Reach for the `ordered` constraint only
-  in an unordered scope, or for a partial order.
+- Treat omission and emptiness deliberately. Omitted `sections` leaves child
+  headings unvalidated and unvisited. `sections: []` processes the scope and
+  requires no retained child; with `extras: anywhere`, that empty grammar
+  instead admits every non-forbidden child as an unassigned extra.
+- A declared list is already exhaustive. Use `forbid_sections` for a heading
+  that is prohibited anywhere in the scope; do not add a trailing wildcard
+  merely to close the scope.
+- List rules in the sequence the sections should appear. A wildcard is a
+  positioned phase, so give it an explicit repeat and put it exactly where
+  the extension region belongs. Use `extras: anywhere` when unrelated
+  unmatched headings may float without binding or child validation.
+- Declare `unordered: true` locally when the whole scope is a classifier and
+  document order is irrelevant. Put specific rules before general ones there,
+  because declaration order is first-match precedence; a wildcard makes every
+  later rule unreachable. Use an `ordered` constraint only inside such an
+  unordered scope to restore a partial or explicit order among named sets.
 - Express per-section obligations structurally (`required`, `repeat`);
   reserve `constraints` for presence logic *between* sections.
-- The default cardinality is `0..n`. Exact-text matchers almost always want
-  `required: false` (`0..1`) or `required: true` (`1..1`) — set one
-  explicitly; leave the open default to pattern matchers (`/regex/`, globs,
-  `"*"`), where multiplicity is usually the point.
+- The default cardinality is `1..1`. An exact matcher may use it silently;
+  write `required: false` for `0..1` and `repeat` for any repeated phase.
+  Regex, glob, and wildcard rules must always spell `required` or `repeat`,
+  so decide their intended collection size rather than relying on a default.
+- When migrating v1, remove `strict`, accepting-rule `allow`, rule-level
+  `ordered`, and `options.ordered_sections`; replace intentional denials with
+  guards, openness with `extras` or a positioned wildcard, and each inherited
+  unordered scope with a local `unordered: true`. Review every formerly
+  unannotated exact rule for optionality or repetition. An accepting exception
+  before a broader v1 denial may have no exact v2 translation because guards
+  always win and the regex dialect has no lookaround.
+- To preserve v1 first-match assignment for overlapping nameable rules,
+  declare the v2 scope unordered and add an `ordered` constraint over those
+  ids. This preserves assignment, cardinality, and the order predicate, but
+  not v1's automatic-order diagnostic attribution or multiplicity; anonymous
+  rules must also acquire ids. Delete rules shadowed by a wildcard before
+  enabling unordered mode and remove references to their ids.
 - Keep structural validation of frontmatter in `frontmatter.schema` (JSON
   Schema); use `frontmatter.captures` for typed values that Outlint itself
   consumes, `fm[...]` for document-time propositions, and `fm.<capture>` for
@@ -1532,7 +1895,7 @@ every requirement below.
 
 ### 11.1 Commands and arguments
 
-The V1 command surface is:
+The v2 command surface is:
 
 ```text
 outlint check <FILE>... [--schema <SCHEMA>] [--format human|json]
@@ -1544,6 +1907,8 @@ outlint --version
 outlint check --help
 outlint schema check --help
 ```
+
+No schema migration command is defined by this version.
 
 `-s` is an alias for `--schema`, and `-h` is an alias for a validation
 command's `--help`. At the top level, `-h` aliases `--help` and `-V` aliases
@@ -1635,7 +2000,7 @@ object is the command's machine-readable interface. Its shape is:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "results": [
     {
       "kind": "document",
@@ -1660,10 +2025,11 @@ Operationally unreadable inputs do not produce results. `summary.files` is
 the number of results; the other counts partition those results by kind and
 count their diagnostics.
 
-Typed Values changes this envelope version from 2 to 3 because the
-`references` variants below can represent positional and RFC 9535 locators;
-consumers MUST reject unsupported envelope versions rather than interpreting
-them as an older reference shape.
+Schema v2 changes the envelope version from 3 to 4 because guard attribution
+adds a schema-node variant and the public diagnostic-id set adds
+`misplaced-section`. Consumers that understand only envelope 3 MUST reject
+envelope 4 rather than interpreting it as an older shape. Any exposed
+diagnostic-id enum MUST include `misplaced-section`.
 
 Each diagnostic object has `id`, `message`, and `location` with one-based
 `line` and byte `column`. The `message` member is explanatory prose: its
@@ -1672,18 +2038,25 @@ rather than parse or key behavior on its wording. Document diagnostics also
 have the tagged `target` defined by Section 6.1. The following members are
 present when the corresponding semantic data exists and omitted otherwise:
 
-- `schema_node`, using the `kind` spellings `title`, `frontmatter`,
+- `schema_node`, using this tagged-variant order: `title`, `frontmatter`,
   `frontmatter_schema_declaration`, `frontmatter_schema_document`, `rule`,
-  `capture`, `frontmatter_capture`, `order_entry`, or `constraint`; rule and
-  constraint nodes retain their zero-based `scope` rule-index path and
-  `index`; `capture` adds its `name` to its owning rule coordinates,
-  `frontmatter_capture` has `name`, and `order_entry` adds zero-based
-  `order_index` to its owning rule coordinates;
+  `guard`, `capture`, `frontmatter_capture`, `order_entry`, `constraint`.
+  Rule and constraint nodes retain their zero-based `scope` accepting-rule
+  index path and `index`; `capture` adds its `name` to its owning rule
+  coordinates, `frontmatter_capture` has `name`, and `order_entry` adds
+  zero-based `order_index` to its owning rule coordinates. A `guard` node has
+  members in declaration order `kind`, `scope`, `index`: `kind` is
+  `"guard"`, `scope` is the array of zero-based accepting-rule indices leading
+  to the guarded scope (empty for an exposed root scope), and `index` is the
+  guard's zero-based index in `forbid_sections`;
 - `schema_location`, with `path`, one-based `line`, and one-based byte
   `column`;
 - `involved_headers`, whose entries have a `header_path` string array and a
   one-based `location`;
 - `references`, whose entries form the tagged union defined below.
+
+`extras` and `unordered` do not have schema-node variants. Their declarations
+change scope behavior but do not attribute document diagnostics directly.
 
 Every `references` entry has an explicit `kind` member whose value is `rule`,
 `frontmatter_query`, or `frontmatter_capture`, and a `locator` member
@@ -1732,8 +2105,8 @@ Strings compare lexicographically by their UTF-8 bytes. Sequence fields
 compare lexicographically. Optional values compare with absence first;
 structured values compare by their variants in the order listed in Sections
 6.1 and 11.3, then by members in declaration order. This order is a function
-of rendered diagnostic data and MUST NOT depend on validator traversal or
-discovery order.
+of rendered diagnostic data and MUST NOT depend on sequence search, recovery,
+unordered assignment, validator traversal, or discovery order.
 
 For `references`, "members in declaration order" means the member order
 stated for each tagged variant in §11.3; the `equals` object likewise compares
@@ -1757,10 +2130,13 @@ When validation diagnostics and an operational error occur in the same
 invocation, status 2 takes precedence. Inputs are preflighted independently
 of schema validity, so an invalid explicit schema can be reported together
 with document read errors; dependent documents are not partially validated.
+Exhaustion of a documented matching work or memory limit under §3.7 is such
+an operational error: it produces no verdict or truncated result for the
+affected document and makes the invocation exit with status 2.
 
 ### 11.6 Side effects and resource retrieval
 
-The V1 CLI validates only. It MUST NOT rewrite Markdown or schema files,
+The v2 CLI validates only. It MUST NOT rewrite Markdown or schema files,
 insert or normalize headings in source, generate suppressions, or modify
 frontmatter. Setext normalization in Section 1.2 is an internal parsing step,
 not a source edit.
