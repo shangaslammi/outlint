@@ -147,6 +147,9 @@ fn schema_node_json(node: &RenderedSchemaNode) -> Value {
         RenderedSchemaNode::Rule { scope, index } => {
             json!({ "kind": "rule", "scope": scope, "index": index })
         }
+        RenderedSchemaNode::Guard { scope, index } => {
+            json!({ "kind": "guard", "scope": scope, "index": index })
+        }
         RenderedSchemaNode::Capture { scope, index, name } => {
             json!({ "kind": "capture", "scope": scope, "index": index, "name": name })
         }

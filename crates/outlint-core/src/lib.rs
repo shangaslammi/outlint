@@ -14,7 +14,7 @@ mod validator;
 mod yaml;
 
 pub use load_result::{
-    ByteOffset, CapturePath, ConstraintIndex, ConstraintPath, InvalidSchema,
+    ByteOffset, CapturePath, ConstraintIndex, ConstraintPath, GuardIndex, GuardPath, InvalidSchema,
     JsonSchemaExternalReference, JsonSchemaResourceContents, JsonSchemaResourceInput,
     LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, OrderEntryPath, OrderIndex,
     RelatedLocation, RuleIndex, RulePath, SchemaError, SchemaErrorKind, SchemaLocations,
@@ -32,12 +32,13 @@ pub use markdown::{
 };
 pub use schema::{
     AtLeastTwo, BoundRuleStep, CanonicalFloat, CanonicalInteger, CaptureName, Cardinality,
-    Constraint, ExactText, FrontmatterCapture, FrontmatterCaptureView, FrontmatterCaptures,
-    FrontmatterPolicy, FrontmatterScalar, FrontmatterSchema, GlobPattern, HeaderLevel, Matcher,
-    NonEmpty, Options, OutlineProvenance, Proposition, RefAnchor, RegexPattern,
-    ResolvedFrontmatterCapture, ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator,
-    ResolvedOutlineLocator, ResolvedRuleCaptureLocator, ResolvedRuleLocator, RuleCapture, RuleId,
-    RuleOutcome, Schema, SchemaVersion, SectionRule, UpperBound, ValueOrderDirection,
+    ChildScope, Constraint, DeclaredScope, DocumentShape, ExactText, ExtrasMode,
+    FrontmatterCapture, FrontmatterCaptureView, FrontmatterCaptures, FrontmatterPolicy,
+    FrontmatterScalar, FrontmatterSchema, GlobPattern, HeaderLevel, Matcher, NonEmpty, Options,
+    OutlineProvenance, Proposition, RefAnchor, RegexPattern, ResolvedFrontmatterCapture,
+    ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator, ResolvedOutlineLocator,
+    ResolvedRuleCaptureLocator, ResolvedRuleLocator, RuleCapture, RuleId, Schema, SchemaVersion,
+    ScopeMode, SectionGuard, SectionRule, TitleSlot, UpperBound, ValueOrderDirection,
     ValueOrderEntry,
 };
 pub use validator::{

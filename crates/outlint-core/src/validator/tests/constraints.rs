@@ -160,7 +160,7 @@ fn a_query_resolves_one_member_per_segment() {
 #[test]
 fn frontmatter_constraints_fire_and_release_through_validation() {
     let loaded = load_schema(
-        "version: 1\nsections:\n  - id: migration\n    match: Migration\n    \
+        "version: 2\nsections:\n  - id: migration\n    match: Migration\n    \
          required: false\nconstraints:\n  - requires: { if: \"fm[$.status]=deprecated\", \
          then: migration }\n",
     )
@@ -214,7 +214,7 @@ fn frontmatter_queries_route_past_a_nested_rule_addressable_as_fm_x() {
     // frontmatter forms, so `fm[$.x]` reads the frontmatter and never the
     // rule forest, and the headers below cannot satisfy the condition.
     let loaded = load_schema(
-        "version: 1\nsections:\n  - id: outer\n    match: Outer\n    required: false\n    \
+        "version: 2\nsections:\n  - id: outer\n    match: Outer\n    required: false\n    \
          sections:\n      - id: fm\n        match: FM\n        required: false\n        \
          sections:\n          - id: x\n            match: X\n            required: false\n    \
          constraints:\n      - requires: { if: \"fm[$.x]=1\", then: \"fm[$.present]=1\" }\n",

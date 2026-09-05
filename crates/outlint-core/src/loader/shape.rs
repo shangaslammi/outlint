@@ -16,24 +16,23 @@ pub(super) const DOCUMENT_FIELDS: &[&str] = &[
     "frontmatter",
     "outline",
     "sections",
+    "forbid_sections",
+    "extras",
+    "unordered",
     "constraints",
 ];
-pub(super) const OPTION_FIELDS: &[&str] = &[
-    "match_case",
-    "strip_inline_markup",
-    "allow_skipped_levels",
-    "ordered_sections",
-];
+pub(super) const OPTION_FIELDS: &[&str] =
+    &["match_case", "strip_inline_markup", "allow_skipped_levels"];
 pub(super) const FRONTMATTER_FIELDS: &[&str] = &["required", "allow", "schema", "captures"];
 pub(super) const RULE_FIELDS: &[&str] = &[
     "id",
     "match",
-    "allow",
     "required",
     "repeat",
-    "strict",
-    "ordered",
     "sections",
+    "forbid_sections",
+    "extras",
+    "unordered",
     "constraints",
     "captures",
     "order",
@@ -60,9 +59,25 @@ impl Loader {
         let outline_conflict = if mapping.contains_key("outline") {
             self.validate_outline_exclusivity(mapping)
         } else {
-            self.validate_required_field(mapping, "sections", self.document_range);
+            if !mapping.contains_key("title") && !mapping.contains_key("sections") {
+                self.shape_error_at(
+                    self.document_range,
+                    "schema must declare `outline`, `title`, or `sections`",
+                );
+            }
             false
         };
+        let declared_list = mapping.contains_key("outline") || mapping.contains_key("sections");
+        if !declared_list {
+            for field in ["extras", "unordered", "constraints"] {
+                if mapping.contains_key(field) {
+                    self.shape_error_at(
+                        self.range(RangeKey::DocumentField(field.into())),
+                        format!("`{field}` requires a declared accepting list"),
+                    );
+                }
+            }
+        }
 
         if let Some(value) = mapping.get("version") {
             if !is_yaml_integer(value) {
@@ -99,6 +114,7 @@ impl Loader {
             let range = self.range(RangeKey::DocumentField("sections".into()));
             self.validate_rules_shape(value, &ScopePath(Vec::new()), range);
         }
+        self.validate_scope_fields(mapping, &ScopePath(Vec::new()), self.document_range);
         if let Some(value) = mapping.get("constraints") {
             let range = self.range(RangeKey::DocumentField("constraints".into()));
             self.validate_constraints_shape(value, &ScopePath(Vec::new()), range);
@@ -208,7 +224,7 @@ impl Loader {
                     }
                 }
             }
-            for field in ["allow", "required", "strict", "ordered"] {
+            for field in ["required", "unordered"] {
                 if let Some(value) = mapping.get(field) {
                     if !matches!(value, Value::Bool(_)) {
                         self.shape_error_at(
@@ -219,6 +235,7 @@ impl Loader {
                 }
             }
             let child_scope = ScopePath(vec![RuleIndex(index)]);
+            self.validate_scope_fields(mapping, &child_scope, rule_range);
             if let Some(children) = mapping.get("sections") {
                 let range = self.range(RangeKey::OutlineRuleField(
                     RuleIndex(index),
@@ -263,7 +280,7 @@ impl Loader {
                     }
                 }
             }
-            for field in ["allow", "required", "strict", "ordered"] {
+            for field in ["required", "unordered"] {
                 if let Some(value) = mapping.get(field) {
                     if !matches!(value, Value::Bool(_)) {
                         self.shape_error_at(
@@ -283,7 +300,57 @@ impl Loader {
                 let range = self.range(RangeKey::RuleField(path, "constraints".into()));
                 self.validate_constraints_shape(constraints, &child_scope, range);
             }
+            self.validate_scope_fields(mapping, &child_scope, rule_range);
         }
+    }
+
+    fn validate_scope_fields(&mut self, mapping: &JsonMap, scope: &ScopePath, range: SourceRange) {
+        let sections_declared = mapping.contains_key(if mapping.contains_key("outline") {
+            "outline"
+        } else {
+            "sections"
+        });
+        if !sections_declared {
+            for field in ["extras", "unordered", "constraints"] {
+                if mapping.contains_key(field) {
+                    self.shape_error_at(
+                        range,
+                        format!("`{field}` requires a declared accepting list"),
+                    );
+                }
+            }
+        }
+        if let Some(value) = mapping.get("extras") {
+            if value.as_str() != Some("anywhere") {
+                self.shape_error_at(range, "`extras` must be the scalar `anywhere`");
+            }
+        }
+        if let Some(value) = mapping.get("unordered") {
+            if !value.is_boolean() {
+                self.shape_error_at(range, "`unordered` must be a bool and cannot be null");
+            }
+        }
+        if let Some(value) = mapping.get("forbid_sections") {
+            let Some(guards) = value.as_array() else {
+                self.shape_error_at(range, "`forbid_sections` must be a sequence");
+                return;
+            };
+            for guard in guards {
+                let Some(guard) = guard.as_object() else {
+                    self.shape_error_at(range, "each guard must be a mapping");
+                    continue;
+                };
+                self.validate_known_fields(guard, &["match"], range);
+                self.validate_required_field(guard, "match", range);
+                if guard
+                    .get("match")
+                    .is_some_and(|matcher| !matcher.is_string())
+                {
+                    self.shape_error_at(range, "guard `match` must be a string");
+                }
+            }
+        }
+        let _ = scope;
     }
 
     fn validate_constraints_shape(&mut self, value: &Value, scope: &ScopePath, range: SourceRange) {

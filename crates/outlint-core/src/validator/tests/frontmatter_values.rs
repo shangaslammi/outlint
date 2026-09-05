@@ -10,7 +10,7 @@ use super::diagnostics;
 /// A headless schema whose frontmatter declares captures, spelled by the
 /// caller at the indentation `frontmatter.captures` needs.
 fn capture_schema(declarations: &str) -> String {
-    format!("version: 1\ntitle: null\nsections: []\nfrontmatter:\n  captures:\n{declarations}")
+    format!("version: 2\ntitle: null\nsections: []\nfrontmatter:\n  captures:\n{declarations}")
 }
 
 /// One capture declaration.
@@ -122,10 +122,10 @@ fn an_unrecognized_tag_keeps_the_core_resolved_kind() {
 
 #[test]
 fn an_unquoted_numeric_version_is_invalid_and_the_message_suggests_quoting() {
-    // §2.4: "unquoted `version: 1.2` is a YAML float and is not a `semver`;
+    // §2.4: "unquoted `version: 2.2` is a YAML float and is not a `semver`;
     // diagnostics SHOULD suggest quoting this common mistake."
     let schema = capture_schema(&declaration("version", "semver", true, None));
-    let reported = diagnostics(&schema, "---\nversion: 1.2\n---\n");
+    let reported = diagnostics(&schema, "---\nversion: 2.2\n---\n");
     assert_eq!(ids(&reported), [DiagnosticId::InvalidValue]);
     assert!(
         reported[0].message.contains("quote"),
@@ -278,7 +278,7 @@ fn an_absent_or_invalid_block_evaluates_no_capture() {
 fn a_json_schema_failure_does_not_suppress_capture_evaluation() {
     // §2.3: "A `frontmatter-schema` failure does not suppress capture
     // evaluation because a valid resolved mapping still exists."
-    let schema = "version: 1\ntitle: null\nsections: []\nfrontmatter:\n  schema:\n    \
+    let schema = "version: 2\ntitle: null\nsections: []\nfrontmatter:\n  schema:\n    \
                   type: object\n    required: [needed]\n  captures:\n    v:\n      type: int\n      \
                   required: true\n";
     assert_eq!(
@@ -295,7 +295,7 @@ fn a_json_schema_failure_does_not_suppress_capture_evaluation() {
 /// always satisfies, so the `requires` diagnostic reports `fm.v`'s truth.
 fn proposition_schema(declarations: &str, block: &str) -> String {
     format!(
-        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+        "version: 2\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
          required: true\nfrontmatter:\n{block}  captures:\n{declarations}\
          constraints:\n  - requires: {{ if: body, then: \"fm.v\" }}\n"
     )

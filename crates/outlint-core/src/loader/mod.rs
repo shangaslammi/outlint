@@ -20,12 +20,11 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    ByteOffset, Cardinality, ConstraintIndex, ConstraintPath, InvalidSchema,
+    ByteOffset, ConstraintIndex, ConstraintPath, DocumentShape, GuardPath, InvalidSchema,
     JsonSchemaResourceContents, LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, Matcher,
-    NonEmpty, OrderIndex, OutlineProvenance, RelatedLocation, RuleIndex, RuleOutcome, RulePath,
-    Schema, SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
-    SchemaVersion, ScopePath, SectionRule, SourceId, SourceLabel, SourceRange, TextRange,
-    UpperBound,
+    NonEmpty, OrderIndex, OutlineProvenance, RelatedLocation, RuleIndex, RulePath, Schema,
+    SchemaError, SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources,
+    SchemaVersion, ScopePath, SourceId, SourceLabel, SourceRange, TextRange, TitleSlot,
 };
 
 use self::constraints::constraints_mut;
@@ -61,17 +60,14 @@ type JsonMap = serde_json::Map<String, Value>;
 ///
 /// let loaded = load_schema(
 ///     r#"
-/// version: 1
+/// version: 2
 /// title: null
 /// sections:
 ///   - match: Overview
 /// "#,
 /// )?;
 ///
-/// assert!(matches!(
-///     loaded.schema.outline[0].sections[0].matcher,
-///     Matcher::Exact(_)
-/// ));
+/// assert!(matches!(loaded.schema.document, outlint_core::DocumentShape::Title(_)));
 /// # Ok::<(), outlint_core::InvalidSchema>(())
 /// ```
 pub fn load_schema(source: &str) -> LoadSchemaResult {
@@ -109,6 +105,10 @@ struct RawSchema {
     sections: Option<Vec<RawRule>>,
     outline: Option<Vec<RawRule>>,
     #[serde(default)]
+    forbid_sections: Vec<RawGuard>,
+    extras: Option<String>,
+    unordered: Option<bool>,
+    #[serde(default)]
     constraints: Vec<Value>,
 }
 
@@ -142,7 +142,6 @@ struct RawOptions {
     match_case: Option<bool>,
     strip_inline_markup: Option<bool>,
     allow_skipped_levels: Option<bool>,
-    ordered_sections: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,15 +150,13 @@ struct RawRule {
     id: Option<String>,
     #[serde(rename = "match")]
     matcher: String,
-    #[serde(default = "default_true")]
-    allow: bool,
     required: Option<bool>,
     repeat: Option<String>,
+    sections: Option<Vec<RawRule>>,
     #[serde(default)]
-    strict: bool,
-    ordered: Option<bool>,
-    #[serde(default)]
-    sections: Vec<RawRule>,
+    forbid_sections: Vec<RawGuard>,
+    extras: Option<String>,
+    unordered: Option<bool>,
     #[serde(default)]
     constraints: Vec<Value>,
     /// The rule's `captures` mapping exactly as written, unnormalized.
@@ -173,8 +170,11 @@ struct RawRule {
     order: Option<Value>,
 }
 
-const fn default_true() -> bool {
-    true
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGuard {
+    #[serde(rename = "match")]
+    matcher: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -184,6 +184,8 @@ enum RangeKey {
     FrontmatterField(String),
     Rule(RulePath),
     RuleField(RulePath, String),
+    Guard(GuardPath),
+    GuardField(GuardPath, String),
     Constraint(ConstraintPath),
     /// An `h1`-level rule in the top-level `outline` list.
     OutlineRule(RuleIndex),
@@ -367,13 +369,13 @@ impl Loader {
         };
 
         let version_range = self.range(RangeKey::DocumentField("version".into()));
-        let version = if raw.version == 1 {
-            Some(SchemaVersion::V1)
+        let version = if raw.version == 2 {
+            Some(SchemaVersion::V2)
         } else {
             self.error_at(
                 SchemaErrorKind::UnsupportedVersion,
                 version_range,
-                format!("unsupported schema version {}; expected 1", raw.version),
+                format!("unsupported schema version {}; expected 2", raw.version),
             );
             None
         };
@@ -382,22 +384,21 @@ impl Loader {
 
         let options = Self::build_options(&raw.options);
         let match_case = options.match_case;
-        let ordered_default = options.ordered_sections;
         let root_scope = ScopePath(Vec::new());
-        // The empty scope key names what the source's top level spelled: the
-        // outline scope for the general form, the `sections` scope for sugar.
-        // `constraints_mut` routes it to the matching place in the built
-        // schema, so both forms share the collection here.
-        self.raw_constraints
-            .insert(root_scope.clone(), raw.constraints);
-        let (outline, outline_provenance) = if let Some(entries) = raw.outline {
+        let document = if let Some(entries) = raw.outline {
             self.outline_general = true;
-            (
-                self.build_outline_scope(entries, &root_scope, match_case, ordered_default),
-                OutlineProvenance::Outline,
+            self.build_outline_scope(
+                entries,
+                &root_scope,
+                match_case,
+                raw.forbid_sections,
+                raw.extras,
+                raw.unordered,
+                raw.constraints,
             )
+            .map(DocumentShape::Outline)
         } else {
-            let outline_provenance = if title_null {
+            let provenance = if title_null {
                 OutlineProvenance::NoTitle
             } else if raw.title.is_some() {
                 OutlineProvenance::Title
@@ -413,7 +414,7 @@ impl Loader {
                 let range = self.range(RangeKey::DocumentField("title".into()));
                 self.nodes.insert(SchemaNode::Title, range);
             }
-            if outline_provenance == OutlineProvenance::BareSections {
+            if provenance == OutlineProvenance::BareSections {
                 // Bare `sections:` implies `title: "*"`, but there is no
                 // `title:` key to anchor title diagnostics on. The `sections`
                 // key is the spelling that implied the rule, so it carries
@@ -421,52 +422,30 @@ impl Loader {
                 let range = self.range(RangeKey::DocumentField("sections".into()));
                 self.nodes.insert(SchemaNode::Title, range);
             }
-            let sections = self.build_scope(
-                raw.sections
-                    .expect("the shape validation requires `sections` without `outline`"),
+            let children = self.build_child_scope(
+                raw.sections,
+                raw.forbid_sections,
+                raw.extras,
+                raw.unordered,
+                raw.constraints,
                 &root_scope,
                 match_case,
-                ordered_default,
+                None,
             );
-            // The sugar desugars UP into the canonical h1-rule list: one
-            // synthesized rule whose matcher is the declared title (any text
-            // when none is declared), required exactly once — or denied for
-            // `title: null` — with the `sections` list as its child scope.
-            // The rule has no id and no spelling of its own: publicly it is
-            // `SchemaNode::Title`, and public scopes address its children.
-            let outline = sections.map(|sections| {
-                vec![SectionRule {
-                    id: None,
-                    // A failed title matcher already pushed its error; the
-                    // any-text placeholder never reaches a caller because the
-                    // load fails below.
-                    matcher: title.unwrap_or(Matcher::Any),
-                    outcome: if title_null {
-                        RuleOutcome::Deny
+            children.map(|children| {
+                DocumentShape::Title(TitleSlot {
+                    matcher: if title_null {
+                        None
                     } else {
-                        RuleOutcome::Allow(Cardinality {
-                            min: 1,
-                            max: UpperBound::Bounded(1),
-                        })
+                        Some(title.unwrap_or(Matcher::Any))
                     },
-                    strict: false,
-                    // The sugar has no rule to carry `ordered`, so its
-                    // `sections` scope follows the option, like the general
-                    // form's outline scope.
-                    ordered: ordered_default,
-                    sections,
-                    constraints: Vec::new(),
-                    // The synthesized title rule has no source declaration to
-                    // carry captures or an order, and never will: both are
-                    // spelled on a rule object.
-                    captures: BTreeMap::new(),
-                    order: Vec::new(),
-                }]
-            });
-            (outline, outline_provenance)
+                    children,
+                    provenance,
+                })
+            })
         };
 
-        let (Some(version), Some(frontmatter), Some(outline)) = (version, frontmatter, outline)
+        let (Some(version), Some(frontmatter), Some(document)) = (version, frontmatter, document)
         else {
             self.validate_constraint_lexical_refs();
             return self.failure();
@@ -475,9 +454,7 @@ impl Loader {
             version,
             options,
             frontmatter,
-            outline,
-            constraints: Vec::new(),
-            outline_provenance,
+            document,
         };
 
         let mut normalized = BTreeMap::new();

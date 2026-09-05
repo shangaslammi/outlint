@@ -11,7 +11,7 @@ use super::diagnostics;
 /// constraints out of. `constraints` is spelled by the caller.
 fn descent_schema(constraints: &str) -> String {
     format!(
-        "version: 1\noptions:\n  ordered_sections: false\noutline:\n  \
+        "version: 2\noptions:\n  ordered_sections: false\noutline:\n  \
          - id: part\n    match: Part\n    required: true\n    ordered: false\n    \
          sections:\n      - id: goal\n        match: Goal\n        required: false\n      \
          - id: note\n        match: Note\n        required: false\n  \
@@ -101,7 +101,7 @@ fn a_positional_step_descends_through_the_same_cardinality_violation() {
 fn a_plural_terminal_step_is_an_ordinary_presence_proposition() {
     // §4.4: "Only the terminal step may remain plural", and §4.5 makes such a
     // locator "satisfied iff its terminal node list is non-empty".
-    let schema = "version: 1\noptions:\n  ordered_sections: false\noutline:\n  \
+    let schema = "version: 2\noptions:\n  ordered_sections: false\noutline:\n  \
                   - id: part\n    match: Part\n    repeat: 0..n\n  \
                   - id: extra\n    match: Extra\n    required: false\n\
                   constraints:\n  - requires: { if: extra, then: part }\n";
@@ -118,7 +118,7 @@ fn an_unrelated_cardinality_failure_leaves_the_locator_alone() {
     // §4.4: dependency suppression "does not make every cardinality failure
     // suppress every later check". The rule in excess here is not on the
     // locator's path.
-    let schema = "version: 1\noptions:\n  ordered_sections: false\noutline:\n  \
+    let schema = "version: 2\noptions:\n  ordered_sections: false\noutline:\n  \
                   - id: part\n    match: Part\n    required: true\n    ordered: false\n    \
                   sections:\n      - id: goal\n        match: Goal\n        required: false\n  \
                   - id: extra\n    match: Extra\n    required: false\n  \
@@ -236,7 +236,7 @@ fn ordered_suppresses_when_any_of_its_locator_descents_is_suppressed() {
 /// query's truth.
 fn query_schema(query: &str, frontmatter: &str) -> String {
     format!(
-        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+        "version: 2\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
          required: true\n{frontmatter}constraints:\n  - requires: {{ if: body, \
          then: \"{query}\" }}\n"
     )
@@ -451,9 +451,9 @@ fn equality_never_invalidates_a_node_and_keeps_its_typed_existential_reading() {
     );
     // §4.6: "String equality follows `options.match_case`".
     let sensitive = format!(
-        "version: 1\noptions:\n  match_case: true\n{}",
+        "version: 2\noptions:\n  match_case: true\n{}",
         query_schema("fm[$.status]=deprecated", "")
-            .strip_prefix("version: 1\n")
+            .strip_prefix("version: 2\n")
             .expect("the helper spells the version first")
     );
     assert_eq!(
@@ -477,7 +477,7 @@ fn a_decisive_earlier_operand_does_not_prevent_a_later_query_diagnostic() {
         "  - conflicts: { if: missing, then_not: \"fm[$.flag]\" }\n",
     ] {
         let schema = format!(
-            "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+            "version: 2\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
              required: true\n  - id: missing\n    match: Missing\n    \
              required: false\nconstraints:\n{constraints}"
         );
@@ -529,7 +529,7 @@ fn an_already_suppressed_operand_does_not_prevent_a_later_query_diagnostic() {
 fn an_unsatisfied_constraint_keeps_every_reference_in_declaration_order() {
     // §5.3 reports "the resolved locators with their matchers or frontmatter
     // declarations", and §11.3's three reference kinds all reach the spine.
-    let schema = "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+    let schema = "version: 2\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
                   required: false\nfrontmatter:\n  captures:\n    v:\n      type: bool\n\
                   constraints:\n  - any_of: [body, \"fm[$.draft]=yes\", \"fm.v\"]\n";
     let reported = diagnostics(schema, "---\nv: false\n---\n");

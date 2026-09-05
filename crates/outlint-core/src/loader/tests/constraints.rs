@@ -7,7 +7,7 @@ use crate::{
 
 /// The bound rule locator a root `any_of`'s first operand holds.
 fn first_rule_locator(schema: &Schema) -> &ResolvedRuleLocator {
-    let Constraint::AnyOf(items) = &schema.outline[0].constraints[0] else {
+    let Constraint::AnyOf(items) = &schema.outline()[0].children.constraints()[0] else {
         panic!("expected any_of")
     };
     let Proposition::Rule(locator) = &items.first else {
@@ -20,7 +20,7 @@ fn first_rule_locator(schema: &Schema) -> &ResolvedRuleLocator {
 fn resolves_constraints_and_normalizes_frontmatter_scalars() {
     let schema = valid(
         r#"
-version: 1
+version: 2
 sections:
   - match: Overview
     required: false
@@ -34,7 +34,7 @@ constraints:
     let Constraint::Requires {
         condition,
         consequences,
-    } = &schema.outline[0].constraints[0]
+    } = &schema.outline()[0].children.constraints()[0]
     else {
         panic!("expected requires")
     };
@@ -80,7 +80,7 @@ fn query_equality_identity_uses_simple_case_folding() {
     // tell apart are one proposition.
     let duplicate = error_kinds(
         r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - any_of: ["fm[$.key]=ſ", "fm[$.key]=S"]
@@ -90,18 +90,18 @@ constraints:
 
     let schema = valid(
         r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - any_of: ["fm[$.key]=ß", "fm[$.key]=ss"]
 "#,
     );
-    assert_eq!(schema.outline[0].constraints.len(), 1);
+    assert_eq!(schema.outline()[0].children.constraints().len(), 1);
 
     // With `match_case` on, the two spellings stay apart.
     let sensitive = valid(
         r#"
-version: 1
+version: 2
 options:
   match_case: true
 sections: []
@@ -109,7 +109,7 @@ constraints:
   - any_of: ["fm[$.key]=ſ", "fm[$.key]=S"]
 "#,
     );
-    assert_eq!(sensitive.outline[0].constraints.len(), 1);
+    assert_eq!(sensitive.outline()[0].children.constraints().len(), 1);
 }
 
 #[test]
@@ -119,13 +119,13 @@ fn query_sources_are_retained_and_compared_as_written() {
     // the provider intact.
     let schema = valid(
         r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - any_of: ["fm[$['a]b']]", "fm[$['c=d']]=x"]
 "#,
     );
-    let Constraint::AnyOf(items) = &schema.outline[0].constraints[0] else {
+    let Constraint::AnyOf(items) = &schema.outline()[0].children.constraints()[0] else {
         panic!("expected any_of")
     };
     let Proposition::FrontmatterQuery(bracketed) = &items.first else {
@@ -146,7 +146,7 @@ constraints:
     // duplicates merely because they may select the same nodes."
     valid(
         r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - any_of: ["fm[$.a]", "fm[$['a']]"]
@@ -156,7 +156,7 @@ constraints:
     assert_eq!(
         error_kinds(
             r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - any_of: ["fm[$.a]", "fm[$.a]"]
@@ -169,7 +169,7 @@ constraints:
     assert_eq!(
         error_kinds(
             r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - any_of: ["fm[$.a]=0x10", "fm[$.a]=16"]
@@ -179,7 +179,7 @@ constraints:
     );
     valid(
         r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - any_of: ["fm[$.a]=16", "fm[$.a]=16.0"]
@@ -194,7 +194,7 @@ fn a_bare_query_is_not_an_equality_against_the_empty_scalar() {
     // bare read never duplicates an equality form.
     valid(
         r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - any_of: ["fm[$.a]", "fm[$.a]="]
@@ -205,7 +205,7 @@ constraints:
     assert_eq!(
         error_kinds(
             r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - any_of: ["fm[$.a]=", "fm[$.a]=null"]
@@ -222,7 +222,7 @@ fn the_retired_dotted_frontmatter_spelling_is_invalid_syntax() {
     // name, which §4.4 makes `invalid-document-shape`.
     assert_eq!(
         error_kinds(
-            "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+            "version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
              - any_of: [fm.status=deprecated, a]\n",
         ),
         vec![SchemaErrorKind::InvalidDocumentShape]
@@ -230,7 +230,7 @@ fn the_retired_dotted_frontmatter_spelling_is_invalid_syntax() {
     // A dotted key path is not a capture name either.
     assert_eq!(
         error_kinds(
-            "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+            "version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
              - any_of: [fm.outer.inner, a]\n",
         ),
         vec![SchemaErrorKind::InvalidDocumentShape]
@@ -262,7 +262,7 @@ fn every_locator_syntax_failure_is_invalid_document_shape() {
         "\"fm[$.a]x\"",  // trailing text that is not an `=` remainder
     ] {
         let kinds = error_kinds(&format!(
-            "version: 1\nsections:\n  - id: a\n    match: A\n    required: false\n\
+            "version: 2\nsections:\n  - id: a\n    match: A\n    required: false\n\
              constraints:\n  - any_of: [{locator}, a]\n"
         ));
         assert_eq!(
@@ -285,27 +285,27 @@ fn constraint_shape_faults_precede_any_binding() {
         );
     };
     // A constraint is a single-key object.
-    shape("version: 1\nsections: []\nconstraints:\n  - nope\n");
+    shape("version: 2\nsections: []\nconstraints:\n  - nope\n");
     shape(
-        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
+        "version: 2\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
            constraints:\n  - { any_of: [a, b], one_of: [a, b] }\n",
     );
     // A list operand is a sequence of at least two locators.
-    shape("version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: a\n");
-    shape("version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: [a]\n");
+    shape("version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: a\n");
+    shape("version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: [a]\n");
     shape(
-        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
+        "version: 2\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
            constraints:\n  - ordered: [a]\n",
     );
     // A locator operand is a string.
-    shape("version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: [a, 7]\n");
+    shape("version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: [a, 7]\n");
     // `then` and `then_not` may be a list, but not an empty one.
     shape(
-        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+        "version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
            - requires: { if: a, then: [] }\n",
     );
     shape(
-        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+        "version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
            - conflicts: { if: a, then_not: [] }\n",
     );
 }
@@ -316,7 +316,7 @@ fn an_undeclared_frontmatter_capture_does_not_resolve() {
     // of the same name exists."
     assert_eq!(
         error_kinds(
-            "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+            "version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
              - any_of: [fm.version, a]\n",
         ),
         vec![SchemaErrorKind::UnresolvedRef]
@@ -327,23 +327,18 @@ fn an_undeclared_frontmatter_capture_does_not_resolve() {
 fn rejects_dangling_forbidden_duplicate_and_mis_scoped_ordered_refs() {
     let kinds = error_kinds(
         r#"
-version: 1
+version: 2
 sections:
   - id: repeated
     match: Repeated
     sections:
       - match: Child
-  - id: denied
-    match: Denied
-    allow: false
 constraints:
   - any_of: [missing, missing]
-  - requires: { if: denied, then: denied }
-  - ordered: [repeated.child, denied]
+  - ordered: [repeated.child, repeated]
 "#,
     );
     assert!(kinds.contains(&SchemaErrorKind::UnresolvedRef));
-    assert!(kinds.contains(&SchemaErrorKind::ForbiddenRef));
     assert!(kinds.contains(&SchemaErrorKind::OrderedScopeMismatch));
 }
 
@@ -353,7 +348,7 @@ fn checks_constraint_lexemes_even_when_a_rule_cannot_be_built() {
     // is the only question answerable with no schema to bind against.
     let kinds = error_kinds(
         r#"
-version: 1
+version: 2
 sections:
   - match: /(?=invalid)/
 constraints:
@@ -373,7 +368,7 @@ constraints:
     // behind binding, and the only error left here is the matcher's.
     let quiet = error_kinds(
         r#"
-version: 1
+version: 2
 sections:
   - match: /(?=invalid)/
 constraints:
@@ -387,7 +382,7 @@ constraints:
 fn rejects_implication_objects_with_the_wrong_keys() {
     let kinds = error_kinds(
         r#"
-version: 1
+version: 2
 sections: []
 constraints:
   - requires: { condition: foo, consequence: bar }
@@ -408,7 +403,7 @@ fn unknown_and_reserved_keywords_are_refused_as_shape() {
         "numbered",
     ] {
         let kinds = error_kinds(&format!(
-            "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
+            "version: 2\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
              constraints:\n  - {keyword}: [a, b]\n"
         ));
         assert_eq!(
@@ -425,22 +420,22 @@ fn relative_and_absolute_spellings_of_one_rule_duplicate() {
     // declared rule steps with the same positional subscripts", whichever
     // anchor reached them.
     let kinds = error_kinds(
-        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: [a, \"$.a\"]\n",
+        "version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  - any_of: [a, \"$.a\"]\n",
     );
     assert_eq!(kinds, vec![SchemaErrorKind::DuplicateRef]);
     // A subscript is part of that identity, so two different ones do not
     // duplicate, and a subscripted spelling does not duplicate a bare one.
     valid(
-        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+        "version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
          - any_of: [\"a[0]\", \"a[1]\"]\n",
     );
     valid(
-        "version: 1\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
+        "version: 2\nsections:\n  - id: a\n    match: A\nconstraints:\n  \
          - any_of: [a, \"a[0]\"]\n",
     );
     // Duplicate detection spans a whole implication, `if` included.
     let across = error_kinds(
-        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  \
+        "version: 2\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  \
          - requires: { if: a, then: [b, \"$.a\"] }\n",
     );
     assert_eq!(across, vec![SchemaErrorKind::DuplicateRef]);
@@ -451,13 +446,13 @@ fn a_name_step_resolves_only_in_its_own_named_scope() {
     // §4.4: "A name step resolves only in the current named scope. There is
     // no implicit upward or downward search."
     let upward = error_kinds(
-        "version: 1\nsections:\n  - id: outer\n    match: Outer\n    required: false\n    \
+        "version: 2\nsections:\n  - id: outer\n    match: Outer\n    required: false\n    \
          sections:\n      - id: inner\n        match: Inner\n    constraints:\n      \
          - any_of: [inner, outer]\n",
     );
     assert_eq!(upward, vec![SchemaErrorKind::UnresolvedRef]);
     let downward = error_kinds(
-        "version: 1\nsections:\n  - id: outer\n    match: Outer\n    required: false\n    \
+        "version: 2\nsections:\n  - id: outer\n    match: Outer\n    required: false\n    \
          sections:\n      - id: inner\n        match: Inner\nconstraints:\n  \
          - any_of: [inner, outer]\n",
     );
@@ -470,7 +465,7 @@ fn a_position_keeps_arbitrary_precision() {
     // value, so the digits survive binding without meeting a machine integer.
     let digits = "1".repeat(400);
     let schema = valid(&format!(
-        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  \
+        "version: 2\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  \
          - any_of: [\"a[{digits}]\", b]\n"
     ));
     assert_eq!(
@@ -483,7 +478,7 @@ fn a_position_keeps_arbitrary_precision() {
 fn only_the_terminal_step_may_stay_plural() {
     // §4.4: "Every non-terminal step MUST be singular [...] Only the terminal
     // step may remain plural"; `[i]` makes any step singular.
-    let source = "version: 1\nsections:\n  - id: many\n    match: M\n    sections:\n      \
+    let source = "version: 2\nsections:\n  - id: many\n    match: M\n    sections:\n      \
                   - id: kid\n        match: K\n  - id: other\n    match: O\nconstraints:\n  \
                   - any_of: [{locator}, other]\n";
     assert_eq!(
@@ -495,7 +490,7 @@ fn only_the_terminal_step_may_stay_plural() {
     valid(&source.replace("{locator}", "many"));
     // A singular ancestor needs no subscript.
     valid(
-        "version: 1\nsections:\n  - id: one\n    match: M\n    required: false\n    sections:\n   \
+        "version: 2\nsections:\n  - id: one\n    match: M\n    required: false\n    sections:\n   \
          \x20  - id: kid\n        match: K\n  - id: other\n    match: O\nconstraints:\n  \
          - any_of: [one.kid, other]\n",
     );
@@ -507,7 +502,7 @@ fn value_terminals_bind_but_are_not_propositions() {
     // locators and are not propositions in this version." Reaching the
     // context error is itself proof that `/text` bound; `/label` never does.
     let bound = invalid(
-        "version: 1\nsections:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    \
+        "version: 2\nsections:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    \
          match: B\nconstraints:\n  - any_of: [a/text, b]\n",
     );
     assert_eq!(bound.errors.rest.len(), 0);
@@ -518,14 +513,14 @@ fn value_terminals_bind_but_are_not_propositions() {
     assert!(bound.errors.first.message.contains("`/text` intrinsic"));
     // §4.4: other structural kinds "remain unallocated", so they never bind.
     let label = error_kinds(
-        "version: 1\nsections:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    \
+        "version: 2\nsections:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    \
          match: B\nconstraints:\n  - any_of: [a/label, b]\n",
     );
     assert_eq!(label, vec![SchemaErrorKind::UnresolvedRef]);
     // The rule in front of `/text` is non-terminal and takes the singularity
     // check like any other, so a repeatable one is refused before the context.
     let plural = invalid(
-        "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
+        "version: 2\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\n\
          constraints:\n  - any_of: [a/text, b]\n",
     );
     assert_eq!(
@@ -541,12 +536,12 @@ fn ordered_refuses_value_terminals_with_its_own_error() {
     // otherwise lacking header position is schema error
     // `ordered-scope-mismatch`."
     let text = error_kinds(
-        "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  \
+        "version: 2\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  \
          - id: b\n    match: B\nconstraints:\n  - ordered: [a/text, b]\n",
     );
     assert_eq!(text, vec![SchemaErrorKind::OrderedScopeMismatch]);
     let frontmatter = error_kinds(
-        "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  \
+        "version: 2\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  \
          - id: b\n    match: B\nconstraints:\n  - ordered: [\"fm[$.draft]\", b]\n",
     );
     assert_eq!(frontmatter, vec![SchemaErrorKind::OrderedScopeMismatch]);
@@ -554,7 +549,7 @@ fn ordered_refuses_value_terminals_with_its_own_error() {
 
 #[test]
 fn ordered_compares_concrete_parent_scopes() {
-    let source = "version: 1\nsections:\n  - id: part\n    match: Part\n    ordered: false\n    \
+    let source = "version: 2\nsections:\n  - id: part\n    match: Part\n    ordered: false\n    \
                   sections:\n      - id: x\n        match: X\n      - id: y\n        match: Y\n\
                   constraints:\n  - ordered: [{first}, {second}]\n";
     // One concrete scope: the same occurrence of a repeatable ancestor.
@@ -575,14 +570,14 @@ fn ordered_compares_concrete_parent_scopes() {
     // §5.1: "a bare terminal rule MAY remain plural", and a terminal
     // subscript is welcome in an unordered scope.
     valid(
-        "version: 1\nsections:\n  - id: part\n    match: Part\n    required: true\n    \
+        "version: 2\nsections:\n  - id: part\n    match: Part\n    required: true\n    \
          ordered: false\n    sections:\n      - id: x\n        match: X\n      - id: y\n        \
          match: Y\n    constraints:\n      - ordered: [\"x[0]\", y]\n",
     );
     // The terminal subscript is part of the ordered identity too.
     assert_eq!(
         error_kinds(
-            "version: 1\nsections:\n  - id: part\n    match: Part\n    required: true\n    \
+            "version: 2\nsections:\n  - id: part\n    match: Part\n    required: true\n    \
              ordered: false\n    sections:\n      - id: x\n        match: X\n      - id: y\n      \
              \x20 match: Y\n    constraints:\n      - ordered: [\"x[0]\", \"x[0]\"]\n",
         ),
@@ -593,7 +588,7 @@ fn ordered_compares_concrete_parent_scopes() {
 /// A repeatable owner whose child scope is unordered, carrying one constraint.
 fn repeatable_owner(constraint: &str) -> String {
     format!(
-        "version: 1\nsections:\n  - id: owner\n    match: Owner\n    ordered: false\n    \
+        "version: 2\nsections:\n  - id: owner\n    match: Owner\n    ordered: false\n    \
          sections:\n      - id: x\n        match: X\n      - id: y\n        match: Y\n    \
          constraints:\n      - {constraint}\n"
     )
@@ -648,7 +643,7 @@ fn ordered_binds_per_instance_inside_a_repeatable_owner() {
 /// A statically singular owner, otherwise identical to [`repeatable_owner`].
 fn singular_owner(constraint: &str) -> String {
     format!(
-        "version: 1\nsections:\n  - id: owner\n    match: Owner\n    required: false\n    \
+        "version: 2\nsections:\n  - id: owner\n    match: Owner\n    required: false\n    \
          ordered: false\n    sections:\n      - id: x\n        match: X\n      - id: y\n        \
          match: Y\n    constraints:\n      - {constraint}\n"
     )
@@ -722,7 +717,7 @@ fn zero_on_a_singular_step_names_the_scope_it_already_named() {
 fn an_explicit_ordered_constraint_over_an_ordered_scope_is_refused() {
     // Redundant or contradictory, the fix is the same: the message says
     // which knob to turn.
-    let redundant = "version: 1\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [a, b]\n";
+    let redundant = "version: 2\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [a, b]\n";
     let refused = invalid(redundant);
     let error = refused
         .errors
@@ -739,17 +734,17 @@ fn an_explicit_ordered_constraint_over_an_ordered_scope_is_refused() {
     // The same refs are welcome once the scope is unordered — by the
     // option at the root, or by the owning rule one level down, whether
     // reached by bare ids or by a path from the root.
-    valid("version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [b, a]\n");
-    valid("version: 1\nsections:\n  - id: s\n    match: S\n    ordered: false\n    sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\n    constraints:\n      - ordered: [b, a]\n");
-    valid("version: 1\nsections:\n  - id: s\n    match: S\n    required: true\n    ordered: false\n    sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\nconstraints:\n  - ordered: [s.b, s.a]\n");
+    valid("version: 2\noptions:\n  ordered_sections: false\nsections:\n  - id: a\n    match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [b, a]\n");
+    valid("version: 2\nsections:\n  - id: s\n    match: S\n    ordered: false\n    sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\n    constraints:\n      - ordered: [b, a]\n");
+    valid("version: 2\nsections:\n  - id: s\n    match: S\n    required: true\n    ordered: false\n    sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\nconstraints:\n  - ordered: [s.b, s.a]\n");
     // A path into an ordered nested scope is refused like a bare ref.
-    let nested = invalid("version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: s\n    match: S\n    required: true\n    ordered: true\n    sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\nconstraints:\n  - ordered: [s.a, s.b]\n");
+    let nested = invalid("version: 2\noptions:\n  ordered_sections: false\nsections:\n  - id: s\n    match: S\n    required: true\n    ordered: true\n    sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\nconstraints:\n  - ordered: [s.a, s.b]\n");
     assert!(nested
         .errors
         .iter()
         .any(|error| error.kind == SchemaErrorKind::OrderedScopeMismatch));
     // Mixed scopes are already refused; the redundancy check stays quiet.
-    let mixed = invalid("version: 1\nsections:\n  - id: s\n    match: S\n    required: true\n    sections:\n      - id: a\n        match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [s.a, b]\n");
+    let mixed = invalid("version: 2\nsections:\n  - id: s\n    match: S\n    required: true\n    sections:\n      - id: a\n        match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [s.a, b]\n");
     assert_eq!(
         mixed
             .errors
@@ -768,7 +763,7 @@ fn an_explicit_ordered_constraint_over_an_ordered_scope_is_refused() {
 /// give every list operand a second member.
 fn release_schema(constraint: &str) -> String {
     format!(
-        "version: 1\nsections:\n  - id: release\n    match: \"/Release (?<version>.+)/\"\n    \
+        "version: 2\nsections:\n  - id: release\n    match: \"/Release (?<version>.+)/\"\n    \
          captures:\n      version: semver\n  - id: other\n    match: Other\nconstraints:\n  \
          - {constraint}\n"
     )
@@ -831,7 +826,7 @@ fn the_rule_owning_a_capture_is_non_terminal_and_must_be_singular() {
         .contains("repeatable rule `release`"));
     // §5.1 gives `ordered` its own error for the same fault.
     let ordered = invalid(
-        "version: 1\noptions:\n  ordered_sections: false\nsections:\n  - id: release\n    \
+        "version: 2\noptions:\n  ordered_sections: false\nsections:\n  - id: release\n    \
          match: \"/Release (?<version>.+)/\"\n    captures:\n      version: semver\n  \
          - id: other\n    match: Other\nconstraints:\n  - ordered: [release.version, other]\n",
     );
@@ -847,7 +842,7 @@ fn a_bare_capture_name_binds_in_the_scope_the_constraint_is_attached_to() {
     // typed value declared by the rule that owns the current named scope" —
     // here, the rule the constraint hangs on.
     let bound = invalid(
-        "version: 1\nsections:\n  - id: release\n    match: \"/Release (?<version>.+)/\"\n    \
+        "version: 2\nsections:\n  - id: release\n    match: \"/Release (?<version>.+)/\"\n    \
          captures:\n      version: semver\n    constraints:\n      - any_of: [version, kid]\n    \
          sections:\n      - id: kid\n        match: Kid\n",
     );
@@ -871,7 +866,7 @@ fn a_bare_capture_name_binds_in_the_scope_the_constraint_is_attached_to() {
 /// A schema declaring one frontmatter capture `version`, plus an outline rule.
 fn frontmatter_capture_schema(constraint: &str) -> String {
     format!(
-        "version: 1\nfrontmatter:\n  captures:\n    version:\n      type: semver\nsections:\n  \
+        "version: 2\nfrontmatter:\n  captures:\n    version:\n      type: semver\nsections:\n  \
          - id: a\n    match: A\n    required: false\nconstraints:\n  - {constraint}\n"
     )
 }
@@ -879,7 +874,7 @@ fn frontmatter_capture_schema(constraint: &str) -> String {
 #[test]
 fn a_declared_frontmatter_capture_normalizes() {
     let schema = valid(&frontmatter_capture_schema("any_of: [fm.version, a]"));
-    let Constraint::AnyOf(items) = &schema.outline[0].constraints[0] else {
+    let Constraint::AnyOf(items) = &schema.outline()[0].children.constraints()[0] else {
         panic!("expected any_of")
     };
     let Proposition::FrontmatterCapture(capture) = &items.first else {
@@ -931,11 +926,11 @@ fn the_frontmatter_and_outline_namespaces_stay_independent() {
     // §4.3: "Frontmatter captures occupy a separate named scope rooted at
     // `fm`; they do not collide with names at the schema root."
     let schema = valid(
-        "version: 1\nfrontmatter:\n  captures:\n    version:\n      type: semver\nsections:\n  \
+        "version: 2\nfrontmatter:\n  captures:\n    version:\n      type: semver\nsections:\n  \
          - id: version\n    match: Version\n    required: false\n  - id: a\n    match: A\n    \
          required: false\nconstraints:\n  - any_of: [fm.version, version]\n",
     );
-    let Constraint::AnyOf(items) = &schema.outline[0].constraints[0] else {
+    let Constraint::AnyOf(items) = &schema.outline()[0].children.constraints()[0] else {
         panic!("expected any_of")
     };
     assert!(matches!(items.first, Proposition::FrontmatterCapture(_)));
@@ -944,12 +939,12 @@ fn the_frontmatter_and_outline_namespaces_stay_independent() {
     // A rule capture and a frontmatter capture may share a name too: only the
     // `fm` root reaches the frontmatter one.
     let both = valid(
-        "version: 1\nfrontmatter:\n  captures:\n    version:\n      type: text\nsections:\n  \
+        "version: 2\nfrontmatter:\n  captures:\n    version:\n      type: text\nsections:\n  \
          - id: release\n    match: \"/Release (?<version>.+)/\"\n    required: false\n    \
          captures:\n      version: semver\n  - id: a\n    match: A\n    required: false\n\
          constraints:\n  - any_of: [fm.version, a]\n",
     );
-    let Constraint::AnyOf(items) = &both.outline[0].constraints[0] else {
+    let Constraint::AnyOf(items) = &both.outline()[0].children.constraints()[0] else {
         panic!("expected any_of")
     };
     let Proposition::FrontmatterCapture(capture) = &items.first else {
@@ -961,7 +956,7 @@ fn the_frontmatter_and_outline_namespaces_stay_independent() {
     // addressed root owns no captures.
     assert_eq!(
         error_kinds(
-            "version: 1\nfrontmatter:\n  captures:\n    version:\n      type: text\nsections:\n  \
+            "version: 2\nfrontmatter:\n  captures:\n    version:\n      type: text\nsections:\n  \
              - id: release\n    match: \"/Release (?<version>.+)/\"\n    required: false\n    \
              captures:\n      version: semver\n  - id: a\n    match: A\n    required: false\n\
              constraints:\n  - any_of: [version, a]\n",

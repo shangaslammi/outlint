@@ -850,7 +850,7 @@ fn frontmatter_drops_one_leading_byte_order_mark() {
     // has to be counted back in — a mark being three bytes and the entry
     // otherwise starting the line.
     let document = parse_markdown(
-        "---\n\u{feff}version: 1\nx: 2\n---\n",
+        "---\n\u{feff}version: 2\nx: 2\n---\n",
         MarkdownOptions::default(),
     );
     let DocumentFrontmatter::Mapping { anchors, .. } = document.frontmatter else {

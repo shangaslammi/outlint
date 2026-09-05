@@ -25,7 +25,7 @@ fn external_source_ids_report_exhaustion_instead_of_saturating() {
 fn normalizes_frontmatter_presence_policy() {
     let schema = valid(
         r#"
-version: 1
+version: 2
 frontmatter: { required: true }
 sections: []
 "#,
@@ -38,7 +38,7 @@ sections: []
 
 #[test]
 fn inline_frontmatter_schema_validates_and_preserves_primary_source_provenance() {
-    let source = r#"version: 1
+    let source = r#"version: 2
 frontmatter:
   schema:
     type: object
@@ -312,7 +312,7 @@ fn inline_frontmatter_schema_uses_the_shared_reference_budget() {
 fn linked_frontmatter_schema_requires_file_context() {
     let kinds = error_kinds(
         r#"
-version: 1
+version: 2
 frontmatter: { schema: frontmatter.schema.json }
 sections: []
 "#,
@@ -685,7 +685,7 @@ fn linked(root: &str, resources: &[(&str, &str)]) -> LoadSchemaResult {
 fn inline(root: &str) -> LoadSchemaResult {
     let root: Value = serde_json::from_str(root).expect("test inline schema is valid JSON");
     load_schema(&format!(
-        "version: 1\nfrontmatter:\n  schema: {}\ntitle: null\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: {}\ntitle: null\nsections: []\n",
         serde_json::to_string(&root).expect("test inline schema serializes")
     ))
 }
@@ -709,7 +709,7 @@ fn failed_resource(uri: &str, label: &str, message: &str) -> crate::JsonSchemaRe
 }
 
 fn linked_schema_source() -> &'static str {
-    "version: 1\nfrontmatter:\n  schema: root.json\ntitle: null\nsections: []\n"
+    "version: 2\nfrontmatter:\n  schema: root.json\ntitle: null\nsections: []\n"
 }
 
 /// Builds a document whose root reference starts a chain of `links` hops,
@@ -845,7 +845,7 @@ fn the_reference_budget_spans_the_graph_and_names_where_it_runs_out() {
 #[test]
 fn repeated_frontmatter_capture_names_anchor_the_later_key() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    version:\n",
@@ -883,7 +883,7 @@ fn repeated_frontmatter_capture_names_anchor_the_later_key() {
 #[test]
 fn capture_declaration_duplicates_remain_syntax() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    version:\n",
@@ -921,7 +921,7 @@ fn capture_declaration_duplicates_remain_syntax() {
 #[test]
 fn non_string_frontmatter_capture_keys_fail_shape_first() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    1:\n",
@@ -949,7 +949,7 @@ fn non_string_frontmatter_capture_keys_fail_shape_first() {
 #[test]
 fn a_captures_declaration_does_not_disturb_the_linked_schema_path() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    version:\n",
@@ -969,7 +969,7 @@ fn a_captures_declaration_does_not_disturb_the_linked_schema_path() {
 #[test]
 fn inline_json_schema_loads_beside_a_captures_declaration() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    version:\n",
@@ -994,7 +994,7 @@ fn inline_json_schema_loads_beside_a_captures_declaration() {
 #[test]
 fn linked_json_schema_loads_beside_a_captures_declaration() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    version:\n",
@@ -1039,7 +1039,7 @@ fn linked_json_schema_loads_beside_a_captures_declaration() {
 /// Loads one frontmatter capture declaration and returns the policy's view.
 fn captures_of(declarations: &str) -> crate::Schema {
     valid(&format!(
-        "version: 1\nfrontmatter:\n  captures:\n{declarations}sections: []\n"
+        "version: 2\nfrontmatter:\n  captures:\n{declarations}sections: []\n"
     ))
 }
 
@@ -1132,7 +1132,7 @@ fn capture_bearing_policies_follow_the_presence_policy() {
     assert!(!optional.frontmatter.is_required());
 
     let required = valid(concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  required: true\n",
         "  captures:\n",
@@ -1187,7 +1187,7 @@ fn several_capture_declarations_normalize_into_one_keyed_collection() {
 #[test]
 fn a_frontmatter_capture_node_covers_its_complete_declaration() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    version:\n",
@@ -1212,7 +1212,7 @@ fn a_frontmatter_capture_node_covers_its_complete_declaration() {
 #[test]
 fn frontmatter_captures_do_not_collide_with_outline_names() {
     let schema = valid(concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    overview:\n",
@@ -1221,7 +1221,7 @@ fn frontmatter_captures_do_not_collide_with_outline_names() {
         "  - match: Overview\n",
     ));
     assert_eq!(schema.frontmatter.captures().len(), 1);
-    assert_eq!(schema.outline.len(), 1);
+    assert_eq!(schema.outline().len(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,7 +1230,7 @@ fn frontmatter_captures_do_not_collide_with_outline_names() {
 
 /// Builds a schema whose `frontmatter.captures` is spelled by `declarations`.
 fn capture_source(declarations: &str) -> String {
-    format!("version: 1\nfrontmatter:\n  captures:\n{declarations}sections: []\n")
+    format!("version: 2\nfrontmatter:\n  captures:\n{declarations}sections: []\n")
 }
 
 /// The one error a source is expected to produce, with its anchor's text.
@@ -1261,7 +1261,7 @@ fn rejects_invalid_capture_collections() {
         ("  captures: 3\n", "3"),
         ("  captures: [version]\n", "[version]"),
     ] {
-        let source = format!("version: 1\nfrontmatter:\n{spelling}sections: []\n");
+        let source = format!("version: 2\nfrontmatter:\n{spelling}sections: []\n");
         let (message, slice) = single_capture_error(&source);
         assert_eq!(
             message, "frontmatter.captures must be a non-empty mapping of capture declarations",
@@ -1493,7 +1493,7 @@ fn a_rejected_capture_never_reaches_a_loaded_schema() {
 #[test]
 fn frontmatter_field_duplicates_remain_syntax() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    version:\n",
@@ -1534,7 +1534,7 @@ fn frontmatter_field_duplicates_remain_syntax() {
 fn capture_path_source(path: &str) -> String {
     format!(
         concat!(
-            "version: 1\n",
+            "version: 2\n",
             "frontmatter:\n",
             "  captures:\n",
             "    version:\n",
@@ -1727,7 +1727,7 @@ fn the_provider_decides_which_surrogate_pair_escapes_a_capture_path_may_use() {
 #[test]
 fn capture_conflict_anchors_the_later_field() {
     let allow_first = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  allow: false\n",
         "  captures:\n",
@@ -1755,7 +1755,7 @@ fn capture_conflict_anchors_the_later_field() {
     assert_eq!(source_slice(allow_first, related[0].range), "false");
 
     let captures_first = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    version:\n",
@@ -1795,7 +1795,7 @@ fn capture_conflict_anchors_the_later_field() {
 #[test]
 fn collects_capture_conflict_and_declaration_errors() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  allow: false\n",
         "  captures:\n",
@@ -1827,7 +1827,7 @@ fn collects_capture_conflict_and_declaration_errors() {
 #[test]
 fn json_schema_preparation_is_unchanged_by_normalized_captures() {
     let inline_source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  captures:\n",
         "    version:\n",
@@ -1852,7 +1852,7 @@ fn json_schema_preparation_is_unchanged_by_normalized_captures() {
     );
 
     let linked_source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  required: true\n",
         "  captures:\n",
@@ -1899,7 +1899,7 @@ fn no_forbidden_policy_carries_captures() {
         "    Version:\n      type: semver\n",
     ] {
         let source = format!(
-            "version: 1\nfrontmatter:\n  allow: false\n  captures:\n{declaration}sections: []\n"
+            "version: 2\nfrontmatter:\n  allow: false\n  captures:\n{declaration}sections: []\n"
         );
         assert!(
             load_schema(&source).is_err(),
@@ -1909,11 +1909,11 @@ fn no_forbidden_policy_carries_captures() {
     // An empty or null collection is refused for being one, and still never
     // produces a forbidden policy carrying captures.
     assert!(load_schema(
-        "version: 1\nfrontmatter:\n  allow: false\n  captures: {}\nsections: []\n"
+        "version: 2\nfrontmatter:\n  allow: false\n  captures: {}\nsections: []\n"
     )
     .is_err());
 
-    let schema = valid("version: 1\nfrontmatter:\n  allow: false\nsections: []\n");
+    let schema = valid("version: 2\nfrontmatter:\n  allow: false\nsections: []\n");
     assert_eq!(
         schema.frontmatter,
         FrontmatterPolicy::Forbidden { schema: None }
@@ -1931,7 +1931,7 @@ fn no_forbidden_policy_carries_captures() {
 #[test]
 fn a_required_and_forbidden_policy_still_reports_its_capture_faults() {
     let source = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  required: true\n",
         "  allow: false\n",
@@ -1999,7 +1999,7 @@ fn a_required_and_forbidden_policy_still_reports_its_capture_faults() {
     // Without captures, the pre-existing refusal is unchanged: one error, no
     // related location, anchored at the `frontmatter` mapping.
     let policy_only = concat!(
-        "version: 1\n",
+        "version: 2\n",
         "frontmatter:\n",
         "  required: true\n",
         "  allow: false\n",

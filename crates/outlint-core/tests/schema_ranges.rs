@@ -130,27 +130,27 @@ const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "document-field-title",
-        "version: 1\ntitle: [nope]\nsections: []\n",
+        "version: 2\ntitle: [nope]\nsections: []\n",
     ),
     (
         "document-field-sections",
-        "version: 1\nsections: nope\n",
+        "version: 2\nsections: nope\n",
     ),
     (
         "document-field-constraints",
-        "version: 1\nsections: []\nconstraints: nope\n",
+        "version: 2\nsections: []\nconstraints: nope\n",
     ),
     (
         "document-field-options",
-        "version: 1\noptions: nope\nsections: []\n",
+        "version: 2\noptions: nope\nsections: []\n",
     ),
     (
         "document-field-frontmatter",
-        "version: 1\nfrontmatter: nope\nsections: []\n",
+        "version: 2\nfrontmatter: nope\nsections: []\n",
     ),
     (
         "document-field-unknown",
-        "version: 1\nsections: []\nunexpected: 1\n",
+        "version: 2\nsections: []\nunexpected: 1\n",
     ),
     (
         "document-missing-required-field",
@@ -158,195 +158,211 @@ const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "document-not-a-mapping",
-        "- version: 1\n",
+        "- version: 2\n",
     ),
     (
         "option-field-match-case",
-        "version: 1\noptions:\n  match_case: yes please\nsections: []\n",
+        "version: 2\noptions:\n  match_case: yes please\nsections: []\n",
     ),
     (
         "option-field-unknown",
-        "version: 1\noptions:\n  strip_inline_markup: true\n  unexpected: true\nsections: []\n",
+        "version: 2\noptions:\n  strip_inline_markup: true\n  unexpected: true\nsections: []\n",
     ),
     (
         "frontmatter-field-required",
-        "version: 1\nfrontmatter:\n  required: sometimes\nsections: []\n",
+        "version: 2\nfrontmatter:\n  required: sometimes\nsections: []\n",
     ),
     (
         "frontmatter-field-schema-shape",
-        "version: 1\nfrontmatter:\n  schema: [nope]\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: [nope]\nsections: []\n",
     ),
     (
         "frontmatter-field-schema-inline",
-        "version: 1\nfrontmatter:\n  schema:\n    type: object\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema:\n    type: object\nsections: []\n",
     ),
     (
         "frontmatter-field-schema-unpreloaded",
-        "version: 1\nfrontmatter:\n  schema: linked.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: linked.json\nsections: []\n",
     ),
     (
         "frontmatter-conflicting-policy",
-        "version: 1\nfrontmatter:\n  required: true\n  allow: false\nsections: []\n",
+        "version: 2\nfrontmatter:\n  required: true\n  allow: false\nsections: []\n",
     ),
     (
         "frontmatter-capture-declaration",
-        "version: 1\nfrontmatter:\n  captures:\n    v:\n      type: nope\nsections: []\n",
+        "version: 2\nfrontmatter:\n  captures:\n    v:\n      type: nope\nsections: []\n",
     ),
     (
         "frontmatter-captures-empty",
-        "version: 1\nfrontmatter:\n  captures: {}\nsections: []\n",
+        "version: 2\nfrontmatter:\n  captures: {}\nsections: []\n",
     ),
     (
         "rule-not-a-mapping",
-        "version: 1\nsections:\n  - nope\n",
+        "version: 2\nsections:\n  - nope\n",
     ),
     (
         "rule-field-match-missing",
-        "version: 1\nsections:\n  - id: intro\n",
+        "version: 2\nsections:\n  - id: intro\n",
     ),
     (
         "rule-field-invalid-matcher",
-        "version: 1\nsections:\n  - match: \"/[unclosed/\"\n",
+        "version: 2\nsections:\n  - match: \"/[unclosed/\"\n",
     ),
     (
         "rule-field-invalid-repeat",
-        "version: 1\nsections:\n  - match: Intro\n    repeat: \"3..1\"\n",
+        "version: 2\nsections:\n  - match: Intro\n    repeat: \"3..1\"\n",
     ),
     (
         "rule-field-repeat-shape",
-        "version: 1\nsections:\n  - match: Intro\n    repeat: 3..1\n",
+        "version: 2\nsections:\n  - match: Intro\n    repeat: 3..1\n",
     ),
     (
         "rule-field-conflicting-cardinality",
-        "version: 1\nsections:\n  - match: Intro\n    required: true\n    repeat: \"2\"\n",
+        "version: 2\nsections:\n  - match: Intro\n    required: true\n    repeat: \"2\"\n",
     ),
     (
         "rule-field-reserved-id",
-        "version: 1\nsections:\n  - id: fm\n    match: Intro\n",
+        "version: 2\nsections:\n  - id: fm\n    match: Intro\n",
     ),
     (
         "rule-field-duplicate-id",
-        "version: 1\nsections:\n  - id: intro\n    match: Intro\n  - id: intro\n    match: Other\n",
+        "version: 2\nsections:\n  - id: intro\n    match: Intro\n  - id: intro\n    match: Other\n",
     ),
     (
         "rule-field-unknown",
-        "version: 1\nsections:\n  - match: Intro\n    unexpected: true\n",
+        "version: 2\nsections:\n  - match: Intro\n    unexpected: true\n",
     ),
     (
         "rule-capture-declaration",
-        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures:\n      v: nope\n",
+        "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures:\n      v: nope\n",
     ),
     (
         "rule-captures-empty",
-        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures: {}\n",
+        "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures: {}\n",
     ),
     (
         "rule-order-entry",
-        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order:\n      - by: v\n        unexpected: true\n",
+        "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order:\n      - by: v\n        unexpected: true\n",
     ),
     (
         "rule-order-empty",
-        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order: []\n",
+        "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order: []\n",
     ),
     (
         "nested-rule-field-invalid-matcher",
-        "version: 1\nsections:\n  - match: Intro\n    sections:\n      - match: \"/[unclosed/\"\n",
+        "version: 2\nsections:\n  - match: Intro\n    sections:\n      - match: \"/[unclosed/\"\n",
     ),
     (
         "constraint-unresolved-ref",
-        "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: { if: intro, then: missing }\n",
+        "version: 2\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: { if: intro, then: missing }\n",
     ),
     (
-        "constraint-forbidden-ref",
-        "version: 1\nsections:\n  - id: intro\n    match: Intro\n  - id: gone\n    match: Gone\n    allow: false\nconstraints:\n  - requires: { if: intro, then: gone }\n",
+        "removed-rule-key",
+        "version: 2\nsections:\n  - match: Gone\n    allow: false\n",
+    ),
+    (
+        "rule-missing-cardinality",
+        "version: 2\nsections:\n  - match: '*'\n",
+    ),
+    (
+        "unordered-unreachable-rule",
+        "version: 2\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n",
+    ),
+    (
+        "guard-invalid-matcher",
+        "version: 2\nsections: []\nforbid_sections:\n  - match: '/[/'\n",
+    ),
+    (
+        "empty-outline-valid",
+        "version: 2\noutline: []\n",
     ),
     (
         "constraint-operand-shape",
-        "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: intro\n",
+        "version: 2\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: intro\n",
     ),
     (
         "constraint-duplicate-ref",
-        "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - one_of: [intro, intro]\n",
+        "version: 2\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - one_of: [intro, intro]\n",
     ),
     (
         "constraint-ordered-scope-mismatch",
-        "version: 1\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n  - id: other\n    match: Other\nconstraints:\n  - ordered: [intro.deep, other]\n",
+        "version: 2\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n  - id: other\n    match: Other\nconstraints:\n  - ordered: [intro.deep, other]\n",
     ),
     (
         "constraint-not-a-mapping",
-        "version: 1\nsections: []\nconstraints:\n  - nope\n",
+        "version: 2\nsections: []\nconstraints:\n  - nope\n",
     ),
     (
         "nested-constraint-unresolved-ref",
-        "version: 1\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n    constraints:\n      - requires: { if: deep, then: missing }\n",
+        "version: 2\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n    constraints:\n      - requires: { if: deep, then: missing }\n",
     ),
     (
         "duplicate-key-document-field",
-        "version: 1\nversion: 2\nsections: []\n",
+        "version: 2\nversion: 2\nsections: []\n",
     ),
     (
         "duplicate-key-quoted-against-plain",
-        "version: 1\n\"version\": 2\nsections: []\n",
+        "version: 2\n\"version\": 2\nsections: []\n",
     ),
     (
         "duplicate-key-rule-field",
-        "version: 1\nsections:\n  - match: Intro\n    match: Other\n",
+        "version: 2\nsections:\n  - match: Intro\n    match: Other\n",
     ),
     (
         "non-standard-tag-on-a-scalar",
-        "version: 1\ntitle: !custom Doc\nsections: []\n",
+        "version: 2\ntitle: !custom Doc\nsections: []\n",
     ),
     (
         "non-standard-tag-on-the-document",
-        "--- !custom\nversion: 1\nsections: []\n",
+        "--- !custom\nversion: 2\nsections: []\n",
     ),
     (
         "alias-expanded-into-a-rule",
-        "version: 1\nsections:\n  - &base\n    match: Intro\n  - *base\n",
+        "version: 2\nsections:\n  - &base\n    match: Intro\n  - *base\n",
     ),
     (
         "alias-in-key-position",
-        "version: 1\nsections: []\nanchors: &a name\n*a : 1\n",
+        "version: 2\nsections: []\nanchors: &a name\n*a : 1\n",
     ),
     (
         "undefined-alias",
-        "version: 1\nsections: *missing\n",
+        "version: 2\nsections: *missing\n",
     ),
     (
         "byte-order-mark-before-the-document",
-        "\u{feff}version: 1\nsections: []\n",
+        "\u{feff}version: 2\nsections: []\n",
     ),
     (
         "byte-order-mark-inside-a-value",
-        "version: 1\ntitle: \u{feff}Doc\nsections: []\n",
+        "version: 2\ntitle: \u{feff}Doc\nsections: []\n",
     ),
     (
         "two-documents",
-        "version: 1\nsections: []\n---\nversion: 1\nsections: []\n",
+        "version: 2\nsections: []\n---\nversion: 2\nsections: []\n",
     ),
     (
         "two-documents-with-a-trailing-marker",
-        "version: 1\nsections: []\n...\n",
+        "version: 2\nsections: []\n...\n",
     ),
     (
         "syntax-colon-in-a-plain-scalar",
-        "version: 1\ntitle: a: bad\nsections: []\n",
+        "version: 2\ntitle: a: bad\nsections: []\n",
     ),
     (
         "syntax-tab-indentation",
-        "version: 1\nsections:\n\t- match: Intro\n",
+        "version: 2\nsections:\n\t- match: Intro\n",
     ),
     (
         "syntax-unclosed-quote",
-        "version: 1\ntitle: \"unterminated\nsections: []\n",
+        "version: 2\ntitle: \"unterminated\nsections: []\n",
     ),
     (
         "syntax-unknown-escape",
-        "version: 1\ntitle: \"bad \\q escape\"\nsections: []\n",
+        "version: 2\ntitle: \"bad \\q escape\"\nsections: []\n",
     ),
     (
         "syntax-empty-flow-element",
-        "version: 1\nsections: []\nconstraints: [, nope]\n",
+        "version: 2\nsections: []\nconstraints: [, nope]\n",
     ),
     (
         "syntax-empty-document",
@@ -544,6 +560,7 @@ fn encode_node(node: &SchemaNode) -> String {
         SchemaNode::Rule(RulePath { scope, index }) => {
             format!("rule {}", index_path(scope, index.0))
         }
+        SchemaNode::Guard(path) => format!("guard {}", index_path(&path.scope, path.index.0)),
         SchemaNode::Capture(CapturePath { rule, name }) => format!(
             "capture {} {}",
             index_path(&rule.scope, rule.index.0),

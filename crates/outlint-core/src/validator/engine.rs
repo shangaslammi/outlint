@@ -6,11 +6,11 @@ use crate::typed_value::{
     parse_header, BoundComponent, ParseFailure, ResolvedYamlKind, TypedValue, ValueType,
 };
 use crate::{
-    ByteOffset, CaptureName, CapturePath, Cardinality, Constraint, ConstraintIndex, ConstraintPath,
-    Document, DocumentFrontmatter, FrontmatterAnchor, FrontmatterLocation, HeaderLevel, Heading,
-    HeadingLocation, Matcher, OrderEntryPath, OrderIndex, OutlineProvenance, RuleIndex,
-    RuleOutcome, RulePath, Schema, SchemaNode, ScopePath, Section, SectionRule, TextRange,
-    UpperBound,
+    ByteOffset, CaptureName, CapturePath, Cardinality, ChildScope, Constraint, ConstraintIndex,
+    ConstraintPath, DeclaredScope, Document, DocumentFrontmatter, DocumentShape, ExtrasMode,
+    FrontmatterAnchor, FrontmatterLocation, GuardIndex, GuardPath, HeaderLevel, Heading,
+    HeadingLocation, Matcher, OrderEntryPath, OrderIndex, OutlineProvenance, RuleIndex, RulePath,
+    Schema, SchemaNode, ScopeMode, ScopePath, Section, SectionRule, TextRange, UpperBound,
 };
 
 use crate::locator::QueryLimitExceeded;
@@ -50,18 +50,9 @@ struct Validator<'a> {
 
 struct BindScopeInput<'a, 'd> {
     sections: &'a [PathedSection<'d>],
-    rules: &'a [SectionRule],
+    scope: &'a DeclaredScope,
     prepared_rules: &'a [PreparedRule],
-    strict: bool,
-    ordered: bool,
-    schema_scope: &'a ScopePath,
-    parent: Option<&'d Heading>,
-    parent_path: &'a HeaderPath,
-}
-
-struct OrderCheck<'a, 'd> {
-    rules: &'a [SectionRule],
-    occurrences: &'a [BoundSection<'d>],
+    prepared_guards: &'a [super::prepare::PreparedMatcher],
     schema_scope: &'a ScopePath,
     parent: Option<&'d Heading>,
     parent_path: &'a HeaderPath,
@@ -113,10 +104,13 @@ impl<'a> Validator<'a> {
         // (alongside the missing-title the absent `h1` earns) — and
         // `title: null` declares that shape outright, whatever the document
         // contains.
-        let root_level = match self.schema.outline_provenance {
-            OutlineProvenance::Outline => 0,
-            OutlineProvenance::NoTitle => 1,
-            OutlineProvenance::Title | OutlineProvenance::BareSections => u8::from(!has_h1),
+        let root_level = match &self.schema.document {
+            DocumentShape::Outline(_) => 0,
+            DocumentShape::Title(title) => match title.provenance {
+                OutlineProvenance::NoTitle => 1,
+                OutlineProvenance::Title | OutlineProvenance::BareSections => u8::from(!has_h1),
+                OutlineProvenance::Outline => 0,
+            },
         };
         if !self.schema.options.allow_skipped_levels {
             // Structural and schema-independent: the walk covers the whole
@@ -127,12 +121,12 @@ impl<'a> Validator<'a> {
             // retired `detached-section` diagnostic used to name.
             self.validate_skipped_levels(&document.sections, root_level, &HeaderPath::default());
         }
-        match self.schema.outline_provenance {
-            OutlineProvenance::Outline => self.validate_outline_root(&top, plan, &values)?,
-            OutlineProvenance::Title
-            | OutlineProvenance::BareSections
-            | OutlineProvenance::NoTitle => {
-                self.validate_sugar_root(&top, has_h1, plan, &values)?
+        match &self.schema.document {
+            DocumentShape::Outline(scope) => {
+                self.validate_outline_root(&top, scope, plan, &values)?
+            }
+            DocumentShape::Title(title) => {
+                self.validate_sugar_root(&top, has_h1, title, plan, &values)?
             }
         }
         Ok(self.diagnostics)
@@ -147,6 +141,7 @@ impl<'a> Validator<'a> {
     fn validate_outline_root(
         &mut self,
         top: &[PathedSection<'a>],
+        scope: &'a DeclaredScope,
         plan: &ValidationPlan,
         frontmatter: &FrontmatterValues<'a>,
     ) -> Result<(), QueryLimitExceeded> {
@@ -156,10 +151,9 @@ impl<'a> Validator<'a> {
         let root_path = HeaderPath::default();
         let root = self.bind_scope(BindScopeInput {
             sections: &admitted,
-            rules: &schema.outline,
-            prepared_rules: &plan.outline,
-            strict: false,
-            ordered: schema.options.ordered_sections,
+            scope,
+            prepared_rules: &plan.rules,
+            prepared_guards: &plan.guards,
             schema_scope: &root_scope,
             parent: None,
             parent_path: &root_path,
@@ -167,14 +161,14 @@ impl<'a> Validator<'a> {
         self.validate_constraints(
             EvalCtx {
                 current: &root,
-                current_rules: &schema.outline,
+                current_rules: &scope.rules,
                 root: &root,
-                root_rules: &schema.outline,
+                root_rules: &scope.rules,
                 frontmatter,
                 queries: &plan.queries,
                 match_case: schema.options.match_case,
             },
-            &schema.constraints,
+            &scope.constraints,
             &root_scope,
             None,
             &root_path,
@@ -199,14 +193,12 @@ impl<'a> Validator<'a> {
         &mut self,
         top: &[PathedSection<'a>],
         has_h1: bool,
+        title: &'a crate::TitleSlot,
         plan: &ValidationPlan,
         frontmatter: &FrontmatterValues<'a>,
     ) -> Result<(), QueryLimitExceeded> {
         let schema = self.schema;
-        let provenance = schema.outline_provenance;
-        let (Some(rule), Some(prepared)) = (schema.outline.first(), plan.outline.first()) else {
-            return Ok(());
-        };
+        let provenance = title.provenance;
 
         if provenance == OutlineProvenance::NoTitle || !has_h1 {
             // The headless scope: the virtual root stands in at level 1 and
@@ -222,7 +214,7 @@ impl<'a> Validator<'a> {
                         // whose virtual parent has no header path.
                         target: DiagnosticTarget::MissingHeader {
                             parent: HeaderPath::default(),
-                            matcher: matcher_label(&rule.matcher),
+                            matcher: matcher_label(title.matcher.as_ref().unwrap_or(&Matcher::Any)),
                         },
                         location: root_location(),
                         schema_node: Some(SchemaNode::Title),
@@ -252,7 +244,7 @@ impl<'a> Validator<'a> {
             }
             let admitted =
                 admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
-            return self.bind_sugar_sections(&admitted, rule, prepared, frontmatter, plan, None);
+            return self.bind_sugar_sections(&admitted, &title.children, frontmatter, plan, None);
         }
 
         // The titled scope: every `h1` occupies the synthesized rule, a
@@ -271,7 +263,11 @@ impl<'a> Validator<'a> {
             if pathed.section.heading.level == HeaderLevel::H1 {
                 // Only a spelled title matcher can miss: the bare-sections
                 // any-text matcher accepts every `h1`.
-                if !prepared.matcher.matches(&pathed.section.heading.text) {
+                if plan
+                    .title
+                    .as_ref()
+                    .is_some_and(|matcher| !matcher.matches(&pathed.section.heading.text))
+                {
                     self.emit_present(
                         DiagnosticId::NotAllowed,
                         pathed.path.clone(),
@@ -332,7 +328,7 @@ impl<'a> Validator<'a> {
                 children = merged;
             }
             let owner = attribute.then_some((&occurrence.section.heading, &occurrence.path));
-            self.bind_sugar_sections(&children, rule, prepared, frontmatter, plan, owner)?;
+            self.bind_sugar_sections(&children, &title.children, frontmatter, plan, owner)?;
         }
         Ok(())
     }
@@ -351,8 +347,7 @@ impl<'a> Validator<'a> {
     fn bind_sugar_sections(
         &mut self,
         sections: &[PathedSection<'a>],
-        rule: &'a SectionRule,
-        prepared: &PreparedRule,
+        child_scope: &'a ChildScope,
         frontmatter: &FrontmatterValues<'a>,
         plan: &ValidationPlan,
         owner: Option<(&'a Heading, &HeaderPath)>,
@@ -362,29 +357,28 @@ impl<'a> Validator<'a> {
             Some((heading, path)) => (Some(heading), path.clone()),
             None => (None, HeaderPath::default()),
         };
-        let bound = self.bind_scope(BindScopeInput {
+        let bound = self.bind_child_scope(
             sections,
-            rules: &rule.sections,
-            prepared_rules: &prepared.sections,
-            strict: rule.strict,
-            ordered: rule.ordered,
-            schema_scope: &scope,
+            child_scope,
+            &plan.rules,
+            &plan.guards,
+            &scope,
             parent,
-            parent_path: &path,
-        });
+            &path,
+        );
         self.validate_constraints(
             EvalCtx {
                 current: &bound,
-                current_rules: &rule.sections,
+                current_rules: child_scope.rules(),
                 // `$.` refs in a sugar schema resolve against the `sections`
                 // scope, as they always have — here, this instance of it.
                 root: &bound,
-                root_rules: &rule.sections,
+                root_rules: child_scope.rules(),
                 frontmatter,
                 queries: &plan.queries,
                 match_case: self.schema.options.match_case,
             },
-            &rule.constraints,
+            child_scope.constraints(),
             &scope,
             parent,
             &path,
@@ -611,61 +605,129 @@ impl<'a> Validator<'a> {
     fn bind_scope<'d>(&mut self, input: BindScopeInput<'_, 'd>) -> BoundScope<'d> {
         let BindScopeInput {
             sections,
-            rules,
+            scope,
             prepared_rules,
-            strict,
-            ordered,
+            prepared_guards,
             schema_scope,
             parent,
             parent_path,
         } = input;
+        let rules = &scope.rules;
         let allow_skipped = self.schema.options.allow_skipped_levels;
-        let mut counts = vec![0_usize; rules.len()];
-        let mut occurrences = Vec::new();
+        let mut retained = Vec::new();
         for pathed in sections {
-            let section = pathed.section;
-            // Already the section's complete ancestor chain. Do not rebuild it
-            // from the diagnostic attribution path, which is intentionally
-            // empty under the sugar's single-`h1` document voice.
-            let path = pathed.path.clone();
-            let matched = rules
+            let guarded = prepared_guards
                 .iter()
-                .zip(prepared_rules)
                 .enumerate()
-                .find(|(_, (_, prepared))| prepared.matcher.matches(&section.heading.text));
-            let Some((rule_index, (rule, prepared_rule))) = matched else {
-                if strict {
-                    let schema_node = schema_scope.0.split_last().map(|(index, parent_scope)| {
-                        SchemaNode::Rule(crate::RulePath {
-                            scope: ScopePath(parent_scope.to_vec()),
-                            index: *index,
-                        })
-                    });
-                    self.emit_present(
-                        DiagnosticId::UnexpectedSection,
-                        path,
-                        &section.heading,
-                        schema_node,
-                        "the section is not permitted in this closed scope",
-                    );
-                }
-                continue;
-            };
-            let node = SchemaNode::Rule(rule_path(schema_scope, rule_index));
-            if matches!(rule.outcome, RuleOutcome::Deny) {
+                .find(|(_, guard)| guard.matches(&pathed.section.heading.text));
+            if let Some((guard_index, _)) = guarded {
                 self.emit_present(
                     DiagnosticId::NotAllowed,
+                    pathed.path.clone(),
+                    &pathed.section.heading,
+                    Some(SchemaNode::Guard(GuardPath {
+                        scope: schema_scope.clone(),
+                        index: GuardIndex(guard_index),
+                    })),
+                    "a prohibition guard rejects this section",
+                );
+            } else {
+                retained.push(pathed);
+            }
+        }
+        let columns = rules.len();
+        let matrix = retained
+            .iter()
+            .flat_map(|pathed| {
+                prepared_rules
+                    .iter()
+                    .map(move |rule| rule.matcher.matches(&pathed.section.heading.text))
+            })
+            .collect::<Vec<_>>();
+        if scope.extras == ExtrasMode::Anywhere {
+            let mut row = 0usize;
+            retained.retain(|_| {
+                let matched = matrix
+                    .get(row.saturating_mul(columns)..row.saturating_add(1).saturating_mul(columns))
+                    .is_some_and(|values| values.iter().any(|value| *value));
+                row += 1;
+                matched
+            });
+        }
+        let matrix = retained
+            .iter()
+            .flat_map(|pathed| {
+                prepared_rules
+                    .iter()
+                    .map(move |rule| rule.matcher.matches(&pathed.section.heading.text))
+            })
+            .collect::<Vec<_>>();
+        let assignment = match scope.mode {
+            ScopeMode::Ordered => super::sequence::assign(rules, &matrix, retained.len()),
+            ScopeMode::Unordered => {
+                let mut assigned = vec![None; retained.len()];
+                let mut counts = vec![0; rules.len()];
+                for (heading_index, slot) in assigned.iter_mut().enumerate() {
+                    if let Some(rule_index) = (0..rules.len()).find(|rule_index| {
+                        matrix
+                            .get(
+                                heading_index
+                                    .saturating_mul(columns)
+                                    .saturating_add(*rule_index),
+                            )
+                            .copied()
+                            .unwrap_or(false)
+                    }) {
+                        *slot = Some(rule_index);
+                        if let Some(count) = counts.get_mut(rule_index) {
+                            *count += 1;
+                        }
+                    }
+                }
+                super::sequence::Assignment {
+                    rules: assigned,
+                    counts,
+                    accepted: true,
+                    recovery_cost: super::sequence::RecoveryCost {
+                        unassigned: 0,
+                        wildcard: 0,
+                    },
+                }
+            }
+        };
+        let mut occurrences = Vec::new();
+        for (heading_index, pathed) in retained.iter().enumerate() {
+            let section = pathed.section;
+            let path = pathed.path.clone();
+            let Some(rule_index) = assignment.rules.get(heading_index).copied().flatten() else {
+                let row_matches = matrix.get(
+                    heading_index.saturating_mul(columns)
+                        ..heading_index.saturating_add(1).saturating_mul(columns),
+                );
+                let misplaced = scope.mode == ScopeMode::Ordered
+                    && row_matches.is_some_and(|row| row.iter().any(|value| *value));
+                self.emit_present(
+                    if misplaced {
+                        DiagnosticId::MisplacedSection
+                    } else {
+                        DiagnosticId::UnexpectedSection
+                    },
                     path,
                     &section.heading,
-                    Some(node),
-                    "the first matching rule denies this section",
+                    scope_owner_node(self.schema, schema_scope),
+                    if misplaced {
+                        "the section matches a rule but cannot occupy its ordered phase"
+                    } else {
+                        "the section matches no accepting rule"
+                    },
                 );
                 continue;
-            }
-
-            if let Some(count) = counts.get_mut(rule_index) {
-                *count += 1;
-            }
+            };
+            let (Some(rule), Some(prepared_rule)) =
+                (rules.get(rule_index), prepared_rules.get(rule_index))
+            else {
+                continue;
+            };
             // §8 parses a matched header's declared captures before visiting
             // its children, and §3.3 makes that the moment every declared
             // capture is parsed — the one place a value is read, so that
@@ -681,16 +743,15 @@ impl<'a> Validator<'a> {
             let child_refs = child_sections(section, &path, allow_skipped);
             let mut child_scope_path = schema_scope.clone();
             child_scope_path.0.push(RuleIndex(rule_index));
-            let child = self.bind_scope(BindScopeInput {
-                sections: &child_refs,
-                rules: &rule.sections,
-                prepared_rules: &prepared_rule.sections,
-                strict: rule.strict,
-                ordered: rule.ordered,
-                schema_scope: &child_scope_path,
-                parent: Some(&section.heading),
-                parent_path: &path,
-            });
+            let child = self.bind_child_scope(
+                &child_refs,
+                &rule.children,
+                &prepared_rule.sections,
+                &prepared_rule.guards,
+                &child_scope_path,
+                Some(&section.heading),
+                &path,
+            );
             occurrences.push(BoundSection {
                 rule_index,
                 section,
@@ -701,24 +762,17 @@ impl<'a> Validator<'a> {
         }
 
         for (rule_index, rule) in rules.iter().enumerate() {
-            let RuleOutcome::Allow(cardinality) = rule.outcome else {
-                continue;
-            };
-            let count = counts.get(rule_index).copied().unwrap_or_default();
+            let cardinality = rule.cardinality;
+            let count = assignment
+                .counts
+                .get(rule_index)
+                .copied()
+                .unwrap_or_default();
             self.validate_cardinality(CardinalityCheck {
                 cardinality,
                 count,
                 rule,
                 rule_index,
-                occurrences: &occurrences,
-                schema_scope,
-                parent,
-                parent_path,
-            });
-        }
-        if ordered {
-            self.validate_order(OrderCheck {
-                rules,
                 occurrences: &occurrences,
                 schema_scope,
                 parent,
@@ -739,10 +793,62 @@ impl<'a> Validator<'a> {
         // recorded here, beside the cardinality check that has just read the
         // same counts, precisely so that a locator descent never has to ask
         // whether a `too-many-sections` diagnostic survived §6.3 filtering.
-        let singular = counts.iter().map(|count| *count <= 1).collect();
+        let singular = assignment.counts.iter().map(|count| *count <= 1).collect();
         BoundScope {
             occurrences,
             singular,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_child_scope<'d>(
+        &mut self,
+        sections: &[PathedSection<'d>],
+        child_scope: &ChildScope,
+        prepared_rules: &[PreparedRule],
+        prepared_guards: &[super::prepare::PreparedMatcher],
+        schema_scope: &ScopePath,
+        parent: Option<&'d Heading>,
+        parent_path: &HeaderPath,
+    ) -> BoundScope<'d> {
+        match child_scope {
+            ChildScope::Declared(scope) => self.bind_scope(BindScopeInput {
+                sections,
+                scope,
+                prepared_rules,
+                prepared_guards,
+                schema_scope,
+                parent,
+                parent_path,
+            }),
+            ChildScope::Omitted => BoundScope {
+                occurrences: Vec::new(),
+                singular: Vec::new(),
+            },
+            ChildScope::GuardsOnly(_) => {
+                for pathed in sections {
+                    if let Some((index, _)) = prepared_guards
+                        .iter()
+                        .enumerate()
+                        .find(|(_, guard)| guard.matches(&pathed.section.heading.text))
+                    {
+                        self.emit_present(
+                            DiagnosticId::NotAllowed,
+                            pathed.path.clone(),
+                            &pathed.section.heading,
+                            Some(SchemaNode::Guard(GuardPath {
+                                scope: schema_scope.clone(),
+                                index: GuardIndex(index),
+                            })),
+                            "a prohibition guard rejects this section",
+                        );
+                    }
+                }
+                BoundScope {
+                    occurrences: Vec::new(),
+                    singular: Vec::new(),
+                }
+            }
         }
     }
 
@@ -804,93 +910,6 @@ impl<'a> Validator<'a> {
             bound.insert(name.clone(), state);
         }
         bound
-    }
-
-    /// Checks an ordered scope: every header an earlier accepting rule
-    /// matched must precede every header a later one matched (§3.7).
-    ///
-    /// The check is §5.1's `last(A) < first(B)` over adjacent pairs of the
-    /// scope's accepting rules that matched anything, in list order. Denied
-    /// rules do not participate in the order pairing, while unmatched headers
-    /// are unconstrained by ordering. Each violated pair is one `ordered`
-    /// diagnostic, so that a
-    /// misplaced section is named by the neighbours it broke rather than by
-    /// the whole scope at once.
-    fn validate_order(&mut self, check: OrderCheck<'_, '_>) {
-        let OrderCheck {
-            rules,
-            occurrences,
-            schema_scope,
-            parent,
-            parent_path,
-        } = check;
-        let present = rules
-            .iter()
-            .enumerate()
-            .filter(|(_, rule)| matches!(rule.outcome, RuleOutcome::Allow(_)))
-            .map(|(rule_index, rule)| {
-                let matched = occurrences
-                    .iter()
-                    .filter(|occurrence| occurrence.rule_index == rule_index)
-                    .collect::<Vec<_>>();
-                (rule, matched)
-            })
-            .filter(|(_, matched)| !matched.is_empty())
-            .collect::<Vec<_>>();
-        let schema_node = schema_scope.0.split_last().map_or_else(
-            || {
-                (self.schema.outline_provenance != OutlineProvenance::Outline)
-                    .then_some(SchemaNode::Title)
-            },
-            |(index, parent_scope)| {
-                Some(SchemaNode::Rule(crate::RulePath {
-                    scope: ScopePath(parent_scope.to_vec()),
-                    index: *index,
-                }))
-            },
-        );
-        for pair in present.windows(2) {
-            let [(earlier, earlier_matched), (later, later_matched)] = pair else {
-                continue;
-            };
-            let position =
-                |occurrence: &&BoundSection<'_>| occurrence.section.heading.location.range.start.0;
-            let last_earlier = earlier_matched.iter().map(position).max();
-            let first_later = later_matched.iter().map(position).min();
-            if matches!((last_earlier, first_later), (Some(last), Some(first)) if last < first) {
-                continue;
-            }
-            let mut involved = earlier_matched
-                .iter()
-                .chain(later_matched.iter())
-                .map(|occurrence| InvolvedHeader {
-                    path: occurrence.path.clone(),
-                    location: heading_location(&occurrence.section.heading.location),
-                })
-                .collect::<Vec<_>>();
-            involved.sort_by_key(|header| (header.location.line, header.location.column));
-            self.emit(
-                Diagnostic {
-                    id: DiagnosticId::Ordered,
-                    target: match parent {
-                        Some(_) => DiagnosticTarget::Header(parent_path.clone()),
-                        None => DiagnosticTarget::Document,
-                    },
-                    location: parent
-                        .map_or_else(root_location, |heading| heading_location(&heading.location)),
-                    schema_node: schema_node.clone(),
-                    involved_headers: involved,
-                    references: Vec::new(),
-                    message: format!(
-                        "sections are out of the declared order: `{}` must precede `{}`",
-                        matcher_label(&earlier.matcher),
-                        matcher_label(&later.matcher)
-                    ),
-                },
-                parent,
-                true,
-            );
-        }
     }
 
     /// Reports every adjacent pair that violates a rule's `order` (§3.8).
@@ -1073,14 +1092,14 @@ impl<'a> Validator<'a> {
             self.validate_constraints(
                 EvalCtx {
                     current: &occurrence.child,
-                    current_rules: &rule.sections,
+                    current_rules: rule.children.rules(),
                     root: eval.root,
                     root_rules: eval.root_rules,
                     frontmatter: eval.frontmatter,
                     queries: eval.queries,
                     match_case: eval.match_case,
                 },
-                &rule.constraints,
+                rule.children.constraints(),
                 &child_schema_scope,
                 Some(&occurrence.section.heading),
                 &occurrence.path,
@@ -1321,6 +1340,18 @@ fn rule_path(scope: &ScopePath, index: usize) -> crate::RulePath {
     }
 }
 
+fn scope_owner_node(schema: &Schema, scope: &ScopePath) -> Option<SchemaNode> {
+    scope.0.split_last().map_or_else(
+        || schema.is_sugar().then_some(SchemaNode::Title),
+        |(index, parent)| {
+            Some(SchemaNode::Rule(RulePath {
+                scope: ScopePath(parent.to_vec()),
+                index: *index,
+            }))
+        },
+    )
+}
+
 fn matcher_label(matcher: &Matcher) -> String {
     match matcher {
         Matcher::Exact(text) => text.0.clone(),
@@ -1357,7 +1388,7 @@ fn value_failure_reason(value_type: ValueType, source: &str, failure: &ParseFail
     match failure {
         ParseFailure::KindMismatch { expected, actual } => {
             // §2.4: "diagnostics SHOULD suggest quoting this common mistake"
-            // — the unquoted `version: 1.2` that reads as a YAML float where
+            // — the unquoted `version: 2.2` that reads as a YAML float where
             // a string-kinded type was declared.
             let hint = if *expected == ResolvedYamlKind::String
                 && matches!(actual, ResolvedYamlKind::Integer | ResolvedYamlKind::Float)

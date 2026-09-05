@@ -1,71 +1,70 @@
 case document-field-version
   source "version: 2\nsections: []\n"
-  verdict invalid
-  error unsupported-version 0:9..10 "2" "unsupported schema version 2; expected 1"
+  verdict valid
+  node title 0:21..23 "[]"
 
 case document-field-title
-  source "version: 1\ntitle: [nope]\nsections: []\n"
+  source "version: 2\ntitle: [nope]\nsections: []\n"
   verdict invalid
   error invalid-document-shape 0:18..24 "[nope]" "title must be a string or null"
 
 case document-field-sections
-  source "version: 1\nsections: nope\n"
+  source "version: 2\nsections: nope\n"
   verdict invalid
   error invalid-document-shape 0:21..25 "nope" "sections must be a sequence and cannot be null"
 
 case document-field-constraints
-  source "version: 1\nsections: []\nconstraints: nope\n"
+  source "version: 2\nsections: []\nconstraints: nope\n"
   verdict invalid
   error invalid-document-shape 0:37..41 "nope" "constraints must be a sequence and cannot be null"
 
 case document-field-options
-  source "version: 1\noptions: nope\nsections: []\n"
+  source "version: 2\noptions: nope\nsections: []\n"
   verdict invalid
   error invalid-document-shape 0:20..24 "nope" "options must be a mapping and cannot be null"
 
 case document-field-frontmatter
-  source "version: 1\nfrontmatter: nope\nsections: []\n"
+  source "version: 2\nfrontmatter: nope\nsections: []\n"
   verdict invalid
   error invalid-document-shape 0:24..28 "nope" "frontmatter must be a mapping and cannot be null"
 
 case document-field-unknown
-  source "version: 1\nsections: []\nunexpected: 1\n"
+  source "version: 2\nsections: []\nunexpected: 1\n"
   verdict invalid
-  error invalid-document-shape 0:0..38 "version: 1\nsections: []\nunexpected: 1\n" "unknown field `unexpected`"
+  error invalid-document-shape 0:0..38 "version: 2\nsections: []\nunexpected: 1\n" "unknown field `unexpected`"
 
 case document-missing-required-field
   source "title: Doc\n"
   verdict invalid
   error invalid-document-shape 0:0..11 "title: Doc\n" "missing required field `version`"
-  error invalid-document-shape 0:0..11 "title: Doc\n" "missing required field `sections`"
 
 case document-not-a-mapping
-  source "- version: 1\n"
+  source "- version: 2\n"
   verdict invalid
-  error invalid-document-shape 0:0..13 "- version: 1\n" "schema document must be a mapping"
+  error invalid-document-shape 0:0..13 "- version: 2\n" "schema document must be a mapping"
 
 case option-field-match-case
-  source "version: 1\noptions:\n  match_case: yes please\nsections: []\n"
+  source "version: 2\noptions:\n  match_case: yes please\nsections: []\n"
   verdict invalid
   error invalid-document-shape 0:34..44 "yes please" "options.match_case must be a bool and cannot be null"
 
 case option-field-unknown
-  source "version: 1\noptions:\n  strip_inline_markup: true\n  unexpected: true\nsections: []\n"
+  source "version: 2\noptions:\n  strip_inline_markup: true\n  unexpected: true\nsections: []\n"
   verdict invalid
   error invalid-document-shape 0:22..67 "strip_inline_markup: true\n  unexpected: true\n" "unknown field `unexpected`"
 
 case frontmatter-field-required
-  source "version: 1\nfrontmatter:\n  required: sometimes\nsections: []\n"
+  source "version: 2\nfrontmatter:\n  required: sometimes\nsections: []\n"
   verdict invalid
   error invalid-document-shape 0:36..45 "sometimes" "frontmatter.required must be a bool and cannot be null"
 
 case frontmatter-field-schema-shape
-  source "version: 1\nfrontmatter:\n  schema: [nope]\nsections: []\n"
+  source "version: 2\nfrontmatter:\n  schema: [nope]\nsections: []\n"
   verdict invalid
   error invalid-document-shape 0:34..40 "[nope]" "frontmatter.schema must be a path string or mapping and cannot be null"
 
 case frontmatter-field-schema-inline
-  source "version: 1\nfrontmatter:\n  schema:\n    type: object\nsections: []\n"
+  source "version: 2\nfrontmatter:\n  schema:\n    type: object\nsections: []\n"
   verdict valid
   node title 0:61..63 "[]"
   node frontmatter 0:26..51 "schema:\n    type: object\n"
@@ -73,213 +72,236 @@ case frontmatter-field-schema-inline
   node frontmatter-schema-document 0:38..51 "type: object\n"
 
 case frontmatter-field-schema-unpreloaded
-  source "version: 1\nfrontmatter:\n  schema: linked.json\nsections: []\n"
+  source "version: 2\nfrontmatter:\n  schema: linked.json\nsections: []\n"
   verdict invalid
   error invalid-frontmatter-schema 0:34..45 "linked.json" "linked frontmatter schema requires a schema file path context"
 
 case frontmatter-conflicting-policy
-  source "version: 1\nfrontmatter:\n  required: true\n  allow: false\nsections: []\n"
+  source "version: 2\nfrontmatter:\n  required: true\n  allow: false\nsections: []\n"
   verdict invalid
   error conflicting-frontmatter 0:26..56 "required: true\n  allow: false\n" "frontmatter cannot be both required and forbidden"
 
 case frontmatter-capture-declaration
-  source "version: 1\nfrontmatter:\n  captures:\n    v:\n      type: nope\nsections: []\n"
+  source "version: 2\nfrontmatter:\n  captures:\n    v:\n      type: nope\nsections: []\n"
   verdict invalid
   error invalid-capture 0:40..60 "v:\n      type: nope\n" "unknown capture type `nope` in frontmatter capture `v`; expected one of `int`, `bool`, `date`, `semver`, `dotted`, `text`"
 
 case frontmatter-captures-empty
-  source "version: 1\nfrontmatter:\n  captures: {}\nsections: []\n"
+  source "version: 2\nfrontmatter:\n  captures: {}\nsections: []\n"
   verdict invalid
   error invalid-capture 0:36..38 "{}" "frontmatter.captures must be a non-empty mapping of capture declarations"
 
 case rule-not-a-mapping
-  source "version: 1\nsections:\n  - nope\n"
+  source "version: 2\nsections:\n  - nope\n"
   verdict invalid
   error invalid-document-shape 0:25..29 "nope" "each section rule must be a mapping"
 
 case rule-field-match-missing
-  source "version: 1\nsections:\n  - id: intro\n"
+  source "version: 2\nsections:\n  - id: intro\n"
   verdict invalid
   error invalid-document-shape 0:25..35 "id: intro\n" "missing required field `match`"
 
 case rule-field-invalid-matcher
-  source "version: 1\nsections:\n  - match: \"/[unclosed/\"\n"
+  source "version: 2\nsections:\n  - match: \"/[unclosed/\"\n"
   verdict invalid
   error invalid-matcher 0:32..45 "\"/[unclosed/\"" "invalid regex matcher `/[unclosed/`: regex parse error:\n    \\A(?:[unclosed)\\z\n         ^\nerror: unclosed character class"
+  error missing-cardinality 0:32..45 "\"/[unclosed/\"" "regex, glob, and wildcard rules must declare `required` or `repeat`"
 
 case rule-field-invalid-repeat
-  source "version: 1\nsections:\n  - match: Intro\n    repeat: \"3..1\"\n"
+  source "version: 2\nsections:\n  - match: Intro\n    repeat: \"3..1\"\n"
   verdict invalid
   error invalid-repeat 0:50..56 "\"3..1\"" "invalid repeat `3..1`"
 
 case rule-field-repeat-shape
-  source "version: 1\nsections:\n  - match: Intro\n    repeat: 3..1\n"
+  source "version: 2\nsections:\n  - match: Intro\n    repeat: 3..1\n"
   verdict invalid
   error invalid-repeat 0:50..54 "3..1" "invalid repeat `3..1`"
 
 case rule-field-conflicting-cardinality
-  source "version: 1\nsections:\n  - match: Intro\n    required: true\n    repeat: \"2\"\n"
+  source "version: 2\nsections:\n  - match: Intro\n    required: true\n    repeat: \"2\"\n"
   verdict invalid
   error conflicting-cardinality 0:69..72 "\"2\"" "required and repeat cannot both be declared"
 
 case rule-field-reserved-id
-  source "version: 1\nsections:\n  - id: fm\n    match: Intro\n"
+  source "version: 2\nsections:\n  - id: fm\n    match: Intro\n"
   verdict invalid
   error reserved-id 0:29..31 "fm" "top-level rule id `fm` is reserved for frontmatter refs"
 
 case rule-field-duplicate-id
-  source "version: 1\nsections:\n  - id: intro\n    match: Intro\n  - id: intro\n    match: Other\n"
+  source "version: 2\nsections:\n  - id: intro\n    match: Intro\n  - id: intro\n    match: Other\n"
   verdict invalid
   error duplicate-id 0:60..65 "intro" "duplicate rule id `intro` in one scope"
 
 case rule-field-unknown
-  source "version: 1\nsections:\n  - match: Intro\n    unexpected: true\n"
+  source "version: 2\nsections:\n  - match: Intro\n    unexpected: true\n"
   verdict invalid
   error invalid-document-shape 0:25..59 "match: Intro\n    unexpected: true\n" "unknown field `unexpected`"
 
 case rule-capture-declaration
-  source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures:\n      v: nope\n"
+  source "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures:\n      v: nope\n"
   verdict invalid
+  error missing-cardinality 0:32..46 "\"/V (?<v>.+)/\"" "regex, glob, and wildcard rules must declare `required` or `repeat`"
   error invalid-capture 0:67..74 "v: nope" "capture `v` declares unknown type `nope`"
 
 case rule-captures-empty
-  source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures: {}\n"
+  source "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    captures: {}\n"
   verdict invalid
+  error missing-cardinality 0:32..46 "\"/V (?<v>.+)/\"" "regex, glob, and wildcard rules must declare `required` or `repeat`"
   error invalid-capture 0:61..63 "{}" "rule `captures` must declare at least one capture"
 
 case rule-order-entry
-  source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order:\n      - by: v\n        unexpected: true\n"
+  source "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order:\n      - by: v\n        unexpected: true\n"
   verdict invalid
   error invalid-order 0:110..141 "by: v\n        unexpected: true\n" "unknown `order` entry field `unexpected`"
 
 case rule-order-empty
-  source "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order: []\n"
+  source "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    captures:\n      v: int\n    order: []\n"
   verdict invalid
   error invalid-order 0:102..104 "[]" "rule `order` must declare at least one entry"
 
 case nested-rule-field-invalid-matcher
-  source "version: 1\nsections:\n  - match: Intro\n    sections:\n      - match: \"/[unclosed/\"\n"
+  source "version: 2\nsections:\n  - match: Intro\n    sections:\n      - match: \"/[unclosed/\"\n"
   verdict invalid
   error invalid-matcher 0:67..80 "\"/[unclosed/\"" "invalid regex matcher `/[unclosed/`: regex parse error:\n    \\A(?:[unclosed)\\z\n         ^\nerror: unclosed character class"
+  error missing-cardinality 0:67..80 "\"/[unclosed/\"" "regex, glob, and wildcard rules must declare `required` or `repeat`"
 
 case constraint-unresolved-ref
-  source "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: { if: intro, then: missing }\n"
+  source "version: 2\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: { if: intro, then: missing }\n"
   verdict invalid
   error unresolved-ref 0:69..108 "requires: { if: intro, then: missing }\n" "unresolved ref `missing`"
 
-case constraint-forbidden-ref
-  source "version: 1\nsections:\n  - id: intro\n    match: Intro\n  - id: gone\n    match: Gone\n    allow: false\nconstraints:\n  - requires: { if: intro, then: gone }\n"
+case removed-rule-key
+  source "version: 2\nsections:\n  - match: Gone\n    allow: false\n"
   verdict invalid
-  error forbidden-ref 0:115..151 "requires: { if: intro, then: gone }\n" "ref `gone` passes through or targets an allow: false rule"
+  error invalid-document-shape 0:25..54 "match: Gone\n    allow: false\n" "unknown field `allow`"
+
+case rule-missing-cardinality
+  source "version: 2\nsections:\n  - match: '*'\n"
+  verdict invalid
+  error missing-cardinality 0:32..35 "'*'" "regex, glob, and wildcard rules must declare `required` or `repeat`"
+
+case unordered-unreachable-rule
+  source "version: 2\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n"
+  verdict invalid
+  error unreachable-rule 0:80..85 "Later" "rule is unreachable after the first wildcard in an unordered scope"
+
+case guard-invalid-matcher
+  source "version: 2\nsections: []\nforbid_sections:\n  - match: '/[/'\n"
+  verdict invalid
+  error invalid-matcher 0:52..57 "'/[/'" "invalid regex matcher `/[/`: regex parse error:\n    \\A(?:[)\\z\n         ^\nerror: unclosed character class"
+
+case empty-outline-valid
+  source "version: 2\noutline: []\n"
+  verdict valid
 
 case constraint-operand-shape
-  source "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: intro\n"
+  source "version: 2\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - requires: intro\n"
   verdict invalid
   error invalid-document-shape 0:69..85 "requires: intro\n" "requires operand must be an object"
 
 case constraint-duplicate-ref
-  source "version: 1\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - one_of: [intro, intro]\n"
+  source "version: 2\nsections:\n  - id: intro\n    match: Intro\nconstraints:\n  - one_of: [intro, intro]\n"
   verdict invalid
   error duplicate-ref 0:69..92 "one_of: [intro, intro]\n" "constraint contains a duplicate ref"
 
 case constraint-ordered-scope-mismatch
-  source "version: 1\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n  - id: other\n    match: Other\nconstraints:\n  - ordered: [intro.deep, other]\n"
+  source "version: 2\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n  - id: other\n    match: Other\nconstraints:\n  - ordered: [intro.deep, other]\n"
   verdict invalid
-  error ordered-scope-mismatch 0:151..180 "ordered: [intro.deep, other]\n" "ref `intro.deep` descends through the repeatable rule `intro`; narrow that step with `[i]`"
+  error ordered-scope-mismatch 0:151..180 "ordered: [intro.deep, other]\n" "all ordered refs must resolve in the same concrete scope"
 
 case constraint-not-a-mapping
-  source "version: 1\nsections: []\nconstraints:\n  - nope\n"
+  source "version: 2\nsections: []\nconstraints:\n  - nope\n"
   verdict invalid
   error invalid-document-shape 0:41..45 "nope" "constraint must be a single-key object"
 
 case nested-constraint-unresolved-ref
-  source "version: 1\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n    constraints:\n      - requires: { if: deep, then: missing }\n"
+  source "version: 2\nsections:\n  - id: intro\n    match: Intro\n    sections:\n      - id: deep\n        match: Deep\n    constraints:\n      - requires: { if: deep, then: missing }\n"
   verdict invalid
   error unresolved-ref 0:128..166 "requires: { if: deep, then: missing }\n" "unresolved ref `missing`"
 
 case duplicate-key-document-field
-  source "version: 1\nversion: 2\nsections: []\n"
+  source "version: 2\nversion: 2\nsections: []\n"
   verdict invalid
   error syntax 0:11..18 "version" "invalid YAML: duplicate mapping key `version`"
 
 case duplicate-key-quoted-against-plain
-  source "version: 1\n\"version\": 2\nsections: []\n"
+  source "version: 2\n\"version\": 2\nsections: []\n"
   verdict invalid
   error syntax 0:11..20 "\"version\"" "invalid YAML: duplicate mapping key `version`"
 
 case duplicate-key-rule-field
-  source "version: 1\nsections:\n  - match: Intro\n    match: Other\n"
+  source "version: 2\nsections:\n  - match: Intro\n    match: Other\n"
   verdict invalid
   error syntax 0:42..47 "match" "invalid YAML: duplicate mapping key `match`"
 
 case non-standard-tag-on-a-scalar
-  source "version: 1\ntitle: !custom Doc\nsections: []\n"
+  source "version: 2\ntitle: !custom Doc\nsections: []\n"
   verdict invalid
   error syntax 0:26..29 "Doc" "invalid YAML: non-standard tag `!custom`"
 
 case non-standard-tag-on-the-document
-  source "--- !custom\nversion: 1\nsections: []\n"
+  source "--- !custom\nversion: 2\nsections: []\n"
   verdict invalid
   error syntax 0:12..13 "v" "invalid YAML: non-standard tag `!custom`"
 
 case alias-expanded-into-a-rule
-  source "version: 1\nsections:\n  - &base\n    match: Intro\n  - *base\n"
+  source "version: 2\nsections:\n  - &base\n    match: Intro\n  - *base\n"
   verdict invalid
   error duplicate-id 0:52..57 "*base" "duplicate rule id `intro` in one scope"
 
 case alias-in-key-position
-  source "version: 1\nsections: []\nanchors: &a name\n*a : 1\n"
+  source "version: 2\nsections: []\nanchors: &a name\n*a : 1\n"
   verdict invalid
-  error invalid-document-shape 0:0..48 "version: 1\nsections: []\nanchors: &a name\n*a : 1\n" "unknown field `anchors`"
-  error invalid-document-shape 0:0..48 "version: 1\nsections: []\nanchors: &a name\n*a : 1\n" "unknown field `name`"
+  error invalid-document-shape 0:0..48 "version: 2\nsections: []\nanchors: &a name\n*a : 1\n" "unknown field `anchors`"
+  error invalid-document-shape 0:0..48 "version: 2\nsections: []\nanchors: &a name\n*a : 1\n" "unknown field `name`"
 
 case undefined-alias
-  source "version: 1\nsections: *missing\n"
+  source "version: 2\nsections: *missing\n"
   verdict invalid
   error syntax 0:21..22 "*" "invalid YAML: while parsing node, found unknown anchor at line 2 column 11"
 
 case byte-order-mark-before-the-document
-  source "﻿version: 1\nsections: []\n"
+  source "﻿version: 2\nsections: []\n"
   verdict valid
   node title 0:24..26 "[]"
 
 case byte-order-mark-inside-a-value
-  source "version: 1\ntitle: ﻿Doc\nsections: []\n"
+  source "version: 2\ntitle: ﻿Doc\nsections: []\n"
   verdict valid
   node title 0:18..24 "﻿Doc"
 
 case two-documents
-  source "version: 1\nsections: []\n---\nversion: 1\nsections: []\n"
+  source "version: 2\nsections: []\n---\nversion: 2\nsections: []\n"
   verdict invalid
   error syntax 0:24..27 "---" "invalid YAML: a second document opens at line 3 column 1; a schema is a single YAML document"
 
 case two-documents-with-a-trailing-marker
-  source "version: 1\nsections: []\n...\n"
+  source "version: 2\nsections: []\n...\n"
   verdict valid
   node title 0:21..23 "[]"
 
 case syntax-colon-in-a-plain-scalar
-  source "version: 1\ntitle: a: bad\nsections: []\n"
+  source "version: 2\ntitle: a: bad\nsections: []\n"
   verdict invalid
   error syntax 0:19..20 ":" "invalid YAML: mapping values are not allowed in this context at line 2 column 9"
 
 case syntax-tab-indentation
-  source "version: 1\nsections:\n\t- match: Intro\n"
+  source "version: 2\nsections:\n\t- match: Intro\n"
   verdict invalid
   error syntax 0:22..23 "-" "invalid YAML: tabs disallowed within this context (block indentation) at line 3 column 2"
 
 case syntax-unclosed-quote
-  source "version: 1\ntitle: \"unterminated\nsections: []\n"
+  source "version: 2\ntitle: \"unterminated\nsections: []\n"
   verdict invalid
   error syntax 0:18..19 "\"" "invalid YAML: invalid indentation in quoted scalar at line 2 column 8"
 
 case syntax-unknown-escape
-  source "version: 1\ntitle: \"bad \\q escape\"\nsections: []\n"
+  source "version: 2\ntitle: \"bad \\q escape\"\nsections: []\n"
   verdict invalid
   error syntax 0:18..19 "\"" "invalid YAML: while parsing a quoted scalar, found unknown escape character at line 2 column 8"
 
 case syntax-empty-flow-element
-  source "version: 1\nsections: []\nconstraints: [, nope]\n"
+  source "version: 2\nsections: []\nconstraints: [, nope]\n"
   verdict invalid
   error syntax 0:38..39 "," "invalid YAML: while parsing a node, did not find expected node content at line 3 column 15"
 

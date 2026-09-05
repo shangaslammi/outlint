@@ -72,7 +72,7 @@ fn main() {
     // 1. Load a schema from YAML (or JSON) source text.
     let loaded = load_schema(
         r#"
-version: 1
+version: 2
 title: "*"
 sections:
   - match: "Overview"

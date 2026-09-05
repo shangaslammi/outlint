@@ -18,7 +18,7 @@ use crate::{load_schema, parse_markdown, MarkdownOptions};
 /// always satisfies.
 fn query_schema(query: &str) -> String {
     format!(
-        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+        "version: 2\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
          required: true\nconstraints:\n  - requires: {{ if: body, then: \"{query}\" }}\n"
     )
 }

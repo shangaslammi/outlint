@@ -10,10 +10,11 @@ use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::regex_capture;
 use crate::typed_value::ValueType;
 use crate::{
-    CaptureName, CapturePath, Cardinality, ExactText, GlobPattern, Matcher, Options,
-    OrderEntryPath, OrderIndex, RegexPattern, RelatedLocation, RuleCapture, RuleId, RuleIndex,
-    RuleOutcome, RulePath, SchemaErrorKind, SchemaNode, ScopePath, SectionRule, SourceRange,
-    UpperBound, ValueOrderDirection, ValueOrderEntry,
+    CaptureName, CapturePath, Cardinality, ChildScope, DeclaredScope, ExactText, ExtrasMode,
+    GlobPattern, GuardIndex, GuardPath, Matcher, NonEmpty, Options, OrderEntryPath, OrderIndex,
+    RegexPattern, RelatedLocation, RuleCapture, RuleId, RuleIndex, RulePath, SchemaErrorKind,
+    SchemaNode, ScopeMode, ScopePath, SectionGuard, SectionRule, SourceRange, UpperBound,
+    ValueOrderDirection, ValueOrderEntry,
 };
 
 use super::shape::{CAPTURES_FIELD, ORDER_FIELD};
@@ -35,22 +36,26 @@ impl Loader {
     /// `title: null` declares, keeping a `sections` list for the real top
     /// level. Accepting `outline: []` would validate nothing and pass every
     /// document silently.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_outline_scope(
         &mut self,
         entries: Vec<RawRule>,
         root_scope: &ScopePath,
         match_case: bool,
-        ordered_default: bool,
-    ) -> Option<Vec<SectionRule>> {
-        if entries.is_empty() {
-            self.shape_error_at(
-                self.range(RangeKey::DocumentField("outline".into())),
-                "outline must declare at least one rule; a document with no h1 headers \
-                 is declared with `title: null`",
-            );
-            return None;
-        }
-        self.build_scope(entries, root_scope, match_case, ordered_default)
+        guards: Vec<super::RawGuard>,
+        extras: Option<String>,
+        unordered: Option<bool>,
+        constraints: Vec<Value>,
+    ) -> Option<DeclaredScope> {
+        self.build_declared_scope(
+            entries,
+            guards,
+            extras,
+            unordered,
+            constraints,
+            root_scope,
+            match_case,
+        )
     }
 
     pub(super) fn build_options(raw: &RawOptions) -> Options {
@@ -58,24 +63,147 @@ impl Loader {
             match_case: raw.match_case.unwrap_or(false),
             strip_inline_markup: raw.strip_inline_markup.unwrap_or(true),
             allow_skipped_levels: raw.allow_skipped_levels.unwrap_or(false),
-            ordered_sections: raw.ordered_sections.unwrap_or(true),
         }
     }
 
-    /// Builds the schema root's scope: the one named scope no rule opens.
-    ///
-    /// The root holds top-level rule ids alone (§4.3). Every deeper scope is
-    /// opened by a rule, whose captures are names in it, so the recursion goes
-    /// through [`Self::build_named_scope`] with that rule's declarations in
-    /// hand.
-    pub(super) fn build_scope(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn build_child_scope(
         &mut self,
-        rules: Vec<RawRule>,
+        rules: Option<Vec<RawRule>>,
+        guards: Vec<super::RawGuard>,
+        extras: Option<String>,
+        unordered: Option<bool>,
+        constraints: Vec<Value>,
         scope: &ScopePath,
         match_case: bool,
-        ordered_default: bool,
-    ) -> Option<Vec<SectionRule>> {
-        self.build_named_scope(rules, scope, match_case, ordered_default, None)
+        owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
+    ) -> Option<ChildScope> {
+        match rules {
+            Some(rules) => self
+                .build_declared_scope_with_owner(
+                    rules,
+                    guards,
+                    extras,
+                    unordered,
+                    constraints,
+                    scope,
+                    match_case,
+                    owner,
+                )
+                .map(ChildScope::Declared),
+            None if guards.is_empty() => Some(ChildScope::Omitted),
+            None => self
+                .build_guards(guards, scope, match_case)
+                .and_then(|guards| {
+                    let mut iter = guards.into_iter();
+                    let first = iter.next()?;
+                    Some(ChildScope::GuardsOnly(NonEmpty {
+                        first,
+                        rest: iter.collect(),
+                    }))
+                }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_declared_scope(
+        &mut self,
+        rules: Vec<RawRule>,
+        guards: Vec<super::RawGuard>,
+        extras: Option<String>,
+        unordered: Option<bool>,
+        constraints: Vec<Value>,
+        scope: &ScopePath,
+        match_case: bool,
+    ) -> Option<DeclaredScope> {
+        self.build_declared_scope_with_owner(
+            rules,
+            guards,
+            extras,
+            unordered,
+            constraints,
+            scope,
+            match_case,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_declared_scope_with_owner(
+        &mut self,
+        rules: Vec<RawRule>,
+        guards: Vec<super::RawGuard>,
+        extras: Option<String>,
+        unordered: Option<bool>,
+        constraints: Vec<Value>,
+        scope: &ScopePath,
+        match_case: bool,
+        owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
+    ) -> Option<DeclaredScope> {
+        self.raw_constraints.insert(scope.clone(), constraints);
+        let mode = if unordered == Some(true) {
+            ScopeMode::Unordered
+        } else {
+            ScopeMode::Ordered
+        };
+        let semantic_rules = self.build_named_scope(rules, scope, match_case, owner);
+        let semantic_guards = self.build_guards(guards, scope, match_case);
+        if mode == ScopeMode::Unordered {
+            let mut wildcard_seen = false;
+            if let Some(built) = semantic_rules.as_ref() {
+                for (index, rule) in built.iter().enumerate() {
+                    if wildcard_seen {
+                        let path = RulePath {
+                            scope: scope.clone(),
+                            index: RuleIndex(index),
+                        };
+                        self.error_at(
+                            SchemaErrorKind::UnreachableRule,
+                            self.range(RangeKey::RuleField(path, "match".into())),
+                            "rule is unreachable after the first wildcard in an unordered scope",
+                        );
+                    }
+                    wildcard_seen |= matches!(rule.matcher, Matcher::Any);
+                }
+            }
+        }
+        match (semantic_rules, semantic_guards) {
+            (Some(rules), Some(guards)) => Some(DeclaredScope {
+                rules,
+                guards,
+                extras: if extras.is_some() {
+                    ExtrasMode::Anywhere
+                } else {
+                    ExtrasMode::Reject
+                },
+                mode,
+                constraints: Vec::new(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn build_guards(
+        &mut self,
+        guards: Vec<super::RawGuard>,
+        scope: &ScopePath,
+        match_case: bool,
+    ) -> Option<Vec<SectionGuard>> {
+        let mut built = Vec::with_capacity(guards.len());
+        let mut complete = true;
+        for (index, guard) in guards.into_iter().enumerate() {
+            let path = GuardPath {
+                scope: scope.clone(),
+                index: GuardIndex(index),
+            };
+            let range = self.range(RangeKey::GuardField(path.clone(), "match".into()));
+            self.nodes.insert(SchemaNode::Guard(path), range);
+            match self.build_matcher(&guard.matcher, match_case, range) {
+                Some(matcher) => built.push(SectionGuard { matcher }),
+                None => complete = false,
+            }
+        }
+        complete.then_some(built)
     }
 
     /// Builds one named scope: a rule list plus the captures of the rule that
@@ -90,7 +218,6 @@ impl Loader {
         rules: Vec<RawRule>,
         scope: &ScopePath,
         match_case: bool,
-        ordered_default: bool,
         owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
     ) -> Option<Vec<SectionRule>> {
         let mut semantic = Vec::with_capacity(rules.len());
@@ -109,8 +236,6 @@ impl Loader {
                 .insert(SchemaNode::Rule(rule_path.clone()), rule_range);
             let mut child_scope = scope.clone();
             child_scope.0.push(RuleIndex(index));
-            self.raw_constraints
-                .insert(child_scope.clone(), raw.constraints);
 
             let matcher_range = self.range(RangeKey::RuleField(rule_path.clone(), "match".into()));
             let matcher = self.build_matcher(&raw.matcher, match_case, matcher_range);
@@ -125,43 +250,43 @@ impl Loader {
             } else if raw.required.is_some() {
                 "required"
             } else {
-                "allow"
+                "match"
             };
             let outcome_range = self.range(RangeKey::RuleField(
                 rule_path.clone(),
                 cardinality_field.into(),
             ));
-            let outcome = self.build_outcome(
-                raw.allow,
+            let cardinality = self.build_cardinality(
                 raw.required,
                 raw.repeat.as_deref(),
+                matcher.as_ref(),
                 outcome_range,
             );
-            let captures = self.build_rule_captures(
-                raw.captures.as_ref(),
+            let captures =
+                self.build_rule_captures(raw.captures.as_ref(), &rule_path, matcher.as_ref());
+            let order = self.build_rule_order(
+                raw.order.as_ref(),
                 &rule_path,
-                matcher.as_ref(),
-                raw.allow,
+                captures.as_ref(),
+                cardinality,
             );
-            let order =
-                self.build_rule_order(raw.order.as_ref(), &rule_path, captures.as_ref(), outcome);
-            let children = self.build_named_scope(
+            let children = self.build_child_scope(
                 raw.sections,
+                raw.forbid_sections,
+                raw.extras,
+                raw.unordered,
+                raw.constraints,
                 &child_scope,
                 match_case,
-                ordered_default,
                 captures.as_ref().map(|entries| (&rule_path, entries)),
             );
-            match (matcher, outcome, children, captures, order) {
-                (Some(matcher), Some(outcome), Some(sections), Some(captures), Some(order)) => {
+            match (matcher, cardinality, children, captures, order) {
+                (Some(matcher), Some(cardinality), Some(children), Some(captures), Some(order)) => {
                     semantic.push(SectionRule {
                         id,
                         matcher,
-                        outcome,
-                        strict: raw.strict,
-                        ordered: raw.ordered.unwrap_or(ordered_default),
-                        sections,
-                        constraints: Vec::new(),
+                        cardinality,
+                        children,
                         captures,
                         order,
                     });
@@ -276,7 +401,6 @@ impl Loader {
         raw: Option<&Value>,
         rule_path: &RulePath,
         matcher: Option<&Matcher>,
-        allow: bool,
     ) -> Option<BTreeMap<CaptureName, RuleCapture>> {
         let field = self.range(RangeKey::RuleField(
             rule_path.clone(),
@@ -336,8 +460,7 @@ impl Loader {
         let mut entries = BTreeMap::new();
         let mut valid = true;
         for (name, value, range) in ordered {
-            let Some(value_type) = self.build_rule_capture(name, value, range, matcher, allow)
-            else {
+            let Some(value_type) = self.build_rule_capture(name, value, range, matcher) else {
                 valid = false;
                 continue;
             };
@@ -401,7 +524,6 @@ impl Loader {
         value: &Value,
         range: SourceRange,
         matcher: Option<&Matcher>,
-        allow: bool,
     ) -> Option<ValueType> {
         if !is_capture_name(name) {
             self.error_at(
@@ -446,14 +568,6 @@ impl Loader {
                 return None;
             }
         }
-        if !allow {
-            self.error_at(
-                SchemaErrorKind::InvalidCapture,
-                range,
-                format!("capture `{name}` cannot be declared on an `allow: false` rule"),
-            );
-            return None;
-        }
         Some(value_type)
     }
 
@@ -481,7 +595,7 @@ impl Loader {
         raw: Option<&Value>,
         rule_path: &RulePath,
         captures: Option<&BTreeMap<CaptureName, RuleCapture>>,
-        outcome: Option<RuleOutcome>,
+        cardinality: Option<Cardinality>,
     ) -> Option<Vec<ValueOrderEntry>> {
         let field = self.range(RangeKey::RuleField(rule_path.clone(), ORDER_FIELD.into()));
         let Some(raw) = raw else {
@@ -580,7 +694,7 @@ impl Loader {
         // being wrong in some other way first. A cardinality that never
         // normalized supplies no maximum to test, so the check is skipped
         // rather than run against an invented one.
-        if let Some(RuleOutcome::Allow(cardinality)) = outcome {
+        if let Some(cardinality) = cardinality {
             if matches!(cardinality.max, UpperBound::Bounded(max) if max <= 1) {
                 for report in reports.iter_mut().filter(|report| report.entry.is_some()) {
                     report.faults.push(
@@ -739,13 +853,13 @@ impl Loader {
         Some(Matcher::Exact(ExactText(source.to_owned())))
     }
 
-    fn build_outcome(
+    fn build_cardinality(
         &mut self,
-        allow: bool,
         required: Option<bool>,
         repeat: Option<&str>,
+        matcher: Option<&Matcher>,
         range: SourceRange,
-    ) -> Option<RuleOutcome> {
+    ) -> Option<Cardinality> {
         if required.is_some() && repeat.is_some() {
             self.error_at(
                 SchemaErrorKind::ConflictingCardinality,
@@ -753,17 +867,6 @@ impl Loader {
                 "required and repeat cannot both be declared",
             );
             return None;
-        }
-        if !allow && (required.is_some() || repeat.is_some()) {
-            self.error_at(
-                SchemaErrorKind::ConflictingCardinality,
-                range,
-                "allow: false cannot be combined with required or repeat",
-            );
-            return None;
-        }
-        if !allow {
-            return Some(RuleOutcome::Deny);
         }
         let cardinality = match (required, repeat) {
             (Some(true), None) => Cardinality {
@@ -785,13 +888,21 @@ impl Loader {
                     return None;
                 }
             },
-            (None, None) => Cardinality {
-                min: 0,
-                max: UpperBound::Unbounded,
+            (None, None) if matches!(matcher, Some(Matcher::Exact(_))) => Cardinality {
+                min: 1,
+                max: UpperBound::Bounded(1),
             },
+            (None, None) => {
+                self.error_at(
+                    SchemaErrorKind::MissingCardinality,
+                    range,
+                    "regex, glob, and wildcard rules must declare `required` or `repeat`",
+                );
+                return None;
+            }
             (Some(_), Some(_)) => return None,
         };
-        Some(RuleOutcome::Allow(cardinality))
+        Some(cardinality)
     }
 }
 

@@ -14,7 +14,7 @@ use super::{diagnostics, diagnostics_with};
 /// title — and differs only in the pattern and the declared types.
 fn capture_schema(pattern: &str, declarations: &str) -> String {
     format!(
-        "version: 1\nsections:\n  - match: \"/{pattern}/\"\n    repeat: 0..n\n    \
+        "version: 2\nsections:\n  - match: \"/{pattern}/\"\n    repeat: 0..n\n    \
          captures:\n{declarations}"
     )
 }
@@ -167,7 +167,7 @@ fn first_match_ownership_decides_which_rule_extracts_captures() {
     // "later rules are not consulted". Both rules here match `Item 1.0.0`;
     // only the first one's `int` capture is parsed, so exactly one
     // `invalid-value` appears and it belongs to the first rule.
-    let schema = "version: 1\nsections:\n  - match: \"/Item (?<n>.+)/\"\n    repeat: 0..n\n    \
+    let schema = "version: 2\nsections:\n  - match: \"/Item (?<n>.+)/\"\n    repeat: 0..n\n    \
                   captures:\n      n: int\n  - match: \"/Item (?<v>.+)/\"\n    repeat: 0..n\n    \
                   captures:\n      v: semver\n";
     let reported = diagnostics(schema, "# T\n## Item 1.0.0\n");
@@ -182,7 +182,7 @@ fn headings_that_bind_no_rule_contribute_no_capture_diagnostic() {
     // below it never sees the heading its capture would have read. §1.5: a
     // heading that skips a level "takes part in no rule", and neither does
     // anything below it.
-    let schema = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+    let schema = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
                   captures:\n          v: semver\n";
     // Bound: one diagnostic. Below an unmatched sibling: none. Below a
@@ -202,7 +202,7 @@ fn headings_that_bind_no_rule_contribute_no_capture_diagnostic() {
     // `h1` and skips the `h2` level, so its capture is never extracted.
     // §3.3 puts capture parsing among the effects of matching, and a
     // skipping header matches nothing.
-    let nested = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+    let nested = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
                   captures:\n          v: semver\n";
     assert_eq!(
@@ -214,9 +214,9 @@ fn headings_that_bind_no_rule_contribute_no_capture_diagnostic() {
     );
     // Admitting the skip makes it an ordinary member, capture and all.
     let admitted = format!(
-        "version: 1\noptions:\n  allow_skipped_levels: true\n{}",
+        "version: 2\noptions:\n  allow_skipped_levels: true\n{}",
         nested
-            .strip_prefix("version: 1\n")
+            .strip_prefix("version: 2\n")
             .expect("the schema spells the version first")
     );
     assert_eq!(
@@ -230,7 +230,7 @@ fn headings_that_bind_no_rule_contribute_no_capture_diagnostic() {
     // A denied heading is rejected wholesale, and a capture cannot be
     // declared on a denying rule at all (§2.1), so the subtree below one
     // contributes nothing either.
-    let denied = "version: 1\noutline:\n  - match: Part\n    allow: false\n  - match: \"*\"\n    \
+    let denied = "version: 2\noutline:\n  - match: Part\n    allow: false\n  - match: \"*\"\n    \
                   repeat: 0..n\n    sections:\n      - match: \"/V (?<v>.+)/\"\n        \
                   repeat: 0..n\n        captures:\n          v: semver\n";
     let reported = diagnostics(denied, "# Part\n## V nope\n");

@@ -146,7 +146,7 @@ fn every_distinct_frontmatter_query_is_compiled_once_with_the_plan() {
     // than per document or per proposition. The same source spelled in two
     // constraints is one compiled query; two different sources are two.
     let loaded = load_schema(
-        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+        "version: 2\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
          required: false\nconstraints:\n  - any_of: [body, \"fm[$.draft]\"]\n  \
          - any_of: [body, \"fm[$.draft]=yes\"]\n  - any_of: [body, \"fm[$.other]\"]\n",
     )
@@ -163,7 +163,7 @@ fn a_nested_rule_constraint_query_is_compiled_too() {
     // Constraints attach to any rule, so the collection walks the whole rule
     // forest rather than the root list alone.
     let loaded = load_schema(
-        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+        "version: 2\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
          required: false\n    sections:\n      - id: inner\n        match: Inner\n        \
          required: false\n    constraints:\n      - any_of: [inner, \"fm[$.deep]\"]\n",
     )
@@ -174,10 +174,13 @@ fn a_nested_rule_constraint_query_is_compiled_too() {
 
 #[test]
 fn malformed_manually_constructed_regex_fails_preparation() {
-    let mut schema = load_schema("version: 1\nsections: []\n")
+    let mut schema = load_schema("version: 2\nsections: []\n")
         .expect("test schema is valid")
         .schema;
-    schema.outline[0].matcher = Matcher::Regex(RegexPattern("(".into()));
+    let crate::DocumentShape::Title(title) = &mut schema.document else {
+        panic!("expected title")
+    };
+    title.matcher = Some(Matcher::Regex(RegexPattern("(".into())));
     let error = PreparedValidator::new(&schema)
         .err()
         .expect("malformed regex must fail preparation");
@@ -197,7 +200,7 @@ fn preparing_refuses_a_reference_chain_longer_than_the_compiler_can_recurse_over
     // would refuse graphs the compiler handles comfortably.
     let document = parse_markdown("---\nstatus: draft\n---\n", MarkdownOptions::default());
 
-    let mut schema = load_schema("version: 1\ntitle: null\nsections: []\n")
+    let mut schema = load_schema("version: 2\ntitle: null\nsections: []\n")
         .expect("test schema is valid")
         .schema;
     schema.frontmatter = FrontmatterPolicy::Optional {

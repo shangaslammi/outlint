@@ -102,6 +102,10 @@ pub(crate) enum RenderedSchemaNode {
         scope: Vec<usize>,
         index: usize,
     },
+    Guard {
+        scope: Vec<usize>,
+        index: usize,
+    },
     /// A rule capture: its owning rule's coordinates plus the capture name.
     Capture {
         scope: Vec<usize>,
@@ -336,6 +340,10 @@ fn render_schema_node(node: &SchemaNode) -> RenderedSchemaNode {
         }
         SchemaNode::FrontmatterSchemaDocument => RenderedSchemaNode::FrontmatterSchemaDocument,
         SchemaNode::Rule(path) => RenderedSchemaNode::Rule {
+            scope: path.scope.0.iter().map(|index| index.0).collect(),
+            index: path.index.0,
+        },
+        SchemaNode::Guard(path) => RenderedSchemaNode::Guard {
             scope: path.scope.0.iter().map(|index| index.0).collect(),
             index: path.index.0,
         },

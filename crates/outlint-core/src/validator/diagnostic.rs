@@ -16,6 +16,8 @@ pub enum DiagnosticId {
     NotAllowed,
     /// A heading has no matching rule in a strict scope.
     UnexpectedSection,
+    /// A heading matches an accepting rule but cannot occupy its ordered phase.
+    MisplacedSection,
     /// No heading matched a rule whose minimum is nonzero.
     MissingSection,
     /// Some headings matched a rule, but fewer than its minimum.
@@ -70,6 +72,7 @@ impl DiagnosticId {
             Self::SkippedLevel => "skipped-level",
             Self::NotAllowed => "not-allowed",
             Self::UnexpectedSection => "unexpected-section",
+            Self::MisplacedSection => "misplaced-section",
             Self::MissingSection => "missing-section",
             Self::TooFewSections => "too-few-sections",
             Self::TooManySections => "too-many-sections",

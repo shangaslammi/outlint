@@ -5,7 +5,7 @@ use crate::{
 
 #[test]
 fn validates_required_frontmatter_against_json_schema() {
-    let mut schema = load_schema("version: 1\nfrontmatter: { required: true }\nsections: []\n")
+    let mut schema = load_schema("version: 2\nfrontmatter: { required: true }\nsections: []\n")
         .expect("test schema is valid")
         .schema;
     let object = serde_json::json!({
@@ -59,7 +59,7 @@ fn validates_required_frontmatter_against_json_schema() {
 
 #[test]
 fn frontmatter_schema_messages_quote_document_number_spellings() {
-    let mut schema = load_schema("version: 1\ntitle: null\nsections: []\n")
+    let mut schema = load_schema("version: 2\ntitle: null\nsections: []\n")
         .expect("test schema is valid")
         .schema;
     schema.frontmatter = FrontmatterPolicy::Optional {
@@ -101,7 +101,7 @@ fn frontmatter_schema_messages_quote_document_number_spellings() {
 #[test]
 fn manually_constructed_frontmatter_schema_denies_remote_retrieval() {
     let remote_uri = "https://example.invalid/frontmatter.schema.json";
-    let mut schema = load_schema("version: 1\nsections: []\n")
+    let mut schema = load_schema("version: 2\nsections: []\n")
         .expect("test schema is valid")
         .schema;
     schema.frontmatter = FrontmatterPolicy::Optional {
@@ -133,7 +133,7 @@ fn manually_constructed_frontmatter_schema_denies_remote_retrieval() {
 #[test]
 fn reports_invalid_and_forbidden_frontmatter_without_schema_execution() {
     let schema =
-        load_schema("version: 1\nfrontmatter: { allow: false }\ntitle: null\nsections: []\n")
+        load_schema("version: 2\nfrontmatter: { allow: false }\ntitle: null\nsections: []\n")
             .expect("test schema is valid")
             .schema;
     let document = parse_markdown("---\n- item\n---\n", MarkdownOptions::default());
@@ -158,7 +158,7 @@ fn optional_forbidden_and_file_suppression_apply_to_json_schema() {
         root: serde_json::Value::Bool(false),
         resources: std::collections::BTreeMap::new(),
     };
-    let mut schema = load_schema("version: 1\ntitle: null\nsections: []\n")
+    let mut schema = load_schema("version: 2\ntitle: null\nsections: []\n")
         .expect("test schema is valid")
         .schema;
     schema.frontmatter = FrontmatterPolicy::Optional {

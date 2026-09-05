@@ -8,7 +8,7 @@ use super::diagnostics;
 /// A one-rule sugar schema whose rule captures `v` and orders by it.
 fn ordered_schema(declared: &str, entries: &str) -> String {
     format!(
-        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
+        "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
          captures:\n      v: {declared}\n    order:\n{entries}"
     )
 }
@@ -263,7 +263,7 @@ fn too_many_sections_never_suppresses_value_ordering() {
     // same from the other side: value ordering "does not depend on the
     // cardinality bound holding".
     let schema = format!(
-        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..2\n    \
+        "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..2\n    \
          captures:\n      v: semver\n    order:\n{}",
         entry("v", "desc", false)
     );
@@ -304,7 +304,7 @@ fn each_entry_is_evaluated_independently_of_the_others() {
     // key. A compound key would settle this document on `a` alone and never
     // consult `b`; independent entries report `b`.
     let schema = format!(
-        "version: 1\nsections:\n  - match: \"/V (?<a>[^ ]+) (?<b>[^ ]+)/\"\n    \
+        "version: 2\nsections:\n  - match: \"/V (?<a>[^ ]+) (?<b>[^ ]+)/\"\n    \
          repeat: 0..n\n    captures:\n      a: int\n      b: int\n    order:\n{}{}",
         entry("a", "asc", false),
         entry("b", "asc", false)
@@ -325,7 +325,7 @@ fn an_invalid_capture_suppresses_only_the_entries_that_read_it() {
     // §3.8: "Other order entries, scopes, and primary `invalid-value`
     // diagnostics are unaffected."
     let schema = format!(
-        "version: 1\nsections:\n  - match: \"/V (?<a>[^ ]+) (?<b>[^ ]+)/\"\n    \
+        "version: 2\nsections:\n  - match: \"/V (?<a>[^ ]+) (?<b>[^ ]+)/\"\n    \
          repeat: 0..n\n    captures:\n      a: semver\n      b: int\n    order:\n{}{}",
         entry("a", "asc", false),
         entry("b", "asc", false)
@@ -356,7 +356,7 @@ fn each_concrete_ancestor_instance_orders_its_own_sequence() {
     // supplies a separate sequence; occurrences are never flattened across
     // instances." So an invalid value in one instance suppresses that
     // instance alone.
-    let schema = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+    let schema = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
                   captures:\n          v: semver\n        order:\n          - by: v\n            \
                   dir: desc\n";
@@ -392,7 +392,7 @@ fn each_concrete_ancestor_instance_orders_its_own_sequence() {
 fn headers_outside_the_sequence_do_not_break_its_adjacency() {
     // §3.8: "Headers matched by other rules and unmatched headers do not
     // break adjacency; they do not belong to the sequence."
-    let schema = "version: 1\noptions:\n  ordered_sections: false\n\
+    let schema = "version: 2\noptions:\n  ordered_sections: false\n\
                   sections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
                   captures:\n      v: semver\n    order:\n      - by: v\n        dir: desc\n  \
                   - match: Note\n    repeat: 0..n\n";
@@ -415,7 +415,7 @@ fn headers_outside_the_sequence_do_not_break_its_adjacency() {
 fn denied_and_unvisited_headings_contribute_nothing_to_a_sequence() {
     // §3.8: "Headers matched by deny rules and every header in a skipped or
     // otherwise unvisited subtree contribute nothing."
-    let denied = "version: 1\noptions:\n  ordered_sections: false\n\
+    let denied = "version: 2\noptions:\n  ordered_sections: false\n\
                   sections:\n  - match: Skip\n    allow: false\n  \
                   - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
                   captures:\n      v: semver\n    order:\n      - by: v\n        dir: desc\n";
@@ -433,7 +433,7 @@ fn denied_and_unvisited_headings_contribute_nothing_to_a_sequence() {
     // either. The `h4` below is a child of the `h1` and skips two levels;
     // were it in the sequence it would sit first in document order and break
     // the descending pair that the two `h2`s satisfy.
-    let skipping = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+    let skipping = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                     sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
                     captures:\n          v: semver\n        order:\n          - by: v\n            \
                     dir: desc\n";
@@ -446,9 +446,9 @@ fn denied_and_unvisited_headings_contribute_nothing_to_a_sequence() {
     );
     // Admitted, it joins the sequence and breaks it.
     let admitted = format!(
-        "version: 1\noptions:\n  allow_skipped_levels: true\n{}",
+        "version: 2\noptions:\n  allow_skipped_levels: true\n{}",
         skipping
-            .strip_prefix("version: 1\n")
+            .strip_prefix("version: 2\n")
             .expect("the schema spells the version first")
     );
     assert_eq!(
@@ -461,7 +461,7 @@ fn denied_and_unvisited_headings_contribute_nothing_to_a_sequence() {
 
     // An unmatched header's subtree is never visited, so the `V` rule below
     // it binds nothing and its sequence stays empty.
-    let nested = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+    let nested = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"/V (?<v>.+)/\"\n        repeat: 0..n\n        \
                   captures:\n          v: semver\n        order:\n          - by: v\n            \
                   dir: desc\n";

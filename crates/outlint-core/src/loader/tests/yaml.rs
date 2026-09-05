@@ -5,9 +5,9 @@ use crate::{ByteOffset, Matcher, SchemaErrorKind, SchemaVersion};
 #[test]
 fn yaml_syntax_error_ranges_convert_character_columns_to_bytes() {
     for source in [
-        "version: 1\ntitle: å: bad\nsections: []\n",
-        "version: 1\ntitle: a: bad\nsections: []\n",
-        "version: 1\rtitle: å: bad\rsections: []\r",
+        "version: 2\ntitle: å: bad\nsections: []\n",
+        "version: 2\ntitle: a: bad\nsections: []\n",
+        "version: 2\rtitle: å: bad\rsections: []\r",
     ] {
         let invalid = load_schema(source).expect_err("schema has invalid YAML");
         let error = &invalid.errors.first;
@@ -33,10 +33,10 @@ fn a_second_schema_document_is_refused_at_its_own_start_marker() {
     // first-column range survives the character-to-byte conversion.
     for (source, line) in [
         (
-            "version: 1\nsections: []\n---\nversion: 1\nsections: []\n",
+            "version: 2\nsections: []\n---\nversion: 2\nsections: []\n",
             3,
         ),
-        ("version: 1\nsections: []\n...\n---\nsections: []\n", 4),
+        ("version: 2\nsections: []\n...\n---\nsections: []\n", 4),
     ] {
         let invalid = invalid(source);
         assert_eq!(invalid.errors.first.kind, SchemaErrorKind::Syntax);
@@ -57,7 +57,7 @@ fn a_second_schema_document_is_refused_at_its_own_start_marker() {
 
     // A `...` that closes the only document opens nothing.
     assert_eq!(
-        valid("version: 1\nsections: []\n...\n")
+        valid("version: 2\nsections: []\n...\n")
             .addressed_root_rules()
             .len(),
         0
@@ -73,7 +73,7 @@ fn a_merge_key_is_an_ordinary_schema_field() {
     // would make schemas that are rejected today start loading, which needs
     // a specification first.
     let source =
-        "version: 1\nbase: &b\n  strip_inline_markup: true\noptions:\n  <<: *b\nsections: []\n";
+        "version: 2\nbase: &b\n  strip_inline_markup: true\noptions:\n  <<: *b\nsections: []\n";
     let invalid = invalid(source);
     let reported = invalid
         .errors
@@ -97,7 +97,7 @@ fn a_merge_key_is_an_ordinary_schema_field() {
 /// Nesting is what a schema spends YAML depth on, two levels per rule: the
 /// `sections` sequence and the rule mapping it holds.
 fn nested_rule_schema(rules: usize) -> String {
-    let mut source = String::from("version: 1\n");
+    let mut source = String::from("version: 2\n");
     for rule in 0..rules {
         let indent = "  ".repeat(rule * 2);
         source.push_str(&format!(
@@ -147,7 +147,7 @@ fn schema_nesting_is_bounded() {
 /// the aliases are expanded.
 fn alias_deepened_schema(links: usize) -> String {
     let mut source =
-        String::from("version: 1\nsections:\n  - match: Title\nconstraints:\n  - &x0 [1]\n");
+        String::from("version: 2\nsections:\n  - match: Title\nconstraints:\n  - &x0 [1]\n");
     for line in 1..links {
         source.push_str(&format!("  - &x{line} [*x{}]\n", line - 1));
     }
@@ -209,7 +209,7 @@ fn alias_expanded_schema_nesting_is_bounded_only_by_the_readers_own_limit() {
 /// scalars between them; nothing nests deeply, so only the node budget
 /// stops it — the same shape the frontmatter bomb fixtures pin.
 fn alias_bomb_schema(depth: usize) -> String {
-    let mut bomb = String::from("version: 1\nsections: []\nx0: &x0 [1,1,1,1]\n");
+    let mut bomb = String::from("version: 2\nsections: []\nx0: &x0 [1,1,1,1]\n");
     for level in 1..=depth {
         let alias = format!("*x{}", level - 1);
         bomb.push_str(&format!(
@@ -246,7 +246,7 @@ fn schema_alias_expansion_is_bounded_by_the_node_budget() {
     // Ordinary reuse stays far under the budget: the aliased matcher is
     // copied once and the schema loads.
     let schema =
-        valid("version: 1\nsections:\n  - match: &m Intro\n  - id: other\n    match: *m\n");
+        valid("version: 2\nsections:\n  - match: &m Intro\n  - id: other\n    match: *m\n");
     assert_eq!(schema.addressed_root_rules().len(), 2);
 }
 
@@ -256,7 +256,7 @@ fn non_standard_tags_are_rejected_anywhere_in_a_schema_document() {
     // schema could use, and the serde-era engine rejected such documents
     // too. The refusal is uniform — scalar, collection, or the document's
     // own root — where the old engine incidentally accepted a root tag.
-    let scalar = invalid("version: 1\ntitle: !custom Doc\nsections: []\n");
+    let scalar = invalid("version: 2\ntitle: !custom Doc\nsections: []\n");
     assert_eq!(scalar.errors.first.kind, SchemaErrorKind::Syntax);
     assert_eq!(
         scalar.errors.first.message,
@@ -264,13 +264,13 @@ fn non_standard_tags_are_rejected_anywhere_in_a_schema_document() {
     );
     assert_eq!(
         source_slice(
-            "version: 1\ntitle: !custom Doc\nsections: []\n",
+            "version: 2\ntitle: !custom Doc\nsections: []\n",
             scalar.errors.first.range
         ),
         "Doc"
     );
 
-    let root = invalid("--- !custom\nversion: 1\nsections: []\n");
+    let root = invalid("--- !custom\nversion: 2\nsections: []\n");
     assert_eq!(root.errors.first.kind, SchemaErrorKind::Syntax);
     assert_eq!(
         root.errors.first.message,
@@ -280,7 +280,7 @@ fn non_standard_tags_are_rejected_anywhere_in_a_schema_document() {
     // Core-schema tags keep their meaning.
     let schema = valid("version: !!int 1\ntitle: !!str Doc\nsections: []\n");
     assert!(matches!(
-        schema.outline.first().map(|rule| &rule.matcher),
+        schema.outline().first().map(|rule| &rule.matcher),
         Some(Matcher::Exact(_))
     ));
 }
@@ -294,10 +294,10 @@ fn a_standard_tag_on_a_schema_collection_must_name_the_collection_kind() {
     // the frontmatter path applies — and this test records the new
     // behaviour deliberately. A tag that names the collection's own kind
     // keeps loading on both engines.
-    let schema = valid("version: 1\nsections: !!seq\n  - match: A\n");
+    let schema = valid("version: 2\nsections: !!seq\n  - match: A\n");
     assert_eq!(schema.addressed_root_rules().len(), 1);
 
-    let source = "version: 1\nsections: !!map\n  - match: A\n";
+    let source = "version: 2\nsections: !!map\n  - match: A\n";
     let refused = invalid(source);
     assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);
     assert_eq!(
@@ -339,10 +339,10 @@ fn one_leading_byte_order_mark_is_removed_before_parsing() {
     // the author cannot see is misspelled. Exactly one is removed — the
     // same rule the frontmatter path applies — and every reported range
     // counts it back in, so a second mark stays visible.
-    let schema = valid("\u{feff}version: 1\nsections: []\n");
-    assert_eq!(schema.version, SchemaVersion::V1);
+    let schema = valid("\u{feff}version: 2\nsections: []\n");
+    assert_eq!(schema.version, SchemaVersion::V2);
 
-    let source = "\u{feff}\u{feff}version: 1\nsections: []\n";
+    let source = "\u{feff}\u{feff}version: 2\nsections: []\n";
     let doubled = invalid(source);
     assert!(doubled
         .errors
@@ -355,8 +355,8 @@ fn duplicate_keys_are_rejected_on_resolved_text_at_the_duplicate() {
     // `a` and `"a"` are one key however differently they are spelled; the
     // refusal names the key and anchors at the duplicate occurrence.
     for source in [
-        "version: 1\nversion: 2\nsections: []\n",
-        "version: 1\n\"version\": 2\nsections: []\n",
+        "version: 2\nversion: 2\nsections: []\n",
+        "version: 2\n\"version\": 2\nsections: []\n",
     ] {
         let refused = invalid(source);
         assert_eq!(refused.errors.first.kind, SchemaErrorKind::Syntax);

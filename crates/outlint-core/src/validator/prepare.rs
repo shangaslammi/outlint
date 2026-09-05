@@ -6,14 +6,18 @@ use crate::loader::{
 };
 use crate::locator::PreparedQuery;
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
-use crate::{Constraint, FrontmatterSchema, Matcher, Proposition, Schema, SectionRule};
+use crate::{
+    Constraint, DocumentShape, FrontmatterSchema, Matcher, Proposition, Schema, SectionRule,
+};
 
 use std::collections::BTreeMap;
 
 use super::diagnostic::PrepareValidationError;
 
 pub(super) struct ValidationPlan {
-    pub(super) outline: Vec<PreparedRule>,
+    pub(super) rules: Vec<PreparedRule>,
+    pub(super) guards: Vec<PreparedMatcher>,
+    pub(super) title: Option<PreparedMatcher>,
     pub(super) frontmatter: Option<jsonschema::Validator>,
     pub(super) queries: PreparedQueries,
 }
@@ -21,7 +25,16 @@ pub(super) struct ValidationPlan {
 impl ValidationPlan {
     pub(super) fn new(schema: &Schema) -> Result<Self, PrepareValidationError> {
         Ok(Self {
-            outline: prepare_rules(&schema.outline, schema.options.match_case)?,
+            rules: prepare_rules(schema.addressed_root_rules(), schema.options.match_case)?,
+            guards: prepare_guards(schema, schema.options.match_case)?,
+            title: match &schema.document {
+                DocumentShape::Title(title) => title
+                    .matcher
+                    .as_ref()
+                    .map(|matcher| PreparedMatcher::new(matcher, schema.options.match_case))
+                    .transpose()?,
+                DocumentShape::Outline(_) => None,
+            },
             frontmatter: schema
                 .frontmatter
                 .schema()
@@ -46,8 +59,8 @@ pub(super) struct PreparedQueries {
 impl PreparedQueries {
     fn new(schema: &Schema) -> Result<Self, PrepareValidationError> {
         let mut queries = BTreeMap::new();
-        collect_queries(&schema.constraints, &mut queries)?;
-        collect_rule_queries(&schema.outline, &mut queries)?;
+        collect_queries(schema.addressed_root_constraints(), &mut queries)?;
+        collect_rule_queries(schema.addressed_root_rules(), &mut queries)?;
         Ok(Self { queries })
     }
 
@@ -63,8 +76,8 @@ fn collect_rule_queries(
     queries: &mut BTreeMap<String, PreparedQuery>,
 ) -> Result<(), PrepareValidationError> {
     for rule in rules {
-        collect_queries(&rule.constraints, queries)?;
-        collect_rule_queries(&rule.sections, queries)?;
+        collect_queries(rule.children.constraints(), queries)?;
+        collect_rule_queries(rule.children.rules(), queries)?;
     }
     Ok(())
 }
@@ -180,6 +193,7 @@ fn compile_frontmatter_schema(
 pub(super) struct PreparedRule {
     pub(super) matcher: PreparedMatcher,
     pub(super) sections: Vec<PreparedRule>,
+    pub(super) guards: Vec<PreparedMatcher>,
 }
 
 fn prepare_rules(
@@ -191,10 +205,33 @@ fn prepare_rules(
         .map(|rule| {
             Ok(PreparedRule {
                 matcher: PreparedMatcher::new(&rule.matcher, match_case)?,
-                sections: prepare_rules(&rule.sections, match_case)?,
+                sections: prepare_rules(rule.children.rules(), match_case)?,
+                guards: rule
+                    .children
+                    .guards()
+                    .map(|guard| PreparedMatcher::new(&guard.matcher, match_case))
+                    .collect::<Result<_, _>>()?,
             })
         })
         .collect()
+}
+
+fn prepare_guards(
+    schema: &Schema,
+    match_case: bool,
+) -> Result<Vec<PreparedMatcher>, PrepareValidationError> {
+    match &schema.document {
+        DocumentShape::Outline(scope) => scope
+            .guards
+            .iter()
+            .map(|guard| PreparedMatcher::new(&guard.matcher, match_case))
+            .collect(),
+        DocumentShape::Title(title) => title
+            .children
+            .guards()
+            .map(|guard| PreparedMatcher::new(&guard.matcher, match_case))
+            .collect(),
+    }
 }
 
 /// One rule's matcher, compiled.

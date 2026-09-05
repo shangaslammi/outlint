@@ -129,6 +129,7 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
             let label = match diagnostic.schema_node.as_ref() {
                 Some(RenderedSchemaNode::Constraint { .. }) => "constraint",
                 Some(RenderedSchemaNode::Rule { .. }) => "rule",
+                Some(RenderedSchemaNode::Guard { .. }) => "guard",
                 Some(RenderedSchemaNode::Capture { .. })
                 | Some(RenderedSchemaNode::FrontmatterCapture { .. })
                 | Some(RenderedSchemaNode::OrderEntry { .. }) => "declared",
@@ -168,6 +169,9 @@ fn append_human_declaration_detail(output: &mut String, diagnostic: &RenderedDia
         }
         Some(RenderedSchemaNode::OrderEntry { order_index, .. }) => {
             output.push_str(&format!("  order entry: {order_index}\n"));
+        }
+        Some(RenderedSchemaNode::Guard { index, .. }) => {
+            output.push_str(&format!("  guard: {index}\n"));
         }
         _ => {}
     }
