@@ -1,6 +1,6 @@
 version: 2
 # Unordered so that only cardinality speaks here: in ordered mode, Beta's
-# `Note three` after `Step two` would also be misplaced (§3.7).
+# `Note three` after `Step two` would also be `misplaced-section` (§3.5).
 unordered: true
 sections:
   # Scopes bind per parent: each `h1` counts its own `Note`s and `Step`s.

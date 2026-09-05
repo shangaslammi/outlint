@@ -1,8 +1,8 @@
 version: 2
-# Distinct h1 rules with distinct child scopes. The outline scope is ordered
-# by default like any other (§3.7), so `# Guide` must precede `# Appendix`
-# with no constraint spelled. A violation targets the document: the virtual
-# root has no header to name.
+# Distinct h1 rules with distinct child scopes. The outline is an ordered
+# consuming grammar (§3.2), so `# Guide` must precede `# Appendix` without a
+# constraint. On inversion, recovery leaves `# Appendix` unassigned and emits
+# a header-targeted `misplaced-section` (§3.5).
 outline:
   - id: guide
     match: "Guide"

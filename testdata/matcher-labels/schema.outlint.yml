@@ -14,7 +14,8 @@ sections:
       - match: "/item [0-9]+/"
         required: true
     extras: anywhere
-  # First-match-wins: a wildcard rule swallows every header, so it goes last.
+  # The final wildcard phase consumes retained headers left after the preceding
+  # ordered phases (§3.2).
   - id: anything
     match: "*"
     required: true
