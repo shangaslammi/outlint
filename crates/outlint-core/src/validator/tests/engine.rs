@@ -10,7 +10,7 @@ use super::ids_and_targets;
 #[test]
 fn diagnostics_retain_normative_document_and_schema_anchors() {
     let loaded =
-        load_schema("version: 2\ntitle: null\nsections:\n  - match: Item\n    repeat: 2..2\n")
+        load_schema("version: 1\ntitle: null\nsections:\n  - match: Item\n    repeat: 2..2\n")
             .expect("test schema is valid");
     let document = parse_markdown("## Item\n## Item\n## Item\n", MarkdownOptions::default());
     let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
@@ -35,7 +35,7 @@ fn diagnostics_retain_normative_document_and_schema_anchors() {
 #[test]
 fn header_paths_carry_the_enclosing_h1() {
     let loaded = load_schema(
-        "version: 2\nsections:\n  - match: Overview\n    repeat: 1..n\n    sections:\n      - match: Goals\n        required: true\n",
+        "version: 1\nsections:\n  - match: Overview\n    repeat: 1..n\n    sections:\n      - match: Goals\n        required: true\n",
     )
     .expect("test schema is valid");
     let document = parse_markdown(
@@ -91,7 +91,7 @@ fn skipped_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
 
 #[test]
 fn surplus_h1_headers_are_reported_once_on_the_second_one() {
-    let schema = "version: 2\nsections:\n  - match: Overview\n    repeat: 0..n\n";
+    let schema = "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n";
 
     // One `h1` above any number of root sections is the intended shape.
     assert!(surplus_diagnostics(schema, "# One\n## Overview\n## Overview\n").is_empty());
@@ -123,7 +123,7 @@ fn surplus_h1_headers_are_reported_once_on_the_second_one() {
 
 #[test]
 fn h2_headers_outside_the_documents_h1_skip_against_the_virtual_root() {
-    let schema = "version: 2\nsections:\n  - match: Overview\n    repeat: 0..n\n";
+    let schema = "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n";
 
     // Bounding the `h1` count is not enough on its own: this document has
     // exactly one `h1`, yet the leading `h2` precedes it with an empty
@@ -144,7 +144,7 @@ fn h2_headers_outside_the_documents_h1_skip_against_the_virtual_root() {
     assert_eq!(diagnostic.schema_node, None);
     assert_eq!(
         skipped_diagnostics(
-            "version: 2\ntitle: Part One\nsections:\n  - match: Overview\n    repeat: 0..n\n",
+            "version: 1\ntitle: Part One\nsections:\n  - match: Overview\n    repeat: 0..n\n",
             "## Overview\n# Part One\n",
         )[0]
         .schema_node,
@@ -190,7 +190,7 @@ fn an_unadmitted_top_level_header_takes_part_in_no_rule_matching_or_counting() {
     // children, and none of them is a `Detached`.
     assert_eq!(
         ids_and_targets(
-            "version: 2\nsections:\n  - match: Detached\n    required: true\n",
+            "version: 1\nsections:\n  - match: Detached\n    required: true\n",
             "## Detached\n# Title\n## Attached\n",
         ),
         [
@@ -216,7 +216,7 @@ fn an_unadmitted_top_level_header_takes_part_in_no_rule_matching_or_counting() {
     // one is what the rule allows.
     assert_eq!(
         ids_and_targets(
-            "version: 2\nsections:\n  - match: Overview\n    repeat: 0..1\n",
+            "version: 1\nsections:\n  - match: Overview\n    repeat: 0..1\n",
             "## Overview\n# Part One\n## Overview\n",
         ),
         [(
@@ -234,7 +234,7 @@ fn an_unadmitted_subtree_is_reported_once_at_its_root() {
     // no skip at all.
     assert_eq!(
         ids_and_targets(
-            "version: 2\nsections:\n  - match: X\n    repeat: 0..n\n    sections:\n      - match: Deep\n        required: true\n",
+            "version: 1\nsections:\n  - match: X\n    repeat: 0..n\n    sections:\n      - match: Deep\n        required: true\n",
             "## X\n### Surprise\n# Title\n",
         ),
         [(
@@ -247,7 +247,7 @@ fn an_unadmitted_subtree_is_reported_once_at_its_root() {
     // fixes, so they stay one diagnostic each.
     assert_eq!(
         ids_and_targets(
-            "version: 2\nsections:\n  - match: \"*\"\n    repeat: 0..n\n",
+            "version: 1\nsections:\n  - match: \"*\"\n    repeat: 0..n\n",
             "## A\n### Under A\n## B\n# Title\n",
         ),
         [
@@ -272,7 +272,7 @@ fn a_nested_skipping_header_takes_part_in_no_rule() {
     // through §3.8 never see it." That holds inside a bound scope exactly as
     // it does at the document root; the `h3` below is a child of the `h1` and
     // skips the `h2` level.
-    let required = "version: 2\noutline:\n  - id: part\n    match: Part\n    required: true\n    \
+    let required = "version: 1\noutline:\n  - id: part\n    match: Part\n    required: true\n    \
                     sections:\n      - id: goal\n        match: Goal\n        \
                     required: true\n";
     assert_eq!(
@@ -299,7 +299,7 @@ fn a_nested_skipping_header_takes_part_in_no_rule() {
     // what the rule allows. (An `h3` written after an `h2` is that `h2`'s
     // child rather than a skipping sibling of it, so the skipping case has to
     // put the deeper header first.)
-    let bounded = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+    let bounded = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                    sections:\n      - match: Goal\n        repeat: 0..1\n";
     assert_eq!(ids_and_targets(bounded, "# Part\n## Goal\n### Goal\n"), []);
     assert_eq!(
@@ -311,7 +311,7 @@ fn a_nested_skipping_header_takes_part_in_no_rule() {
     );
 
     // And it satisfies no constraint locator descending through its scope.
-    let constrained = "version: 2\noutline:\n  - id: part\n    match: Part\n    \
+    let constrained = "version: 1\noutline:\n  - id: part\n    match: Part\n    \
                        required: true\n    sections:\n      - id: goal\n        \
                        match: Goal\n        required: false\n\
                        constraints:\n  - requires: { if: part, then: \"$.part.goal\" }\n";
@@ -331,7 +331,7 @@ fn a_nested_skipping_headers_own_descendants_are_not_reported_for_its_skip() {
     // skips relative to a skipping parent is reported in its own right, but a
     // well-nested descendant yields no cascade of complaints about a
     // misplacement that is entirely its ancestor's."
-    let schema = "version: 2\noutline:\n  - match: Part\n    repeat: 0..n\n    \
+    let schema = "version: 1\noutline:\n  - match: Part\n    repeat: 0..n\n    \
                   sections:\n      - match: \"*\"\n        repeat: 0..n\n";
     // `Deep` sits one level under the skipping `Goal`, so it is no skip of
     // its own — one diagnostic for the subtree, at its root.
@@ -368,7 +368,7 @@ fn allowing_skipped_levels_admits_a_nested_skip_as_an_ordinary_sibling() {
     // §1.5: "If the option is true, the skip is admitted: the header becomes
     // an ordinary member of the enclosing scope and is matched against that
     // scope's rules like any sibling."
-    let schema = "version: 2\noptions:\n  allow_skipped_levels: true\noutline:\n  \
+    let schema = "version: 1\noptions:\n  allow_skipped_levels: true\noutline:\n  \
                   - match: Part\n    required: true\n    \
                   sections:\n      - match: Goal\n        repeat: 1..1\n";
     // The `h3` binds the `Goal` rule, so nothing is missing and nothing skips.
@@ -395,7 +395,7 @@ fn allowing_skipped_levels_admits_a_nested_skip_as_an_ordinary_sibling() {
 
 #[test]
 fn orphan_headers_skip_against_the_virtual_root() {
-    let schema = "version: 2\nsections:\n  - match: Sec\n    repeat: 0..n\n";
+    let schema = "version: 1\nsections:\n  - match: Sec\n    repeat: 0..n\n";
 
     // An orphan has no parent header; the virtual document root is what
     // it skips against — level 0 when the document has an `h1`.
@@ -409,7 +409,7 @@ fn orphan_headers_skip_against_the_virtual_root() {
 
     // With `title: null` the root stands in at level 1 and the `h2`s
     // bind directly, so a deeper orphan skips just the same.
-    let headless = "version: 2\ntitle: null\nsections:\n  - match: Sec\n    repeat: 0..n\n";
+    let headless = "version: 1\ntitle: null\nsections:\n  - match: Sec\n    repeat: 0..n\n";
     assert_eq!(
         ids_and_targets(headless, "### Orphan\n## Sec\n"),
         [(
@@ -437,9 +437,9 @@ fn orphan_headers_skip_against_the_virtual_root() {
 
 #[test]
 fn declared_scopes_are_exhaustive_after_level_admission() {
-    // §3.3: v2 declared lists are exhaustive; unmatched admitted headings
+    // §3.3: declared lists are exhaustive; unmatched admitted headings
     // receive `unexpected-section` unless extras removes them first.
-    let open = "version: 2\nsections:\n  - match: Known\n    repeat: 0..n\n";
+    let open = "version: 1\nsections:\n  - match: Known\n    repeat: 0..n\n";
     assert_eq!(
         ids_and_targets(open, "# Title\n## Known\n## Unmatched\n### Child\n"),
         [(
@@ -447,7 +447,7 @@ fn declared_scopes_are_exhaustive_after_level_admission() {
             DiagnosticTarget::Header(HeaderPath(vec!["Title".into(), "Unmatched".into()])),
         )]
     );
-    let open_headless = "version: 2\ntitle: null\nsections:\n  - match: Known\n    repeat: 0..n\n";
+    let open_headless = "version: 1\ntitle: null\nsections:\n  - match: Known\n    repeat: 0..n\n";
     assert_eq!(
         ids_and_targets(open_headless, "## Known\n## Unmatched\n"),
         [(
@@ -456,7 +456,7 @@ fn declared_scopes_are_exhaustive_after_level_admission() {
         )]
     );
 
-    let closed = "version: 2\nsections:\n  - match: Known\n    repeat: 0..n\n    sections: []\n";
+    let closed = "version: 1\nsections:\n  - match: Known\n    repeat: 0..n\n    sections: []\n";
     assert_eq!(
         ids_and_targets(closed, "# Title\n## Known\n### Surprise\n"),
         [(
@@ -476,7 +476,7 @@ fn allow_skipped_levels_admits_top_level_headers_into_the_root_scope() {
     // level. With the option off it is reported and takes part in
     // nothing; with it on it binds into the outline scope like any
     // skipped child of a bound header, and can satisfy an h1 rule.
-    let strict_levels = "version: 2\noutline:\n  - match: Stray\n    required: true\n";
+    let strict_levels = "version: 1\noutline:\n  - match: Stray\n    required: true\n";
     assert_eq!(
         ids_and_targets(strict_levels, "## Stray\n"),
         [
@@ -493,13 +493,13 @@ fn allow_skipped_levels_admits_top_level_headers_into_the_root_scope() {
             ),
         ]
     );
-    let lax_levels = "version: 2\noptions:\n  allow_skipped_levels: true\n\
+    let lax_levels = "version: 1\noptions:\n  allow_skipped_levels: true\n\
                       outline:\n  - match: Stray\n    required: true\n";
     assert_eq!(ids_and_targets(lax_levels, "## Stray\n"), []);
 
     // Sugar's headless scope stands in at level 1, one level down: a
     // top-level `h3` is the skip there, and admission works the same.
-    let sugar = "version: 2\ntitle: null\nsections:\n  - match: Deep\n    required: true\n";
+    let sugar = "version: 1\ntitle: null\nsections:\n  - match: Deep\n    required: true\n";
     assert_eq!(
         ids_and_targets(sugar, "### Deep\n"),
         [
@@ -516,14 +516,14 @@ fn allow_skipped_levels_admits_top_level_headers_into_the_root_scope() {
             ),
         ]
     );
-    let lax_sugar = "version: 2\noptions:\n  allow_skipped_levels: true\n\
+    let lax_sugar = "version: 1\noptions:\n  allow_skipped_levels: true\n\
                      title: null\nsections:\n  - match: Deep\n    required: true\n";
     assert_eq!(ids_and_targets(lax_sugar, "### Deep\n"), []);
 }
 
 #[test]
 fn title_null_denies_h1_and_binds_top_level_h2s() {
-    let schema = "version: 2\ntitle: null\nsections:\n  - match: Overview\n    required: true\n";
+    let schema = "version: 1\ntitle: null\nsections:\n  - match: Overview\n    required: true\n";
 
     // The declared shape: no h1, the sections scope is the document's
     // own top-level h2s.
@@ -572,7 +572,7 @@ fn bare_sections_implies_a_required_title() {
     // `sections:` without `title:` means `title: "*"`: exactly one `h1`,
     // any text. A document that loses its `# Title` no longer passes
     // silently.
-    let bare = "version: 2\nsections:\n  - match: Overview\n    required: true\n";
+    let bare = "version: 1\nsections:\n  - match: Overview\n    required: true\n";
     let loaded = load_schema(bare).expect("test schema is valid");
     let document = parse_markdown("## Overview\n", MarkdownOptions::default());
     let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
@@ -602,12 +602,12 @@ fn bare_sections_implies_a_required_title() {
     // A single `h1` — any text — satisfies the implied title, and the
     // same headless document under `title: null` is declared conformant.
     assert_eq!(ids_and_targets(bare, "# Anything\n## Overview\n"), []);
-    let null = "version: 2\ntitle: null\nsections:\n  - match: Overview\n    required: true\n";
+    let null = "version: 1\ntitle: null\nsections:\n  - match: Overview\n    required: true\n";
     assert_eq!(ids_and_targets(null, "## Overview\n"), []);
 
     // The strictness is sugar business: the general form has no title
     // slot, so a zero-`h1` document under `outline:` misses nothing.
-    let general = "version: 2\noptions:\n  allow_skipped_levels: true\n\
+    let general = "version: 1\noptions:\n  allow_skipped_levels: true\n\
                    outline:\n  - match: Part\n    repeat: \"0..n\"\n\
                    \x20   sections:\n      - match: Overview\n        required: true\n";
     assert_eq!(ids_and_targets(general, ""), []);
@@ -617,7 +617,7 @@ fn bare_sections_implies_a_required_title() {
 fn a_general_form_h1_that_matches_no_rule_is_unexpected() {
     // §3.3: a general-form outline list is exhaustive just like any other
     // declared scope; there is no v1 implicit openness.
-    let schema = "version: 2\noutline:\n  - match: \"Guide *\"\n    required: true\n";
+    let schema = "version: 1\noutline:\n  - match: \"Guide *\"\n    required: true\n";
     assert_eq!(
         ids_and_targets(schema, "# Handbook\n## Anything\n"),
         [
@@ -643,7 +643,7 @@ fn multi_h1_sugar_cardinality_misses_carry_the_owning_h1() {
     // diagnostics name their owner instead, so both parents appear.
     assert_eq!(
         ids_and_targets(
-            "version: 2\ntitle: \"*\"\nsections:\n  - match: Overview\n    required: true\n",
+            "version: 1\ntitle: \"*\"\nsections:\n  - match: Overview\n    required: true\n",
             "# One\n# Two\n",
         ),
         [
@@ -673,7 +673,7 @@ fn multi_h1_sugar_cardinality_misses_carry_the_owning_h1() {
     // witness that the attribution switch is the occurrence count.
     assert_eq!(
         ids_and_targets(
-            "version: 2\ntitle: \"*\"\nsections:\n  - match: Overview\n    required: true\n",
+            "version: 1\ntitle: \"*\"\nsections:\n  - match: Overview\n    required: true\n",
             "# One\n",
         ),
         [(
@@ -688,7 +688,7 @@ fn multi_h1_sugar_cardinality_misses_carry_the_owning_h1() {
 
 #[test]
 fn multi_h1_sugar_constraints_target_the_owning_h1() {
-    let schema = "version: 2\nsections:\n  - id: a\n    match: A\n    required: false\n  \
+    let schema = "version: 1\nsections:\n  - id: a\n    match: A\n    required: false\n  \
                   - id: b\n    match: B\n    required: false\nconstraints:\n  - requires: { if: a, then: b }\n";
 
     // One `h1`: the legacy voice, the document as target.
@@ -726,9 +726,9 @@ fn an_admitted_top_level_h2_never_occupies_the_title_slot() {
     // — yielding a phantom surplus title plus a missing section. It now
     // binds into the `sections` scope instead, where `Overview` under the
     // real `h1` and the unmatched `Intro` are both ordinary open-scope
-    // members; because the declared list is exhaustive in v2, `Intro` is
+    // members; because the declared list is exhaustive, `Intro` is
     // reported as unexpected but never as a title surplus.
-    let schema = "version: 2\noptions:\n  allow_skipped_levels: true\ntitle: \"*\"\n\
+    let schema = "version: 1\noptions:\n  allow_skipped_levels: true\ntitle: \"*\"\n\
                   sections:\n  - match: Overview\n    required: true\n";
     assert_eq!(
         ids_and_targets(schema, "## Intro\n# Doc\n## Overview\n"),
@@ -748,7 +748,7 @@ fn an_admitted_top_level_h2_binds_the_titled_documents_sections_scope() {
     // two missing-`Intro` instances); were the stray dropped outright,
     // the required `Intro` rule would fire. Only binding into the
     // `sections` scope leaves the document clean.
-    let schema = "version: 2\noptions:\n  allow_skipped_levels: true\ntitle: \"*\"\n\
+    let schema = "version: 1\noptions:\n  allow_skipped_levels: true\ntitle: \"*\"\n\
                   sections:\n  - match: Intro\n    required: true\n";
     assert_eq!(ids_and_targets(schema, "## Intro\n# Doc\n"), []);
 }
@@ -756,7 +756,7 @@ fn an_admitted_top_level_h2_binds_the_titled_documents_sections_scope() {
 #[test]
 fn surplus_titles_blame_the_spelled_or_implied_title() {
     let titled = surplus_diagnostics(
-        "version: 2\ntitle: Project\nsections:\n  - match: Item\n    repeat: 0..n\n",
+        "version: 1\ntitle: Project\nsections:\n  - match: Item\n    repeat: 0..n\n",
         "# Project\n# Project\n## Item\n",
     );
     assert_eq!(titled.len(), 1);
@@ -768,7 +768,7 @@ fn surplus_titles_blame_the_spelled_or_implied_title() {
     // `sections:` implies `title: "*"`, so the surplus `h1` is a surplus
     // title there too, blamed on the implied title node.
     let untitled = surplus_diagnostics(
-        "version: 2\nsections:\n  - match: Item\n    repeat: 0..n\n",
+        "version: 1\nsections:\n  - match: Item\n    repeat: 0..n\n",
         "# Project\n# Project\n## Item\n",
     );
     assert_eq!(untitled.len(), 1);
@@ -779,7 +779,7 @@ fn surplus_titles_blame_the_spelled_or_implied_title() {
 #[test]
 fn a_surplus_header_carries_its_own_inline_suppression() {
     assert!(surplus_diagnostics(
-        "version: 2\nsections:\n  - match: Overview\n    repeat: 0..n\n",
+        "version: 1\nsections:\n  - match: Overview\n    repeat: 0..n\n",
         "# One\n## Overview\n<!-- outlint-disable too-many-sections -->\n# Two\n",
     )
     .is_empty());
@@ -788,7 +788,7 @@ fn a_surplus_header_carries_its_own_inline_suppression() {
 #[test]
 fn root_scope_violations_name_the_document_rather_than_a_header() {
     let loaded = load_schema(
-        "version: 2\nsections:\n  - id: a\n    match: A\n    required: true\n  - id: b\n    match: B\n    required: true\nconstraints:\n  - all_or_none: [a, b]\n",
+        "version: 1\nsections:\n  - id: a\n    match: A\n    required: true\n  - id: b\n    match: B\n    required: true\nconstraints:\n  - all_or_none: [a, b]\n",
     )
     .expect("test schema is valid");
     let document = parse_markdown("# Part One\n## B\n", MarkdownOptions::default());
@@ -815,7 +815,7 @@ fn root_scope_violations_name_the_document_rather_than_a_header() {
 
 #[test]
 fn unexpected_section_points_to_the_rule_that_closed_its_scope() {
-    let loaded = load_schema("version: 2\nsections:\n  - match: Parent\n    sections: []\n")
+    let loaded = load_schema("version: 1\nsections:\n  - match: Parent\n    sections: []\n")
         .expect("test schema is valid");
     let document = parse_markdown("## Parent\n### Surprise\n", MarkdownOptions::default());
     let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
@@ -834,9 +834,9 @@ fn unexpected_section_points_to_the_rule_that_closed_its_scope() {
 }
 
 #[test]
-fn v2_guard_precedes_accepting_assignment() {
+fn guards_precede_accepting_assignment() {
     let schema =
-        "version: 2\ntitle: '*'\nforbid_sections:\n  - match: A\nsections:\n  - match: A\n";
+        "version: 1\ntitle: '*'\nforbid_sections:\n  - match: A\nsections:\n  - match: A\n";
     let diagnostics = ids_and_targets(schema, "# Doc\n## A\n");
     assert_eq!(diagnostics.len(), 2);
     assert_eq!(diagnostics[0].0, DiagnosticId::NotAllowed);
@@ -847,7 +847,7 @@ fn v2_guard_precedes_accepting_assignment() {
 fn sugar_scope_guards_never_inspect_the_title_slot() {
     // §2: sugar-form top-level guards inspect the exposed h2 scope, never the
     // synthesized h1 title slot, even when their matcher equals title text.
-    let schema = "version: 2\ntitle: Same\nforbid_sections:\n  - match: Same\nsections: []\n";
+    let schema = "version: 1\ntitle: Same\nforbid_sections:\n  - match: Same\nsections: []\n";
     assert_eq!(
         ids_and_targets(schema, "# Same\n## Same\n"),
         [(
@@ -862,7 +862,7 @@ fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
     // §3.7: guard work is at most H×G, accepting-matrix work is H×R, and
     // extras classifies each post-guard heading once.
     let loaded = load_schema(
-        "version: 2\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\nsections:\n  - match: A\n    repeat: 0..n\nextras: anywhere\n",
+        "version: 1\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\nsections:\n  - match: A\n    repeat: 0..n\nextras: anywhere\n",
     )
     .expect("test schema is valid");
     let document = parse_markdown(
@@ -882,7 +882,7 @@ fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
     assert!(work.sequence_operations <= 13 * (5 + 1) * (1 + 1));
 
     let guard_only = load_schema(
-        "version: 2\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\n",
+        "version: 1\ntitle: '*'\nforbid_sections:\n  - match: X\n  - match: Y\n  - match: Z\n",
     )
     .expect("test schema is valid");
     let guard_only_plan = ValidationPlan::new(&guard_only.schema).expect("schema prepares");
@@ -903,7 +903,7 @@ fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
 }
 
 fn adversarial_schema(rules: usize, guards: usize, extras: bool) -> String {
-    let mut schema = String::from("version: 2\ntitle: '*'\n");
+    let mut schema = String::from("version: 1\ntitle: '*'\n");
     if guards > 0 {
         schema.push_str("forbid_sections:\n");
         for index in 0..guards {
@@ -990,7 +990,7 @@ fn adversarial_scope_work_scales_with_h_r_and_g_independently() {
 }
 
 fn unordered_adversarial_schema(rules: usize, guards: usize, extras: bool) -> String {
-    let mut schema = String::from("version: 2\ntitle: '*'\nunordered: true\n");
+    let mut schema = String::from("version: 1\ntitle: '*'\nunordered: true\n");
     if guards > 0 {
         schema.push_str("forbid_sections:\n");
         for index in 0..guards {
@@ -1080,7 +1080,7 @@ fn nested_schema_and_document(depth: usize) -> (String, String) {
         }
     }
 
-    let mut schema = String::from("version: 2\ntitle: Level 1\nsections:\n");
+    let mut schema = String::from("version: 1\ntitle: Level 1\nsections:\n");
     append_rule(&mut schema, 2, depth + 1, 2);
     let mut document = String::new();
     for level in 1..=depth + 1 {
@@ -1111,7 +1111,7 @@ fn nested_scope_work_is_the_sum_of_per_scope_bounds() {
 
 proptest! {
     #[test]
-    fn generated_v2_schemas_and_documents_never_panic(
+    fn generated_schemas_and_documents_never_panic(
         rule_shapes in proptest::collection::vec((0u8..4, 0u8..4, any::<bool>()), 0..7),
         guard_names in proptest::collection::vec("[A-Z][a-z]{0,4}", 0..5),
         headings in proptest::collection::vec(("[ABXZ][a-z]{0,5}", any::<bool>(), any::<bool>()), 0..13),
@@ -1119,7 +1119,7 @@ proptest! {
         extras in any::<bool>(),
         unordered in any::<bool>(),
     ) {
-        let mut schema = String::from("version: 2\ntitle: '*'\n");
+        let mut schema = String::from("version: 1\ntitle: '*'\n");
         if unordered {
             schema.push_str("unordered: true\n");
         }
@@ -1182,8 +1182,8 @@ proptest! {
 }
 
 #[test]
-fn v2_ordered_recovery_distinguishes_misplaced_from_unexpected() {
-    let schema = "version: 2\ntitle: '*'\nsections:\n  - match: A\n  - match: B\n";
+fn ordered_recovery_distinguishes_misplaced_from_unexpected() {
+    let schema = "version: 1\ntitle: '*'\nsections:\n  - match: A\n  - match: B\n";
     let diagnostics = ids_and_targets(schema, "# Doc\n## B\n## X\n## A\n");
     assert!(diagnostics
         .iter()
@@ -1194,19 +1194,19 @@ fn v2_ordered_recovery_distinguishes_misplaced_from_unexpected() {
 }
 
 #[test]
-fn v2_unordered_uses_first_matching_rule() {
-    let schema = "version: 2\ntitle: '*'\nunordered: true\nsections:\n  - id: broad\n    match: 'A*'\n    repeat: 0..n\n  - id: exact\n    match: A\n    required: false\n";
+fn unordered_uses_first_matching_rule() {
+    let schema = "version: 1\ntitle: '*'\nunordered: true\nsections:\n  - id: broad\n    match: 'A*'\n    repeat: 0..n\n  - id: exact\n    match: A\n    required: false\n";
     let diagnostics = ids_and_targets(schema, "# Doc\n## A\n");
     assert!(diagnostics.is_empty());
 }
 
 #[test]
-fn v2_identity_matrix_controls_child_traversal_by_heading_class() {
+fn identity_matrix_controls_child_traversal_by_heading_class() {
     // §4.2: canonical and recovery assignments inherit their rule identity
     // and recurse; unassigned, forbidden, extra, and omitted-scope headings
     // do not open a validation scope. An anonymous wildcard still recurses
     // even though no name step can reach its occurrence.
-    let canonical = "version: 2\noutline:\n  - match: Parent\n    sections: []\n";
+    let canonical = "version: 1\noutline:\n  - match: Parent\n    sections: []\n";
     assert_eq!(
         ids_and_targets(canonical, "# Parent\n## Child\n"),
         [(
@@ -1216,7 +1216,7 @@ fn v2_identity_matrix_controls_child_traversal_by_heading_class() {
     );
 
     let recovery =
-        "version: 2\noutline:\n  - match: Parent\n    required: false\n    sections: []\n";
+        "version: 1\noutline:\n  - match: Parent\n    required: false\n    sections: []\n";
     let recovered = ids_and_targets(recovery, "# Parent\n# Parent\n## Child\n");
     assert!(recovered
         .iter()
@@ -1227,7 +1227,7 @@ fn v2_identity_matrix_controls_child_traversal_by_heading_class() {
                 == DiagnosticTarget::Header(HeaderPath(vec!["Parent".into(), "Child".into()]))
     }));
 
-    let unassigned = "version: 2\noutline:\n  - match: A\n    required: false\n    sections: []\n  - match: B\n    required: false\n    sections: []\n";
+    let unassigned = "version: 1\noutline:\n  - match: A\n    required: false\n    sections: []\n  - match: B\n    required: false\n    sections: []\n";
     assert_eq!(
         ids_and_targets(unassigned, "# B\n## Child\n# A\n"),
         [(
@@ -1236,7 +1236,7 @@ fn v2_identity_matrix_controls_child_traversal_by_heading_class() {
         )]
     );
 
-    let forbidden = "version: 2\nforbid_sections:\n  - match: Parent\noutline: []\n";
+    let forbidden = "version: 1\nforbid_sections:\n  - match: Parent\noutline: []\n";
     assert_eq!(
         ids_and_targets(forbidden, "# Parent\n## Child\n"),
         [(
@@ -1245,13 +1245,13 @@ fn v2_identity_matrix_controls_child_traversal_by_heading_class() {
         )]
     );
 
-    let extra = "version: 2\nextras: anywhere\noutline: []\n";
+    let extra = "version: 1\nextras: anywhere\noutline: []\n";
     assert!(ids_and_targets(extra, "# Parent\n## Child\n").is_empty());
 
-    let omitted = "version: 2\noutline:\n  - match: Parent\n";
+    let omitted = "version: 1\noutline:\n  - match: Parent\n";
     assert!(ids_and_targets(omitted, "# Parent\n## Child\n").is_empty());
 
-    let anonymous = "version: 2\noutline:\n  - match: '*'\n    repeat: 0..n\n    sections: []\n";
+    let anonymous = "version: 1\noutline:\n  - match: '*'\n    repeat: 0..n\n    sections: []\n";
     assert_eq!(
         ids_and_targets(anonymous, "# Parent\n## Child\n"),
         [(
@@ -1262,11 +1262,11 @@ fn v2_identity_matrix_controls_child_traversal_by_heading_class() {
 }
 
 #[test]
-fn v2_declared_rule_identity_wins_over_an_unassigned_concrete_id() {
+fn declared_rule_identity_wins_over_an_unassigned_concrete_id() {
     // §4.2: the explicit schema id `x` wins over the unassigned heading whose
     // concrete default id is also `x`; schema-resident locators bind only the
     // declared rule, so that heading cannot satisfy the consequence.
-    let schema = "version: 2\nunordered: true\noutline:\n  - id: x\n    match: Assigned\n    required: false\n  - id: trigger\n    match: Trigger\nconstraints:\n  - requires: { if: trigger, then: x }\n";
+    let schema = "version: 1\nunordered: true\noutline:\n  - id: x\n    match: Assigned\n    required: false\n  - id: trigger\n    match: Trigger\nconstraints:\n  - requires: { if: trigger, then: x }\n";
     let ids = ids_and_targets(schema, "# Trigger\n# X\n")
         .into_iter()
         .map(|(id, _)| id)
@@ -1278,11 +1278,11 @@ fn v2_declared_rule_identity_wins_over_an_unassigned_concrete_id() {
 }
 
 #[test]
-fn v2_child_grammar_never_reassigns_an_overlapping_parent() {
+fn child_grammar_never_reassigns_an_overlapping_parent() {
     // §3.2's final example: the canonical specific-rule count vector assigns
     // the one `Part` to the first optional rule. A child matching only the
     // second rule's grammar cannot make assignment backtrack.
-    let schema = "version: 2\noutline:\n  - id: first\n    match: Part\n    required: false\n    sections:\n      - match: First Child\n  - id: second\n    match: Part\n    required: false\n    sections:\n      - match: Second Child\n";
+    let schema = "version: 1\noutline:\n  - id: first\n    match: Part\n    required: false\n    sections:\n      - match: First Child\n  - id: second\n    match: Part\n    required: false\n    sections:\n      - match: Second Child\n";
     let ids = ids_and_targets(schema, "# Part\n## Second Child\n")
         .into_iter()
         .map(|(id, _)| id)
@@ -1297,11 +1297,11 @@ fn v2_child_grammar_never_reassigns_an_overlapping_parent() {
 }
 
 #[test]
-fn v2_recovery_binding_survives_diagnostic_suppression() {
+fn recovery_binding_survives_diagnostic_suppression() {
     // §§3.5, 4.2, 5.2, and 6.3: recovery assigns `A`, leaves the leading `B`
     // unassigned, and the constraint reads that binding. Filtering the
     // misplaced primary cannot reassign `B` or change the `requires` result.
-    let schema = "version: 2\noutline:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    match: B\n    required: false\nconstraints:\n  - requires: { if: a, then: b }\n";
+    let schema = "version: 1\noutline:\n  - id: a\n    match: A\n    required: false\n  - id: b\n    match: B\n    required: false\nconstraints:\n  - requires: { if: a, then: b }\n";
     let plain = ids_and_targets(schema, "# B\n# A\n")
         .into_iter()
         .map(|(id, _)| id)

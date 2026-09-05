@@ -1,7 +1,7 @@
 # Keep a Changelog structure for CHANGELOG.md, discovered automatically by
 # `outlint check CHANGELOG.md` (per-document discovery, spec §11.2) and
 # enforced by the CLI test suite.
-version: 2
+version: 1
 
 title: "Changelog"
 

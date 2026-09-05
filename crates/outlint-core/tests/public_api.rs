@@ -50,7 +50,7 @@ fn the_validation_signatures_are_pinned() {
     let prepare: fn(&Schema) -> Result<PreparedValidator, PrepareValidationError> =
         PreparedValidator::new;
 
-    let loaded = load_schema("version: 2\ntitle: '*'\nsections: []\n").expect("schema is valid");
+    let loaded = load_schema("version: 1\ntitle: '*'\nsections: []\n").expect("schema is valid");
     let document = parse_markdown("# Guide\n", MarkdownOptions::default());
 
     let validator = prepare(&loaded.schema).expect("the loaded schema compiles");
@@ -127,7 +127,7 @@ fn public_display_implementations_are_concise_and_stable() {
     assert_eq!(invalid.errors.first.kind.to_string(), "unsupported-version");
     assert_eq!(
         invalid.errors.first.to_string(),
-        "unsupported-version: unsupported schema version 99; expected 2"
+        "unsupported-version: unsupported schema version 99; expected 1"
     );
     assert_eq!(invalid.to_string(), invalid.errors.first.to_string());
 }
@@ -136,7 +136,7 @@ fn public_display_implementations_are_concise_and_stable() {
 fn normalized_newtypes_are_inspectable_without_exposing_construction() {
     let loaded = load_schema(
         r#"
-version: 2
+version: 1
 title: "*"
 sections:
   - id: guide
@@ -213,7 +213,7 @@ fn cardinality_construction_enforces_its_normalized_range() {
 }
 
 #[test]
-fn schema_v2_public_model_and_vocabulary_are_pinned() {
+fn current_schema_public_model_and_vocabulary_are_pinned() {
     use outlint_core::{
         ChildScope, DeclaredScope, DocumentShape, ExtrasMode, Matcher, SchemaErrorKind,
         SchemaVersion, ScopeMode, SectionGuard, TitleSlot,
@@ -235,10 +235,10 @@ fn schema_v2_public_model_and_vocabulary_are_pinned() {
     assert!(matches!(scope_variants[1], ScopeMode::Unordered));
 
     let loaded = load_schema(
-        "version: 2\noutline:\n  - match: A\nforbid_sections:\n  - match: X\nextras: anywhere\nunordered: true\n",
+        "version: 1\noutline:\n  - match: A\nforbid_sections:\n  - match: X\nextras: anywhere\nunordered: true\n",
     )
-    .expect("the complete v2 root scope is valid");
-    assert_eq!(loaded.schema.version, SchemaVersion::V2);
+    .expect("the complete root scope is valid");
+    assert_eq!(loaded.schema.version, SchemaVersion::V1);
     let DocumentShape::Outline(scope) = &loaded.schema.document else {
         panic!("the general form exposes a declared outline scope")
     };
@@ -254,7 +254,7 @@ fn schema_v2_public_model_and_vocabulary_are_pinned() {
     assert_eq!(scope.guards.len(), 1);
     assert!(matches!(scope.guards[0].matcher, Matcher::Exact(_)));
 
-    let spelled = load_schema("version: 2\ntitle: Guide\n")
+    let spelled = load_schema("version: 1\ntitle: Guide\n")
         .expect("a spelled title without child declarations is valid");
     assert!(matches!(
         spelled.schema.document,
@@ -265,7 +265,7 @@ fn schema_v2_public_model_and_vocabulary_are_pinned() {
     ));
 
     let implied =
-        load_schema("version: 2\nsections: []\n").expect("bare sections imply a wildcard title");
+        load_schema("version: 1\nsections: []\n").expect("bare sections imply a wildcard title");
     assert!(matches!(
         implied.schema.document,
         DocumentShape::Title(TitleSlot::ImpliedBySections {
@@ -273,7 +273,7 @@ fn schema_v2_public_model_and_vocabulary_are_pinned() {
         })
     ));
 
-    let guards_only = load_schema("version: 2\ntitle: null\nforbid_sections:\n  - match: Secret\n")
+    let guards_only = load_schema("version: 1\ntitle: null\nforbid_sections:\n  - match: Secret\n")
         .expect("guards may be the only child declaration");
     assert!(matches!(
         guards_only.schema.document,
@@ -304,7 +304,7 @@ fn schema_v2_public_model_and_vocabulary_are_pinned() {
 fn schemas_without_typed_values_normalize_to_empty_capture_and_order_defaults() {
     let loaded = load_schema(
         r#"
-version: 2
+version: 1
 title: "*"
 sections:
   - id: guide
@@ -327,7 +327,7 @@ sections:
 /// forcing callers to match five ways.
 #[test]
 fn the_frontmatter_policy_answers_capture_questions_for_every_variant() {
-    let loaded = load_schema("version: 2\nfrontmatter:\n  required: true\nsections: []\n")
+    let loaded = load_schema("version: 1\nfrontmatter:\n  required: true\nsections: []\n")
         .expect("schema is valid");
     let policy = &loaded.schema.frontmatter;
 
@@ -341,7 +341,7 @@ fn the_frontmatter_policy_answers_capture_questions_for_every_variant() {
     assert!(captures.declared().is_none());
     assert_eq!(captures.iter().count(), 0);
 
-    let forbidden = load_schema("version: 2\nfrontmatter:\n  allow: false\nsections: []\n")
+    let forbidden = load_schema("version: 1\nfrontmatter:\n  allow: false\nsections: []\n")
         .expect("schema is valid");
     assert!(forbidden.schema.frontmatter.is_forbidden());
     assert!(!forbidden.schema.frontmatter.is_required());
@@ -356,7 +356,7 @@ fn the_frontmatter_policy_answers_capture_questions_for_every_variant() {
 #[test]
 fn repeated_capture_keys_are_classified_apart_from_other_duplicate_keys() {
     let invalid = load_schema(
-        "version: 2\nsections:\n  - match: /(?<a>.)(?<b>.)/\n    captures:\n      a: text\n      a: int\n",
+        "version: 1\nsections:\n  - match: /(?<a>.)(?<b>.)/\n    captures:\n      a: text\n      a: int\n",
     )
     .expect_err("a repeated capture key is refused");
     assert_eq!(invalid.errors.first.kind.to_string(), "invalid-capture");
@@ -365,14 +365,14 @@ fn repeated_capture_keys_are_classified_apart_from_other_duplicate_keys() {
 
     // Inside one frontmatter capture declaration the general rule applies.
     let invalid = load_schema(
-        "version: 2\nfrontmatter:\n  captures:\n    v:\n      type: text\n      type: int\nsections: []\n",
+        "version: 1\nfrontmatter:\n  captures:\n    v:\n      type: text\n      type: int\nsections: []\n",
     )
     .expect_err("a repeated declaration key is refused");
     assert_eq!(invalid.errors.first.kind.to_string(), "syntax");
 
     // Two independent repeats are reported together, not one at a time.
     let invalid = load_schema(
-        "version: 2\nfrontmatter:\n  captures:\n    v: {type: text}\n    v: {type: int}\n    w: {type: text}\n    w: {type: int}\nsections: []\n",
+        "version: 1\nfrontmatter:\n  captures:\n    v: {type: text}\n    v: {type: int}\n    w: {type: text}\n    w: {type: int}\nsections: []\n",
     )
     .expect_err("repeated capture keys are refused");
     let kinds = invalid
@@ -400,7 +400,7 @@ fn repeated_capture_keys_are_classified_apart_from_other_duplicate_keys() {
 #[test]
 fn non_string_capture_keys_fail_the_shape_rule_before_duplicate_classification() {
     let invalid = load_schema(
-        "version: 2\nsections:\n  - match: /(?<a>.)/\n    captures:\n      1: text\n      01: int\n",
+        "version: 1\nsections:\n  - match: /(?<a>.)/\n    captures:\n      1: text\n      01: int\n",
     )
     .expect_err("a non-string mapping key is refused");
 
@@ -422,7 +422,7 @@ fn non_string_capture_keys_fail_the_shape_rule_before_duplicate_classification()
 fn rule_captures_and_order_reach_the_public_model() {
     let loaded = load_schema(
         r#"
-version: 2
+version: 1
 frontmatter:
   captures:
     version:
@@ -624,7 +624,7 @@ fn a_positional_rule_reference_survives_binding_and_validation_intact() {
 
     let position = "1".repeat(40);
     let loaded = load_schema(&format!(
-        "version: 2\nsections:\n  - id: alpha\n    match: Alpha\n  - id: beta\n    \
+        "version: 1\nsections:\n  - id: alpha\n    match: Alpha\n  - id: beta\n    \
          match: Beta\nconstraints:\n  - any_of: [\"$.alpha[{position}]\", beta]\n"
     ))
     .expect("schema is valid");
@@ -662,7 +662,7 @@ fn a_rule_capture_invalid_value_names_its_header_and_capture_declaration() {
     use outlint_core::{DiagnosticTarget, RuleIndex, SchemaNode};
 
     let loaded = load_schema(
-        "version: 2\nsections:\n  - match: \"/Release (?<version>.+)/\"\n    repeat: 0..n\n    \
+        "version: 1\nsections:\n  - match: \"/Release (?<version>.+)/\"\n    repeat: 0..n\n    \
          captures:\n      version: semver\n",
     )
     .expect("schema is valid");
@@ -709,7 +709,7 @@ fn a_frontmatter_missing_value_names_its_block_pointer_and_declaration() {
     use outlint_core::{DiagnosticTarget, FrontmatterLineRange, SchemaNode};
 
     let loaded = load_schema(
-        "version: 2\ntitle: null\nsections: []\nfrontmatter:\n  captures:\n    version:\n      \
+        "version: 1\ntitle: null\nsections: []\nfrontmatter:\n  captures:\n    version:\n      \
          type: semver\n      required: true\n",
     )
     .expect("schema is valid");
@@ -747,7 +747,7 @@ fn an_order_violation_names_its_entry_and_exactly_its_adjacent_pair() {
     use outlint_core::{DiagnosticTarget, OrderIndex, RuleIndex, SchemaNode};
 
     let loaded = load_schema(
-        "version: 2\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
+        "version: 1\nsections:\n  - match: \"/V (?<v>.+)/\"\n    repeat: 0..n\n    \
          captures:\n      v: int\n    order:\n      - by: v\n",
     )
     .expect("schema is valid");
@@ -791,7 +791,7 @@ fn an_invalid_boolean_read_carries_the_query_that_failed() {
     use outlint_core::{DiagnosticReference, DiagnosticTarget};
 
     let loaded = load_schema(
-        "version: 2\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
          required: true\nconstraints:\n  - requires: { if: body, then: \"fm[$.flag]\" }\n",
     )
     .expect("schema is valid");
@@ -827,7 +827,7 @@ fn a_failed_constraint_carries_its_rule_and_frontmatter_capture_references() {
     use outlint_core::{DiagnosticReference, Matcher, RefAnchor};
 
     let loaded = load_schema(
-        "version: 2\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
+        "version: 1\ntitle: null\nsections:\n  - id: body\n    match: Body\n    \
          required: false\nfrontmatter:\n  captures:\n    released:\n      \
          type: bool\nconstraints:\n  - any_of: [body, \"fm.released\"]\n",
     )

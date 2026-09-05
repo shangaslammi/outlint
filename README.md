@@ -46,7 +46,7 @@ archives with checksums.
 Write a schema. The default project schema is `.outlint.yml`:
 
 ```yaml
-version: 2
+version: 1
 title: "*"                  # exactly one h1, any text
 sections:                   # rules for h2 headings, in document order
   - id: overview
@@ -128,7 +128,7 @@ This is a taste of the schema language, not a manual —
 [`spec/outlint-spec.md`](spec/outlint-spec.md) is the normative definition.
 
 ```yaml
-version: 2
+version: 1
 
 options:
   match_case: false            # matchers are case-insensitive by default
@@ -269,7 +269,7 @@ describing the `h1`s themselves. Every scope binds per parent, so each part
 carries its own obligations:
 
 ```yaml
-version: 2
+version: 1
 outline:
   - match: "Part *"
     repeat: "1..n"
@@ -323,7 +323,7 @@ filesystem location, discovery is impossible and `--schema` is required:
 git show HEAD:README.md | outlint check - --schema .outlint.yml
 ```
 
-**Paths only.** v2 takes individual files, not directories. Use your shell
+**Paths only.** Outlint takes individual files, not directories. Use your shell
 or `find` to expand:
 
 ```sh
@@ -431,7 +431,7 @@ including the complete `--help` surface.
 
 ## Status and stability
 
-outlint is at version 0.1.0. It implements Outlint Schema Specification v2,
+outlint is at version 0.1.0. It implements the current Outlint Schema specification,
 including its command-line contract in §11, and the shared conformance corpus
 in `testdata/` runs in CI.
 

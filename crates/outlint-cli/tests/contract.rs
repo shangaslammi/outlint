@@ -42,15 +42,15 @@ fn schema_check_reports_schema_diagnostics_as_validation_output() {
 }
 
 #[test]
-fn schema_check_reports_v2_cardinality_and_reachability_errors() {
-    let directory = TempDir::new("schema-v2-errors");
+fn schema_check_reports_cardinality_and_reachability_errors() {
+    let directory = TempDir::new("schema-language-errors");
     directory.write(
         "missing.yml",
-        "version: 2\ntitle: null\nsections:\n  - match: '*'\n",
+        "version: 1\ntitle: null\nsections:\n  - match: '*'\n",
     );
     directory.write(
         "unreachable.yml",
-        "version: 2\ntitle: null\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n",
+        "version: 1\ntitle: null\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n",
     );
 
     let output = run(
@@ -91,10 +91,10 @@ fn schema_check_reports_v2_cardinality_and_reachability_errors() {
 #[test]
 fn schema_syntax_locations_use_one_based_byte_columns_after_non_ascii() {
     let directory = TempDir::new("schema-non-ascii-syntax-location");
-    directory.write("invalid.yml", "version: 2\ntitle: å: bad\nsections: []\n");
+    directory.write("invalid.yml", "version: 1\ntitle: å: bad\nsections: []\n");
     directory.write(
         "invalid-bare-cr.yml",
-        "version: 2\rtitle: å: bad\rsections: []\r",
+        "version: 1\rtitle: å: bad\rsections: []\r",
     );
 
     for path in ["invalid.yml", "invalid-bare-cr.yml"] {
@@ -114,7 +114,7 @@ fn schema_syntax_locations_use_one_based_byte_columns_after_non_ascii() {
 fn schema_check_and_check_report_oversized_globs_consistently() {
     let directory = TempDir::new("schema-oversized-glob");
     let oversized_glob = format!(
-        "version: 2\nsections:\n  - match: \"{}*\"\n",
+        "version: 1\nsections:\n  - match: \"{}*\"\n",
         "a".repeat(200_000)
     );
     directory.write("oversized.yml", oversized_glob);
@@ -400,13 +400,13 @@ fn non_utf8_command_line_paths_are_an_explicit_usage_error() {
     assert!(stderr(&output).contains("arguments must be valid UTF-8"));
 }
 
-/// Version 4 is a hard cut, so there is no `json-v2` escape hatch: §11.3 tells
+/// Version 4 is a hard cut, so there is no legacy JSON-format escape hatch: §11.3 tells
 /// consumers to reject an envelope version they do not know, and a second
 /// format name would be exactly the older shape it tells them not to read.
 /// Only `human` and `json` are accepted.
 #[test]
 fn the_replaced_envelope_version_is_not_reachable_through_a_format_name() {
-    let directory = TempDir::new("no-json-v2");
+    let directory = TempDir::new("no-legacy-json");
     directory.write("schema.yml", VALID_SCHEMA);
     directory.write("doc.md", "## Required\n");
 
@@ -459,7 +459,7 @@ fn a_query_that_cannot_be_evaluated_is_an_operational_failure() {
         "schema.yml",
         format!(
             concat!(
-                "version: 2\n",
+                "version: 1\n",
                 "title: null\n",
                 "sections:\n",
                 "  - id: body\n",

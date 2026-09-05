@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Declared frontmatter captures used as propositions (spec 4.6).
 #
 # A capture proposition names a declaration and resolves at schema load, so a

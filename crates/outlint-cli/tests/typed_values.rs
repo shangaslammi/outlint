@@ -36,7 +36,7 @@ fn every_reference_kind_renders_its_exact_version_4_shape() {
     directory.write(
         "schema.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "frontmatter:\n",
             "  captures:\n",
@@ -186,7 +186,7 @@ fn positional_narrowing_survives_as_an_arbitrary_precision_json_integer() {
     directory.write(
         "schema.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "sections:\n",
             "  - id: release\n",
@@ -261,7 +261,7 @@ fn typed_value_schema_errors_are_positioned_and_carry_no_document_target() {
     directory.write(
         "capture.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "sections:\n",
             "  - match: Release\n",
@@ -274,7 +274,7 @@ fn typed_value_schema_errors_are_positioned_and_carry_no_document_target() {
     directory.write(
         "order.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "sections:\n",
             "  - match: \"/Release (?<version>.+)/\"\n",
@@ -347,7 +347,7 @@ fn a_rule_capture_invalid_value_is_attributed_to_its_capture_declaration() {
     directory.write(
         "schema.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "sections:\n",
             "  - id: product\n",
@@ -439,7 +439,7 @@ fn a_frontmatter_capture_invalid_value_points_at_the_failing_entry() {
     directory.write(
         "schema.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "frontmatter:\n",
             "  captures:\n",
@@ -451,7 +451,7 @@ fn a_frontmatter_capture_invalid_value_points_at_the_failing_entry() {
     );
     // An unquoted `1.2` is a YAML float, the mistake §2.4 says diagnostics
     // should suggest quoting.
-    directory.write("doc.md", "---\nheader: x\nrelease-version: 2.2\n---\n");
+    directory.write("doc.md", "---\nheader: x\nrelease-version: 1.2\n---\n");
 
     let output = run(
         &directory,
@@ -519,7 +519,7 @@ fn a_required_frontmatter_capture_missing_value_names_the_absent_path() {
     directory.write(
         "schema.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "frontmatter:\n",
             "  captures:\n",
@@ -592,7 +592,7 @@ fn a_boolean_query_invalid_value_is_attributed_to_its_containing_constraint() {
     directory.write(
         "schema.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "sections:\n",
             "  - id: a\n",
@@ -690,7 +690,7 @@ fn a_value_order_violation_names_its_order_entry_and_adjacent_pair() {
     directory.write(
         "schema.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "sections:\n",
             "  - id: release\n",
@@ -792,7 +792,7 @@ fn typed_value_presentation_escapes_untrusted_pointers_and_header_paths() {
     directory.write(
         "pointer.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "frontmatter:\n",
             "  captures:\n",
@@ -807,7 +807,7 @@ fn typed_value_presentation_escapes_untrusted_pointers_and_header_paths() {
     directory.write(
         "pair.yml",
         concat!(
-            "version: 2\n",
+            "version: 1\n",
             "title: null\n",
             "sections:\n",
             "  - id: product\n",

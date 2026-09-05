@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # The explicit `ordered` constraint attached to the sugar `sections` scope,
 # which binds once per enclosing `h1`: occurrences are compared within one
 # instance, so ordering never reaches across ancestors. `inverted.md` fires

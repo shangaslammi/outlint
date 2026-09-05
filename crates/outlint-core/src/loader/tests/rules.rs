@@ -13,7 +13,7 @@ use proptest::prelude::*;
 fn applies_defaults_and_normalizes_rules() {
     let schema = valid(
         r#"
-version: 2
+version: 1
 sections:
   - match: API Reference
     required: true
@@ -52,7 +52,7 @@ forbid_sections:
 fn classifies_matcher_forms_and_unescapes_regex_delimiter() {
     let schema = valid(
         r#"
-version: 2
+version: 1
 sections:
   - match: exact
   - match: prefix*suffix
@@ -78,7 +78,7 @@ sections:
 fn rejects_invalid_regex_and_repeat_while_collecting_errors() {
     let kinds = error_kinds(
         r#"
-version: 2
+version: 1
 sections:
   - match: /(?=lookaround)/
     repeat: 01..2
@@ -96,7 +96,7 @@ sections:
 fn rejects_a_single_regex_delimiter_without_panicking() {
     let kinds = error_kinds(
         r#"
-version: 2
+version: 1
 sections:
   - match: "/"
     repeat: 0..n
@@ -109,13 +109,13 @@ sections:
 fn regex_load_validation_uses_the_normalized_match_case_setting() {
     let body = "[a-z]{100000}";
     let case_insensitive =
-        format!("version: 2\nsections:\n  - match: \"/{body}/\"\n    required: false\n");
+        format!("version: 1\nsections:\n  - match: \"/{body}/\"\n    required: false\n");
     let invalid = load_schema(&case_insensitive)
         .expect_err("case-insensitive compiled regex exceeds the size limit");
     assert_eq!(invalid.errors.first.kind, SchemaErrorKind::InvalidMatcher);
 
     let case_sensitive =
-        format!("version: 2\noptions:\n  match_case: true\nsections:\n  - match: \"/{body}/\"\n    required: false\n");
+        format!("version: 1\noptions:\n  match_case: true\nsections:\n  - match: \"/{body}/\"\n    required: false\n");
     let loaded = load_schema(&case_sensitive).expect("the same regex fits when case-sensitive");
     crate::PreparedValidator::new(&loaded.schema)
         .expect("loader and validator use identical case-sensitive settings");
@@ -124,7 +124,7 @@ fn regex_load_validation_uses_the_normalized_match_case_setting() {
 #[test]
 fn oversized_glob_is_invalid_at_its_matcher_range_and_errors_are_collected() {
     let glob = format!("{}*", "a".repeat(200_000));
-    let source = format!("version: 2\nsections:\n  - match: {glob}\n    repeat: 01..2\n");
+    let source = format!("version: 1\nsections:\n  - match: {glob}\n    repeat: 01..2\n");
     let invalid = load_schema(&source).expect_err("oversized glob must fail during loading");
     let errors = invalid.errors.iter().collect::<Vec<_>>();
 
@@ -134,7 +134,7 @@ fn oversized_glob_is_invalid_at_its_matcher_range_and_errors_are_collected() {
     assert_eq!(errors[1].kind, SchemaErrorKind::InvalidRepeat);
 
     let case_sensitive =
-        format!("version: 2\noptions:\n  match_case: true\nsections:\n  - match: {glob}\n    required: false\n");
+        format!("version: 1\noptions:\n  match_case: true\nsections:\n  - match: {glob}\n    required: false\n");
     let loaded =
         load_schema(&case_sensitive).expect("the same glob fits when matching case-sensitively");
     crate::PreparedValidator::new(&loaded.schema)
@@ -145,7 +145,7 @@ fn oversized_glob_is_invalid_at_its_matcher_range_and_errors_are_collected() {
 fn detects_auto_id_collisions_per_scope() {
     let kinds = error_kinds(
         r#"
-version: 2
+version: 1
 sections:
   - match: API
   - id: api
@@ -166,7 +166,7 @@ fn auto_ids_discard_decomposed_marks_without_splitting_words() {
 fn rejects_auto_generated_reserved_fm_id() {
     let kinds = error_kinds(
         r#"
-version: 2
+version: 1
 sections:
   - match: fm
 "#,
@@ -179,7 +179,7 @@ sections:
 /// rejected as an unknown option rather than silently ignored.
 #[test]
 fn rejects_the_removed_root_level_option() {
-    let source = "version: 2\noptions:\n  root_level: 3\nsections: []\n";
+    let source = "version: 1\noptions:\n  root_level: 3\nsections: []\n";
     let invalid = invalid(source);
     let messages = invalid
         .errors
@@ -199,7 +199,7 @@ fn rejects_the_removed_root_level_option() {
 fn rejects_every_explicit_null_typed_field_and_collects_them() {
     // `title: null` is the one legal null: it declares a document with no
     // h1, so only the four other nulls are rejected.
-    let source = r#"version: 2
+    let source = r#"version: 1
 title: null
 options:
   match_case: null
@@ -231,7 +231,7 @@ sections:
 
 #[test]
 fn title_null_declares_a_document_without_h1() {
-    let source = "version: 2\ntitle: null\nsections:\n  - match: Overview\n";
+    let source = "version: 1\ntitle: null\nsections:\n  - match: Overview\n";
     let loaded = load_schema(source).expect("title: null loads");
     let DocumentShape::Title(title) = &loaded.schema.document else {
         panic!("expected title form")
@@ -255,12 +255,12 @@ fn title_null_declares_a_document_without_h1() {
 
 #[test]
 fn sugar_forms_use_distinct_title_variants() {
-    let titled = valid("version: 2\ntitle: Doc\nsections: []\n");
+    let titled = valid("version: 1\ntitle: Doc\nsections: []\n");
     assert!(matches!(
         titled.document,
         DocumentShape::Title(crate::TitleSlot::Spelled { .. })
     ));
-    let bare = valid("version: 2\nsections: []\n");
+    let bare = valid("version: 1\nsections: []\n");
     assert!(matches!(
         bare.document,
         DocumentShape::Title(crate::TitleSlot::ImpliedBySections { .. })
@@ -269,7 +269,7 @@ fn sugar_forms_use_distinct_title_variants() {
 
 #[test]
 fn outline_rules_are_the_canonical_model_and_anchor_at_their_spellings() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 outline:
   - match: Part
     required: true
@@ -329,7 +329,7 @@ outline:
 #[test]
 fn sugar_and_outline_forms_parse_to_the_same_model() {
     let sugar = valid(
-        r#"version: 2
+        r#"version: 1
 title: "Doc *"
 sections:
   - match: Overview
@@ -342,7 +342,7 @@ constraints:
 "#,
     );
     let general = valid(
-        r#"version: 2
+        r#"version: 1
 outline:
   - match: "Doc *"
     required: true
@@ -364,7 +364,7 @@ outline:
 #[test]
 fn an_outline_declares_any_number_of_ordinary_h1_rules() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 outline:
   - match: "Part *"
     repeat: "1..n"
@@ -382,13 +382,13 @@ outline:
 
 #[test]
 fn an_empty_outline_is_a_declared_empty_grammar() {
-    let schema = valid("version: 2\noutline: []\n");
+    let schema = valid("version: 1\noutline: []\n");
     assert!(schema.outline().is_empty());
 }
 
 #[test]
 fn outline_conflicts_with_title_at_the_second_declared_key() {
-    let source = "version: 2\ntitle: Doc\noutline:\n  - match: Doc\n    required: true\n";
+    let source = "version: 1\ntitle: Doc\noutline:\n  - match: Doc\n    required: true\n";
     let invalid = invalid(source);
     let errors = invalid.errors.iter().collect::<Vec<_>>();
     assert_eq!(errors.len(), 1);
@@ -410,7 +410,7 @@ fn outline_conflicts_with_title_at_the_second_declared_key() {
 #[test]
 fn outline_conflicts_with_sections_anchoring_whichever_comes_second() {
     // `outline` first: the error anchors at `sections`.
-    let source = "version: 2\noutline:\n  - match: Doc\n    required: true\nsections: []\n";
+    let source = "version: 1\noutline:\n  - match: Doc\n    required: true\nsections: []\n";
     let invalid = invalid(source);
     let errors = invalid.errors.iter().collect::<Vec<_>>();
     assert_eq!(errors.len(), 1);
@@ -428,7 +428,7 @@ fn outline_conflicts_with_sections_anchoring_whichever_comes_second() {
 fn top_level_constraints_beside_outline_attach_to_the_h1_scope() {
     // Their refs resolve among the outline rules themselves.
     let schema = valid(
-        "version: 2\nunordered: true\noutline:\n  - id: intro\n\
+        "version: 1\nunordered: true\noutline:\n  - id: intro\n\
          \x20   match: Intro\n  - id: body\n    match: Body\nconstraints:\n\
          \x20 - ordered: [intro, body]\n",
     );
@@ -438,10 +438,10 @@ fn top_level_constraints_beside_outline_attach_to_the_h1_scope() {
         .iter()
         .all(|rule| rule.children.constraints().is_empty()));
 
-    // §2.1: sugar keeps the same addressed root even though v2 represents the
+    // §2.1: sugar keeps the same addressed root even though this revision represents the
     // title slot separately rather than manufacturing a schema rule.
     let sugar = valid(
-        "version: 2\nunordered: true\nsections:\n  - id: a\n\
+        "version: 1\nunordered: true\nsections:\n  - id: a\n\
          \x20   match: A\n  - id: b\n    match: B\nconstraints:\n  - ordered: [a, b]\n",
     );
     assert_eq!(sugar.constraints().len(), 1);
@@ -453,7 +453,7 @@ fn schema_root_refs_anchor_at_the_outline_scope_in_the_general_form() {
     // `$` names the h1 rules for `outline:` schemas; a sugar schema's
     // `$.` refs keep resolving against its `sections` scope.
     let schema = valid(
-        "version: 2\noutline:\n  - id: doc\n    match: Doc\n    required: true\n\
+        "version: 1\noutline:\n  - id: doc\n    match: Doc\n    required: true\n\
          \x20   sections:\n      - id: a\n        match: A\n        sections: []\n        constraints:\n\
          \x20         - requires: { if: \"$.doc.a\", then: \"$.doc\" }\n",
     );
@@ -467,7 +467,7 @@ fn schema_root_refs_anchor_at_the_outline_scope_in_the_general_form() {
     // The same spelling that resolved through `sections` before still
     // does: `$.a` in sugar reaches the top-level `sections` rule.
     let sugar = valid(
-        "version: 2\nsections:\n  - id: a\n    match: A\n    sections:\n\
+        "version: 1\nsections:\n  - id: a\n    match: A\n    sections:\n\
          \x20     - id: b\n        match: B\n    constraints:\n\
          \x20     - requires: { if: b, then: \"$.a\" }\n",
     );
@@ -475,7 +475,7 @@ fn schema_root_refs_anchor_at_the_outline_scope_in_the_general_form() {
     // An unresolved `$.` ref in the general form is a real error, not a
     // gate: `$.a` skips the outline level.
     let unresolved = invalid(
-        "version: 2\noutline:\n  - id: doc\n    match: Doc\n    required: true\n\
+        "version: 1\noutline:\n  - id: doc\n    match: Doc\n    required: true\n\
          \x20   sections:\n      - id: a\n        match: A\n    constraints:\n\
          \x20     - requires: { if: a, then: \"$.a\" }\n",
     );
@@ -488,13 +488,13 @@ fn schema_root_refs_anchor_at_the_outline_scope_in_the_general_form() {
 
 #[test]
 fn outline_rules_take_every_cardinality_spelling() {
-    let schema = valid("version: 2\noutline:\n  - match: Doc\n    repeat: \"1..1\"\n");
+    let schema = valid("version: 1\noutline:\n  - match: Doc\n    repeat: \"1..1\"\n");
     assert_eq!(
         schema.outline()[0].cardinality,
         Cardinality::new(1, UpperBound::Bounded(1)).expect("singleton is valid")
     );
     // Exact matchers use the exact-one default.
-    let default = valid("version: 2\noutline:\n  - match: Doc\n");
+    let default = valid("version: 1\noutline:\n  - match: Doc\n");
     assert_eq!(
         default.outline()[0].cardinality,
         Cardinality::new(1, UpperBound::Bounded(1)).expect("singleton is valid")
@@ -503,7 +503,7 @@ fn outline_rules_take_every_cardinality_spelling() {
 
 #[test]
 fn errors_inside_an_outline_rule_anchor_at_their_own_spellings() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 outline:
   - match: Doc
     required: true
@@ -522,7 +522,7 @@ outline:
 
 #[test]
 fn constraints_on_an_outline_rule_anchor_at_their_own_spellings() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 outline:
   - match: Doc
     required: true
@@ -549,7 +549,7 @@ fn ordered_refs_through_a_repeatable_h1_rule_are_refused() {
     // repeatable ancestor has no single document position to compare, so
     // `Part` under `repeat: 1..n` cannot carry an ordered ref path.
     let invalid = invalid(
-        "version: 2\noutline:\n  - id: part\n    match: \"Part *\"\n    repeat: \"1..n\"\n\
+        "version: 1\noutline:\n  - id: part\n    match: \"Part *\"\n    repeat: \"1..n\"\n\
          \x20   sections:\n      - id: a\n        match: A\n      - id: b\n        match: B\n\
          constraints:\n  - ordered: [part.a, part.b]\n",
     );
@@ -561,7 +561,7 @@ fn ordered_refs_through_a_repeatable_h1_rule_are_refused() {
 
 #[test]
 fn duplicate_id_error_and_related_location_point_to_each_scalar() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - id: duplicate
     match: First
@@ -575,7 +575,7 @@ sections:
 
 #[test]
 fn successful_node_locations_are_narrower_than_the_document() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 unordered: true
 title: "*"
 sections:
@@ -617,7 +617,7 @@ constraints:
 fn repeat_accepts_u32_boundary_and_rejects_overflow() {
     let schema = valid(
         r#"
-version: 2
+version: 1
 sections:
   - match: many
     repeat: 4294967295..4294967295
@@ -630,7 +630,7 @@ sections:
     );
     let kinds = error_kinds(
         r#"
-version: 2
+version: 1
 sections:
   - match: too-many
     repeat: 4294967296..n
@@ -641,7 +641,7 @@ sections:
 
 #[test]
 fn unordered_is_local_to_the_declared_scope() {
-    let schema = valid("version: 2\nunordered: true\nsections:\n  - match: A\n");
+    let schema = valid("version: 1\nunordered: true\nsections:\n  - match: A\n");
     let DocumentShape::Title(title) = schema.document else {
         panic!("expected title form")
     };
@@ -652,9 +652,9 @@ fn unordered_is_local_to_the_declared_scope() {
 }
 
 #[test]
-fn v2_only_and_removed_keys_are_rejected() {
+fn the_current_language_line_and_removed_keys_are_checked() {
     assert_eq!(
-        error_kinds("version: 1\nsections: []\n"),
+        error_kinds("version: 2\nsections: []\n"),
         vec![SchemaErrorKind::UnsupportedVersion]
     );
     for declaration in [
@@ -664,7 +664,7 @@ fn v2_only_and_removed_keys_are_rejected() {
         "options:\n  ordered_sections: false\nsections: []\n",
     ] {
         assert_eq!(
-            error_kinds(&format!("version: 2\n{declaration}")),
+            error_kinds(&format!("version: 1\n{declaration}")),
             vec![SchemaErrorKind::InvalidDocumentShape]
         );
     }
@@ -673,18 +673,18 @@ fn v2_only_and_removed_keys_are_rejected() {
 #[test]
 fn collection_matchers_require_cardinality_but_title_does_not() {
     for matcher in ["'*'", "'A*'", "'/A/'"] {
-        let invalid = invalid(&format!("version: 2\nsections:\n  - match: {matcher}\n"));
+        let invalid = invalid(&format!("version: 1\nsections:\n  - match: {matcher}\n"));
         assert_eq!(
             invalid.errors.first.kind,
             SchemaErrorKind::MissingCardinality
         );
     }
-    valid("version: 2\ntitle: '*'\nsections: []\n");
+    valid("version: 1\ntitle: '*'\nsections: []\n");
 }
 
 #[test]
 fn guards_and_declared_scope_modes_normalize_separately() {
-    let schema = valid("version: 2\ntitle: Doc\nforbid_sections:\n  - match: Secret\nunordered: true\nextras: anywhere\nsections: []\n");
+    let schema = valid("version: 1\ntitle: Doc\nforbid_sections:\n  - match: Secret\nunordered: true\nextras: anywhere\nsections: []\n");
     let DocumentShape::Title(title) = schema.document else {
         panic!("expected title")
     };
@@ -695,7 +695,7 @@ fn guards_and_declared_scope_modes_normalize_separately() {
     assert_eq!(scope.extras, crate::ExtrasMode::Anywhere);
     assert_eq!(scope.mode, crate::ScopeMode::Unordered);
 
-    let guard_only = valid("version: 2\ntitle: Doc\nforbid_sections:\n  - match: Secret\n");
+    let guard_only = valid("version: 1\ntitle: Doc\nforbid_sections:\n  - match: Secret\n");
     let DocumentShape::Title(title) = guard_only.document else {
         panic!("expected title")
     };
@@ -707,22 +707,22 @@ fn empty_guard_lists_are_legal_and_semantically_inert_in_every_scope_form() {
     // §2.1: an empty `forbid_sections` list is legal beside omitted, empty,
     // or nonempty accepting grammars and contributes no guard state.
     assert_eq!(
-        valid("version: 2\noutline: []\nforbid_sections: []\n"),
-        valid("version: 2\noutline: []\n")
+        valid("version: 1\noutline: []\nforbid_sections: []\n"),
+        valid("version: 1\noutline: []\n")
     );
     assert_eq!(
-        valid("version: 2\ntitle: Doc\nforbid_sections: []\n"),
-        valid("version: 2\ntitle: Doc\n")
+        valid("version: 1\ntitle: Doc\nforbid_sections: []\n"),
+        valid("version: 1\ntitle: Doc\n")
     );
     assert_eq!(
-        valid("version: 2\ntitle: Doc\nsections:\n  - match: Parent\n    forbid_sections: []\n"),
-        valid("version: 2\ntitle: Doc\nsections:\n  - match: Parent\n")
+        valid("version: 1\ntitle: Doc\nsections:\n  - match: Parent\n    forbid_sections: []\n"),
+        valid("version: 1\ntitle: Doc\nsections:\n  - match: Parent\n")
     );
 }
 
 #[test]
 fn unordered_wildcard_shadows_every_later_rule() {
-    let invalid = invalid("version: 2\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: A\n  - match: B\n");
+    let invalid = invalid("version: 1\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: A\n  - match: B\n");
     assert_eq!(
         invalid
             .errors
@@ -736,7 +736,7 @@ fn unordered_wildcard_shadows_every_later_rule() {
 #[test]
 fn unordered_reachability_uses_each_independently_parsed_matcher() {
     // §2.1/§6.3: unrelated rule errors do not suppress reachability.
-    let source = "version: 2\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n    captures: nope\n";
+    let source = "version: 1\nunordered: true\nsections:\n  - match: '*'\n    repeat: 0..n\n  - match: Later\n    captures: nope\n";
     let rejected = invalid(source);
     assert_eq!(
         rejected
@@ -761,7 +761,7 @@ fn unordered_reachability_uses_each_independently_parsed_matcher() {
 fn reserved_content_keys_are_rejected_in_every_section_mapping() {
     for key in ["content", "block"] {
         let invalid = invalid(&format!(
-            "version: 2\nsections:\n  - match: A\n    {key}: []\n"
+            "version: 1\nsections:\n  - match: A\n    {key}: []\n"
         ));
         assert_eq!(
             invalid.errors.first.kind,
@@ -772,9 +772,9 @@ fn reserved_content_keys_are_rejected_in_every_section_mapping() {
 
 #[test]
 fn unordered_must_be_a_bool_and_the_removed_option_is_unknown() {
-    // §2.1: v2 moves ordering to the scope-local `unordered` member.
+    // §2.1: this revision moves ordering to the scope-local `unordered` member.
     let invalid = invalid(
-        "version: 2\nsections:\n  - match: A\n    unordered: yes please\n    sections: []\n",
+        "version: 1\nsections:\n  - match: A\n    unordered: yes please\n    sections: []\n",
     );
     assert!(invalid
         .errors
@@ -782,7 +782,7 @@ fn unordered_must_be_a_bool_and_the_removed_option_is_unknown() {
         .any(|error| error.kind == SchemaErrorKind::InvalidDocumentShape
             && error.message == "`unordered` must be a bool and cannot be null"));
     let invalid =
-        self::invalid("version: 2\noptions:\n  ordered_sections: false\nsections:\n  - match: A\n");
+        self::invalid("version: 1\noptions:\n  ordered_sections: false\nsections:\n  - match: A\n");
     assert!(invalid
         .errors
         .iter()
@@ -915,7 +915,7 @@ fn assert_related(source: &str, error: &SchemaError, anchor: &str) {
 /// the one a reader meets as the contradiction, so it anchors the error.
 #[test]
 fn duplicate_capture_key_has_special_classification() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/(?<major>[0-9]+)/"
     repeat: 0..n
@@ -936,7 +936,7 @@ sections:
 /// key repeated inside one `order` entry stays `syntax` (§2.1).
 #[test]
 fn duplicate_order_entry_key_remains_syntax() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/(?<major>[0-9]+)/"
     repeat: 0..n
@@ -954,7 +954,7 @@ sections:
 /// same `syntax` it always was.
 #[test]
 fn duplicate_rule_keys_remain_syntax() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: First
     match: Second
@@ -968,7 +968,7 @@ sections:
 /// declaration against it reports `invalid-matcher` alone.
 #[test]
 fn invalid_regex_suppresses_capture_group_checks() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/(?<major>[0-9]+/"
     repeat: 0..n
@@ -986,7 +986,7 @@ sections:
 /// `duplicate-id` its name would otherwise raise against a child rule.
 #[test]
 fn invalid_capture_precedes_duplicate_id() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1007,7 +1007,7 @@ sections:
 #[test]
 fn every_capture_type_normalizes_to_its_declared_name() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - match: "/(?<a>.)(?<b>.)(?<c>.)(?<d>.)(?<e>.)(?<f>.)/"
     repeat: 0..n
@@ -1043,11 +1043,11 @@ sections:
 #[test]
 fn capture_mapping_source_order_is_not_semantic() {
     let first = valid(
-        "version: 2\nsections:\n  - match: \"/(?<major>[0-9]+)\\\\.(?<minor>[0-9]+)/\"\n\
+        "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)\\\\.(?<minor>[0-9]+)/\"\n\
          \x20   repeat: 0..n\n    captures:\n      major: int\n      minor: int\n",
     );
     let second = valid(
-        "version: 2\nsections:\n  - match: \"/(?<major>[0-9]+)\\\\.(?<minor>[0-9]+)/\"\n\
+        "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)\\\\.(?<minor>[0-9]+)/\"\n\
          \x20   repeat: 0..n\n    captures:\n      minor: int\n      major: int\n",
     );
     assert_eq!(first, second);
@@ -1058,7 +1058,7 @@ fn capture_mapping_source_order_is_not_semantic() {
 fn both_named_group_spellings_bind_a_capture() {
     for pattern in ["/v(?<major>[0-9]+)/", "/v(?P<major>[0-9]+)/"] {
         let schema = valid(&format!(
-            "version: 2\nsections:\n  - match: \"{pattern}\"\n    repeat: 0..n\n    captures:\n      major: int\n"
+            "version: 1\nsections:\n  - match: \"{pattern}\"\n    repeat: 0..n\n    captures:\n      major: int\n"
         ));
         assert_eq!(schema.addressed_root_rules()[0].captures.len(), 1);
     }
@@ -1070,7 +1070,7 @@ fn both_named_group_spellings_bind_a_capture() {
 #[test]
 fn declared_group_cannot_be_under_alternation() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - match: "/Release (?<kind>alpha|beta)/"
     repeat: 0..n
@@ -1080,7 +1080,7 @@ sections:
     );
     assert_eq!(schema.addressed_root_rules()[0].captures.len(), 1);
 
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/(?<kind>alpha)|beta/"
     repeat: 0..n
@@ -1103,7 +1103,7 @@ fn declared_group_must_participate() {
         "?", "??", "*", "*?", "{0}", "{0}?", "{0,}", "{0,}?", "{0,3}", "{0,3}?",
     ] {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/a(?:(?<n>[0-9]+))\
+            "version: 1\nsections:\n  - match: \"/a(?:(?<n>[0-9]+))\
              {quantifier}/\"\n    captures:\n      n: int\n"
         );
         let error = assert_anchored(&source, SchemaErrorKind::InvalidCapture, "n: int");
@@ -1121,7 +1121,7 @@ fn declared_group_must_participate() {
 fn positive_minimum_repetitions_keep_a_capture_legal() {
     for quantifier in ["+", "+?", "{1}", "{1,}", "{2,4}"] {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/a(?:(?<n>[0-9]))\
+            "version: 1\nsections:\n  - match: \"/a(?:(?<n>[0-9]))\
              {quantifier}/\"\n    repeat: 0..n\n    captures:\n      n: int\n"
         );
         assert_eq!(valid(&source).addressed_root_rules()[0].captures.len(), 1);
@@ -1133,7 +1133,7 @@ fn positive_minimum_repetitions_keep_a_capture_legal() {
 #[test]
 fn undeclared_groups_are_unconstrained() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - match: "/(?<major>[0-9]+)(?:-(?<tag>[a-z]+))?( draft)?/"
     repeat: 0..n
@@ -1147,7 +1147,7 @@ sections:
 /// A declaration must name a group that exists (§2.2).
 #[test]
 fn declared_group_must_exist() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1167,7 +1167,7 @@ sections:
 fn captures_require_a_mapping() {
     for spelling in ["null", "semver", "[major]"] {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n    captures: {spelling}\n"
+            "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n    captures: {spelling}\n"
         );
         assert_anchored(&source, SchemaErrorKind::InvalidCapture, spelling);
     }
@@ -1175,7 +1175,7 @@ fn captures_require_a_mapping() {
 
 #[test]
 fn captures_must_be_nonempty() {
-    let source = "version: 2\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n    captures: {}\n";
+    let source = "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n    captures: {}\n";
     let error = assert_anchored(source, SchemaErrorKind::InvalidCapture, "{}");
     assert_eq!(
         error.message,
@@ -1198,7 +1198,7 @@ fn capture_names_follow_exact_grammar() {
         ("\"\"", ""),
     ] {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n\
+            "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n\
              \x20   repeat: 0..n\n    captures:\n      {spelling}: int\n"
         );
         let error = sole_error(
@@ -1213,7 +1213,7 @@ fn capture_names_follow_exact_grammar() {
     }
     // `_` and digits are legal after the first character.
     let schema = valid(
-        "version: 2\nsections:\n  - match: \"/(?<major_2>[0-9]+)/\"\n\
+        "version: 1\nsections:\n  - match: \"/(?<major_2>[0-9]+)/\"\n\
          \x20   repeat: 0..n\n    captures:\n      major_2: int\n",
     );
     assert_eq!(schema.addressed_root_rules()[0].captures.len(), 1);
@@ -1223,7 +1223,7 @@ fn capture_names_follow_exact_grammar() {
 fn capture_type_must_be_a_string() {
     for spelling in ["null", "1", "true", "[text]", "{a: b}"] {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n\
+            "version: 1\nsections:\n  - match: \"/(?<major>[0-9]+)/\"\n\
              \x20   captures:\n      major: {spelling}\n"
         );
         let error = assert_anchored(
@@ -1242,7 +1242,7 @@ fn capture_type_must_be_a_string() {
 /// extension point.
 #[test]
 fn capture_type_set_is_closed() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1262,7 +1262,7 @@ sections:
 fn captures_require_regex_matcher() {
     for matcher in ["Release", "Release *", "\"*\""] {
         let source = format!(
-            "version: 2\nsections:\n  - match: {matcher}\n    required: false\n\
+            "version: 1\nsections:\n  - match: {matcher}\n    required: false\n\
              \x20   captures:\n      major: int\n      minor: int\n"
         );
         assert_errors(
@@ -1278,7 +1278,7 @@ fn captures_require_regex_matcher() {
 /// Guards are prohibition-only and reject accepting-rule fields (§2.1).
 #[test]
 fn guards_cannot_declare_captures() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 forbid_sections:
   - match: "/(?<major>[0-9]+)/"
     captures:
@@ -1310,7 +1310,7 @@ sections: []
 #[test]
 fn reserved_rule_ids_are_ordinary_capture_names() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - match: "/(?<fm>[a-z]+) (?<linkdefs>[a-z]+)/"
     repeat: 0..n
@@ -1330,7 +1330,7 @@ sections:
 /// Capture declarations are addressable, in every form a rule is spelled in.
 #[test]
 fn capture_nodes_are_addressable_in_every_rule_form() {
-    let sugar = r#"version: 2
+    let sugar = r#"version: 1
 title: Doc
 sections:
   - match: "/(?<major>[0-9]+)/"
@@ -1353,7 +1353,7 @@ sections:
         "minor: int"
     );
 
-    let outline = r#"version: 2
+    let outline = r#"version: 1
 outline:
   - match: "/(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1422,7 +1422,7 @@ proptest! {
 #[test]
 fn order_defaults_to_ascending_and_non_strict() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1447,7 +1447,7 @@ sections:
 #[test]
 fn explicit_order_values_normalize_and_keep_their_list_order() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)\\.(?<minor>[0-9]+)/"
     repeat: 0..n
@@ -1485,7 +1485,7 @@ sections:
 fn order_requires_a_list() {
     for spelling in ["null", "major", "{by: major}"] {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
              \x20   captures:\n      major: int\n    order: {spelling}\n"
         );
         assert_anchored(&source, SchemaErrorKind::InvalidOrder, spelling);
@@ -1494,7 +1494,7 @@ fn order_requires_a_list() {
 
 #[test]
 fn order_must_be_nonempty() {
-    let source = "version: 2\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+    let source = "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
                   \x20   captures:\n      major: int\n    order: []\n";
     let error = assert_anchored(source, SchemaErrorKind::InvalidOrder, "[]");
     assert_eq!(
@@ -1591,7 +1591,7 @@ fn order_by_must_name_declared_capture() {
 /// error.
 #[test]
 fn duplicate_order_is_checked_after_defaults() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1615,7 +1615,7 @@ sections:
 
     // Entries differing in any normalized component are not duplicates.
     let distinct = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1639,7 +1639,7 @@ sections:
 fn order_requires_repeatable_rule() {
     for cardinality in ["required: true", "required: false", "repeat: \"0..1\""] {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n    {cardinality}\n\
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n    {cardinality}\n\
              \x20   captures:\n      major: int\n    order:\n      - by: major\n\
              \x20     - by: major\n        dir: desc\n"
         );
@@ -1662,7 +1662,7 @@ fn order_requires_repeatable_rule() {
         "    repeat: \"1..n\"\n",
     ] {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n{cardinality}\
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n{cardinality}\
              \x20   captures:\n      major: int\n    order:\n      - by: major\n"
         );
         assert_eq!(valid(&source).addressed_root_rules()[0].order.len(), 1);
@@ -1674,7 +1674,7 @@ fn order_requires_repeatable_rule() {
 /// about the order depends on it.
 #[test]
 fn invalid_repeat_suppresses_order_max_check() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 01..2
@@ -1688,7 +1688,7 @@ sections:
 
 #[test]
 fn conflicting_cardinality_suppresses_order_max_check() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     required: true
@@ -1709,7 +1709,7 @@ sections:
 /// entry — while an entry that is independently malformed still reports.
 #[test]
 fn malformed_captures_suppress_only_capture_dependent_order_checks() {
-    let well_shaped = r#"version: 2
+    let well_shaped = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1723,7 +1723,7 @@ sections:
         &[(SchemaErrorKind::InvalidCapture, "major: integer")],
     );
 
-    let independently_malformed = r#"version: 2
+    let independently_malformed = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1749,7 +1749,7 @@ sections:
 /// in.
 #[test]
 fn order_nodes_are_addressable_in_every_rule_form() {
-    let sugar = r#"version: 2
+    let sugar = r#"version: 1
 title: Doc
 sections:
   - match: "/v(?<major>[0-9]+)/"
@@ -1777,7 +1777,7 @@ sections:
         "by: minor\n            dir: desc\n"
     );
 
-    let outline = r#"version: 2
+    let outline = r#"version: 1
 outline:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1794,7 +1794,7 @@ outline:
 }
 
 /// A rule with `<ENTRY>` substituted into a one-capture `order` list.
-const ORDER_RULE: &str = "version: 2\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+const ORDER_RULE: &str = "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
                           \x20   repeat: 0..n\n    captures:\n      major: int\n    order:\n      <ENTRY>\n";
 
 /// The source text one rule's order-entry node addresses.
@@ -1826,7 +1826,7 @@ fn order_slice<'a>(
 #[track_caller]
 fn capture_name(name: &str) -> CaptureName {
     valid(&format!(
-        "version: 2\nsections:\n  - match: \"/(?<{name}>.+)/\"\n    repeat: 0..n\n    captures:\n      {name}: text\n"
+        "version: 1\nsections:\n  - match: \"/(?<{name}>.+)/\"\n    repeat: 0..n\n    captures:\n      {name}: text\n"
     ))
     .addressed_root_rules()[0]
         .captures
@@ -1846,7 +1846,7 @@ fn capture_name(name: &str) -> CaptureName {
 fn a_capture_declared_before_a_child_id_anchors_the_child() {
     for (child, id_anchor) in CHILD_ID_SPELLINGS {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
              \x20   captures:\n      major: int\n    sections:\n      - {child}\n"
         );
         let error = assert_anchored(&source, SchemaErrorKind::DuplicateId, id_anchor);
@@ -1864,7 +1864,7 @@ fn a_capture_declared_before_a_child_id_anchors_the_child() {
 fn a_capture_declared_after_a_child_id_anchors_the_capture() {
     for (child, id_anchor) in CHILD_ID_SPELLINGS {
         let source = format!(
-            "version: 2\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
+            "version: 1\nsections:\n  - match: \"/v(?<major>[0-9]+)/\"\n\
              \x20   sections:\n      - {child}\n    captures:\n      major: int\n"
         );
         let error = assert_anchored(&source, SchemaErrorKind::DuplicateId, "major: int");
@@ -1887,7 +1887,7 @@ const CHILD_ID_SPELLINGS: [(&str, &str); 2] = [
 /// invalid declaration keeps every name beside it out of the comparison.
 #[test]
 fn an_invalid_capture_prevents_every_capture_child_collision() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1905,7 +1905,7 @@ sections:
 /// what the named scope reads, so the collision is still reported.
 #[test]
 fn an_invalid_order_does_not_suppress_a_capture_child_collision() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1932,7 +1932,7 @@ sections:
 #[test]
 fn a_capture_collides_with_neither_its_own_rule_nor_a_grandchild() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - id: major
     match: "/v(?<major>[0-9]+)/"
@@ -1960,7 +1960,7 @@ sections:
 #[test]
 fn separate_rules_may_declare_the_same_capture_name() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -1981,7 +1981,7 @@ sections:
 #[test]
 fn reserved_root_ids_are_rejected() {
     for id in ["fm", "linkdefs"] {
-        let source = format!("version: 2\nsections:\n  - id: {id}\n    match: Intro\n");
+        let source = format!("version: 1\nsections:\n  - id: {id}\n    match: Intro\n");
         let error = assert_anchored(&source, SchemaErrorKind::ReservedId, id);
         assert!(
             error
@@ -2000,7 +2000,7 @@ fn generated_reserved_root_ids_are_rejected() {
         ("Link Defs", "link-defs"),
         ("Linkdefs", "linkdefs"),
     ] {
-        let source = format!("version: 2\nsections:\n  - match: {matcher}\n");
+        let source = format!("version: 1\nsections:\n  - match: {matcher}\n");
         if id == "link-defs" {
             // Only the exact reserved spellings are held back; a slug that
             // merely resembles one is an ordinary id.
@@ -2026,7 +2026,7 @@ fn generated_reserved_root_ids_are_rejected() {
 #[test]
 fn nested_reserved_names_are_ordinary_rule_ids() {
     let schema = valid(
-        r#"version: 2
+        r#"version: 1
 sections:
   - match: Doc
     sections:
@@ -2045,7 +2045,7 @@ sections:
 /// document.
 #[test]
 fn successful_locations_carry_capture_and_order_nodes() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n
@@ -2082,7 +2082,7 @@ sections:
 /// repeated group name is refused by both, and only the matcher says so.
 #[test]
 fn the_matcher_and_the_capture_analyzer_agree_on_a_pattern() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/(?<major>x)(?<major>y)/"
     repeat: 0..n
@@ -2105,7 +2105,7 @@ sections:
 /// applies to, so one entry can carry more than one.
 #[test]
 fn undeclared_by_on_an_unrepeatable_rule_reports_both_faults() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     required: true
@@ -2137,7 +2137,7 @@ sections:
 /// not have removed from this one's view.
 #[test]
 fn an_unrepeatable_rule_rejects_every_order_entry_including_duplicates() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     required: true
@@ -2174,7 +2174,7 @@ sections:
 /// it.
 #[test]
 fn a_duplicate_entry_still_reports_its_undeclared_capture() {
-    let source = r#"version: 2
+    let source = r#"version: 1
 sections:
   - match: "/v(?<major>[0-9]+)/"
     repeat: 0..n

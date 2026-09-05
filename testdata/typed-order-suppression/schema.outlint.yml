@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Dependency suppression for value ordering (spec 3.8, last paragraphs).
 #
 # One rule declares two independent `order` entries over two captures of the

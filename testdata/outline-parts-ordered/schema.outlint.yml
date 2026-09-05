@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Distinct h1 rules with distinct child scopes. The outline is an ordered
 # consuming grammar (§3.2), so `# Guide` must precede `# Appendix` without a
 # constraint. On inversion, recovery leaves `# Appendix` unassigned and emits

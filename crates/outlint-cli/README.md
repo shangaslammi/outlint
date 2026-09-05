@@ -20,7 +20,7 @@ cargo install outlint
 `.outlint.yml`:
 
 ```yaml
-version: 2
+version: 1
 title: "*"                  # exactly one h1, any text
 sections:                   # rules for h2 headings, in document order
   - id: overview

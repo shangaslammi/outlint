@@ -1,0 +1,4 @@
+version: 1
+# §2: a mismatched h1 occupies the title slot and still opens its child scope.
+title: Doc
+sections: []

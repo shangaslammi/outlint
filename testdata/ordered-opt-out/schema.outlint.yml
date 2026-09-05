@@ -1,5 +1,5 @@
-version: 2
-# Ordering mode is local in v2: the root and `Notes` opt into unordered
+version: 1
+# Ordering mode is local: the root and `Notes` opt into unordered
 # classification, while `Steps` keeps the ordered default for its children.
 title: "*"
 unordered: true

@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Unordered so that only cardinality speaks here: in ordered mode, Beta's
 # `Note three` after `Step two` would also be `misplaced-section` (§3.5).
 unordered: true

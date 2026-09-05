@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Positional narrowing in outline locators (spec 4.4, 4.5).
 #
 # `group` is a repeatable regex rule and so is statically plural. A bare

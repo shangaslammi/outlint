@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Typed captures declared on regex rules (spec 2.1, 2.2, 2.4).
 #
 # `unordered: true` keeps the across-rule ordered grammar of 3.2 out

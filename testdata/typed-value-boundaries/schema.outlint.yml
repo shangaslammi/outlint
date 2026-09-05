@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Every boundary named in the spec 2.4 type table and its consequences list,
 # reached from both capture sites: a regex rule capture, whose source is the
 # case-preserving substring the named group selected, and a frontmatter

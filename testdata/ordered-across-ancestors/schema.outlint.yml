@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # The sugar `sections` scope is ordered (§3.2) and binds once per
 # enclosing `h1`: occurrences are compared within one instance, so ordering
 # never reaches across ancestors. `inverted.md` fires inside its one part;

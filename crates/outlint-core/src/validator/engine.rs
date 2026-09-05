@@ -1490,7 +1490,7 @@ fn value_failure_reason(value_type: ValueType, source: &str, failure: &ParseFail
     match failure {
         ParseFailure::KindMismatch { expected, actual } => {
             // §2.4: "diagnostics SHOULD suggest quoting this common mistake"
-            // — the unquoted `version: 2.2` that reads as a YAML float where
+            // — the unquoted `version: 1.2` that reads as a YAML float where
             // a string-kinded type was declared.
             let hint = if *expected == ResolvedYamlKind::String
                 && matches!(actual, ResolvedYamlKind::Integer | ResolvedYamlKind::Float)

@@ -34,7 +34,7 @@ invent, rename, or repurpose one without a spec change.
 
 ## Current state
 
-Released as 0.1.0; the working tree implements specification v2. The
+Released as 0.1.0; the working tree implements the current specification. The
 pipeline in `outlint-core`: `load_schema` / `load_schema_with_resources`
 (`loader/`) turn schema text into a normalized `Schema` or an
 `InvalidSchema` carrying positioned `SchemaError`s; `parse_markdown`

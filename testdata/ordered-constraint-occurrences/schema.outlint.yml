@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # The explicit `ordered` constraint on an unordered scope, over repeating
 # rules: §5.1's `last(A) < first(B)` compares every occurrence, so repeats
 # may sit together but not straddle the next ref's occurrences. The

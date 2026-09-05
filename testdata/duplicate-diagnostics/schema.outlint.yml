@@ -1,4 +1,4 @@
-version: 2
+version: 1
 title: null
 sections:
   # Two rules with the same matcher label in one scope: when neither is

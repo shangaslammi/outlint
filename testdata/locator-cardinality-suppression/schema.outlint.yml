@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Dependency suppression for locator descent (spec 4.4, "Dependency
 # suppression").
 #

@@ -1,3 +1,0 @@
-version: 2
-# §2: a non-null title with omitted sections leaves descendants unvalidated.
-title: Doc

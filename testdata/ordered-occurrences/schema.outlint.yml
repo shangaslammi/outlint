@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # No constraint: the `sections` list is an ordered grammar (§3.2), so repeats
 # of one rule may sit together but not straddle the next rule's occurrences.
 title: null

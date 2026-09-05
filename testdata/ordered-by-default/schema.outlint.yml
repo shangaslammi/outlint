@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Nothing here says `unordered`: the `sections` list is an ordered grammar
 # (§3.2).
 # Unmatched headers match no rule and float freely in this open scope, and

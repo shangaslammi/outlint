@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # The explicit `ordered` constraint on the general form's outline scope,
 # declared unordered so the constraint is the only order. `ordered` across
 # h1 headers is expressible exactly because each ref path crosses only

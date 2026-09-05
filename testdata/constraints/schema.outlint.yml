@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # The partial `ordered: [a, c]` below needs an unordered scope: an ordered
 # scope already orders every rule in it and refuses the constraint as
 # redundant.

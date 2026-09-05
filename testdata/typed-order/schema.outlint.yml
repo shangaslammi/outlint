@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Value ordering of a rule's repeated matches (spec 3.8). Each `order` entry
 # independently orders the occurrences its own rule matched; headers matched by
 # other rules and unmatched headers do not break adjacency.

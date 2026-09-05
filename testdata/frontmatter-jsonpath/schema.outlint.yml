@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # JSONPath frontmatter propositions (spec 4.6). Every query here stays inside
 # the guaranteed core of 4.6 — child segments with exactly one name, index, or
 # wildcard selector each. Filters, slices, descendant segments, multi-selectors

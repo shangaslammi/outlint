@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # A skipping header takes part in no rule, and neither does anything below
 # it. `Overview` closes its child scope and requires `Goals`, so if the
 # stray top-level `Overview` were matched it would drag in a whole cascade:

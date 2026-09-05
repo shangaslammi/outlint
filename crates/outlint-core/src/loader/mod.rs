@@ -60,7 +60,7 @@ type JsonMap = serde_json::Map<String, Value>;
 ///
 /// let loaded = load_schema(
 ///     r#"
-/// version: 2
+/// version: 1
 /// title: null
 /// sections:
 ///   - match: Overview
@@ -494,14 +494,14 @@ impl Loader {
         }
         if raw
             .as_number()
-            .is_some_and(|number| number.to_string() == "2")
+            .is_some_and(|number| number.to_string() == "1")
         {
-            Some(SchemaVersion::V2)
+            Some(SchemaVersion::V1)
         } else {
             self.error_at(
                 SchemaErrorKind::UnsupportedVersion,
                 self.range(RangeKey::DocumentField("version".into())),
-                format!("unsupported schema version {raw}; expected 2"),
+                format!("unsupported schema version {raw}; expected 1"),
             );
             None
         }

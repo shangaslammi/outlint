@@ -1,4 +1,4 @@
-# Outlint Schema — Specification v2
+# Outlint Schema — Specification
 
 Status: Normative public specification; may change before 1.0. The reference
 implementation in this repository may lag newly specified features.
@@ -155,15 +155,18 @@ its text is written at.
 
 ## 2. Schema format
 
-A schema is a YAML (or JSON) document with `version: 2` and one of two
-top-level shapes. An implementation of this version MUST reject every other
-version, including `version: 1`, as schema error `unsupported-version`; it
-MUST NOT silently invoke a legacy matching model. The **general form**
+A schema is a YAML (or JSON) document with `version: 1` and one of two
+top-level shapes. The `version: 1` field denotes the language line. Until
+release 1.0, that language MAY change incompatibly between releases, and such
+changes are recorded in the changelog rather than by changing this field. From
+release 1.0 onward, the field is a compatibility promise. An implementation
+MUST reject every other integer as schema error `unsupported-version`; it MUST
+NOT silently invoke a different matching model. The **general form**
 declares `outline`, the accepting rule list (§2.1) for the document's h1
 scope:
 
 ```yaml
-version: 2                         # required, integer, currently 2
+version: 1                         # required integer; the language line
 options:                           # optional, see §7
   match_case: false
   strip_inline_markup: true
@@ -187,7 +190,7 @@ The **sugar form** serves the common document with exactly one h1 — a
 title:
 
 ```yaml
-version: 2
+version: 1
 title: <matcher>                   # optional; or null — no h1 is allowed
 options: ...
 frontmatter: ...
@@ -206,7 +209,7 @@ sections: [<rule>, ...]   #  ≡    - match: <matcher>
                           #       sections: [<rule>, ...]
 ```
 
-The synthesized rule uses the v2 exact-one default. It is exempt from
+The synthesized rule uses this revision's exact-one default. It is exempt from
 `missing-cardinality` even when its matcher is a regex, glob, or wildcard.
 Its child `forbid_sections`, `extras`, `unordered`, and `constraints` are the
 corresponding top-level sugar members.
@@ -256,7 +259,7 @@ Every Outlint mapping — the top level, `options`, `frontmatter`, each rule,
 each guard, each order entry, and each constraint — admits only the keys this
 specification names for it. An unknown key is
 `invalid-document-shape`, except where a construct assigns a more specific
-schema error. In particular, v1 rule members `strict`, `allow`, and `ordered`
+schema error. In particular, the 0.1.0 rule members `strict`, `allow`, and `ordered`
 and `options.ordered_sections` are rejected as `invalid-document-shape`
 regardless of their values. Frontmatter `allow` is the separate presence
 policy of §2.3 and is unaffected. An inline `frontmatter.schema` is JSON
@@ -387,7 +390,7 @@ detection for exact, glob, or regex matchers.
 
 An exposed parsed-schema API MUST represent accepting rules and guards as
 distinct types, represent `extras` and `unordered` on every exposed scope,
-and MUST NOT deserialize removed v1 members into ignored fields.
+and MUST NOT deserialize members removed since the 0.1.0 language into ignored fields.
 
 ### 2.2 Matcher forms
 
@@ -866,7 +869,7 @@ specific `one_of` alternative and 1 only when its wildcard alternative is
 required — but MUST minimize total wildcard cost before applying the
 count-vector tie-break.
 Content-level prohibition guards, extras, and unordered scopes remain
-undefined; using them in such a context has no v2 semantics.
+undefined; using them in such a context has no semantics in this revision.
 
 ---
 
@@ -1456,7 +1459,8 @@ it, and an invalid regex does not produce capture-group errors.
 `missing-cardinality` anchors at the `match` of an accepting regex, glob, or
 wildcard rule that declares neither `required` nor `repeat`.
 `unreachable-rule` anchors at each accepting rule declared after the first
-wildcard in an unordered scope. Removed v1 members, malformed guards, and
+wildcard in an unordered scope. Members removed since the 0.1.0 language,
+malformed guards, and
 invalid `extras` or `unordered` declarations use
 `invalid-document-shape`.
 
@@ -1505,7 +1509,7 @@ suppression.
 
 ```
 load_schema:
-  parse YAML; require version 2; reject unknown and removed keys (§2)
+  parse YAML; require version 1; reject unknown and removed keys (§2)
   settle the top-level shape (§2):
     outline beside title/sections -> conflicting-outline
     outline, including [], is a declared exhaustive h1 scope
@@ -1669,7 +1673,7 @@ memory bounds, matcher-text costs, and operational-limit rule are §3.7.
 ## 9. Complete examples
 
 ```yaml
-version: 2
+version: 1
 title: "*"
 
 frontmatter:
@@ -1752,7 +1756,7 @@ The same machinery one level up — a multi-part handbook, written in the
 general form because it has several h1s:
 
 ```yaml
-version: 2
+version: 1
 outline:
   - id: intro
     match: "Introduction"
@@ -1773,7 +1777,7 @@ exists.
 An ordered scope with non-positional extras:
 
 ```yaml
-version: 2
+version: 1
 title: "Guide"
 extras: anywhere
 sections:
@@ -1790,7 +1794,7 @@ cardinality.
 An unordered open presence schema:
 
 ```yaml
-version: 2
+version: 1
 title: "*"
 unordered: true
 extras: anywhere
@@ -1840,17 +1844,17 @@ document order — selects the assigned rule.
   write `required: false` for `0..1` and `repeat` for any repeated phase.
   Regex, glob, and wildcard rules must always spell `required` or `repeat`,
   so decide their intended collection size rather than relying on a default.
-- When migrating v1, remove `strict`, accepting-rule `allow`, rule-level
+- When migrating from the 0.1.0 language, remove `strict`, accepting-rule `allow`, rule-level
   `ordered`, and `options.ordered_sections`; replace intentional denials with
   guards, openness with `extras` or a positioned wildcard, and each inherited
   unordered scope with a local `unordered: true`. Review every formerly
   unannotated exact rule for optionality or repetition. An accepting exception
-  before a broader v1 denial may have no exact v2 translation because guards
+  before a broader 0.1.0 denial may have no exact translation because guards
   always win and the regex dialect has no lookaround.
-- To preserve v1 first-match assignment for overlapping nameable rules,
-  declare the v2 scope unordered and add an `ordered` constraint over those
+- To preserve the 0.1.0 first-match assignment for overlapping nameable rules,
+  declare the revised scope unordered and add an `ordered` constraint over those
   ids. This preserves assignment, cardinality, and the order predicate, but
-  not v1's automatic-order diagnostic attribution or multiplicity; anonymous
+  not the 0.1.0 language's automatic-order diagnostic attribution or multiplicity; anonymous
   rules must also acquire ids. Delete rules shadowed by a wildcard before
   enabling unordered mode and remove references to their ids.
 - Keep structural validation of frontmatter in `frontmatter.schema` (JSON
@@ -1895,7 +1899,7 @@ every requirement below.
 
 ### 11.1 Commands and arguments
 
-The v2 command surface is:
+The command surface is:
 
 ```text
 outlint check <FILE>... [--schema <SCHEMA>] [--format human|json]
@@ -2025,7 +2029,7 @@ Operationally unreadable inputs do not produce results. `summary.files` is
 the number of results; the other counts partition those results by kind and
 count their diagnostics.
 
-Schema v2 changes the envelope version from 3 to 4 because guard attribution
+This revision changes the envelope version from 3 to 4 because guard attribution
 adds a schema-node variant and the public diagnostic-id set adds
 `misplaced-section`. Consumers that understand only envelope 3 MUST reject
 envelope 4 rather than interpreting it as an older shape. Any exposed
@@ -2136,7 +2140,7 @@ affected document and makes the invocation exit with status 2.
 
 ### 11.6 Side effects and resource retrieval
 
-The v2 CLI validates only. It MUST NOT rewrite Markdown or schema files,
+The CLI validates only. It MUST NOT rewrite Markdown or schema files,
 insert or normalize headings in source, generate suppressions, or modify
 frontmatter. Setext normalization in Section 1.2 is an internal parsing step,
 not a source edit.

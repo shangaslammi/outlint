@@ -480,8 +480,8 @@ pub struct FrontmatterSchema {
 /// A supported version of the Outlint schema language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SchemaVersion {
-    /// Version 2 of the schema language.
-    V2,
+    /// The version 1 language line.
+    V1,
 }
 
 /// Options controlling Markdown parsing and matcher behavior.

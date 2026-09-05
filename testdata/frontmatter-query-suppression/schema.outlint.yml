@@ -1,4 +1,4 @@
-version: 2
+version: 1
 # Suppression driven by a JSONPath boolean read (spec 4.6).
 #
 # A bare `fm[...]` is a typed boolean read: satisfied iff at least one result

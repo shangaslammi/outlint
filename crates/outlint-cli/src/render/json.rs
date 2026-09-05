@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 /// §11.3 fixes the number and requires consumers to reject versions they do
 /// not know rather than reading them as an older shape, so Typed Values is a
 /// hard cut from 3 to 4: there is no second emission path, no negotiation,
-/// and no `json-v2` format name to fall back to.
+/// and no legacy format name to fall back to.
 const ENVELOPE_VERSION: u64 = 4;
 
 use crate::diagnostics::{
