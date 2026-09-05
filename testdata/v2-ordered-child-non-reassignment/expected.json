@@ -1,0 +1,12 @@
+{
+  "second-child.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": ["Part"], "matcher": "Alpha" }
+    },
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["Part", "Beta"] }
+    }
+  ]
+}

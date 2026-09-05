@@ -1,0 +1,11 @@
+version: 2
+title: null
+# §3.2: A{1..n}, A{1..1} over three A headings chooses (2, 1).
+sections:
+  - id: prefix
+    match: A
+    repeat: 1..n
+  - id: suffix
+    match: A
+    required: true
+    sections: []

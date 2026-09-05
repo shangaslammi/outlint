@@ -1,0 +1,12 @@
+version: 2
+title: null
+# §3.2: identical A{0..2}, A{0..2} rules require explicit ids and choose
+# (2, 0), so neither first-rule child is validated.
+sections:
+  - id: first
+    match: A
+    repeat: 0..2
+  - id: second
+    match: A
+    repeat: 0..2
+    sections: []

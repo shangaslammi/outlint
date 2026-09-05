@@ -1,0 +1,18 @@
+version: 2
+title: null
+# §§3.3-3.5: unordered first-match assignment composes with guards, extras,
+# and cardinality without producing misplaced-section.
+unordered: true
+sections:
+  - id: broad
+    match: "A*"
+    repeat: 2..2
+  - id: exact
+    match: A
+    required: false
+  - id: b
+    match: B
+    required: true
+forbid_sections:
+  - match: Secret
+extras: anywhere

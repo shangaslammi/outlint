@@ -1,0 +1,7 @@
+version: 2
+title: null
+# §§2, 3.6: an explicit empty child grammar rejects retained children.
+sections:
+  - match: Container
+    required: true
+    sections: []

@@ -1,0 +1,8 @@
+{
+  "wrong.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Wrong"] }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+version: 2
+# §2: title:null exposes the root h2 scope and forbids any stray h1 subtree.
+title: null
+sections:
+  - match: Overview
+    required: true
+extras: anywhere

@@ -1,0 +1,11 @@
+version: 2
+title: null
+# §8: when consume and advance preserve the same recovery cost, consume wins.
+sections:
+  - id: broad
+    match: "A*"
+    required: true
+    sections: []
+  - id: exact
+    match: A
+    required: true

@@ -1,0 +1,28 @@
+{
+  "any-order.md": [],
+  "first-match.md": [],
+  "missing.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "B" }
+    }
+  ],
+  "too-few.md": [
+    {
+      "id": "too-few-sections",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "A*" }
+    }
+  ],
+  "too-many.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["A three"] }
+    }
+  ],
+  "composed.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Secret"] }
+    }
+  ]
+}

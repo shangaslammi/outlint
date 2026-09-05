@@ -1,0 +1,12 @@
+{
+  "positioned.md": [
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["Before", "Leading child"] }
+    },
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["After", "Trailing child"] }
+    }
+  ]
+}

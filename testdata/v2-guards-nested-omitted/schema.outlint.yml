@@ -1,0 +1,9 @@
+version: 2
+title: null
+# §§2, 3.3: guards run with omitted sections; other children stay unassigned
+# and unvisited, while a guarded subtree is removed as a unit.
+sections:
+  - match: Container
+    required: true
+    forbid_sections:
+      - match: Secret

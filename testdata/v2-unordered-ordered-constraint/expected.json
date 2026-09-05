@@ -1,0 +1,9 @@
+{
+  "pass.md": [],
+  "fail.md": [
+    {
+      "id": "ordered",
+      "target": { "kind": "document" }
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+version: 2
+title: null
+# §8: at B,A, leave preserves the same cost as advance and therefore wins.
+sections:
+  - match: A
+    required: true
+  - match: B
+    required: true

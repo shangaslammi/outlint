@@ -1,0 +1,8 @@
+version: 2
+title: null
+# §3.3: the guard removes A before its exact-one accepting rule is matched.
+sections:
+  - match: A
+    required: true
+forbid_sections:
+  - match: A

@@ -1,0 +1,7 @@
+version: 2
+title: null
+# §3.3: extras is inert when the wildcard makes every matrix row nonempty.
+sections:
+  - match: "*"
+    repeat: 0..1
+extras: anywhere

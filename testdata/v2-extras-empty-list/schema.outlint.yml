@@ -1,0 +1,5 @@
+version: 2
+title: null
+# §§2, 3.3: an empty declared list can admit every heading as an extra.
+sections: []
+extras: anywhere

@@ -1,0 +1,8 @@
+{
+  "child.md": [
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["Container", "Child"] }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+version: 2
+title: null
+# §3.3: filtering an intervening extra still binds both repeated matches.
+sections:
+  - match: "A *"
+    repeat: 2..2
+extras: anywhere

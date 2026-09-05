@@ -1,0 +1,8 @@
+{
+  "canonical.md": [
+    {
+      "id": "unexpected-section",
+      "target": { "kind": "header", "path": ["A", "Suffix child"] }
+    }
+  ]
+}

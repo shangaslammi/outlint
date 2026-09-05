@@ -1,0 +1,12 @@
+version: 2
+title: null
+# §3.2: both wildcard phases are positioned around the specific phase.
+sections:
+  - match: "*"
+    required: true
+    sections: []
+  - match: Middle
+    required: true
+  - match: "*"
+    required: true
+    sections: []

@@ -1,0 +1,6 @@
+version: 2
+title: null
+# §3.5: one recovered repeating rule exposes all four cardinality outcomes.
+sections:
+  - match: "A *"
+    repeat: 2..2

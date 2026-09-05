@@ -1,0 +1,11 @@
+version: 2
+title: null
+# §3.2: *{0..n}, A{1..1}, *{0..n} over A,A chooses (0,1,1).
+sections:
+  - match: "*"
+    repeat: 0..n
+  - match: A
+    required: true
+    sections: []
+  - match: "*"
+    repeat: 0..n

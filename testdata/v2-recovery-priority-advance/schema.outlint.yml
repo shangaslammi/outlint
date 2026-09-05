@@ -1,0 +1,10 @@
+version: 2
+title: null
+# §8: advance is selected when it is the only optimal transition.
+sections:
+  - match: A
+    required: false
+  - match: B
+    required: true
+  - match: C
+    required: true

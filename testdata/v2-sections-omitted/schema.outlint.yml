@@ -1,0 +1,6 @@
+version: 2
+title: null
+# §§2, 3.6: omitted sections assigns and validates none of the child subtree.
+sections:
+  - match: Container
+    required: true

@@ -1,0 +1,14 @@
+{
+  "first-guard.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Blocked exact"] }
+    }
+  ],
+  "beats-wildcard.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Wildcard target"] }
+    }
+  ]
+}

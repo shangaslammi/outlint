@@ -1,0 +1,9 @@
+version: 2
+title: null
+# §3.3: all-false rows are filtered without changing retained rule order.
+sections:
+  - match: A
+    required: true
+  - match: B
+    required: true
+extras: anywhere

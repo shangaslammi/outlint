@@ -1,0 +1,17 @@
+version: 2
+title: null
+# §3.2: assignment ignores child validity. The optional Part binds to the
+# first rule, whose child grammar is then diagnosed without reassignment.
+sections:
+  - id: first-part
+    match: Part
+    required: false
+    sections:
+      - match: Alpha
+        required: true
+  - id: second-part
+    match: Part
+    required: false
+    sections:
+      - match: Beta
+        required: true

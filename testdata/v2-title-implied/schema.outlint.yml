@@ -1,0 +1,4 @@
+version: 2
+# §2: bare sections implies one wildcard title.
+sections: []
+extras: anywhere

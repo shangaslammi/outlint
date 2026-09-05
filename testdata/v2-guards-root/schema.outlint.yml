@@ -1,0 +1,11 @@
+version: 2
+title: null
+# §3.3: only the first matching guard reports, and guards beat a wildcard.
+sections:
+  - match: "*"
+    repeat: 0..n
+    sections: []
+forbid_sections:
+  - match: "Blocked *"
+  - match: "Blocked exact"
+  - match: "Wildcard target"

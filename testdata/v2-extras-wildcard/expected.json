@@ -1,0 +1,8 @@
+{
+  "excess.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Second"] }
+    }
+  ]
+}

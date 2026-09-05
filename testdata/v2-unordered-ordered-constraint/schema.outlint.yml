@@ -1,0 +1,13 @@
+version: 2
+title: null
+# §§3.4, 5.1: a partial ordered constraint is legal inside an unordered scope.
+unordered: true
+sections:
+  - id: a
+    match: A
+    repeat: 0..n
+  - id: b
+    match: B
+    repeat: 0..n
+constraints:
+  - ordered: [a, b]

@@ -1,0 +1,8 @@
+{
+  "advance.md": [
+    {
+      "id": "missing-section",
+      "target": { "kind": "missing_header", "parent": [], "matcher": "C" }
+    }
+  ]
+}
