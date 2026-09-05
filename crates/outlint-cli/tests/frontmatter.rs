@@ -7,7 +7,7 @@ fn check_validates_yaml_frontmatter_with_a_linked_json_schema() {
     let directory = TempDir::new("linked-frontmatter");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  required: true\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  required: true\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write(
         "frontmatter.schema.json",
@@ -69,7 +69,7 @@ fn frontmatter_schema_messages_preserve_document_number_spellings() {
     let directory = TempDir::new("frontmatter-number-messages");
     directory.write(
         "schema.yml",
-        "version: 1\ntitle: null\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\ntitle: null\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write(
         "frontmatter.schema.json",
@@ -123,7 +123,7 @@ fn frontmatter_schema_diagnostics_anchor_to_the_failing_entry() {
     let directory = TempDir::new("frontmatter-anchors");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write(
         "frontmatter.schema.json",
@@ -219,7 +219,7 @@ fn frontmatter_schema_anchors_reach_entries_beside_tags() {
     let directory = TempDir::new("frontmatter-anchors-tagged");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write(
         "frontmatter.schema.json",
@@ -260,11 +260,11 @@ fn block_level_frontmatter_diagnostics_stay_anchored_to_the_block() {
     let directory = TempDir::new("frontmatter-block-anchors");
     directory.write(
         "required.yml",
-        "version: 1\nfrontmatter:\n  required: true\nsections: []\n",
+        "version: 2\nfrontmatter:\n  required: true\nsections: []\n",
     );
     directory.write(
         "forbidden.yml",
-        "version: 1\nfrontmatter:\n  allow: false\nsections: []\n",
+        "version: 2\nfrontmatter:\n  allow: false\nsections: []\n",
     );
     directory.write("absent.md", "# Document\n");
     directory.write("unparsable.md", "---\nnot: [a\n---\n\n# Document\n");
@@ -346,7 +346,7 @@ fn frontmatter_reference_details_retain_typed_equality() {
     let directory = TempDir::new("frontmatter-reference");
     directory.write(
         "schema.yml",
-        "version: 1\ntitle: null\nsections:\n  - id: a\n    match: A\nconstraints:\n  - one_of: [\"fm[$.status]=true\", \"fm[$.status]\", a]\n",
+        "version: 2\ntitle: null\nsections:\n  - id: a\n    match: A\n    required: false\nconstraints:\n  - one_of: [\"fm[$.status]=true\", \"fm[$.status]\", a]\n",
     );
     directory.write("doc.md", "plain text\n");
 

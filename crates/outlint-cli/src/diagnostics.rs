@@ -520,7 +520,7 @@ fn diagnostic_sort_key(diagnostic: &RenderedDiagnostic) -> DiagnosticSortKey<'_>
 
 /// Sorts one file's diagnostics into the order the JSON contract promises.
 ///
-/// The key is **total** and is built from nothing but rendered version 3
+/// The key is **total** and is built from nothing but rendered version 4
 /// data. §11.4 requires exactly that — "this order is a function of rendered
 /// diagnostic data and MUST NOT depend on validator traversal or discovery
 /// order" — so no validator index, discovery sequence, pointer address, or
@@ -689,6 +689,10 @@ mod tests {
                     scope: scope(),
                     index: 1,
                 },
+                RenderedSchemaNode::Guard {
+                    scope: scope(),
+                    index: 1,
+                },
                 RenderedSchemaNode::Capture {
                     scope: scope(),
                     index: 1,
@@ -726,6 +730,23 @@ mod tests {
                 RenderedSchemaNode::Rule {
                     scope: vec![1, 0],
                     index: 0,
+                },
+            ],
+        );
+        assert_ascending(
+            "guard coordinates",
+            &[
+                RenderedSchemaNode::Guard {
+                    scope: vec![0],
+                    index: 9,
+                },
+                RenderedSchemaNode::Guard {
+                    scope: vec![1],
+                    index: 0,
+                },
+                RenderedSchemaNode::Guard {
+                    scope: vec![1],
+                    index: 1,
                 },
             ],
         );

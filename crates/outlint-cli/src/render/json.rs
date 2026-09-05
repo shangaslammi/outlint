@@ -1,4 +1,4 @@
-//! The version 3 JSON output envelope and its field conversions.
+//! The version 4 JSON output envelope and its field conversions.
 
 use serde_json::{json, Map, Value};
 
@@ -6,9 +6,9 @@ use serde_json::{json, Map, Value};
 ///
 /// §11.3 fixes the number and requires consumers to reject versions they do
 /// not know rather than reading them as an older shape, so Typed Values is a
-/// hard cut from 2 to 3: there is no second emission path, no negotiation,
+/// hard cut from 3 to 4: there is no second emission path, no negotiation,
 /// and no `json-v2` format name to fall back to.
-const ENVELOPE_VERSION: u64 = 3;
+const ENVELOPE_VERSION: u64 = 4;
 
 use crate::diagnostics::{
     RenderedDiagnostic, RenderedMatcher, RenderedPosition, RenderedReference, RenderedScalar,
@@ -301,7 +301,7 @@ mod tests {
     /// omitted rather than emitted as null, and `Some("")` — the root pointer
     /// naming the mapping itself — stays distinct from `None`.
     #[test]
-    fn target_shapes_match_their_version_3_fixtures_exactly() {
+    fn target_shapes_match_their_version_4_fixtures_exactly() {
         let range = || {
             Some(RenderedLineRange {
                 start_line: 1,
@@ -373,7 +373,7 @@ mod tests {
     /// `name` to them, `order_entry` adds `order_index`, and
     /// `frontmatter_capture` has a `name` and no rule coordinates at all.
     #[test]
-    fn schema_node_shapes_match_their_version_3_fixtures_exactly() {
+    fn schema_node_shapes_match_their_version_4_fixtures_exactly() {
         let (scope, index) = rule_coordinates();
         assert_exact(
             schema_node_json,
@@ -397,6 +397,13 @@ mod tests {
                         index,
                     },
                     json!({"kind": "rule", "scope": [1, 0], "index": 2}),
+                ),
+                (
+                    RenderedSchemaNode::Guard {
+                        scope: scope.clone(),
+                        index,
+                    },
+                    json!({"kind": "guard", "scope": [1, 0], "index": 2}),
                 ),
                 (
                     RenderedSchemaNode::Capture {
@@ -438,7 +445,7 @@ mod tests {
     /// `positions` and one with them, and a frontmatter query without and with
     /// `equals`.
     #[test]
-    fn reference_shapes_match_their_version_3_fixtures_exactly() {
+    fn reference_shapes_match_their_version_4_fixtures_exactly() {
         assert_exact(
             reference_json,
             vec![
@@ -572,7 +579,7 @@ mod tests {
     /// §11.3 names four matcher kinds; the first three carry `value` and
     /// `any` carries nothing.
     #[test]
-    fn matcher_shapes_match_their_version_3_fixtures_exactly() {
+    fn matcher_shapes_match_their_version_4_fixtures_exactly() {
         assert_exact(
             matcher_json,
             vec![
@@ -598,7 +605,7 @@ mod tests {
     /// a float's spelling is significant, so neither survives a JSON number.
     /// The other three use their corresponding JSON types.
     #[test]
-    fn equality_scalar_shapes_match_their_version_3_fixtures_exactly() {
+    fn equality_scalar_shapes_match_their_version_4_fixtures_exactly() {
         assert_exact(
             scalar_json,
             vec![
@@ -718,7 +725,7 @@ mod tests {
 
     /// The whole §11.3 envelope, compared as one value.
     #[test]
-    fn the_envelope_matches_its_version_3_fixture_exactly() {
+    fn the_envelope_matches_its_version_4_fixture_exactly() {
         let rendered = render_json(&[ValidationResult {
             kind: ResultKind::Document,
             path: "doc.md".into(),
@@ -729,7 +736,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&rendered).expect("one JSON document"),
             json!({
-                "version": 3,
+                "version": 4,
                 "results": [{
                     "kind": "document",
                     "path": "doc.md",

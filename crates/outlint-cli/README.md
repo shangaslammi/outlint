@@ -20,7 +20,7 @@ cargo install outlint
 `.outlint.yml`:
 
 ```yaml
-version: 1
+version: 2
 title: "*"                  # exactly one h1, any text
 sections:                   # rules for h2 headings, in document order
   - id: overview
@@ -29,8 +29,7 @@ sections:                   # rules for h2 headings, in document order
   - id: design
     match: "Design"
     required: true
-    strict: true            # only the child rules below are allowed
-    sections:
+    sections:               # this declared child scope is exhaustive
       - match: "Alternatives"
   - id: rollout
     match: "Rollout"
@@ -54,15 +53,13 @@ outlint check design.md
 ```
 
 ```text
-design.md:1:1 [ordered] sections are out of the declared order: `Overview` must precede `Design`
-  observed order:
-    design.md:3:1 "Widget Redesign > Design"
-    design.md:7:1 "Widget Redesign > Overview"
-  schema: .outlint.yml:2:8
-
-design.md:5:1 [unexpected-section] the section is not permitted in this closed scope
-  section: "Widget Redesign > Design > Implementation Notes"
+design.md:1:1 [missing-section] matched 0 sections, but at least 1 are required
+  expected: "Design"
   rule: .outlint.yml:7:5
+
+design.md:3:1 [misplaced-section] the section matches a rule but cannot occupy its ordered phase
+  section: "Widget Redesign > Design"
+  schema: .outlint.yml:2:8
 
 2 diagnostics in 1 file
 ```
@@ -83,11 +80,11 @@ outlint check rollout.md --format json
 ```
 
 ```json
-{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":3}
+{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":4}
 ```
 
-The envelope is exactly version `3`. There is no version 2 and no
-compatibility mode: consumers must read `version` and reject a value they do
+The envelope is exactly version `4`. There is no compatibility mode:
+consumers must read `version` and reject a value they do
 not support instead of assuming the older reference shape.
 
 Every diagnostic carries a `target` object tagged by `kind`: `header`,

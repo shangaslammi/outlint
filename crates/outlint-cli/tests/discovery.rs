@@ -8,11 +8,11 @@ fn discovery_uses_the_nearest_schema_for_each_file() {
     let directory = TempDir::new("discovery");
     directory.write(
         ".outlint.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: Root\n    required: true\n",
+        "version: 2\ntitle: null\nsections:\n  - match: Root\n    required: true\n",
     );
     directory.write(
         "nested/.outlint.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: Nested\n    required: true\n",
+        "version: 2\ntitle: null\nsections:\n  - match: Nested\n    required: true\n",
     );
     directory.write("root.md", "## Root\n");
     directory.write("nested/doc.md", "## Nested\n");
@@ -32,11 +32,11 @@ fn discovery_prefers_the_stem_schema_within_a_directory() {
     let directory = TempDir::new("stem-discovery");
     directory.write(
         ".outlint.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: Root\n    required: true\n",
+        "version: 2\ntitle: null\nsections:\n  - match: Root\n    required: true\n",
     );
     directory.write(
         "CHANGELOG.outlint.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: Log\n    required: true\n",
+        "version: 2\ntitle: null\nsections:\n  - match: Log\n    required: true\n",
     );
     directory.write("CHANGELOG.md", "## Log\n");
     directory.write("other.md", "## Root\n");
@@ -56,7 +56,7 @@ fn discovery_finds_a_stem_schema_in_an_ancestor_directory() {
     let directory = TempDir::new("stem-ancestor");
     directory.write(
         "doc.outlint.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: Far\n    required: true\n",
+        "version: 2\ntitle: null\nsections:\n  - match: Far\n    required: true\n",
     );
     directory.write("nested/doc.md", "## Far\n");
 
@@ -73,11 +73,11 @@ fn discovery_prefers_a_nearer_directory_over_an_ancestor_stem_schema() {
     let directory = TempDir::new("stem-precedence");
     directory.write(
         "doc.outlint.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: Far\n    required: true\n",
+        "version: 2\ntitle: null\nsections:\n  - match: Far\n    required: true\n",
     );
     directory.write(
         "nested/.outlint.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: Near\n    required: true\n",
+        "version: 2\ntitle: null\nsections:\n  - match: Near\n    required: true\n",
     );
     directory.write("nested/doc.md", "## Near\n");
 
@@ -94,7 +94,7 @@ fn discovery_treats_an_extensionless_file_name_as_its_own_stem() {
     let directory = TempDir::new("stem-extensionless");
     directory.write(
         "NOTES.outlint.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: Notes\n    required: true\n",
+        "version: 2\ntitle: null\nsections:\n  - match: Notes\n    required: true\n",
     );
     directory.write("NOTES", "## Notes\n");
 
@@ -111,7 +111,7 @@ fn discovery_skips_directories_named_like_schemas() {
     let directory = TempDir::new("stem-directory-candidates");
     directory.write(
         ".outlint.yml",
-        "version: 1\ntitle: null\nsections:\n  - match: Root\n    required: true\n",
+        "version: 2\ntitle: null\nsections:\n  - match: Root\n    required: true\n",
     );
     fs::create_dir_all(directory.path().join("nested/.outlint.yml"))
         .expect("directory candidate should be creatable");

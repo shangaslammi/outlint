@@ -43,7 +43,7 @@ use serde_json::Value;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) const VALID_SCHEMA: &str =
-    "version: 1\ntitle: null\nsections:\n  - match: Required\n    required: true\n";
+    "version: 2\ntitle: null\nsections:\n  - match: Required\n    required: true\n";
 
 pub(crate) struct TempDir(PathBuf);
 

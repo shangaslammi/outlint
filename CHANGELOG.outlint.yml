@@ -1,7 +1,7 @@
 # Keep a Changelog structure for CHANGELOG.md, discovered automatically by
 # `outlint check CHANGELOG.md` (per-document discovery, spec §11.2) and
 # enforced by the CLI test suite.
-version: 1
+version: 2
 
 title: "Changelog"
 
@@ -9,7 +9,6 @@ sections:
   - id: unreleased
     match: "Unreleased"
     required: true
-    strict: true
     sections: &categories
       - match: "Added"
         required: false
@@ -27,5 +26,4 @@ sections:
   - id: release
     match: "/[0-9]+\\.[0-9]+\\.[0-9]+.*/"
     repeat: "1..n"
-    strict: true
     sections: *categories

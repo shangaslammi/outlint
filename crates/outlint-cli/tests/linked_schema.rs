@@ -9,7 +9,7 @@ fn linked_schema_root_uri_does_not_alias_a_sibling_root_json() {
     let directory = TempDir::new("linked-frontmatter-root-name-collision");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write("frontmatter.schema.json", r#"{"$ref":"root.json"}"#);
     directory.write("root.json", r#"{"required":["needed"]}"#);
@@ -39,7 +39,7 @@ fn linked_schema_parent_refs_from_a_nested_root_remain_distinct() {
     let directory = TempDir::new("linked-frontmatter-parent-ref-collision");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: sub/main.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: sub/main.json\nsections: []\n",
     );
     directory.write(
         "sub/main.json",
@@ -73,7 +73,7 @@ fn linked_schema_same_basename_resources_in_different_directories_remain_distinc
     let directory = TempDir::new("linked-frontmatter-basename-collision");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: workspace/deep/main.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: workspace/deep/main.json\nsections: []\n",
     );
     directory.write(
         "workspace/deep/main.json",
@@ -118,7 +118,7 @@ fn linked_schema_protocol_relative_ref_does_not_read_from_current_directory() {
     let directory = TempDir::new("linked-frontmatter-uri-authority");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write(
         "frontmatter.schema.json",
@@ -161,17 +161,17 @@ fn linked_schema_read_failures_name_the_unreadable_resource() {
     let directory = TempDir::new("linked-frontmatter-read-failures");
     directory.write(
         "root-missing.yml",
-        "version: 1\nfrontmatter:\n  schema: missing-root.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: missing-root.json\nsections: []\n",
     );
     directory.write(
         "root-directory.yml",
-        "version: 1\nfrontmatter:\n  schema: unreadable-root\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: unreadable-root\nsections: []\n",
     );
     fs::create_dir(directory.path().join("unreadable-root"))
         .expect("unreadable root fixture directory is creatable");
     directory.write(
         "nested-missing.yml",
-        "version: 1\nfrontmatter:\n  schema: nested-missing-root.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: nested-missing-root.json\nsections: []\n",
     );
     directory.write(
         "nested-missing-root.json",
@@ -179,7 +179,7 @@ fn linked_schema_read_failures_name_the_unreadable_resource() {
     );
     directory.write(
         "nested-directory.yml",
-        "version: 1\nfrontmatter:\n  schema: nested-directory-root.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: nested-directory-root.json\nsections: []\n",
     );
     directory.write(
         "nested-directory-root.json",
@@ -254,7 +254,7 @@ fn linked_schema_reports_all_invalid_resources_in_reference_order() {
     let directory = TempDir::new("linked-frontmatter-error-collection");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: root.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: root.json\nsections: []\n",
     );
     directory.write(
         "root.json",
@@ -289,7 +289,7 @@ fn linked_schema_localhost_ref_loads_the_local_absolute_path() {
     let directory = TempDir::new("linked-frontmatter-localhost-authority");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     let target = directory.path().join("defs.json");
     directory.write(
@@ -324,7 +324,7 @@ fn linked_schema_absolute_id_does_not_rebase_physical_sibling_reads() {
     let directory = TempDir::new("linked-frontmatter-absolute-id");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write(
         "frontmatter.schema.json",
@@ -369,7 +369,7 @@ fn linked_schema_absolute_id_preserves_same_document_fragment_refs() {
     let directory = TempDir::new("linked-frontmatter-absolute-id-fragment");
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write(
         "frontmatter.schema.json",
@@ -407,7 +407,7 @@ fn linked_schema_remote_ref_uses_controlled_no_retrieval_diagnostic() {
     let remote_uri = "https://example.invalid/frontmatter.schema.json";
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write(
         "frontmatter.schema.json",
@@ -447,7 +447,7 @@ fn linked_schema_refs_use_the_symlink_path_as_their_base() {
     let directory = TempDir::new("linked-frontmatter-symlink-base");
     directory.write(
         "schema.yml",
-        "version: 1\ntitle: null\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\ntitle: null\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
     directory.write("target/root.json", r#"{"$ref":"defs.json"}"#);
     directory.write("target/defs.json", "false");
@@ -488,7 +488,7 @@ fn write_reference_chain_schema(directory: &TempDir, links: usize) {
     );
     directory.write(
         "schema.yml",
-        "version: 1\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
+        "version: 2\nfrontmatter:\n  schema: frontmatter.schema.json\nsections: []\n",
     );
 }
 

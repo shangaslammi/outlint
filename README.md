@@ -46,7 +46,7 @@ archives with checksums.
 Write a schema. The default project schema is `.outlint.yml`:
 
 ```yaml
-version: 1
+version: 2
 title: "*"                  # exactly one h1, any text
 sections:                   # rules for h2 headings, in document order
   - id: overview
@@ -55,8 +55,7 @@ sections:                   # rules for h2 headings, in document order
   - id: design
     match: "Design"
     required: true
-    strict: true            # only the child rules below are allowed
-    sections:
+    sections:               # declared child scopes are exhaustive
       - match: "Alternatives"
   - id: rollout
     match: "Rollout"
@@ -80,15 +79,13 @@ outlint check design.md
 ```
 
 ```text
-design.md:1:1 [ordered] sections are out of the declared order: `Overview` must precede `Design`
-  observed order:
-    design.md:3:1 "Widget Redesign > Design"
-    design.md:7:1 "Widget Redesign > Overview"
-  schema: .outlint.yml:2:8
-
-design.md:5:1 [unexpected-section] the section is not permitted in this closed scope
-  section: "Widget Redesign > Design > Implementation Notes"
+design.md:1:1 [missing-section] matched 0 sections, but at least 1 are required
+  expected: "Design"
   rule: .outlint.yml:7:5
+
+design.md:3:1 [misplaced-section] the section matches a rule but cannot occupy its ordered phase
+  section: "Widget Redesign > Design"
+  schema: .outlint.yml:2:8
 
 2 diagnostics in 1 file
 ```
@@ -97,11 +94,11 @@ This is an illustration of the current human presentation, not a parseable
 output grammar. Its wording and layout may change between releases; use
 `--format json` for scripts and integrations.
 
-Two problems: `## Overview` comes after `## Design` although the schema
-lists them the other way round — rule order is document order by default —
-and `### Implementation Notes` is not one of the
-children the `strict` Design scope permits. Each finding carries a stable
-diagnostic id (`ordered`, `unexpected-section`), the document location, and
+`## Overview` comes after `## Design` although the schema lists them the
+other way round. Ordered recovery leaves `Design` misplaced, so its required
+rule is also missing; child grammar never changes that assignment. Each
+finding carries a stable diagnostic id (`misplaced-section`,
+`missing-section`), the document location, and
 the schema location that produced it, so both sides of a failure are
 traceable regardless of presentation.
 
@@ -131,7 +128,7 @@ This is a taste of the schema language, not a manual —
 [`spec/outlint-spec.md`](spec/outlint-spec.md) is the normative definition.
 
 ```yaml
-version: 1
+version: 2
 
 options:
   match_case: false            # matchers are case-insensitive by default
@@ -150,8 +147,7 @@ sections:
   - id: overview
     match: "Overview"          # exact matcher
     required: true             # 1..1
-    strict: true               # unmatched children are diagnostics
-    sections:
+    sections:                  # declared scopes reject unmatched children
       - match: "Goals"         # default id: goals
         required: true
   - id: api
@@ -175,8 +171,8 @@ sections:
     required: false
   - match: "Appendix *"        # glob
     required: false
-  - match: "*"                 # first match wins, so catch-alls come last
-    allow: false               # any other h2 is a violation
+forbid_sections:
+  - match: "*"                 # guards reject before accepting assignment
 
 constraints:
   - one_of: [changelog, history]
@@ -190,19 +186,19 @@ The pieces:
 
 - **Matchers.** `match` is exact by default; `/.../` is an anchored regex
   (RE2 dialect — no backreferences or lookaround), a string containing `*`
-  is a glob, and a bare `*` matches anything. Rules in a scope are tried in
-  order and the first match wins.
+  is a glob, and a bare `*` matches anything. Ordered scopes consume rule
+  phases; `unordered: true` scopes classify with the first matching rule.
 - **Cardinality.** `required: true` means `1..1`, `required: false` means
   `0..1`, `repeat: "min..max"` sets explicit bounds with `n` for unbounded,
-  and the default is `0..n`.
+  exact rules default to `1..1`; collection matchers require an explicit
+  cardinality.
 - **Scopes.** A rule's `sections` describes the headings one level deeper.
-  `strict: true` closes a scope so unmatched children are reported;
-  `allow: false` turns a match into a violation outright.
+  Every declared list is exhaustive; `extras: anywhere` filters unmatched
+  headings, while `forbid_sections` guards reject before assignment.
 - **Order.** Rules bind in document order by default: the list above says
   Overview comes before the API sections, which come before Changelog. Set
-  `ordered: false` on a rule (or `options.ordered_sections: false` for
-  every scope) where sections may come in any order. That orders one rule
-  against another; ordering the repeated matches of a single rule is a
+  `unordered: true` on a scope where sections may come in any order. That
+  governs assignment across rules; ordering the repeated matches of a rule is
   rule's own `order` list, below.
 - **Typed values.** A regex rule can declare its named groups as typed
   captures (`captures: { version: semver, date: date }`), and
@@ -228,8 +224,8 @@ The pieces:
   adjacency between its neighbours.
 - **Constraints.** `one_of`, `any_of`, `at_most_one`, `all_or_none`,
   `requires`, `conflicts`, and `ordered` relate *locators*, at the schema
-  root or inside any rule's scope; `ordered` spells a partial order, or any
-  order inside a scope declared `ordered: false`. A locator is a name path:
+  root or inside any rule's scope; `ordered` spells a partial order inside an
+  unordered scope. A locator is a name path:
   `deployment.rollback-plan` reads relative to the scope the constraint is
   attached to, `$.overview.goals` from the outermost scope, and `[i]`
   narrows a step to its i-th match (`$.release[0]`). Name steps are joined
@@ -275,7 +271,7 @@ describing the `h1`s themselves. Every scope binds per parent, so each part
 carries its own obligations:
 
 ```yaml
-version: 1
+version: 2
 outline:
   - match: "Part *"
     repeat: "1..n"
@@ -345,11 +341,11 @@ outlint check rollout.md --format json
 ```
 
 ```json
-{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":3}
+{"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":4}
 ```
 
-The envelope is exactly version `3`. There is no version 2 mode and no
-compatibility switch: a consumer must read `version` and reject anything it
+The envelope is exactly version `4`. There is no compatibility mode: a
+consumer must read `version` and reject anything it
 does not understand rather than assume the older reference shape.
 
 Every diagnostic carries a `target` saying what it is about, tagged by
