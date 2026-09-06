@@ -1,4 +1,4 @@
-//! Typed Values against the version 4 envelope, end to end through the CLI.
+//! Typed Values against the JSON envelope, end to end through the CLI.
 //!
 //! The unit fixtures beside the renderer pin each rendered shape in isolation;
 //! these pin the shapes the loader and validator actually produce, so a
@@ -250,7 +250,7 @@ fn positional_narrowing_survives_as_an_arbitrary_precision_json_integer() {
 ///
 /// They are load-time failures about the schema document, so §6 gives them a
 /// positioned `schema_location` and no `target` at all — and they arrive in
-/// the same version 4 envelope as everything else. `invalid-capture` and
+/// the same JSON envelope as everything else. `invalid-capture` and
 /// `invalid-order` are declared in separate schemas because §6.3 forbids
 /// reporting an order error for entries referring to a capture mapping that
 /// did not build.

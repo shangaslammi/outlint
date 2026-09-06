@@ -67,7 +67,7 @@ fn schema_check_reports_cardinality_and_reachability_errors() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stderr(&output), "");
     let report = json_output(&output);
-    assert_eq!(report["version"], 4);
+    assert_eq!(report["version"], 2);
     assert_eq!(
         report["results"][0]["diagnostics"],
         serde_json::json!([{
@@ -400,7 +400,7 @@ fn non_utf8_command_line_paths_are_an_explicit_usage_error() {
     assert!(stderr(&output).contains("arguments must be valid UTF-8"));
 }
 
-/// Version 4 is a hard cut, so there is no legacy JSON-format escape hatch: §11.3 tells
+/// The envelope is a hard cut, so there is no legacy JSON-format escape hatch: §11.3 tells
 /// consumers to reject an envelope version they do not know, and a second
 /// format name would be exactly the older shape it tells them not to read.
 /// Only `human` and `json` are accepted.
@@ -439,7 +439,7 @@ fn the_replaced_envelope_version_is_not_reachable_through_a_format_name() {
         &["check", "doc.md", "-s", "schema.yml", "--format", "json"],
     );
     assert_eq!(json.status.code(), Some(0));
-    assert_eq!(json_output(&json)["version"], 4);
+    assert_eq!(json_output(&json)["version"], 2);
 }
 
 /// §4.6 provides for an implementation-specific limit on evaluating a

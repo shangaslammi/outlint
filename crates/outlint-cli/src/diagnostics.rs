@@ -520,7 +520,7 @@ fn diagnostic_sort_key(diagnostic: &RenderedDiagnostic) -> DiagnosticSortKey<'_>
 
 /// Sorts one file's diagnostics into the order the JSON contract promises.
 ///
-/// The key is **total** and is built from nothing but rendered version 4
+/// The key is **total** and is built from nothing but rendered envelope
 /// data. §11.4 requires exactly that — "this order is a function of rendered
 /// diagnostic data and MUST NOT depend on validator traversal or discovery
 /// order" — so no validator index, discovery sequence, pointer address, or

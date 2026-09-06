@@ -79,7 +79,7 @@ normalization, and ordered assignment; `crates/outlint-core/tests/`
 holds the public-API check and committed schema-range baselines
 (`schema_ranges/`); `crates/outlint-cli/tests/` splits end-to-end CLI tests
 by command surface and holds the conformance runner (`conformance.rs`), which
-asserts envelope version 4 before comparing each result order-insensitively
+asserts envelope version 2 before comparing each result order-insensitively
 against its `testdata/*/expected.json` projection.
 
 Absent by design, do not add speculatively:

@@ -2004,7 +2004,7 @@ object is the command's machine-readable interface. Its shape is:
 
 ```json
 {
-  "version": 4,
+  "version": 2,
   "results": [
     {
       "kind": "document",
@@ -2029,11 +2029,15 @@ Operationally unreadable inputs do not produce results. `summary.files` is
 the number of results; the other counts partition those results by kind and
 count their diagnostics.
 
-This revision changes the envelope version from 3 to 4 because guard attribution
-adds a schema-node variant and the public diagnostic-id set adds
-`misplaced-section`. Consumers that understand only envelope 3 MUST reject
-envelope 4 rather than interpreting it as an older shape. Any exposed
-diagnostic-id enum MUST include `misplaced-section`.
+The `version` member identifies the output shape. It changes only at a
+release, never between releases. Until release 1.0 the shape MAY gain members
+or tagged-union variants between releases under the same number; such changes
+are recorded in the changelog, and consumers pin the outlint release. From
+release 1.0 onward a consumer that understands only an older number MUST
+reject a newer one rather than interpreting it as an older shape. This
+revision adds the `guard` schema-node variant and the `misplaced-section`
+diagnostic id without changing the number. Any exposed diagnostic-id enum
+MUST include `misplaced-section`.
 
 Each diagnostic object has `id`, `message`, and `location` with one-based
 `line` and byte `column`. The `message` member is explanatory prose: its

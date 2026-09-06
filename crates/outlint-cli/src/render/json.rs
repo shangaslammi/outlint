@@ -1,14 +1,15 @@
-//! The version 4 JSON output envelope and its field conversions.
+//! The JSON output envelope and its field conversions.
 
 use serde_json::{json, Map, Value};
 
 /// The envelope version this build emits.
 ///
-/// §11.3 fixes the number and requires consumers to reject versions they do
-/// not know rather than reading them as an older shape, so Typed Values is a
-/// hard cut from 3 to 4: there is no second emission path, no negotiation,
-/// and no legacy format name to fall back to.
-const ENVELOPE_VERSION: u64 = 4;
+/// §11.3 fixes the number; it changes only at a release, never in a
+/// mid-release commit. Before release 1.0 the shape may gain members or
+/// variants under the same number, so consumers pin the outlint release.
+/// There is no second emission path, no negotiation, and no legacy format
+/// name to fall back to.
+const ENVELOPE_VERSION: u64 = 2;
 
 use crate::diagnostics::{
     RenderedDiagnostic, RenderedMatcher, RenderedPosition, RenderedReference, RenderedScalar,
@@ -736,7 +737,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&rendered).expect("one JSON document"),
             json!({
-                "version": 4,
+                "version": 2,
                 "results": [{
                     "kind": "document",
                     "path": "doc.md",

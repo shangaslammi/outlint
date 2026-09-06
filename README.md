@@ -342,9 +342,11 @@ outlint check rollout.md --format json
 {"results":[{"diagnostics":[{"id":"missing-section","location":{"column":1,"line":1},"message":"matched 0 sections, but at least 1 are required","schema_location":{"column":5,"line":7,"path":".outlint.yml"},"schema_node":{"index":1,"kind":"rule","scope":[]},"target":{"kind":"missing_header","matcher":"Design","parent":[]}}],"kind":"document","path":"rollout.md","schema":".outlint.yml"}],"summary":{"diagnostics":1,"documents":1,"files":1,"schemas":0},"version":4}
 ```
 
-The envelope is exactly version `4`. There is no compatibility mode: a
-consumer must read `version` and reject anything it
-does not understand rather than assume the older reference shape.
+The envelope is version `2`. The number changes only at a release; before
+release 1.0 the shape may gain members or variants under the same number, so
+consumers pin the outlint release. There is no compatibility mode: a consumer
+must read `version` and reject a number it does not understand rather than
+assume the older reference shape.
 
 Every diagnostic carries a `target` saying what it is about, tagged by
 `kind`: `header` (a header the document has, as a `path` array),

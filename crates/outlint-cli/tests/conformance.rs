@@ -236,8 +236,8 @@ fn run_cli(directory: &Path, markdown_names: &BTreeSet<String>) -> BTreeMap<Stri
     });
     assert_eq!(
         report["version"],
-        4,
-        "outlint report in {} is not envelope version 4",
+        2,
+        "outlint report in {} is not envelope version 2",
         directory.display()
     );
     let results = report["results"]
