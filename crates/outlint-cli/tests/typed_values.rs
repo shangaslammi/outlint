@@ -296,7 +296,7 @@ fn typed_value_schema_errors_are_positioned_and_carry_no_document_target() {
         assert_eq!(stderr(&output), "");
 
         let json = json_output(&output);
-        assert_eq!(json["version"], 4);
+        assert_eq!(json["version"], 2);
         assert_eq!(json["results"][0]["kind"], "schema");
         assert_eq!(json["results"][0]["path"], path);
         assert_eq!(json["results"][0]["schema"], path);
