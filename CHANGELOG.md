@@ -58,13 +58,15 @@ output shape, and the library API may all change in a minor release. See
   resource-bounded; exceeding the bound is an operational failure with exit
   code 2 and no partial verdict. Meanwhile, `fm.<name>` now refers only to a
   declared frontmatter capture: the former dynamic-key meaning is gone and
-  legacy `fm.key=value` is invalid. CLI machine output stays envelope version 2
-  and gains tagged `rule`, `frontmatter_query`, and `frontmatter_capture`
-  references preserving the written locator and its typed-value metadata, plus
-  guard schema nodes and the `misplaced-section` id. Version numbers move only
-  at a release: before 1.0 the envelope shape may gain members or variants
-  under the same number, and consumers pin the outlint release (spec §§2.3–2.4,
-  3.8, 4.4–4.6, 6, 11.3–11.4).
+  legacy `fm.key=value` is invalid. CLI machine output stays at envelope
+  version 2 with an incompatibly changed shape: `rule` references gain
+  `locator` and optional `positions`, the former `frontmatter` reference is
+  replaced by `frontmatter_query` and `frontmatter_capture` references that
+  preserve the written locator and its typed-value metadata, and schema-node
+  kinds gain `capture`, `frontmatter_capture`, `order_entry`, and `guard`.
+  Version numbers move only at a release: before 1.0 the envelope shape may
+  change incompatibly under the same number, so consumers pin the outlint
+  release (spec §§2.3–2.4, 3.8, 4.4–4.6, 6, 11.3–11.4).
 - **Per-document schema discovery.** Without `--schema`, discovery now checks
   each ancestor directory for `<stem>.outlint.yml` — the document's file name
   with its final extension removed, so `CHANGELOG.md` discovers

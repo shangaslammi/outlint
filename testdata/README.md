@@ -31,7 +31,10 @@ in its directory.
 
 The runner consumes the CLI's **version 2** JSON envelope (§11.3) and projects
 each diagnostic down to `{id, target}`. A runner MUST assert the envelope
-version is 2 before performing that projection. That narrowing is deliberate,
+version is 2 before performing that projection. Before release 1.0 that check
+confirms the output line, not shape compatibility with another outlint
+release; the runner is pinned to the build in this tree. That narrowing is
+deliberate,
 not a simplification waiting to be undone. A diagnostic also carries
 `message` and `location`, and — whenever the corresponding semantic data
 exists — `schema_node`, `schema_location`, `involved_headers`, and

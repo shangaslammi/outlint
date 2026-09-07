@@ -197,7 +197,7 @@ fn guard_human_output_names_the_guard_and_its_declaration() {
 }
 
 #[test]
-fn first_matching_guard_owns_the_version_4_schema_node() {
+fn first_matching_guard_owns_the_schema_node() {
     let directory = TempDir::new("first-guard-attribution");
     directory.write(
         "schema.yml",

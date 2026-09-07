@@ -2029,15 +2029,17 @@ Operationally unreadable inputs do not produce results. `summary.files` is
 the number of results; the other counts partition those results by kind and
 count their diagnostics.
 
-The `version` member identifies the output shape. It changes only at a
-release, never between releases. Until release 1.0 the shape MAY gain members
-or tagged-union variants between releases under the same number; such changes
-are recorded in the changelog, and consumers pin the outlint release. From
-release 1.0 onward a consumer that understands only an older number MUST
-reject a newer one rather than interpreting it as an older shape. This
-revision adds the `guard` schema-node variant and the `misplaced-section`
-diagnostic id without changing the number. Any exposed diagnostic-id enum
-MUST include `misplaced-section`.
+The `version` member denotes the output-format line, as `version: 1` in §2
+denotes the schema-language line. It changes only at an outlint release, never
+in a commit between releases. Until release 1.0 the output shape MAY change
+incompatibly between releases under the same number; such changes are
+recorded in the changelog rather than by changing this member, and a consumer
+MUST pin the producing outlint release rather than accept output on the
+strength of a matching number alone. From release 1.0 onward the member is a
+compatibility promise: a consumer that understands only an older number MUST
+reject a newer one rather than interpreting it as an older shape. Any exposed
+diagnostic-id enum MUST include every id this specification defines,
+including `misplaced-section`.
 
 Each diagnostic object has `id`, `message`, and `location` with one-based
 `line` and byte `column`. The `message` member is explanatory prose: its

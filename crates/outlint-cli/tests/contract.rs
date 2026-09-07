@@ -400,12 +400,11 @@ fn non_utf8_command_line_paths_are_an_explicit_usage_error() {
     assert!(stderr(&output).contains("arguments must be valid UTF-8"));
 }
 
-/// The envelope is a hard cut, so there is no legacy JSON-format escape hatch: §11.3 tells
-/// consumers to reject an envelope version they do not know, and a second
-/// format name would be exactly the older shape it tells them not to read.
-/// Only `human` and `json` are accepted.
+/// §11.3 defines exactly two format names, `human` and `json`, and no
+/// compatibility mode: a version-specific alias would be exactly the older
+/// shape it tells consumers not to read.
 #[test]
-fn the_replaced_envelope_version_is_not_reachable_through_a_format_name() {
+fn version_specific_json_format_aliases_are_rejected() {
     let directory = TempDir::new("no-legacy-json");
     directory.write("schema.yml", VALID_SCHEMA);
     directory.write("doc.md", "## Required\n");
@@ -428,7 +427,7 @@ fn the_replaced_envelope_version_is_not_reachable_through_a_format_name() {
         );
     }
 
-    // The two names that are accepted both still work, and `json` is v4.
+    // The two specified names both work, and `json` emits envelope version 2.
     let human = run(
         &directory,
         &["check", "doc.md", "-s", "schema.yml", "--format", "human"],

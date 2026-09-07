@@ -31,7 +31,7 @@ fn diagnostic(output: &std::process::Output) -> Value {
 /// emitted `fm.version` locator can only be the spelling the author wrote and
 /// cannot have been rebuilt from the bound query.
 #[test]
-fn every_reference_kind_renders_its_exact_version_4_shape() {
+fn every_reference_kind_renders_its_exact_json_shape() {
     let directory = TempDir::new("typed-references");
     directory.write(
         "schema.yml",
