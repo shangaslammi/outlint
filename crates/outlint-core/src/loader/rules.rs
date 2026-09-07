@@ -10,15 +10,103 @@ use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::regex_capture;
 use crate::typed_value::ValueType;
 use crate::{
-    CaptureName, CapturePath, Cardinality, ChildScope, DeclaredScope, ExactText, ExtrasMode,
-    GlobPattern, GuardIndex, GuardPath, Matcher, NonEmpty, Options, OrderEntryPath, OrderIndex,
-    RegexPattern, RelatedLocation, RuleCapture, RuleId, RuleIndex, RulePath, SchemaErrorKind,
-    SchemaNode, ScopeMode, ScopePath, SectionGuard, SectionRule, SourceRange, UpperBound,
-    ValueOrderDirection, ValueOrderEntry,
+    CaptureName, CapturePath, Cardinality, ChildScope, ContentRulePath, DeclaredScope, ExactText,
+    ExtrasMode, GlobPattern, GuardIndex, GuardPath, ItemRulePath, Matcher, NonEmpty, Options,
+    OrderEntryPath, OrderIndex, RegexPattern, RelatedLocation, RuleCapture, RuleId, RuleIndex,
+    RulePath, SchemaErrorKind, SchemaNode, ScopeMode, ScopePath, SectionGuard, SectionRule,
+    SourceRange, UpperBound, ValueOrderDirection, ValueOrderEntry,
 };
 
 use super::shape::{CAPTURES_FIELD, ORDER_FIELD};
 use super::{Loader, RangeKey, RawOptions, RawRule};
+
+/// One namespace opened by the schema root, a section rule, or a named
+/// structural rule. Section scopes use their existing structural path; the
+/// empty path is the outermost namespace for every document form.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum NamedScope {
+    Sections(ScopePath),
+    Content(ContentRulePath),
+    Item(ItemRulePath),
+}
+
+/// A declaration admitted to a named scope after its own normalization.
+///
+/// Structural entries retain the effective maximum needed by locator
+/// singularity checks. Captures are terminal values and have no cardinality.
+#[derive(Debug, Clone)]
+pub(super) enum NamedEntry {
+    Section {
+        path: RulePath,
+        effective_maximum: UpperBound,
+    },
+    Content {
+        path: ContentRulePath,
+        effective_maximum: UpperBound,
+    },
+    Item {
+        path: ItemRulePath,
+        effective_maximum: UpperBound,
+    },
+    Capture(CapturePath),
+}
+
+/// One source-positioned name in the unified §4.3 registry.
+#[derive(Debug, Clone)]
+pub(super) struct NamedDeclaration {
+    pub(super) name: String,
+    pub(super) range: SourceRange,
+    pub(super) entry: NamedEntry,
+}
+
+impl NamedEntry {
+    fn is_capture(&self) -> bool {
+        matches!(self, Self::Capture(_))
+    }
+
+    fn related_message(&self) -> String {
+        match self {
+            Self::Section { path, .. } => {
+                format!("first declared by sibling rule {}", path.index.0)
+            }
+            Self::Content { path, .. } => {
+                format!("first declared by content rule {}", path.index.0)
+            }
+            Self::Item { path, .. } => {
+                format!("first declared by item rule {}", path.index.0)
+            }
+            Self::Capture(path) => format!("capture `{}` declared here", path.name),
+        }
+    }
+
+    /// Retained for the structural locator binder introduced in stage 3b3.
+    #[allow(dead_code)]
+    pub(super) fn effective_maximum(&self) -> Option<UpperBound> {
+        match self {
+            Self::Section {
+                effective_maximum, ..
+            }
+            | Self::Content {
+                effective_maximum, ..
+            }
+            | Self::Item {
+                effective_maximum, ..
+            } => Some(*effective_maximum),
+            Self::Capture(_) => None,
+        }
+    }
+}
+
+/// Multiplies cardinality maxima while preserving §4.3's absorbing infinity
+/// and converting finite overflow into the same plural sentinel.
+pub(super) fn effective_maximum(left: UpperBound, right: UpperBound) -> UpperBound {
+    match (left, right) {
+        (UpperBound::Bounded(left), UpperBound::Bounded(right)) => left
+            .checked_mul(right)
+            .map_or(UpperBound::Unbounded, UpperBound::Bounded),
+        (UpperBound::Unbounded, _) | (_, UpperBound::Unbounded) => UpperBound::Unbounded,
+    }
+}
 
 impl Loader {
     /// Builds the general `outline:` form: the canonical `h1`-rule list.
@@ -78,9 +166,15 @@ impl Loader {
         match_case: bool,
         owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
     ) -> Option<ChildScope> {
+        self.namespaces
+            .entry(NamedScope::Sections(scope.clone()))
+            .or_default();
+        if let Some((owner_path, captures)) = owner {
+            self.register_captures(scope, owner_path, captures);
+        }
         match rules {
             Some(rules) => self
-                .build_declared_scope_with_owner(
+                .build_declared_scope(
                     rules,
                     guards,
                     extras,
@@ -88,20 +182,23 @@ impl Loader {
                     constraints,
                     scope,
                     match_case,
-                    owner,
                 )
                 .map(ChildScope::Declared),
-            None if guards.is_empty() => Some(ChildScope::Omitted),
-            None => self
-                .build_guards(guards, scope, match_case)
-                .and_then(|guards| {
+            None if guards.is_empty() => self
+                .check_named_scope(&NamedScope::Sections(scope.clone()))
+                .then_some(ChildScope::Omitted),
+            None => {
+                let guards = self.build_guards(guards, scope, match_case);
+                let names_valid = self.check_named_scope(&NamedScope::Sections(scope.clone()));
+                guards.and_then(|guards| {
                     let mut iter = guards.into_iter();
                     let first = iter.next()?;
-                    Some(ChildScope::GuardsOnly(NonEmpty {
+                    names_valid.then_some(ChildScope::GuardsOnly(NonEmpty {
                         first,
                         rest: iter.collect(),
                     }))
-                }),
+                })
+            }
         }
     }
 
@@ -116,37 +213,13 @@ impl Loader {
         scope: &ScopePath,
         match_case: bool,
     ) -> Option<DeclaredScope> {
-        self.build_declared_scope_with_owner(
-            rules,
-            guards,
-            extras,
-            unordered,
-            constraints,
-            scope,
-            match_case,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build_declared_scope_with_owner(
-        &mut self,
-        rules: Vec<RawRule>,
-        guards: Vec<super::RawGuard>,
-        extras: Option<String>,
-        unordered: Option<bool>,
-        constraints: Vec<Value>,
-        scope: &ScopePath,
-        match_case: bool,
-        owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
-    ) -> Option<DeclaredScope> {
         self.raw_constraints.insert(scope.clone(), constraints);
         let mode = if unordered == Some(true) {
             ScopeMode::Unordered
         } else {
             ScopeMode::Ordered
         };
-        let semantic_rules = self.build_named_scope(rules, scope, match_case, owner, mode);
+        let semantic_rules = self.build_named_scope(rules, scope, match_case, mode);
         let semantic_guards = self.build_guards(guards, scope, match_case);
         match (semantic_rules, semantic_guards) {
             (Some(rules), Some(guards)) => Some(DeclaredScope {
@@ -187,26 +260,18 @@ impl Loader {
         complete.then_some(built)
     }
 
-    /// Builds one named scope: a rule list plus the captures of the rule that
-    /// opens the scope those rules live in.
-    ///
-    /// `owner` is `None` for the schema root, and for a rule whose `captures`
-    /// mapping never normalized — §2.1 enters a name into the scope only once
-    /// its mapping is well-formed, so a failed mapping contributes nothing to
-    /// compare against rather than contributing a partial set.
+    /// Builds the section rules declared directly in one named scope.
     fn build_named_scope(
         &mut self,
         rules: Vec<RawRule>,
         scope: &ScopePath,
         match_case: bool,
-        owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
         mode: ScopeMode,
     ) -> Option<Vec<SectionRule>> {
+        self.namespaces
+            .entry(NamedScope::Sections(scope.clone()))
+            .or_default();
         let mut semantic = Vec::with_capacity(rules.len());
-        // Collected for every rule, not only the ones that built: an id is a
-        // declaration in this scope whether or not the rule around it turned
-        // out to be constructible, and §4.3 compares declarations.
-        let mut ids = Vec::with_capacity(rules.len());
         let mut complete = true;
         let mut wildcard_seen = false;
         for (index, raw) in rules.into_iter().enumerate() {
@@ -237,7 +302,6 @@ impl Loader {
                 if raw.id.is_some() { "id" } else { "match" }.into(),
             ));
             let id = self.build_rule_id(raw.id.as_deref(), matcher.as_ref(), scope, id_range);
-            ids.push(id.clone());
             let cardinality_field = if raw.repeat.is_some() {
                 "repeat"
             } else if raw.required.is_some() {
@@ -255,6 +319,20 @@ impl Loader {
                 matches!(matcher, Some(Matcher::Exact(_))),
                 outcome_range,
             );
+            if let (Some(id), Some(cardinality)) = (&id, cardinality) {
+                let reserved = scope.0.is_empty() && reserved_root_id(id.as_str()).is_some();
+                if !reserved {
+                    self.register_name(
+                        NamedScope::Sections(scope.clone()),
+                        id.as_str(),
+                        id_range,
+                        NamedEntry::Section {
+                            path: rule_path.clone(),
+                            effective_maximum: cardinality.max(),
+                        },
+                    );
+                }
+            }
             let content = self.build_content_scope(
                 raw.content.as_ref(),
                 &super::RawContentOwner::Rule(rule_path.clone()),
@@ -302,91 +380,87 @@ impl Loader {
             }
         }
 
-        complete &= self.check_named_scope(scope, owner, &ids);
+        complete &= self.check_named_scope(&NamedScope::Sections(scope.clone()));
         complete.then_some(semantic)
     }
 
-    /// Reports every §4.3 collision in one named scope, and says whether the
-    /// scope came out free of them.
-    ///
-    /// The scope's names are the opening rule's valid captures together with
-    /// the valid explicit and default ids of the rules directly in it — no
-    /// deeper, and not the opening rule's own id, which is a name in the scope
-    /// above. §6.3 anchors a collision at whichever declaration the document
-    /// spells second and relates the first, so the names are put into
-    /// schema-document order before they are compared: the capture mapping's
-    /// own order is a `BTreeMap`'s, not the source's.
-    fn check_named_scope(
+    pub(super) fn register_name(
+        &mut self,
+        scope: NamedScope,
+        name: &str,
+        range: SourceRange,
+        entry: NamedEntry,
+    ) {
+        self.namespaces
+            .entry(scope)
+            .or_default()
+            .push(NamedDeclaration {
+                name: name.to_owned(),
+                range,
+                entry,
+            });
+    }
+
+    fn register_captures(
         &mut self,
         scope: &ScopePath,
-        owner: Option<(&RulePath, &BTreeMap<CaptureName, RuleCapture>)>,
-        ids: &[Option<RuleId>],
-    ) -> bool {
-        // `None` marks a capture; `Some(index)` the sibling rule that declared
-        // the id.
-        let mut declarations: Vec<(String, SourceRange, Option<usize>)> = Vec::new();
-        if let Some((owner_path, captures)) = owner {
-            let field = self.range(RangeKey::RuleField(
-                owner_path.clone(),
-                CAPTURES_FIELD.into(),
-            ));
-            declarations.extend(captures.keys().map(|name| {
-                (
-                    name.as_str().to_owned(),
-                    self.capture_declaration_range(owner_path, name.as_str(), field),
-                    None,
-                )
-            }));
+        owner_path: &RulePath,
+        captures: &BTreeMap<CaptureName, RuleCapture>,
+    ) {
+        let field = self.range(RangeKey::RuleField(
+            owner_path.clone(),
+            CAPTURES_FIELD.into(),
+        ));
+        for name in captures.keys() {
+            let range = self.capture_declaration_range(owner_path, name.as_str(), field);
+            self.register_name(
+                NamedScope::Sections(scope.clone()),
+                name.as_str(),
+                range,
+                NamedEntry::Capture(CapturePath {
+                    rule: owner_path.clone(),
+                    name: name.clone(),
+                }),
+            );
         }
-        for (index, id) in ids.iter().enumerate() {
-            let Some(id) = id else { continue };
-            let path = RulePath {
-                scope: scope.clone(),
-                index: RuleIndex(index),
-            };
-            declarations.push((id.0.clone(), self.rule_id_range(&path), Some(index)));
-        }
-        // Stable, so two declarations sharing one range — an alias expanded
-        // twice — keep the order they were collected in.
-        declarations.sort_by_key(|(_, range, _)| (range.source, range.range.start));
+    }
 
-        let mut earliest: HashMap<&str, (SourceRange, Option<usize>)> = HashMap::new();
+    /// Reports every §4.3 collision in one namespace. Stable source ordering
+    /// makes the later spelling primary.
+    pub(super) fn check_named_scope(&mut self, scope: &NamedScope) -> bool {
+        let mut declarations = self.namespaces.get(scope).cloned().unwrap_or_default();
+        declarations
+            .sort_by_key(|declaration| (declaration.range.source, declaration.range.range.start));
+
+        let mut earliest: HashMap<String, NamedDeclaration> = HashMap::new();
         let mut free = true;
-        for (name, range, origin) in &declarations {
-            match earliest.get(name.as_str()) {
-                Some((first_range, first_origin)) => {
-                    free = false;
-                    let (message, related) = match (first_origin, origin) {
-                        (Some(first_index), Some(_)) => (
-                            format!("duplicate rule id `{name}` in one scope"),
-                            format!("first declared by sibling rule {first_index}"),
-                        ),
-                        (Some(first_index), None) => (
-                            format!(
-                                "capture `{name}` collides with a rule id in the same named scope"
-                            ),
-                            format!("first declared by sibling rule {first_index}"),
-                        ),
-                        (None, _) => (
-                            format!(
-                                "rule id `{name}` collides with a capture in the same named scope"
-                            ),
-                            format!("capture `{name}` declared here"),
-                        ),
-                    };
-                    self.error_with_related_at(
-                        SchemaErrorKind::DuplicateId,
-                        *range,
-                        message,
-                        vec![RelatedLocation {
-                            range: *first_range,
-                            message: related,
-                        }],
-                    );
-                }
-                None => {
-                    earliest.insert(name, (*range, *origin));
-                }
+        for declaration in declarations {
+            if let Some(first) = earliest.get(&declaration.name) {
+                free = false;
+                let later_capture = declaration.entry.is_capture();
+                let first_capture = first.entry.is_capture();
+                let message = match (first_capture, later_capture) {
+                    (false, true) => format!(
+                        "capture `{}` collides with a rule id in the same named scope",
+                        declaration.name
+                    ),
+                    (true, false) => format!(
+                        "rule id `{}` collides with a capture in the same named scope",
+                        declaration.name
+                    ),
+                    _ => format!("duplicate rule id `{}` in one scope", declaration.name),
+                };
+                self.error_with_related_at(
+                    SchemaErrorKind::DuplicateId,
+                    declaration.range,
+                    message,
+                    vec![RelatedLocation {
+                        range: first.range,
+                        message: first.entry.related_message(),
+                    }],
+                );
+            } else {
+                earliest.insert(declaration.name.clone(), declaration);
             }
         }
         free
@@ -796,7 +870,7 @@ impl Loader {
         let reserved = generated
             .as_ref()
             .filter(|_| scope.0.is_empty())
-            .and_then(|id| Some((id.0.as_str(), reserved_root_id(&id.0)?)));
+            .and_then(|id| Some((id.as_str(), reserved_root_id(id.as_str())?)));
         if let Some((id, purpose)) = reserved {
             self.error_at(
                 SchemaErrorKind::ReservedId,

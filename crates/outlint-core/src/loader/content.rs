@@ -7,10 +7,11 @@ use serde_json::{Map, Value};
 use crate::{
     AtLeastTwo, BlockMatcher, Cardinality, ContentOwner, ContentRule, ContentRuleIndex,
     ContentRulePath, ContentScope, ItemRule, ItemRuleIndex, ItemRulePath, ItemScope, ListKind,
-    Matcher, RelatedLocation, RuleId, SchemaErrorKind, SchemaNode, SourceRange,
+    Matcher, RelatedLocation, RuleId, SchemaErrorKind, SchemaNode, ScopePath, SourceRange,
+    UpperBound,
 };
 
-use super::rules::is_slug;
+use super::rules::{effective_maximum, is_slug, NamedEntry, NamedScope};
 use super::{Loader, RangeKey, RawContentOwner};
 
 const CONTENT_FIELDS: &[&str] = &[
@@ -82,12 +83,99 @@ impl Loader {
                             );
                         }
                     }
+                    complete &= self.register_content_names(&rule, raw_owner, &content_path);
                     rules.push(rule);
                 }
                 None => complete = false,
             }
         }
         complete.then_some(ContentScope::Declared(rules))
+    }
+
+    /// Registers one normalized structural subtree in the nearest named
+    /// scope, multiplying maxima only while crossing anonymous ancestors.
+    fn register_content_names(
+        &mut self,
+        rule: &ContentRule,
+        raw_owner: &RawContentOwner,
+        path: &ContentRulePath,
+    ) -> bool {
+        let enclosing = match &path.owner {
+            ContentOwner::Document | ContentOwner::Title => {
+                NamedScope::Sections(ScopePath(Vec::new()))
+            }
+            ContentOwner::Rule(owner) => {
+                let mut scope = owner.scope.clone();
+                scope.0.push(owner.index);
+                NamedScope::Sections(scope)
+            }
+        };
+        let (id, cardinality, items) = match rule {
+            ContentRule::Paragraph { id, cardinality }
+            | ContentRule::Any { id, cardinality }
+            | ContentRule::OneOf {
+                id, cardinality, ..
+            } => (id, *cardinality, None),
+            ContentRule::List {
+                id,
+                cardinality,
+                items,
+                ..
+            } => (id, *cardinality, Some(items)),
+        };
+
+        let receiving = if let Some(id) = id {
+            self.register_name(
+                enclosing.clone(),
+                id.as_str(),
+                self.content_value_range(raw_owner, path.index.0, "id"),
+                NamedEntry::Content {
+                    path: path.clone(),
+                    effective_maximum: cardinality.max(),
+                },
+            );
+            let scope = NamedScope::Content(path.clone());
+            self.namespaces.entry(scope.clone()).or_default();
+            scope
+        } else {
+            enclosing
+        };
+        let inherited_maximum = if id.is_some() {
+            UpperBound::Bounded(1)
+        } else {
+            cardinality.max()
+        };
+
+        if let Some(ItemScope::Declared(items)) = items {
+            for (index, item) in items.iter().enumerate() {
+                let Some(id) = &item.id else { continue };
+                let item_path = ItemRulePath {
+                    content: path.clone(),
+                    index: ItemRuleIndex(index),
+                };
+                self.register_name(
+                    receiving.clone(),
+                    id.as_str(),
+                    self.item_value_range(raw_owner, path.index.0, index, "id"),
+                    NamedEntry::Item {
+                        path: item_path.clone(),
+                        effective_maximum: effective_maximum(
+                            inherited_maximum,
+                            item.cardinality.max(),
+                        ),
+                    },
+                );
+                self.namespaces
+                    .entry(NamedScope::Item(item_path))
+                    .or_default();
+            }
+        }
+
+        if id.is_some() {
+            self.check_named_scope(&receiving)
+        } else {
+            true
+        }
     }
 
     fn build_content_rule(
@@ -182,6 +270,7 @@ impl Loader {
                         owner,
                         index,
                         match_case,
+                        matches!(owner, RawContentOwner::Document) && !mapping.contains_key("id"),
                         &mut valid,
                     )
                 } else {
@@ -567,6 +656,7 @@ impl Loader {
         owner: &RawContentOwner,
         content_index: usize,
         match_case: bool,
+        ids_are_outermost: bool,
         valid: &mut bool,
     ) -> ItemScope {
         let Some(raw) = raw else {
@@ -582,7 +672,14 @@ impl Loader {
         };
         let mut rules = Vec::with_capacity(entries.len());
         for (item_index, entry) in entries.iter().enumerate() {
-            match self.build_item_rule(entry, owner, content_index, item_index, match_case) {
+            match self.build_item_rule(
+                entry,
+                owner,
+                content_index,
+                item_index,
+                match_case,
+                ids_are_outermost,
+            ) {
                 Some(rule) => rules.push(rule),
                 None => *valid = false,
             }
@@ -597,6 +694,7 @@ impl Loader {
         content_index: usize,
         item_index: usize,
         match_case: bool,
+        id_is_outermost: bool,
     ) -> Option<ItemRule> {
         let rule_range = self.range(RangeKey::ItemRule(owner.clone(), content_index, item_index));
         let Some(mapping) = raw.as_object() else {
@@ -614,7 +712,19 @@ impl Loader {
             }
         }
         let id = match mapping.get("id") {
-            Some(Value::String(id)) if is_slug(id) => Some(RuleId(id.clone())),
+            Some(Value::String(id)) if is_slug(id) => {
+                if id_is_outermost {
+                    if let Some(purpose) = super::rules::reserved_root_id(id) {
+                        valid = false;
+                        self.error_at(
+                            SchemaErrorKind::ReservedId,
+                            self.item_value_range(owner, content_index, item_index, "id"),
+                            format!("top-level rule id `{id}` is reserved for {purpose}"),
+                        );
+                    }
+                }
+                Some(RuleId(id.clone()))
+            }
             Some(Value::String(id)) => {
                 valid = false;
                 self.shape_error_at(

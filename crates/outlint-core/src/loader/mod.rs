@@ -273,6 +273,11 @@ struct Loader {
     ranges: RangeIndex,
     errors: Vec<SchemaError>,
     nodes: BTreeMap<SchemaNode, SourceRange>,
+    /// Declarations grouped by the named scope in which §4.3 exposes them.
+    ///
+    /// This remains loader-private: locators bind against it while loading,
+    /// while the normalized schema keeps identity in its structural paths.
+    namespaces: BTreeMap<rules::NamedScope, Vec<rules::NamedDeclaration>>,
     raw_constraints: BTreeMap<ScopePath, Vec<Value>>,
     external_schema: Option<PreparedExternalSchema>,
     /// Whether the document declares the general `outline:` form.
@@ -353,6 +358,7 @@ impl Loader {
             ranges,
             errors: Vec::new(),
             nodes: BTreeMap::new(),
+            namespaces: BTreeMap::new(),
             raw_constraints: BTreeMap::new(),
             external_schema,
             outline_general: false,
@@ -614,18 +620,6 @@ impl Loader {
             }
             other => other,
         }
-    }
-
-    /// The anchor of a rule's identity: its `id` spelling, else its `match`,
-    /// else the rule itself.
-    fn rule_id_range(&self, path: &RulePath) -> SourceRange {
-        for field in ["id", "match"] {
-            let key = self.source_key(RangeKey::RuleField(path.clone(), field.into()));
-            if let Some(range) = self.ranges.ranges.get(&key) {
-                return *range;
-            }
-        }
-        self.range(RangeKey::Rule(path.clone()))
     }
 
     fn shape_error_at(&mut self, range: SourceRange, message: impl Into<String>) {

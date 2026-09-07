@@ -1,7 +1,9 @@
 use super::{invalid, source_slice, valid};
+use crate::loader::load_schema;
+use crate::loader::rules::effective_maximum;
 use crate::{
     BlockMatcher, ContentRule, ContentScope, DocumentShape, ItemScope, ListKind, Matcher,
-    SchemaErrorKind,
+    SchemaErrorKind, UpperBound,
 };
 
 fn document_content(source: &str) -> ContentScope {
@@ -251,6 +253,170 @@ fn section_content_null_is_invalid_at_its_value() {
         SchemaErrorKind::InvalidContentRule
     );
     assert_eq!(source_slice(source, rejected.errors.first.range), "null");
+}
+
+#[test]
+fn anonymous_structural_ancestors_hoist_ids() {
+    let source = r#"version: 1
+sections:
+  - match: Parent
+    content:
+      - block: list
+        repeat: 2..3
+        items:
+          - id: shared
+            match: Item
+      - id: shared
+        block: p
+"#;
+    let rejected = invalid(source);
+    let errors = rejected.errors.iter().collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].kind, SchemaErrorKind::DuplicateId);
+    assert_eq!(source_slice(source, errors[0].range), "shared");
+    assert_eq!(errors[0].related.len(), 1);
+    assert!(errors[0].related[0].range.range.start < errors[0].range.range.start);
+}
+
+#[test]
+fn named_structural_ancestors_stop_hoisting() {
+    valid(
+        r#"version: 1
+sections:
+  - match: Parent
+    content:
+      - id: choices
+        block: list
+        items:
+          - id: shared
+            match: Item
+      - id: shared
+        block: p
+"#,
+    );
+
+    let source = r#"version: 1
+sections:
+  - match: Parent
+    content:
+      - id: choices
+        block: list
+        items:
+          - id: duplicate
+            match: First
+          - id: duplicate
+            match: Second
+"#;
+    let rejected = invalid(source);
+    assert_eq!(rejected.errors.iter().count(), 1);
+    assert_eq!(rejected.errors.first.kind, SchemaErrorKind::DuplicateId);
+    assert_eq!(
+        source_slice(source, rejected.errors.first.range),
+        "duplicate"
+    );
+    assert_eq!(rejected.errors.first.related.len(), 1);
+}
+
+#[test]
+fn reserved_content_id_is_collected_beside_invalid_repeat() {
+    let source = "version: 1\ncontent:\n  - id: fm\n    block: p\n    repeat: nope\noutline: []\n";
+    let rejected = invalid(source);
+    let kinds = rejected
+        .errors
+        .iter()
+        .map(|error| error.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(kinds.len(), 2);
+    assert!(kinds.contains(&SchemaErrorKind::ReservedId));
+    assert!(kinds.contains(&SchemaErrorKind::InvalidRepeat));
+}
+
+#[test]
+fn reserved_hoisted_item_id_is_collected_beside_missing_cardinality() {
+    let source = "version: 1\ncontent:\n  - block: list\n    items:\n      - id: fm\n        match: '*'\noutline: []\n";
+    let rejected = invalid(source);
+    let kinds = rejected
+        .errors
+        .iter()
+        .map(|error| error.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(kinds.len(), 2);
+    assert!(kinds.contains(&SchemaErrorKind::ReservedId));
+    assert!(kinds.contains(&SchemaErrorKind::MissingCardinality));
+}
+
+#[test]
+fn top_level_content_shares_all_outermost_namespaces() {
+    for source in [
+        "version: 1\ncontent:\n  - id: shared\n    block: p\noutline:\n  - id: shared\n    match: Heading\n",
+        "version: 1\ntitle: Title\ncontent:\n  - id: shared\n    block: p\nsections:\n  - id: shared\n    match: Heading\n",
+        "version: 1\ntitle: null\ncontent:\n  - id: shared\n    block: p\nsections:\n  - id: shared\n    match: Heading\n",
+    ] {
+        let rejected = invalid(source);
+        let duplicates = rejected
+            .errors
+            .iter()
+            .filter(|error| error.kind == SchemaErrorKind::DuplicateId)
+            .collect::<Vec<_>>();
+        assert_eq!(duplicates.len(), 1, "{source}");
+        assert_eq!(source_slice(source, duplicates[0].range), "shared");
+        assert_eq!(duplicates[0].related.len(), 1);
+    }
+
+    let reserved = invalid(
+        "version: 1\ncontent:\n  - block: list\n    items:\n      - id: fm\n        match: Item\noutline: []\n",
+    );
+    assert_eq!(reserved.errors.iter().count(), 1);
+    assert_eq!(reserved.errors.first.kind, SchemaErrorKind::ReservedId);
+
+    valid(
+        "version: 1\ncontent:\n  - id: choices\n    block: list\n    items:\n      - id: fm\n        match: Item\noutline: []\n",
+    );
+}
+
+#[test]
+fn effective_maximum_is_saturating_product() {
+    assert_eq!(
+        effective_maximum(UpperBound::Bounded(3), UpperBound::Bounded(4)),
+        UpperBound::Bounded(12)
+    );
+    assert_eq!(
+        effective_maximum(UpperBound::Bounded(u32::MAX), UpperBound::Bounded(2)),
+        UpperBound::Unbounded
+    );
+    assert_eq!(
+        effective_maximum(UpperBound::Unbounded, UpperBound::Bounded(1)),
+        UpperBound::Unbounded
+    );
+    assert_eq!(
+        effective_maximum(UpperBound::Bounded(1), UpperBound::Unbounded),
+        UpperBound::Unbounded
+    );
+}
+
+#[test]
+fn later_cross_kind_collision_is_reported_in_source_order() {
+    for (source, later) in [
+        (
+            "version: 1\nsections:\n  - match: '/(?<shared>Parent)/'\n    required: true\n    content:\n      - id: shared\n        block: p\n    captures:\n      shared: text\n",
+            "shared: text",
+        ),
+        (
+            "version: 1\nsections:\n  - match: '/(?<shared>Parent)/'\n    required: true\n    captures:\n      shared: text\n    content:\n      - id: shared\n        block: p\n",
+            "shared",
+        ),
+    ] {
+        let rejected = match load_schema(source) {
+            Ok(loaded) => panic!("unexpected valid schema: {:#?}", loaded.schema),
+            Err(rejected) => rejected,
+        };
+        let errors = rejected.errors.iter().collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "{source}");
+        assert_eq!(errors[0].kind, SchemaErrorKind::DuplicateId);
+        assert_eq!(source_slice(source, errors[0].range), later);
+        assert_eq!(errors[0].related.len(), 1);
+        assert!(errors[0].related[0].range.range.start < errors[0].range.range.start);
+    }
 }
 
 #[test]

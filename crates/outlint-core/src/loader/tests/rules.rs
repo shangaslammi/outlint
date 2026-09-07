@@ -2015,6 +2015,14 @@ fn reserved_root_ids_are_rejected() {
 }
 
 #[test]
+fn reserved_section_id_is_collected_beside_missing_cardinality() {
+    let kinds = error_kinds("version: 1\nsections:\n  - id: fm\n    match: /Intro/\n");
+    assert_eq!(kinds.len(), 2);
+    assert!(kinds.contains(&SchemaErrorKind::ReservedId));
+    assert!(kinds.contains(&SchemaErrorKind::MissingCardinality));
+}
+
+#[test]
 fn generated_reserved_root_ids_are_rejected() {
     for (matcher, id) in [
         ("fm", "fm"),
