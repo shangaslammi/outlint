@@ -1,0 +1,40 @@
+version: 1
+title: null
+sections:
+  - match: Two Lists
+    required: false
+    content:
+      - block: list
+        list_kind: bullet
+        items:
+          - match: Alpha
+      - block: list
+        list_kind: ordered
+        items:
+          - match: Beta
+  - match: Repeated List Rule
+    required: false
+    content:
+      - block: list
+        repeat: "2..2"
+        items:
+          - match: Alpha
+  - match: Repeated Parent
+    repeat: "0..2"
+    content:
+      - block: list
+        items:
+          - match: Alpha
+  - match: Same Parent
+    repeat: "0..2"
+    content:
+      - block: list
+        items:
+          - match: Alpha
+  - match: Nested List Address
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Outer
+          - match: Expected

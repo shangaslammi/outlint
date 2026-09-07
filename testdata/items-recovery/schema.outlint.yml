@@ -1,0 +1,52 @@
+version: 1
+title: null
+sections:
+  - match: Misplaced
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Alpha
+          - match: Beta
+  - match: Unexpected
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Alpha
+  - match: Missing
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Alpha
+          - match: "*"
+            repeat: "1..1"
+  - match: Too Few
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Alpha
+            repeat: "2..2"
+  - match: Too Many
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Alpha
+            repeat: "1..1"
+  - match: Empty Declaration
+    required: false
+    content:
+      - block: list
+        items: []
+  - match: Overlap Canonical
+    required: false
+    content:
+      - block: list
+        items:
+          - match: "*"
+            required: false
+          - match: Alpha
+          - match: Beta

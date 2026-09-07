@@ -1,0 +1,4 @@
+## Empty Declaration
+
+- Alpha
+- Beta

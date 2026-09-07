@@ -1,0 +1,33 @@
+{
+  "two-lists.md": [],
+  "repeated-list-rule.md": [],
+  "repeated-section-parents.md": [],
+  "same-named-parents.md": [
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Same Parent"], "index": 0 }, "index": 0 }
+    },
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Same Parent"], "index": 0 }, "index": 0 }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Same Parent"], "index": 0 }, "matcher": "Alpha" }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Same Parent"], "index": 0 }, "matcher": "Alpha" }
+    }
+  ],
+  "nested-list-address.md": [
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Nested List Address"], "index": 0 }, "index": 1 }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Nested List Address"], "index": 0 }, "matcher": "Expected" }
+    }
+  ]
+}

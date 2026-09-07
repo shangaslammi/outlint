@@ -1,0 +1,56 @@
+{
+  "misplaced.md": [
+    {
+      "id": "misplaced-item",
+      "target": { "kind": "item", "list": { "parent": ["Misplaced"], "index": 0 }, "index": 0 }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Misplaced"], "index": 0 }, "matcher": "Beta" }
+    }
+  ],
+  "unexpected.md": [
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Unexpected"], "index": 0 }, "index": 0 }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Unexpected"], "index": 0 }, "matcher": "Alpha" }
+    }
+  ],
+  "missing.md": [
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Missing"], "index": 0 }, "matcher": "Alpha" }
+    }
+  ],
+  "too-few.md": [
+    {
+      "id": "too-few-items",
+      "target": { "kind": "missing_item", "list": { "parent": ["Too Few"], "index": 0 }, "matcher": "Alpha" }
+    }
+  ],
+  "too-many.md": [
+    {
+      "id": "too-many-items",
+      "target": { "kind": "item", "list": { "parent": ["Too Many"], "index": 0 }, "index": 1 }
+    }
+  ],
+  "empty-declaration.md": [
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Empty Declaration"], "index": 0 }, "index": 0 }
+    },
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Empty Declaration"], "index": 0 }, "index": 1 }
+    }
+  ],
+  "overlap-canonical.md": [
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Overlap Canonical"], "index": 0 }, "matcher": "Beta" }
+    }
+  ]
+}

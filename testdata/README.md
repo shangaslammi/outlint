@@ -223,3 +223,6 @@ this backwards is silent: the suite still passes.
 | `items-matchers-options` | exact, glob, regex, and wildcard item matchers; case folding; inline-markup stripping | §1.8, §2.2, §2.5, §7 |
 | `items-text-presence` | no-text versus present-empty item text; first non-paragraph blocks; wildcard-only no-text matching | §1.8, §2.5, §3.9 |
 | `items-nondefault-options` | case-sensitive and markup-retaining item matching under non-default options | §1.8, §2.2, §7 |
+| `items-direct-and-tightness` | tight/loose first-paragraph equivalence; mixed and nested block boundaries; direct-item isolation; ordered markers | §1.8, §2.5, §3.9 |
+| `items-recovery` | misplaced versus unexpected items; all item cardinality diagnostics; empty declarations; overlap cost; structured list addresses | §2.5, §3.9, §6.1–§6.2 |
+| `items-parent-isolation` | sibling and repeated list scopes; repeated and same-name section parents; nested-item address ordinals; identical-target multiplicity | §1.8, §3.6, §3.9, §6.1–§6.2 |
