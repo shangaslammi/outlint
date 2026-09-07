@@ -180,12 +180,22 @@ stable block kinds:
 | `table` | reserved table node |
 
 Each visible block records its complete half-open byte range, a source
-anchor under §6.2, and anchor-scoped suppressions. Blank lines are not blocks.
+anchor under §6.2, and anchor-scoped suppressions. Only direct preamble
+blocks and direct list items are modelled as nodes; blocks nested inside
+containers are consulted for ownership and boundaries but are not exposed.
+A node's range is the span the CommonMark parser reports for it; trailing
+blank lines are never part of it. Of that range only the start byte, which is
+the anchor, and the guarantee that the range ends no later than the end of
+the node's last content line are normative. Whether the terminating line
+ending is included is implementation-defined, and consumers MUST NOT depend
+on it. Blank lines are not blocks.
 Recognized frontmatter is separate from the root preamble. Link-reference
 definitions occupy no preamble position. A top-level HTML block containing
-only whitespace and one or more complete HTML comments is transparent; every
-other HTML block is a visible `html` block. An inline HTML comment inside a
-paragraph does not make the paragraph transparent.
+only CommonMark ASCII whitespace (spaces, tabs, and line endings) and one or
+more complete HTML comments, as the CommonMark 0.31 HTML-comment production
+defines them, is transparent; every other HTML block is a visible `html`
+block. An inline HTML comment inside a paragraph does not make the paragraph
+transparent.
 
 Block identity is established before transparent nodes are removed. Removing
 a comment or link-reference definition therefore MUST NOT merge its visible
@@ -849,6 +859,24 @@ inspected. After applicability succeeds, exactly the first applicable shape
 row for that member is used. Independent errors on distinct members are
 collected, but no check whose input could not be built is run; no two rows
 fire for one member occurrence.
+
+Applicability is defined only relative to a valid outer form. A content rule
+with no valid outer form — both `block` and `one_of` present, neither
+present, or a discriminator whose value is not a legal label — emits exactly
+one `invalid-content-rule`, anchored at the first discriminator key in source
+order, or at the rule mapping when neither key is present. The rule's `id`,
+`list_kind`, `items`, `required`, and `repeat` members MUST NOT be inspected.
+Unknown keys of that rule still report `invalid-document-shape`
+independently. For example:
+
+```yaml
+content:
+  - block: p
+    one_of: [{block: p}, {block: list}]
+    list_kind: bullet
+```
+
+reports one `invalid-content-rule` at `block` and nothing about `list_kind`.
 
 | Rejected spelling or condition | Schema error | Anchor |
 |---|---|---|
