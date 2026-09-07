@@ -1,11 +1,49 @@
 use crate::markdown::lines::{text_range, LineIndex};
 use crate::markdown::{
-    parse_markdown, Document, DocumentFrontmatter, Heading, MarkdownOptions, Section,
+    parse_markdown, Block, BlockKind, BlockLocation, Document, DocumentFrontmatter, Heading,
+    ItemText, ListBlock, ListKind, MarkdownOptions, Section,
 };
 use crate::HeaderLevel;
 use pulldown_cmark::{Tag, TagEnd};
 
-use super::super::body::{is_comment_only_html, scan_preambles, BlockKind, FrameStack};
+use super::super::body::{is_comment_only_html, scan_preambles, FrameStack};
+
+fn block_kind(block: &Block) -> BlockKind {
+    match block {
+        Block::Paragraph(_) => BlockKind::Paragraph,
+        Block::List(_) => BlockKind::List,
+        Block::Quote(_) => BlockKind::Quote,
+        Block::Code(_) => BlockKind::Code,
+        Block::Html(_) => BlockKind::Html,
+        Block::Break(_) => BlockKind::Break,
+    }
+}
+
+fn block_location(block: &Block) -> &BlockLocation {
+    match block {
+        Block::Paragraph(block)
+        | Block::Quote(block)
+        | Block::Code(block)
+        | Block::Html(block)
+        | Block::Break(block) => &block.location,
+        Block::List(block) => &block.location,
+    }
+}
+
+fn lists(document: &Document) -> Vec<&ListBlock> {
+    document
+        .preamble
+        .iter()
+        .filter_map(|block| match block {
+            Block::List(list) => Some(list),
+            _ => None,
+        })
+        .collect()
+}
+
+fn item_text(item: &crate::markdown::ListItem) -> Option<&ItemText> {
+    item.text.as_ref()
+}
 
 fn headings(document: &Document) -> Vec<&Heading> {
     fn visit<'a>(sections: &'a [Section], output: &mut Vec<&'a Heading>) {
@@ -379,7 +417,7 @@ fn direct_blocks_follow_balanced_event_identity() {
     let headings = scanned.headings;
 
     assert_eq!(
-        root.iter().map(|record| record.kind).collect::<Vec<_>>(),
+        root.iter().map(block_kind).collect::<Vec<_>>(),
         [
             BlockKind::Paragraph,
             BlockKind::Html,
@@ -391,19 +429,114 @@ fn direct_blocks_follow_balanced_event_identity() {
     );
     assert_eq!(headings.len(), 2);
     assert_eq!(
-        headings[0]
-            .iter()
-            .map(|record| record.kind)
-            .collect::<Vec<_>>(),
+        headings[0].iter().map(block_kind).collect::<Vec<_>>(),
         [BlockKind::Paragraph, BlockKind::Quote, BlockKind::Paragraph]
     );
     assert_eq!(
-        headings[1]
-            .iter()
-            .map(|record| record.kind)
-            .collect::<Vec<_>>(),
+        headings[1].iter().map(block_kind).collect::<Vec<_>>(),
         [BlockKind::Paragraph]
     );
+}
+
+#[test]
+fn tight_and_loose_first_paragraphs_have_equal_item_text() {
+    let tight = parse_markdown(
+        "- **A&amp;B** [link](target)\n- sibling\n",
+        MarkdownOptions::default(),
+    );
+    let loose = parse_markdown(
+        "- **A&amp;B** [link](target)\n\n- sibling\n",
+        MarkdownOptions::default(),
+    );
+    let tight_text = lists(&tight)[0].items.first.text.as_ref();
+    let loose_text = lists(&loose)[0].items.first.text.as_ref();
+
+    assert_eq!(tight_text, loose_text);
+    let text = tight_text.unwrap_or_else(|| unreachable!());
+    assert_eq!(text.text, "A&B link");
+    assert_eq!(text.diagnostic_text, "A&B link");
+    assert_eq!(text.source_text, "**A&amp;B** [link](target)");
+
+    let retained = parse_markdown(
+        "- **A&amp;B** [link](target)\n",
+        MarkdownOptions {
+            strip_inline_markup: false,
+        },
+    );
+    let retained = lists(&retained)[0]
+        .items
+        .first
+        .text
+        .as_ref()
+        .unwrap_or_else(|| unreachable!());
+    assert_eq!(retained.text, "**A&B** [link](target)");
+    assert_eq!(retained.diagnostic_text, "A&B link");
+}
+
+#[test]
+fn nonparagraph_first_blocks_produce_no_item_text() {
+    let source = concat!(
+        "-\n",
+        "- > quote first\n",
+        "\n  later paragraph\n",
+        "- ```\n  code\n  ```\n",
+        "\n  later paragraph\n",
+        "- - nested first\n",
+        "\n  later paragraph\n",
+        "- []()\n",
+    );
+    let document = parse_markdown(source, MarkdownOptions::default());
+    let list = lists(&document)[0];
+    let items: Vec<_> = list.items.iter().collect();
+
+    assert_eq!(items.len(), 5);
+    assert!(items[..4].iter().all(|item| item.text.is_none()));
+    let present_empty = item_text(items[4]).unwrap_or_else(|| unreachable!());
+    assert!(present_empty.text.is_empty());
+    assert!(present_empty.diagnostic_text.is_empty());
+    assert_eq!(present_empty.source_text, "[]()");
+}
+
+#[test]
+fn nested_items_are_not_direct_items() {
+    let document = parse_markdown(
+        "- outer one\n  - nested one\n  - nested two\n- outer two\n",
+        MarkdownOptions::default(),
+    );
+    let list = lists(&document)[0];
+    let texts: Vec<_> = list
+        .items
+        .iter()
+        .filter_map(item_text)
+        .map(|text| text.diagnostic_text.as_str())
+        .collect();
+
+    assert_eq!(texts, ["outer one", "outer two"]);
+    assert_eq!(list.items.rest.len(), 1);
+}
+
+#[test]
+fn adjacent_lists_follow_parser_list_events() {
+    let document = parse_markdown(
+        concat!(
+            "- first\n",
+            "- second\n\n",
+            "1. ordered\n",
+            "2. continued\n\n",
+            "<!-- transparent separator -->\n\n",
+            "- final\n",
+        ),
+        MarkdownOptions::default(),
+    );
+    let lists = lists(&document);
+
+    assert_eq!(lists.len(), 3);
+    assert_eq!(lists[0].kind, ListKind::Bullet);
+    assert_eq!(lists[0].items.iter().count(), 2);
+    assert_eq!(lists[1].kind, ListKind::Ordered);
+    assert_eq!(lists[1].items.iter().count(), 2);
+    assert_eq!(lists[2].kind, ListKind::Bullet);
+    assert_eq!(lists[2].items.iter().count(), 1);
 }
 
 #[test]
@@ -431,12 +564,12 @@ fn comment_only_html_uses_commonmark_comment_grammar() {
     let source = "<!-- only -->\n\ntext <!-- inline --> stays\n";
     let root = scan_preambles(source, MarkdownOptions::default()).root;
     assert_eq!(root.len(), 1);
-    assert_eq!(root[0].kind, BlockKind::Paragraph);
+    assert_eq!(block_kind(&root[0]), BlockKind::Paragraph);
 
     let vertical_tab = "<!-- first -->\x0b<!-- second -->\n";
     let root = scan_preambles(vertical_tab, MarkdownOptions::default()).root;
     assert_eq!(root.len(), 1);
-    assert_eq!(root[0].kind, BlockKind::Html);
+    assert_eq!(block_kind(&root[0]), BlockKind::Html);
 }
 
 #[test]
@@ -447,28 +580,32 @@ fn duplicate_normalized_reference_labels_do_not_create_or_merge_direct_blocks() 
     let definitions = scanned.reference_definitions;
 
     assert_eq!(
-        root.iter().map(|record| record.kind).collect::<Vec<_>>(),
+        root.iter().map(block_kind).collect::<Vec<_>>(),
         [BlockKind::Paragraph, BlockKind::Paragraph]
     );
     assert_eq!(definitions.len(), 1);
     assert!(definitions.contains_key("a b"));
-    assert_eq!(root[0].range.start, 0);
-    assert!([6, 7].contains(&root[0].range.end));
+    assert_eq!(block_location(&root[0]).range.start.0, 0);
+    assert!([6, 7].contains(&block_location(&root[0]).range.end.0));
     assert_eq!(
-        source.get(root[0].range.clone()).map(trim_one_line_ending),
+        source
+            .get(block_location(&root[0]).range.start.0..block_location(&root[0]).range.end.0)
+            .map(trim_one_line_ending),
         Some("before")
     );
     let after_start = source.find("after").unwrap_or_else(|| unreachable!());
-    assert_eq!(root[1].range.start, after_start);
-    assert!([source.len() - 1, source.len()].contains(&root[1].range.end));
+    assert_eq!(block_location(&root[1]).range.start.0, after_start);
+    assert!([source.len() - 1, source.len()].contains(&block_location(&root[1]).range.end.0));
     assert_eq!(
-        source.get(root[1].range.clone()).map(trim_one_line_ending),
+        source
+            .get(block_location(&root[1]).range.start.0..block_location(&root[1]).range.end.0)
+            .map(trim_one_line_ending),
         Some("after")
     );
     for span in definitions.values() {
         assert!(root
             .iter()
-            .all(|record| ranges_do_not_overlap(&record.range, span)));
+            .all(|record| ranges_do_not_overlap(block_location(record), span)));
     }
 }
 
@@ -481,28 +618,32 @@ fn multiple_reference_definitions_in_one_region_do_not_create_or_merge_direct_bl
 
     assert_eq!(definitions.len(), 3);
     assert_eq!(root.len(), 2);
-    assert_eq!(root[0].range.start, 0);
-    assert!([6, 7].contains(&root[0].range.end));
+    assert_eq!(block_location(&root[0]).range.start.0, 0);
+    assert!([6, 7].contains(&block_location(&root[0]).range.end.0));
     assert_eq!(
-        source.get(root[0].range.clone()).map(trim_one_line_ending),
+        source
+            .get(block_location(&root[0]).range.start.0..block_location(&root[0]).range.end.0)
+            .map(trim_one_line_ending),
         Some("before")
     );
     let after_start = source.find("after").unwrap_or_else(|| unreachable!());
-    assert_eq!(root[1].range.start, after_start);
-    assert!([source.len() - 1, source.len()].contains(&root[1].range.end));
+    assert_eq!(block_location(&root[1]).range.start.0, after_start);
+    assert!([source.len() - 1, source.len()].contains(&block_location(&root[1]).range.end.0));
     assert_eq!(
-        source.get(root[1].range.clone()).map(trim_one_line_ending),
+        source
+            .get(block_location(&root[1]).range.start.0..block_location(&root[1]).range.end.0)
+            .map(trim_one_line_ending),
         Some("after")
     );
     for span in definitions.values() {
         assert!(root
             .iter()
-            .all(|record| ranges_do_not_overlap(&record.range, span)));
+            .all(|record| ranges_do_not_overlap(block_location(record), span)));
     }
 }
 
-fn ranges_do_not_overlap(left: &std::ops::Range<usize>, right: &std::ops::Range<usize>) -> bool {
-    left.end <= right.start || right.end <= left.start
+fn ranges_do_not_overlap(left: &BlockLocation, right: &std::ops::Range<usize>) -> bool {
+    left.range.end.0 <= right.start || right.end <= left.range.start.0
 }
 
 fn trim_one_line_ending(text: &str) -> &str {
@@ -523,7 +664,7 @@ fn reference_definitions_inside_quotes_and_list_items_do_not_create_or_merge_dir
     let definitions = scanned.reference_definitions;
 
     assert_eq!(
-        root.iter().map(|record| record.kind).collect::<Vec<_>>(),
+        root.iter().map(block_kind).collect::<Vec<_>>(),
         [BlockKind::Quote, BlockKind::List, BlockKind::Paragraph]
     );
     assert_eq!(definitions.len(), 2);
@@ -553,21 +694,30 @@ fn parser_ranges_pin_kind_specific_anchors_and_exclude_trailing_blanks() {
     ];
 
     assert_eq!(root.len(), anchors.len());
-    for (record, (kind, spelling)) in root.iter().zip(anchors) {
-        assert_eq!(record.kind, kind);
+    for (block, (kind, spelling)) in root.iter().zip(anchors) {
+        let location = block_location(block);
+        assert_eq!(block_kind(block), kind);
         assert_eq!(
-            source.get(record.range.start..record.range.start + spelling.len()),
+            source.get(location.range.start.0..location.range.start.0 + spelling.len()),
             Some(spelling)
         );
         assert_eq!(
-            record.line_range.start + record.column as usize - 1,
-            record.range.start
+            location.line_range.start.0 + location.column as usize - 1,
+            location.range.start.0
         );
         assert!(!source
-            .get(record.range.clone())
+            .get(location.range.start.0..location.range.end.0)
             .unwrap_or_default()
             .ends_with("\r\n\r\n"));
-        assert!(record.suppressions.0.is_empty());
+        let suppressions = match block {
+            Block::Paragraph(block)
+            | Block::Quote(block)
+            | Block::Code(block)
+            | Block::Html(block)
+            | Block::Break(block) => &block.suppressions,
+            Block::List(block) => &block.suppressions,
+        };
+        assert!(suppressions.0.is_empty());
     }
 
     let promoted = scan_preambles(
@@ -577,7 +727,7 @@ fn parser_ranges_pin_kind_specific_anchors_and_exclude_trailing_blanks() {
     assert!(promoted.root.is_empty());
     assert_eq!(promoted.headings.len(), 1);
     assert_eq!(promoted.headings[0].len(), 1);
-    assert_eq!(promoted.headings[0][0].kind, BlockKind::Paragraph);
+    assert_eq!(block_kind(&promoted.headings[0][0]), BlockKind::Paragraph);
 }
 
 #[test]

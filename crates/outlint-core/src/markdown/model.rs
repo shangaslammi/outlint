@@ -5,13 +5,15 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use crate::{HeaderLevel, TextRange};
+use crate::{HeaderLevel, NonEmpty, TextRange};
 
-/// Options that affect conversion of a Markdown heading into matcher text.
+/// Options that affect conversion of a Markdown heading or a list item's
+/// first paragraph into matcher text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarkdownOptions {
     /// Reduce inline markup to visible text while retaining the unmodified
-    /// source spelling separately on [`Heading::source_text`].
+    /// source spelling separately on [`Heading::source_text`] and
+    /// [`ItemText`].
     pub strip_inline_markup: bool,
 }
 
@@ -28,6 +30,8 @@ impl Default for MarkdownOptions {
 pub struct Document {
     /// Parsed YAML frontmatter, or its positioned parse failure.
     pub frontmatter: DocumentFrontmatter,
+    /// Visible blocks before the first recognized top-level heading.
+    pub preamble: Preamble,
     /// Sections with no preceding header at a lower level.
     pub sections: Vec<Section>,
     /// Diagnostic ids disabled everywhere in this document.
@@ -115,12 +119,158 @@ impl FrontmatterAnchors {
 pub struct Section {
     /// The heading that opens this section.
     pub heading: Heading,
+    /// Visible blocks after this heading and before the next recognized heading.
+    pub preamble: Preamble,
     /// Sections nested beneath this heading by Markdown heading level.
     ///
     /// When levels are skipped, a heading is attached to the nearest prior
     /// heading with a lower level so validation can diagnose the skip without
     /// losing the surrounding structure.
     pub children: Vec<Section>,
+}
+
+/// The parser-established sequence of visible direct blocks owned by a document or section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preamble(Vec<Block>);
+
+impl Preamble {
+    /// Returns the blocks in document order.
+    pub fn as_slice(&self) -> &[Block] {
+        &self.0
+    }
+
+    /// Iterates the blocks in document order.
+    pub fn iter(&self) -> std::slice::Iter<'_, Block> {
+        self.0.iter()
+    }
+
+    /// Returns the number of visible direct blocks.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Reports whether this preamble has no visible direct blocks.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(in crate::markdown) fn from_blocks(blocks: Vec<Block>) -> Self {
+        Self(blocks)
+    }
+}
+
+/// A visible direct preamble block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Block {
+    /// A Markdown paragraph.
+    Paragraph(LeafBlock),
+    /// A Markdown list and its direct items.
+    List(ListBlock),
+    /// A block quote whose nested blocks are not exposed separately.
+    Quote(LeafBlock),
+    /// A fenced or indented code block.
+    Code(LeafBlock),
+    /// A visible HTML block.
+    Html(LeafBlock),
+    /// A thematic break.
+    Break(LeafBlock),
+}
+
+/// The stable kind of a visible preamble block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockKind {
+    /// A Markdown paragraph.
+    Paragraph,
+    /// A Markdown list.
+    List,
+    /// A block quote.
+    Quote,
+    /// A fenced or indented code block.
+    Code,
+    /// A visible HTML block.
+    Html,
+    /// A thematic break.
+    Break,
+}
+
+/// The marker family that opens a Markdown list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListKind {
+    /// A list opened by a bullet marker.
+    Bullet,
+    /// A list opened by an ordered marker.
+    Ordered,
+}
+
+/// A non-list preamble block and its parser-established metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeafBlock {
+    /// Source extent and anchor of the block.
+    pub location: BlockLocation,
+    /// Diagnostic ids disabled by a directive on the immediately prior line.
+    pub suppressions: Suppressions,
+}
+
+/// A direct Markdown list block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListBlock {
+    /// Whether the outer marker is bullet or ordered syntax.
+    pub kind: ListKind,
+    /// Source extent and anchor of the outer list.
+    pub location: BlockLocation,
+    /// Diagnostic ids disabled by a directive on the immediately prior line.
+    pub suppressions: Suppressions,
+    /// Every syntactic item directly owned by this list.
+    pub items: NonEmpty<ListItem>,
+}
+
+/// One syntactic item directly owned by an exposed list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListItem {
+    /// Source extent and marker anchor of the item.
+    pub location: ItemLocation,
+    /// Diagnostic ids disabled by a directive on the immediately prior line.
+    pub suppressions: Suppressions,
+    /// Processed first-paragraph text, or `None` when the first child is not a paragraph.
+    pub text: Option<ItemText>,
+}
+
+/// The three text views retained for a list item's first paragraph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemText {
+    /// Text used by matchers, normalized according to [`MarkdownOptions`].
+    pub text: String,
+    /// Visible, case-preserving text with inline markup stripped.
+    pub diagnostic_text: String,
+    /// Inline content as spelled in the source, excluding the list marker.
+    pub source_text: String,
+}
+
+/// Source position of a visible direct preamble block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockLocation {
+    /// Parser-reported half-open span, beginning at the block anchor.
+    pub range: TextRange,
+    /// Half-open byte range of the source line containing the anchor.
+    pub line_range: TextRange,
+    /// One-based source line containing the anchor.
+    pub line: u64,
+    /// One-based byte column of the anchor.
+    pub column: u64,
+}
+
+/// Source position of a direct Markdown list item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ItemLocation {
+    /// Parser-reported half-open span, beginning at the item marker.
+    pub range: TextRange,
+    /// Half-open byte range of the source line containing the marker.
+    pub line_range: TextRange,
+    /// One-based source line containing the marker.
+    pub line: u64,
+    /// One-based byte column of the marker.
+    pub column: u64,
 }
 
 /// A normalized and positioned Markdown heading.

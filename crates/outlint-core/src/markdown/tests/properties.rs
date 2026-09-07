@@ -3,13 +3,24 @@ use proptest::prelude::*;
 use crate::markdown::frontmatter::yaml::push_pointer_token;
 use crate::markdown::lines::LineIndex;
 use crate::markdown::{
-    parse_markdown, DocumentFrontmatter, FrontmatterAnchors, FrontmatterLocation, Heading,
-    MarkdownOptions, Section,
+    parse_markdown, Block, BlockLocation, DocumentFrontmatter, FrontmatterAnchors,
+    FrontmatterLocation, Heading, MarkdownOptions, Section,
 };
 use crate::{HeaderLevel, TextRange};
 
 use super::super::body::scan_preambles;
 use super::assert_distinct_anchors;
+
+fn block_location(block: &Block) -> &BlockLocation {
+    match block {
+        Block::Paragraph(block)
+        | Block::Quote(block)
+        | Block::Code(block)
+        | Block::Html(block)
+        | Block::Break(block) => &block.location,
+        Block::List(block) => &block.location,
+    }
+}
 
 fn assert_valid_range(source: &str, range: TextRange) {
     assert!(range.start <= range.end);
@@ -28,11 +39,37 @@ fn assert_valid_section_ranges(source: &str, sections: &[Section]) {
     }
 }
 
+fn assert_valid_preamble_ranges(source: &str, blocks: &[Block]) {
+    for block in blocks {
+        let location = block_location(block);
+        assert_valid_range(source, location.range);
+        assert_valid_range(source, location.line_range);
+        assert!(location.line >= 1);
+        assert!(location.column >= 1);
+        if let Block::List(list) = block {
+            for item in list.items.iter() {
+                assert_valid_range(source, item.location.range);
+                assert_valid_range(source, item.location.line_range);
+                assert!(location.range.start <= item.location.range.start);
+                assert!(item.location.range.end <= location.range.end);
+            }
+        }
+    }
+}
+
+fn flatten_sections<'a>(sections: &'a [Section], output: &mut Vec<&'a Section>) {
+    for section in sections {
+        output.push(section);
+        flatten_sections(&section.children, output);
+    }
+}
+
 fn heading_projection(sections: &[Section]) -> Vec<(HeaderLevel, String)> {
     fn visit(sections: &[Section], output: &mut Vec<(HeaderLevel, String)>) {
         for Section {
             heading: Heading { level, text, .. },
             children,
+            ..
         } in sections
         {
             output.push((*level, text.clone()));
@@ -318,6 +355,40 @@ fn arbitrary_frontmatter_document() -> impl Strategy<Value = String> {
 
 proptest! {
     #[test]
+    fn public_preamble_tree_preserves_parentage_and_ranges(
+        root_blocks in 0usize..4,
+        sections in proptest::collection::vec((1usize..5, "[a-z]{1,8}"), 1..16),
+    ) {
+        let mut source = String::new();
+        for index in 0..root_blocks {
+            source.push_str(&format!("root-{index}\n\n"));
+        }
+        for (index, (level, name)) in sections.iter().enumerate() {
+            source.push_str(&format!("{} {name}-{index}\n\n- item-{index}\n\n", "#".repeat(*level)));
+        }
+
+        let document = parse_markdown(&source, MarkdownOptions::default());
+        prop_assert_eq!(document.preamble.len(), root_blocks);
+        assert_valid_preamble_ranges(&source, document.preamble.as_slice());
+
+        let mut flattened = Vec::new();
+        flatten_sections(&document.sections, &mut flattened);
+        prop_assert_eq!(flattened.len(), sections.len());
+        for (index, section) in flattened.into_iter().enumerate() {
+            prop_assert_eq!(section.preamble.len(), 1);
+            let block = section.preamble.as_slice().first().unwrap_or_else(|| unreachable!());
+            let Block::List(list) = block else {
+                prop_assert!(false, "section preamble did not retain its list");
+                continue;
+            };
+            let text = list.items.first.text.as_ref().unwrap_or_else(|| unreachable!());
+            prop_assert_eq!(text.diagnostic_text.as_str(), format!("item-{index}"));
+            prop_assert!(section.heading.location.range.end <= list.location.range.start);
+            assert_valid_preamble_ranges(&source, section.preamble.as_slice());
+        }
+    }
+
+    #[test]
     fn parser_spans_and_anchors_are_in_bounds_utf8_boundaries(
         prefix in "[é界]{0,4}",
         indent in 0usize..4,
@@ -333,13 +404,13 @@ proptest! {
         let headings = scanned.headings;
         prop_assert_eq!(root.len(), 1);
         prop_assert_eq!(headings.len(), 1);
-        let record = &root[0];
+        let record = block_location(&root[0]);
         let expected_start = "<!--  -->".len() + prefix.len() + ending.len() * 2 + indent;
-        prop_assert_eq!(record.range.start, expected_start);
+        prop_assert_eq!(record.range.start.0, expected_start);
         prop_assert!(record.range.start <= record.range.end);
-        prop_assert!(record.range.end <= expected_start + content.len() + ending.len());
-        prop_assert!(source.is_char_boundary(record.range.start));
-        prop_assert!(source.is_char_boundary(record.range.end));
+        prop_assert!(record.range.end.0 <= expected_start + content.len() + ending.len());
+        prop_assert!(source.is_char_boundary(record.range.start.0));
+        prop_assert!(source.is_char_boundary(record.range.end.0));
         prop_assert!(record.line_range.start <= record.range.start);
         prop_assert!(record.range.start <= record.line_range.end);
         prop_assert_eq!(record.column as usize, indent + 1);

@@ -10,11 +10,16 @@ use super::lines::{
     byte_column, clamp_range, physical_lines, text_range, without_trailing_blank_lines, LineIndex,
 };
 use super::model::{
-    Heading, HeadingLocation, MarkdownOptions, Section, SuppressedDiagnostic, Suppressions,
+    Block, BlockKind, BlockLocation, Heading, HeadingLocation, ItemLocation, ItemText, LeafBlock,
+    ListBlock, ListItem, ListKind, MarkdownOptions, Preamble, Section, SuppressedDiagnostic,
+    Suppressions,
 };
+use crate::NonEmpty;
 
 /// The sections and file-wide suppressions one document body holds.
 pub(super) struct ParsedBody {
+    /// Visible blocks owned directly by the document root.
+    pub(super) preamble: Preamble,
     /// Sections with no preceding header at a lower level.
     pub(super) sections: Vec<Section>,
     /// Diagnostic ids disabled everywhere in this document.
@@ -24,32 +29,12 @@ pub(super) struct ParsedBody {
 struct ScannedBody {
     headings: Vec<HeadingRecord>,
     file_suppressions: Suppressions,
-    root_preamble: Vec<BlockRecord>,
+    root_preamble: Vec<Block>,
     reference_definitions: BTreeMap<String, std::ops::Range<usize>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BlockKind {
-    Paragraph,
-    List,
-    Quote,
-    Code,
-    Html,
-    Break,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct BlockRecord {
-    pub(super) kind: BlockKind,
-    pub(super) range: std::ops::Range<usize>,
-    pub(super) line_range: std::ops::Range<usize>,
-    pub(super) line: usize,
-    pub(super) column: u64,
-    pub(super) suppressions: Suppressions,
-}
-
 pub(super) struct PreambleBuilder {
-    records: Vec<BlockRecord>,
+    records: Vec<Block>,
     open: bool,
 }
 
@@ -61,9 +46,9 @@ impl PreambleBuilder {
         }
     }
 
-    fn push(&mut self, record: BlockRecord) {
+    fn push(&mut self, block: Block) {
         if self.open {
-            self.records.push(record);
+            self.records.push(block);
         }
     }
 
@@ -71,7 +56,7 @@ impl PreambleBuilder {
         self.open = false;
     }
 
-    fn finish(self) -> Vec<BlockRecord> {
+    fn finish(self) -> Vec<Block> {
         self.records
     }
 }
@@ -93,6 +78,31 @@ struct BlockBuilder {
     parser_range: std::ops::Range<usize>,
 }
 
+struct ListBuilder {
+    kind: ListKind,
+    parser_range: std::ops::Range<usize>,
+    items: Vec<ListItem>,
+    active_item: Option<ItemBuilder>,
+}
+
+struct ItemBuilder {
+    parser_range: std::ops::Range<usize>,
+    first_child: ItemFirstChild,
+}
+
+enum ItemFirstChild {
+    Unknown,
+    Paragraph(ItemTextBuilder),
+    ParagraphDone(ItemTextBuilder),
+    NonParagraph,
+}
+
+struct ItemTextBuilder {
+    parser_range: std::ops::Range<usize>,
+    diagnostic_text: String,
+    explicit_wrapper: bool,
+}
+
 /// Scans the CommonMark body for headings and suppression directives.
 ///
 /// `parser_source` is the length-preserving rewrite handed to `pulldown-cmark`
@@ -111,10 +121,11 @@ pub(super) fn parse(
         root_preamble,
         reference_definitions,
     } = scan_events(source, parser_source, options, line_index);
-    let (sections, heading_preambles) = build_section_tree(headings);
-    // These parser-private records become the public preamble model in 3a3.
-    let _ = (root_preamble, heading_preambles, reference_definitions);
+    let sections = build_section_tree(headings);
+    // Definition metadata remains supporting scan information only.
+    let _ = reference_definitions;
     ParsedBody {
+        preamble: Preamble::from_blocks(root_preamble),
         sections,
         file_suppressions,
     }
@@ -133,6 +144,7 @@ fn scan_events(
     let mut line_suppressions = BTreeMap::new();
     let mut active_heading: Option<HeadingBuilder> = None;
     let mut active_direct_block: Option<BlockBuilder> = None;
+    let mut active_direct_list: Option<ListBuilder> = None;
     let mut frames = FrameStack::default();
 
     let parser = Parser::new_ext(parser_source, CommonMarkOptions::empty());
@@ -148,6 +160,14 @@ fn scan_events(
         match event {
             Event::Start(tag) => {
                 let direct_kind = frames.is_top_level().then(|| block_kind(&tag)).flatten();
+                let direct_item = matches!(tag, Tag::Item) && frames.accepts_direct_item();
+                if let Some(list) = active_direct_list.as_mut() {
+                    if direct_item {
+                        list.start_item(range.clone());
+                    } else {
+                        list.observe_start(&tag, range.clone(), frames.direct_item_is_parent());
+                    }
+                }
                 let heading = match &tag {
                     Tag::Heading { level, .. }
                         if frames.is_top_level()
@@ -161,86 +181,124 @@ fn scan_events(
                 };
                 active_heading = heading;
                 if let Some(kind) = direct_kind {
-                    active_direct_block = Some(BlockBuilder {
-                        kind,
-                        expected_end: tag.to_end(),
-                        parser_range: range.clone(),
-                    });
+                    if let Tag::List(start) = &tag {
+                        active_direct_list = Some(ListBuilder::new(*start, range.clone()));
+                    } else {
+                        active_direct_block = Some(BlockBuilder {
+                            kind,
+                            expected_end: tag.to_end(),
+                            parser_range: range.clone(),
+                        });
+                    }
                 }
                 frames.push(tag, range);
             }
-            Event::End(end) => match frames.close(end) {
-                Ok(frame) if matches!(frame.expected_end, TagEnd::Heading(_)) => {
-                    if let Some(builder) = active_heading.take() {
-                        let heading = builder.finish(
-                            source,
-                            frame.range,
-                            options,
-                            line_index,
-                            &line_suppressions,
-                        );
-                        headings.push(HeadingRecord {
-                            heading,
-                            preamble: PreambleBuilder::new(),
-                        });
-                        if let Some(index) = headings.len().checked_sub(1) {
-                            owner = Owner::HeadingRecord(index);
+            Event::End(end) => {
+                if let Some(list) = active_direct_list.as_mut() {
+                    list.observe_end(end, range.clone());
+                }
+                match frames.close(end) {
+                    Ok(frame) if matches!(frame.expected_end, TagEnd::Heading(_)) => {
+                        if let Some(builder) = active_heading.take() {
+                            let heading = builder.finish(
+                                source,
+                                frame.range,
+                                options,
+                                line_index,
+                                &line_suppressions,
+                            );
+                            headings.push(HeadingRecord {
+                                heading,
+                                preamble: PreambleBuilder::new(),
+                            });
+                            if let Some(index) = headings.len().checked_sub(1) {
+                                owner = Owner::HeadingRecord(index);
+                            }
                         }
                     }
-                }
-                Ok(frame) => {
-                    if frame.direct_block {
-                        let Some(builder) = active_direct_block.take() else {
-                            continue;
-                        };
-                        if builder.expected_end != end {
-                            continue;
+                    Ok(frame) => {
+                        if frame.direct_item {
+                            if let Some(list) = active_direct_list.as_mut() {
+                                list.finish_item(source, line_index, &line_suppressions, options);
+                            }
                         }
-                        if let Some(record) = builder.finish(source, line_index, &line_suppressions)
-                        {
-                            push_owned_block(&mut root_preamble, &mut headings, owner, record);
+                        if frame.direct_block {
+                            let block = if matches!(end, TagEnd::List(_)) {
+                                active_direct_list.take().and_then(|builder| {
+                                    builder.finish(source, line_index, &line_suppressions)
+                                })
+                            } else {
+                                active_direct_block.take().and_then(|builder| {
+                                    (builder.expected_end == end)
+                                        .then(|| {
+                                            builder.finish(source, line_index, &line_suppressions)
+                                        })
+                                        .flatten()
+                                })
+                            };
+                            if let Some(block) = block {
+                                push_owned_block(&mut root_preamble, &mut headings, owner, block);
+                            }
                         }
                     }
+                    Err(()) => {
+                        active_heading = None;
+                        active_direct_block = None;
+                        active_direct_list = None;
+                    }
                 }
-                Err(()) => {
-                    active_heading = None;
-                    active_direct_block = None;
-                }
-            },
+            }
             Event::Text(text) => {
                 if let Some(builder) = active_heading.as_mut() {
                     builder.push_visible(&text);
+                }
+                if let Some(list) = active_direct_list.as_mut() {
+                    list.observe_inline(range, Some(&text), frames.direct_item_is_parent());
                 }
             }
             Event::Code(text) | Event::InlineMath(text) | Event::DisplayMath(text) => {
                 if let Some(builder) = active_heading.as_mut() {
                     builder.push_visible(&text);
                 }
+                if let Some(list) = active_direct_list.as_mut() {
+                    list.observe_inline(range, Some(&text), frames.direct_item_is_parent());
+                }
             }
             Event::SoftBreak | Event::HardBreak => {
                 if let Some(builder) = active_heading.as_mut() {
                     builder.push_visible("\n");
+                }
+                if let Some(list) = active_direct_list.as_mut() {
+                    list.observe_inline(range, Some("\n"), frames.direct_item_is_parent());
                 }
             }
             Event::Html(html) | Event::InlineHtml(html) => {
                 collect_suppressions(
                     source,
                     &html,
-                    range,
+                    range.clone(),
                     line_index,
                     &mut file_suppressions,
                     &mut line_suppressions,
                 );
+                if let Some(list) = active_direct_list.as_mut() {
+                    list.observe_inline(range, None, frames.direct_item_is_parent());
+                }
             }
             Event::Rule if frames.is_top_level() => {
-                if let Some(record) = make_block_record(
+                if let Some(block) = make_leaf_block(
                     BlockKind::Break,
                     range,
                     source,
                     line_index,
                     &line_suppressions,
                 ) {
-                    push_owned_block(&mut root_preamble, &mut headings, owner, record);
+                    push_owned_block(&mut root_preamble, &mut headings, owner, block);
+                }
+            }
+            Event::Rule => {
+                if let Some(list) = active_direct_list.as_mut() {
+                    list.observe_nonparagraph(frames.direct_item_is_parent());
                 }
             }
             _ => {}
@@ -259,8 +317,8 @@ fn scan_events(
 
 #[cfg(test)]
 pub(super) struct ScannedPreambles {
-    pub(super) root: Vec<BlockRecord>,
-    pub(super) headings: Vec<Vec<BlockRecord>>,
+    pub(super) root: Vec<Block>,
+    pub(super) headings: Vec<Vec<Block>>,
     pub(super) reference_definitions: BTreeMap<String, std::ops::Range<usize>>,
 }
 
@@ -269,7 +327,11 @@ pub(super) fn scan_preambles(source: &str, options: MarkdownOptions) -> ScannedP
     let lines = LineIndex::new(source);
     let parser_source = super::lines::normalize_bare_cr(source);
     let scanned = scan_events(source, &parser_source, options, &lines);
-    let (_, heading_preambles) = build_section_tree(scanned.headings);
+    let heading_preambles = scanned
+        .headings
+        .iter()
+        .map(|record| record.preamble.records.clone())
+        .collect();
     ScannedPreambles {
         root: scanned.root_preamble,
         headings: heading_preambles,
@@ -288,6 +350,264 @@ fn block_kind(tag: &Tag<'_>) -> Option<BlockKind> {
     }
 }
 
+fn is_inline_tag(tag: &Tag<'_>) -> bool {
+    matches!(
+        tag,
+        Tag::Emphasis
+            | Tag::Strong
+            | Tag::Strikethrough
+            | Tag::Link { .. }
+            | Tag::Image { .. }
+            | Tag::Superscript
+            | Tag::Subscript
+    )
+}
+
+fn is_inline_end(end: TagEnd) -> bool {
+    matches!(
+        end,
+        TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
+            | TagEnd::Link
+            | TagEnd::Image
+            | TagEnd::Superscript
+            | TagEnd::Subscript
+    )
+}
+
+impl ListBuilder {
+    fn new(start: Option<u64>, parser_range: std::ops::Range<usize>) -> Self {
+        Self {
+            kind: if start.is_some() {
+                ListKind::Ordered
+            } else {
+                ListKind::Bullet
+            },
+            parser_range,
+            items: Vec::new(),
+            active_item: None,
+        }
+    }
+
+    fn start_item(&mut self, parser_range: std::ops::Range<usize>) {
+        if self.active_item.is_none() {
+            self.active_item = Some(ItemBuilder {
+                parser_range,
+                first_child: ItemFirstChild::Unknown,
+            });
+        }
+    }
+
+    fn observe_start(
+        &mut self,
+        tag: &Tag<'_>,
+        range: std::ops::Range<usize>,
+        direct_item_parent: bool,
+    ) {
+        let Some(item) = self.active_item.as_mut() else {
+            return;
+        };
+        if direct_item_parent {
+            match tag {
+                Tag::Paragraph => item.start_explicit_paragraph(range),
+                _ if is_inline_tag(tag) => item.observe_inline(range, None, true),
+                _ => item.observe_nonparagraph(),
+            }
+        } else if is_inline_tag(tag) {
+            item.observe_inline(range, None, false);
+        }
+    }
+
+    fn observe_end(&mut self, end: TagEnd, range: std::ops::Range<usize>) {
+        if let Some(item) = self.active_item.as_mut() {
+            if is_inline_end(end) {
+                item.observe_inline(range, None, false);
+            }
+            if end == TagEnd::Paragraph {
+                item.finish_explicit_paragraph();
+            }
+        }
+    }
+
+    fn observe_inline(
+        &mut self,
+        range: std::ops::Range<usize>,
+        visible: Option<&str>,
+        direct_item_parent: bool,
+    ) {
+        if let Some(item) = self.active_item.as_mut() {
+            item.observe_inline(range, visible, direct_item_parent);
+        }
+    }
+
+    fn observe_nonparagraph(&mut self, direct_item_parent: bool) {
+        if direct_item_parent {
+            if let Some(item) = self.active_item.as_mut() {
+                item.observe_nonparagraph();
+            }
+        }
+    }
+
+    fn finish_item(
+        &mut self,
+        source: &str,
+        lines: &LineIndex,
+        line_suppressions: &BTreeMap<usize, Suppressions>,
+        options: MarkdownOptions,
+    ) {
+        let Some(item) = self.active_item.take() else {
+            return;
+        };
+        if let Some(item) = item.finish(source, lines, line_suppressions, options) {
+            self.items.push(item);
+        }
+    }
+
+    fn finish(
+        self,
+        source: &str,
+        lines: &LineIndex,
+        line_suppressions: &BTreeMap<usize, Suppressions>,
+    ) -> Option<Block> {
+        let (location, suppressions) = make_block_location(
+            BlockKind::List,
+            self.parser_range,
+            source,
+            lines,
+            line_suppressions,
+        )?;
+        let mut items = self.items.into_iter();
+        let first = items.next()?;
+        Some(Block::List(ListBlock {
+            kind: self.kind,
+            location,
+            suppressions,
+            items: NonEmpty {
+                first,
+                rest: items.collect(),
+            },
+        }))
+    }
+}
+
+impl ItemBuilder {
+    fn start_explicit_paragraph(&mut self, parser_range: std::ops::Range<usize>) {
+        if matches!(self.first_child, ItemFirstChild::Unknown) {
+            self.first_child = ItemFirstChild::Paragraph(ItemTextBuilder {
+                parser_range,
+                diagnostic_text: String::new(),
+                explicit_wrapper: true,
+            });
+        }
+    }
+
+    fn observe_inline(
+        &mut self,
+        range: std::ops::Range<usize>,
+        visible: Option<&str>,
+        direct_item_parent: bool,
+    ) {
+        if matches!(self.first_child, ItemFirstChild::Unknown) && direct_item_parent {
+            self.first_child = ItemFirstChild::Paragraph(ItemTextBuilder {
+                parser_range: range.clone(),
+                diagnostic_text: String::new(),
+                explicit_wrapper: false,
+            });
+        }
+        if let ItemFirstChild::Paragraph(text) = &mut self.first_child {
+            if !text.explicit_wrapper {
+                text.parser_range.start = text.parser_range.start.min(range.start);
+                text.parser_range.end = text.parser_range.end.max(range.end);
+            }
+            if let Some(visible) = visible {
+                text.diagnostic_text.push_str(visible);
+            }
+        }
+    }
+
+    fn observe_nonparagraph(&mut self) {
+        let first_child = std::mem::replace(&mut self.first_child, ItemFirstChild::Unknown);
+        self.first_child = match first_child {
+            ItemFirstChild::Unknown => ItemFirstChild::NonParagraph,
+            ItemFirstChild::Paragraph(text) if !text.explicit_wrapper => {
+                ItemFirstChild::ParagraphDone(text)
+            }
+            other => other,
+        };
+    }
+
+    fn finish_explicit_paragraph(&mut self) {
+        let first_child = std::mem::replace(&mut self.first_child, ItemFirstChild::Unknown);
+        self.first_child = match first_child {
+            ItemFirstChild::Paragraph(text) if text.explicit_wrapper => {
+                ItemFirstChild::ParagraphDone(text)
+            }
+            other => other,
+        };
+    }
+
+    fn finish(
+        self,
+        source: &str,
+        lines: &LineIndex,
+        line_suppressions: &BTreeMap<usize, Suppressions>,
+        options: MarkdownOptions,
+    ) -> Option<ListItem> {
+        let parser_range = without_trailing_blank_lines(source, self.parser_range, lines);
+        let start = block_anchor(BlockKind::List, source, &parser_range, lines)?;
+        if start > parser_range.end || !source.is_char_boundary(start) {
+            return None;
+        }
+        let range = start..parser_range.end;
+        let line = lines.line_number(start);
+        let line_start = lines.line_start(line);
+        let line_end = lines.line_end(line, source.len());
+        let suppressions = line
+            .checked_sub(1)
+            .and_then(|prior| line_suppressions.get(&prior))
+            .cloned()
+            .unwrap_or_default();
+        let text = match self.first_child {
+            ItemFirstChild::Paragraph(builder) | ItemFirstChild::ParagraphDone(builder) => {
+                Some(builder.finish(source, options))
+            }
+            ItemFirstChild::Unknown | ItemFirstChild::NonParagraph => None,
+        };
+        Some(ListItem {
+            location: ItemLocation {
+                range: text_range(range.start, range.end),
+                line_range: text_range(line_start, line_end),
+                line: line as u64,
+                column: byte_column(line_start, start),
+            },
+            suppressions,
+            text,
+        })
+    }
+}
+
+impl ItemTextBuilder {
+    fn finish(self, source: &str, options: MarkdownOptions) -> ItemText {
+        let safe_range = clamp_range(self.parser_range, source.len());
+        let source_text = source
+            .get(safe_range)
+            .unwrap_or_default()
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        let text = if options.strip_inline_markup {
+            self.diagnostic_text.clone()
+        } else {
+            process_inline_text(&source_text)
+        };
+        ItemText {
+            text,
+            diagnostic_text: self.diagnostic_text,
+            source_text,
+        }
+    }
+}
+
 fn close_owner(root: &mut PreambleBuilder, headings: &mut [HeadingRecord], owner: Owner) {
     match owner {
         Owner::Root => root.close(),
@@ -303,13 +623,13 @@ fn push_owned_block(
     root: &mut PreambleBuilder,
     headings: &mut [HeadingRecord],
     owner: Owner,
-    record: BlockRecord,
+    block: Block,
 ) {
     match owner {
-        Owner::Root => root.push(record),
+        Owner::Root => root.push(block),
         Owner::HeadingRecord(index) => {
             if let Some(heading) = headings.get_mut(index) {
-                heading.preamble.push(record);
+                heading.preamble.push(block);
             }
         }
     }
@@ -321,33 +641,54 @@ impl BlockBuilder {
         source: &str,
         lines: &LineIndex,
         line_suppressions: &BTreeMap<usize, Suppressions>,
-    ) -> Option<BlockRecord> {
-        let record = make_block_record(
+    ) -> Option<Block> {
+        let block = make_leaf_block(
             self.kind,
             self.parser_range,
             source,
             lines,
             line_suppressions,
         )?;
-        if record.kind == BlockKind::Html
-            && source
-                .get(record.range.clone())
-                .is_some_and(is_comment_only_html)
-        {
-            None
-        } else {
-            Some(record)
+        if let Block::Html(leaf) = &block {
+            let range = leaf.location.range.start.0..leaf.location.range.end.0;
+            if source.get(range).is_some_and(is_comment_only_html) {
+                return None;
+            }
         }
+        Some(block)
     }
 }
 
-fn make_block_record(
+fn make_leaf_block(
     kind: BlockKind,
     parser_range: std::ops::Range<usize>,
     source: &str,
     lines: &LineIndex,
     line_suppressions: &BTreeMap<usize, Suppressions>,
-) -> Option<BlockRecord> {
+) -> Option<Block> {
+    let (location, suppressions) =
+        make_block_location(kind, parser_range, source, lines, line_suppressions)?;
+    let leaf = LeafBlock {
+        location,
+        suppressions,
+    };
+    match kind {
+        BlockKind::Paragraph => Some(Block::Paragraph(leaf)),
+        BlockKind::Quote => Some(Block::Quote(leaf)),
+        BlockKind::Code => Some(Block::Code(leaf)),
+        BlockKind::Html => Some(Block::Html(leaf)),
+        BlockKind::Break => Some(Block::Break(leaf)),
+        BlockKind::List => None,
+    }
+}
+
+fn make_block_location(
+    kind: BlockKind,
+    parser_range: std::ops::Range<usize>,
+    source: &str,
+    lines: &LineIndex,
+    line_suppressions: &BTreeMap<usize, Suppressions>,
+) -> Option<(BlockLocation, Suppressions)> {
     let parser_range = without_trailing_blank_lines(source, parser_range, lines);
     let start = block_anchor(kind, source, &parser_range, lines)?;
     if start > parser_range.end || !source.is_char_boundary(start) {
@@ -362,14 +703,15 @@ fn make_block_record(
         .and_then(|prior| line_suppressions.get(&prior))
         .cloned()
         .unwrap_or_default();
-    Some(BlockRecord {
-        kind,
-        range,
-        line_range: line_start..line_end,
-        line,
-        column: byte_column(line_start, start),
+    Some((
+        BlockLocation {
+            range: text_range(range.start, range.end),
+            line_range: text_range(line_start, line_end),
+            line: line as u64,
+            column: byte_column(line_start, start),
+        },
         suppressions,
-    })
+    ))
 }
 
 fn block_anchor(
@@ -443,6 +785,8 @@ pub(super) struct Frame {
     pub(super) expected_end: TagEnd,
     pub(super) range: std::ops::Range<usize>,
     direct_block: bool,
+    direct_list: bool,
+    direct_item: bool,
 }
 
 #[derive(Default)]
@@ -458,11 +802,23 @@ impl FrameStack {
 
     pub(super) fn push(&mut self, tag: Tag<'_>, range: std::ops::Range<usize>) {
         let direct_block = self.is_top_level() && block_kind(&tag).is_some();
+        let direct_list = direct_block && matches!(tag, Tag::List(_));
+        let direct_item = matches!(tag, Tag::Item) && self.accepts_direct_item();
         self.frames.push(Frame {
             expected_end: tag.to_end(),
             range,
             direct_block,
+            direct_list,
+            direct_item,
         });
+    }
+
+    fn accepts_direct_item(&self) -> bool {
+        !self.malformed && self.frames.last().is_some_and(|frame| frame.direct_list)
+    }
+
+    fn direct_item_is_parent(&self) -> bool {
+        !self.malformed && self.frames.last().is_some_and(|frame| frame.direct_item)
     }
 
     pub(super) fn close(&mut self, end: TagEnd) -> Result<Frame, ()> {
@@ -807,14 +1163,12 @@ fn parse_suppression(html: &str) -> Option<(bool, Suppressions)> {
     }
 }
 
-fn build_section_tree(headings: Vec<HeadingRecord>) -> (Vec<Section>, Vec<Vec<BlockRecord>>) {
+fn build_section_tree(headings: Vec<HeadingRecord>) -> Vec<Section> {
     let mut roots = Vec::new();
     let mut path = Vec::<usize>::new();
-    let mut preambles = Vec::with_capacity(headings.len());
 
     for record in headings {
         let HeadingRecord { heading, preamble } = record;
-        preambles.push(preamble.finish());
         while let Some(parent) = section_at_path(&roots, &path) {
             if parent.heading.level < heading.level {
                 break;
@@ -827,12 +1181,13 @@ fn build_section_tree(headings: Vec<HeadingRecord>) -> (Vec<Section>, Vec<Vec<Bl
         };
         siblings.push(Section {
             heading,
+            preamble: Preamble::from_blocks(preamble.finish()),
             children: Vec::new(),
         });
         path.push(siblings.len() - 1);
     }
 
-    (roots, preambles)
+    roots
 }
 
 fn section_at_path<'a>(roots: &'a [Section], path: &[usize]) -> Option<&'a Section> {

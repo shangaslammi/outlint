@@ -26,9 +26,10 @@ pub use loader::{
     load_schema_with_label, load_schema_with_resources,
 };
 pub use markdown::{
-    parse_markdown, Document, DocumentFrontmatter, FrontmatterAnchor, FrontmatterAnchors,
-    FrontmatterLocation, Heading, HeadingLocation, MarkdownOptions, Section, SuppressedDiagnostic,
-    Suppressions,
+    parse_markdown, Block, BlockKind, BlockLocation, Document, DocumentFrontmatter,
+    FrontmatterAnchor, FrontmatterAnchors, FrontmatterLocation, Heading, HeadingLocation,
+    ItemLocation, ItemText, LeafBlock, ListBlock, ListItem, ListKind, MarkdownOptions, Preamble,
+    Section, SuppressedDiagnostic, Suppressions,
 };
 pub use schema::{
     AtLeastTwo, BoundRuleStep, CanonicalFloat, CanonicalInteger, CaptureName, Cardinality,

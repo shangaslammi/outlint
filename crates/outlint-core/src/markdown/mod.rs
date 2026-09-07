@@ -13,8 +13,10 @@ mod model;
 mod tests;
 
 pub use model::{
-    Document, DocumentFrontmatter, FrontmatterAnchor, FrontmatterAnchors, FrontmatterLocation,
-    Heading, HeadingLocation, MarkdownOptions, Section, SuppressedDiagnostic, Suppressions,
+    Block, BlockKind, BlockLocation, Document, DocumentFrontmatter, FrontmatterAnchor,
+    FrontmatterAnchors, FrontmatterLocation, Heading, HeadingLocation, ItemLocation, ItemText,
+    LeafBlock, ListBlock, ListItem, ListKind, MarkdownOptions, Preamble, Section,
+    SuppressedDiagnostic, Suppressions,
 };
 
 use body::ParsedBody;
@@ -46,12 +48,14 @@ pub fn parse_markdown(source: &str, options: MarkdownOptions) -> Document {
     let masked_source = frontmatter_range.map(|range| mask_source_range(source, range));
     let parser_source = normalize_bare_cr(masked_source.as_deref().unwrap_or(source));
     let ParsedBody {
+        preamble,
         sections,
         file_suppressions,
     } = body::parse(source, &parser_source, options, &line_index);
 
     Document {
         frontmatter,
+        preamble,
         sections,
         file_suppressions,
     }

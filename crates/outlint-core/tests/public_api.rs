@@ -201,6 +201,95 @@ fn semantic_options_default_to_the_specification_values() {
 }
 
 #[test]
+fn rfc5_document_model_is_pinned() {
+    use outlint_core::{
+        Block, BlockKind, BlockLocation, ItemLocation, ItemText, LeafBlock, ListBlock, ListItem,
+        ListKind, NonEmpty, Preamble, Suppressions,
+    };
+
+    fn assert_model_value<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
+    assert_model_value::<Preamble>();
+    assert_model_value::<Block>();
+    assert_model_value::<BlockKind>();
+    assert_model_value::<ListKind>();
+    assert_model_value::<LeafBlock>();
+    assert_model_value::<ListBlock>();
+    assert_model_value::<ListItem>();
+    assert_model_value::<ItemText>();
+    assert_model_value::<BlockLocation>();
+    assert_model_value::<ItemLocation>();
+
+    let document = parse_markdown(
+        "root\n\n# Section\n\n- **first**\n-\n",
+        MarkdownOptions::default(),
+    );
+    assert_eq!(document.preamble.len(), 1);
+    assert_eq!(document.preamble.iter().count(), 1);
+    assert!(!document.preamble.is_empty());
+    assert!(matches!(
+        document.preamble.as_slice().first(),
+        Some(Block::Paragraph(_))
+    ));
+
+    let section = document.sections.first().expect("the section is parsed");
+    let Some(Block::List(list)) = section.preamble.as_slice().first() else {
+        panic!("the section owns its list")
+    };
+    assert_eq!(list.kind, ListKind::Bullet);
+    assert_eq!(list.items.iter().count(), 2);
+    assert_eq!(
+        list.items.first.text.as_ref().map(|text| (
+            text.text.as_str(),
+            text.diagnostic_text.as_str(),
+            text.source_text.as_str(),
+        )),
+        Some(("first", "first", "**first**"))
+    );
+    assert!(list
+        .items
+        .rest
+        .first()
+        .is_some_and(|item| item.text.is_none()));
+
+    let location = BlockLocation {
+        range: TextRange {
+            start: ByteOffset(0),
+            end: ByteOffset(1),
+        },
+        line_range: TextRange {
+            start: ByteOffset(0),
+            end: ByteOffset(1),
+        },
+        line: 1,
+        column: 1,
+    };
+    let item_location = ItemLocation {
+        range: location.range,
+        line_range: location.line_range,
+        line: location.line,
+        column: location.column,
+    };
+    let constructed = Block::List(ListBlock {
+        kind: ListKind::Ordered,
+        location,
+        suppressions: Suppressions::default(),
+        items: NonEmpty {
+            first: ListItem {
+                location: item_location,
+                suppressions: Suppressions::default(),
+                text: Some(ItemText {
+                    text: String::new(),
+                    diagnostic_text: String::new(),
+                    source_text: "[]()".to_owned(),
+                }),
+            },
+            rest: Vec::new(),
+        },
+    });
+    assert!(matches!(constructed, Block::List(_)));
+}
+
+#[test]
 fn cardinality_construction_enforces_its_normalized_range() {
     use outlint_core::{Cardinality, UpperBound};
 
