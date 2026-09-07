@@ -56,7 +56,7 @@ pub(crate) use self::jsonpath::{AbsoluteSingularPath, FrontmatterQueryLocator};
 pub(crate) use self::jsonpath::{PreparedQuery, QueryLimitExceeded, SingularComponent};
 pub(crate) use self::syntax::{
     parse_locator, FrontmatterCaptureLocator, LocatorAnchor, LocatorPosition, LocatorSource,
-    ParsedLocator, UnboundOutlineLocator,
+    ParsedLocator, StructuralStep, UnboundOutlineLocator,
 };
 
 #[cfg(test)]

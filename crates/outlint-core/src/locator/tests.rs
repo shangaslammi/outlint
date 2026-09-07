@@ -525,22 +525,6 @@ mod outline_syntax {
         );
     }
 
-    /// §4.4 admits structural traversal "when those kinds exist"; none does in
-    /// this version, so the tokens are retained and left unallocated.
-    #[test]
-    fn structural_steps_are_retained_without_being_allocated() {
-        let locator = outline("$.section/list[0]/item[2]");
-        assert_eq!(names(&locator), vec![("section", None)]);
-        assert_eq!(
-            structure(&locator),
-            vec![
-                ("list", Some("0".to_owned())),
-                ("item", Some("2".to_owned()))
-            ]
-        );
-        assert!(locator.intrinsic_text().is_none());
-    }
-
     #[test]
     fn the_text_intrinsic_terminates_a_locator() {
         let locator = outline("$.release[0]/text");
@@ -852,6 +836,79 @@ mod outline_syntax {
             }
         }
     }
+}
+
+fn structural_schema(locator: &str, content: &str) -> crate::InvalidSchema {
+    crate::load_schema(&format!(
+        "version: 1\nsections:\n  - id: owner\n    match: Owner\n    content:\n{content}  - id: other\n    match: Other\nconstraints:\n  - any_of: [\"{locator}\", other]\n"
+    ))
+    .expect_err("structural terminals are unavailable as propositions")
+}
+
+#[test]
+fn structural_kind_steps_require_specific_declarations() {
+    let any_only = structural_schema("owner/p", "      - block: any\n");
+    assert_eq!(
+        any_only.errors.first.kind,
+        crate::SchemaErrorKind::UnresolvedRef
+    );
+
+    for locator in ["owner/p", "owner/list"] {
+        let specific =
+            structural_schema(locator, "      - one_of: [{ block: p }, { block: list }]\n");
+        assert_eq!(
+            specific.errors.first.kind,
+            crate::SchemaErrorKind::InvalidDocumentShape
+        );
+        assert!(specific.errors.first.message.contains("not propositions"));
+    }
+}
+
+#[test]
+fn structural_kind_steps_are_plural_until_indexed() {
+    let content =
+        "      - block: p\n      - block: list\n        items:\n          - match: Item\n";
+    for locator in [
+        "owner/p",
+        "owner/p[999999999999999999999]",
+        "owner/list",
+        "owner/list[999999999999999999999]",
+        "owner/list[0]/item",
+        "owner/list[0]/item[999999999999999999999]",
+    ] {
+        let bound = structural_schema(locator, content);
+        assert!(
+            bound.errors.first.message.contains("not propositions"),
+            "{locator}"
+        );
+    }
+
+    let plural = structural_schema("owner/list/item", content);
+    assert_eq!(
+        plural.errors.first.kind,
+        crate::SchemaErrorKind::InvalidDocumentShape
+    );
+    assert!(plural.errors.first.message.contains("plural step `/list`"));
+}
+
+#[test]
+fn item_step_requires_declared_nonempty_items() {
+    for content in [
+        "      - block: list\n",
+        "      - block: list\n        items: []\n",
+    ] {
+        let invalid = structural_schema("owner/list[0]/item", content);
+        assert_eq!(
+            invalid.errors.first.kind,
+            crate::SchemaErrorKind::UnresolvedRef
+        );
+    }
+
+    let declared = structural_schema(
+        "owner/list[0]/item",
+        "      - block: list\n        items:\n          - match: Item\n",
+    );
+    assert!(declared.errors.first.message.contains("not propositions"));
 }
 
 /// An index far larger than any node list, which §4.4 requires to be cheap.

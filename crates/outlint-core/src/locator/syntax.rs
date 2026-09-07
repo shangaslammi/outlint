@@ -157,11 +157,9 @@ impl StepName {
 
 /// A structural kind step's spelling, admitted but not yet allocated.
 ///
-/// §4.4 allocates exactly one structural member in this version — `/text`,
-/// which has its own type — and says of the rest that "other structural kinds
-/// and intrinsic members, including `/label`, remain unallocated until the
-/// document features that own them are specified". Nothing may therefore be
-/// resolved here; the token is retained so a later feature can allocate it.
+/// §4.4 allocates `/p`, `/list`, and `/item`; `/text` has its own terminal
+/// type. Resolution still belongs to the schema-aware binder, so the grammar
+/// retains the spelling without claiming that the required declaration exists.
 ///
 /// Admission reuses the §4.1 slug grammar. The spec states no character
 /// grammar for a kind spelling, and slug is the only identifier grammar it
@@ -222,18 +220,12 @@ pub(crate) struct StructuralStep {
 }
 
 impl StructuralStep {
+    /// The structural kind spelling to resolve against the schema.
     pub(crate) fn kind(&self) -> &StructuralKind {
         &self.kind
     }
 
     /// The step's `[i]` subscript, if any.
-    ///
-    /// This version allocates no structural kind, so binding refuses such a
-    /// step before its subscript could matter and no production caller reads
-    /// this. The grammar still parses the subscript, and the parser's tests
-    /// are what check that it does, so the accessor is compiled for the test
-    /// build alone rather than kept alive by an allowance.
-    #[cfg(test)]
     pub(crate) fn position(&self) -> Option<&LocatorPosition> {
         self.position.as_ref()
     }
@@ -593,7 +585,7 @@ fn parse_outline(source: &str) -> Result<UnboundOutlineLocator, LocatorParseErro
     })
 }
 
-/// The one structural member §4.4 allocates in this version.
+/// The terminal intrinsic distinguished lexically from structural kinds.
 const INTRINSIC_TEXT: &str = "text";
 
 fn parse_anchor(scanner: &mut Scanner<'_>) -> Result<LocatorAnchor, LocatorParseError> {

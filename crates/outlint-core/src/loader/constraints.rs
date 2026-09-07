@@ -15,17 +15,19 @@ use std::collections::HashSet;
 use num_bigint::BigUint;
 use serde_json::Value;
 
-use crate::locator::{parse_locator, ParsedLocator, UnboundOutlineLocator};
+use crate::locator::{parse_locator, ParsedLocator, StructuralStep, UnboundOutlineLocator};
 use crate::schema::resolved_anchor;
 use crate::yaml::parse_frontmatter_scalar;
 use crate::{
-    AtLeastTwo, BoundRuleStep, CaptureName, Constraint, ConstraintIndex, ConstraintPath,
-    FrontmatterScalar, NonEmpty, Proposition, RefAnchor, ResolvedFrontmatterCapture,
-    ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator, ResolvedRuleCaptureLocator,
-    ResolvedRuleLocator, RuleIndex, Schema, SchemaErrorKind, ScopePath, SectionRule, SourceRange,
-    UpperBound,
+    AtLeastTwo, BlockMatcher, BoundRuleStep, CaptureName, Constraint, ConstraintIndex,
+    ConstraintPath, ContentOwner, ContentRule, ContentRulePath, ContentScope, FrontmatterScalar,
+    ItemRule, ItemRulePath, ItemScope, Matcher, NonEmpty, Proposition, RefAnchor,
+    ResolvedFrontmatterCapture, ResolvedFrontmatterQuery, ResolvedIntrinsicTextLocator,
+    ResolvedRuleCaptureLocator, ResolvedRuleLocator, RuleIndex, RulePath, Schema, SchemaErrorKind,
+    ScopePath, SectionRule, SourceRange, UpperBound,
 };
 
+use super::rules::{NamedEntry, NamedScope};
 use super::{Loader, RangeKey};
 
 impl Loader {
@@ -362,6 +364,17 @@ impl Loader {
                 );
                 None
             }
+            BoundOperand::StructuralTerminal => {
+                self.shape_error_at(
+                    range,
+                    "structural content and item locators are not propositions",
+                );
+                None
+            }
+            BoundOperand::ItemTextTerminal => {
+                self.shape_error_at(range, "item `/text` is a value and not a proposition");
+                None
+            }
         }
     }
 
@@ -435,17 +448,11 @@ impl Loader {
     ) -> Option<BoundOperand> {
         let source = parsed.source();
         let anchor = resolved_anchor(parsed.anchor());
-        // §4.5: `$.` starts at the outermost named scope — the `outline` rules
-        // in the general form, the `sections` rules under the sugar, whose
-        // synthesized title rule is transparent and declares no captures. A
-        // bare name starts in the scope the constraint is attached to, which
-        // also exposes the captures of the rule that owns that scope.
-        let (mut rules, prefix, mut captures) = match anchor {
-            RefAnchor::SchemaRoot => (schema.addressed_root_rules(), Vec::new(), None),
+        let (mut named_scope, prefix) = match anchor {
+            RefAnchor::SchemaRoot => (NamedScope::Sections(ScopePath(Vec::new())), Vec::new()),
             RefAnchor::CurrentScope => (
-                rules_at_scope(schema, scope)?,
+                NamedScope::Sections(scope.clone()),
                 attachment_identity(schema, scope),
-                rule_at_scope(schema, scope).map(|rule| &rule.captures),
             ),
         };
         // The two keys start alike and part company only where a subscript is
@@ -455,170 +462,287 @@ impl Loader {
 
         let mut first_step = None;
         let mut rest_steps = Vec::new();
-        let mut singular: Vec<bool> = Vec::new();
-        let mut capture = None;
+        let mut names = Vec::new();
+        let mut cursor = BinderCursor::SectionScope;
         let name_steps = parsed.name_steps();
         let step_count = name_steps.rest.len() + 1;
         for (position, step) in name_steps.iter().enumerate() {
             let name = step.name().as_str();
-            // §4.4: a name step inspects the rule ids of the current named
-            // scope and the captures declared by the rule that opened it, and
-            // nothing else. §4.3 makes those two sets disjoint within a scope.
-            if let Some((index, rule, id)) = rules.iter().enumerate().find_map(|(index, rule)| {
-                rule.id
-                    .as_ref()
-                    .filter(|id| id.as_str() == name)
-                    .cloned()
-                    .map(|id| (index, rule, id))
-            }) {
-                let singular_rule = is_statically_singular(rule);
-                let bound_position = step.position().cloned();
-                let selector = match &bound_position {
-                    Some(subscript) => ScopeSelector::ExplicitIndex(subscript.value().clone()),
-                    None => ScopeSelector::ImplicitSingular,
-                };
-                identity.push(CanonicalStep {
-                    index,
-                    selector: selector.clone(),
-                });
-                scope_key.push(CanonicalStep {
-                    index,
-                    selector: scope_equivalent(selector, singular_rule),
-                });
-                singular.push(bound_position.is_some() || singular_rule);
-                let bound_step = BoundRuleStep::new(id, RuleIndex(index), bound_position);
-                if first_step.is_some() {
-                    rest_steps.push(bound_step);
-                } else {
-                    first_step = Some(bound_step);
+            let declaration = self
+                .namespaces
+                .get(&named_scope)
+                .and_then(|entries| entries.iter().find(|entry| entry.name == name))
+                .cloned();
+            let Some(declaration) = declaration else {
+                self.error_at(
+                    SchemaErrorKind::UnresolvedRef,
+                    range,
+                    format!("unresolved ref `{source}`"),
+                );
+                return None;
+            };
+            let bound_position = step.position().cloned();
+            let effective_maximum = declaration.entry.effective_maximum();
+            names.push(BoundName {
+                spelling: name.to_owned(),
+                narrowed: bound_position.is_some(),
+                statically_singular: effective_maximum.is_some_and(is_singular_maximum),
+            });
+            match declaration.entry {
+                NamedEntry::Section { path, .. } => {
+                    let rule = section_rule_at_path(schema, &path)?;
+                    let selector = match &bound_position {
+                        Some(subscript) => ScopeSelector::ExplicitIndex(subscript.value().clone()),
+                        None => ScopeSelector::ImplicitSingular,
+                    };
+                    identity.push(CanonicalStep {
+                        index: path.index.0,
+                        selector: selector.clone(),
+                    });
+                    scope_key.push(CanonicalStep {
+                        index: path.index.0,
+                        selector: scope_equivalent(
+                            selector,
+                            is_singular_maximum(rule.cardinality.max()),
+                        ),
+                    });
+                    let bound_step =
+                        BoundRuleStep::new(rule.id.clone()?, path.index, bound_position);
+                    if first_step.is_some() {
+                        rest_steps.push(bound_step);
+                    } else {
+                        first_step = Some(bound_step);
+                    }
+                    let mut child_scope = path.scope.clone();
+                    child_scope.0.push(path.index);
+                    named_scope = NamedScope::Sections(child_scope);
+                    cursor = BinderCursor::Section(path);
                 }
-                captures = Some(&rule.captures);
-                rules = rule.children.rules();
-                continue;
+                NamedEntry::Content { path, .. } => {
+                    named_scope = NamedScope::Content(path.clone());
+                    cursor = BinderCursor::Content(path);
+                }
+                NamedEntry::Item { path, .. } => {
+                    named_scope = NamedScope::Item(path.clone());
+                    cursor = BinderCursor::NamedItem(path);
+                }
+                NamedEntry::Capture(path) => {
+                    if position + 1 != step_count
+                        || !parsed.structural_steps().is_empty()
+                        || parsed.intrinsic_text().is_some()
+                    {
+                        self.shape_error_at(
+                            range,
+                            format!(
+                                "ref `{source}` continues past the declared capture `{name}`, \
+                                 which is a terminal value"
+                            ),
+                        );
+                        return None;
+                    }
+                    for name in names.iter().take(names.len().saturating_sub(1)) {
+                        if !name.narrowed && !name.statically_singular {
+                            self.plural_step_error(context, range, source.as_str(), &name.spelling);
+                            return None;
+                        }
+                    }
+                    let declaration = section_rule_at_path(schema, &path.rule)?
+                        .captures
+                        .get(&path.name)?;
+                    let steps = first_step.into_iter().chain(rest_steps).collect();
+                    return Some(BoundOperand::Capture(ResolvedRuleCaptureLocator::new(
+                        source.clone(),
+                        anchor,
+                        steps,
+                        path.name,
+                        declaration.value_type(),
+                        bound_position,
+                    )));
+                }
             }
-            let capture_name = CaptureName(name.to_owned());
-            if let Some(declaration) = captures.and_then(|declared| declared.get(&capture_name)) {
-                // §4.3: "A declared capture is a terminal typed value, not a
-                // child scope."
-                if position + 1 != step_count
-                    || !parsed.structural_steps().is_empty()
-                    || parsed.intrinsic_text().is_some()
-                {
-                    self.shape_error_at(
+        }
+
+        let structural_steps: &[StructuralStep] = parsed.structural_steps();
+        for structural in structural_steps {
+            cursor = match structural.kind().as_str() {
+                "p" => bind_paragraph_step(schema, &cursor),
+                "list" => bind_list_step(schema, &cursor),
+                "item" => bind_item_step(schema, &cursor),
+                kind => {
+                    self.error_at(
+                        SchemaErrorKind::UnresolvedRef,
                         range,
                         format!(
-                            "ref `{source}` continues past the declared capture `{name}`, which \
-                             is a terminal value"
+                            "unresolved ref `{source}`: structural kind `/{kind}` is not allocated"
                         ),
                     );
                     return None;
                 }
-                capture = Some((
-                    capture_name,
-                    declaration.value_type(),
-                    step.position().cloned(),
-                ));
-                break;
             }
-            // §4.4 gives a name step exactly one scope, so a name that is
-            // neither a rule id nor a declared capture there resolves nowhere.
-            self.error_at(
-                SchemaErrorKind::UnresolvedRef,
-                range,
-                format!("unresolved ref `{source}`"),
-            );
-            return None;
+            .or_else(|| {
+                self.error_at(
+                    SchemaErrorKind::UnresolvedRef,
+                    range,
+                    format!(
+                        "unresolved ref `{source}`: no specific `/{}` declaration exists here",
+                        structural.kind().as_str()
+                    ),
+                );
+                None
+            })?;
         }
 
-        // §4.4: a schema-resident structural kind step "MUST land on a declared
-        // structural rule of that kind", and this version declares no content
-        // or item rules, so none of them binds.
-        if let Some(structural) = parsed.structural_steps().first() {
-            self.error_at(
-                SchemaErrorKind::UnresolvedRef,
-                range,
-                format!(
-                    "unresolved ref `{source}`: the structural kind `/{}` is not allocated in \
-                     this version",
-                    structural.kind().as_str()
-                ),
-            );
-            return None;
+        // §4.4 assigns plurality an error only after the complete locator is
+        // otherwise known to bind. Resolve every structural declaration first
+        // so an unallocated kind or missing declaration keeps `unresolved-ref`.
+        let item_text_predecessor = structural_steps.is_empty()
+            && parsed.intrinsic_text().is_some()
+            && matches!(cursor, BinderCursor::NamedItem(_));
+        let non_terminal_names = names.len().saturating_sub(usize::from(
+            structural_steps.is_empty() && parsed.intrinsic_text().is_none(),
+        ));
+        for (index, name) in names.iter().take(non_terminal_names).enumerate() {
+            if item_text_predecessor && index + 1 == names.len() {
+                continue;
+            }
+            if !name.narrowed && !name.statically_singular {
+                self.plural_step_error(context, range, source.as_str(), &name.spelling);
+                return None;
+            }
         }
-        // §4.4: "Every non-terminal step MUST be singular [...] Only the
-        // terminal step may remain plural." A capture and `/text` are terminal
-        // values, so the rule step in front of either is itself non-terminal
-        // and takes the same check.
-        let step_count = usize::from(first_step.is_some()) + rest_steps.len();
-        let non_terminal = if capture.is_some() || parsed.intrinsic_text().is_some() {
-            step_count
-        } else {
-            step_count.saturating_sub(1)
-        };
-        let bound_steps = first_step.iter().chain(&rest_steps);
-        if let Some((_, plural)) = singular
-            .iter()
-            .zip(bound_steps)
-            .take(non_terminal)
-            .find(|(singular, _)| !**singular)
-        {
-            // §5.1 gives `ordered` its own, more specific error for the same
-            // condition.
-            let kind = match context {
-                Context::Ordered => SchemaErrorKind::OrderedScopeMismatch,
-                Context::Proposition => SchemaErrorKind::InvalidDocumentShape,
-            };
-            self.error_at(
-                kind,
-                range,
-                format!(
-                    "ref `{source}` descends through the repeatable rule `{}`; narrow that step \
-                     with `[i]`",
-                    plural.id().as_str()
-                ),
-            );
-            return None;
+        for (index, structural) in structural_steps.iter().enumerate() {
+            let non_terminal =
+                index + 1 < structural_steps.len() || parsed.intrinsic_text().is_some();
+            if non_terminal && structural.position().is_none() {
+                self.plural_step_error(
+                    context,
+                    range,
+                    source.as_str(),
+                    &format!("/{}", structural.kind().as_str()),
+                );
+                return None;
+            }
         }
 
-        if let Some((name, value_type, subscript)) = capture {
-            let steps = first_step.into_iter().chain(rest_steps).collect();
-            return Some(BoundOperand::Capture(ResolvedRuleCaptureLocator::new(
-                source.clone(),
-                anchor,
-                steps,
-                name,
-                value_type,
-                subscript,
-            )));
-        }
-        let Some(first) = first_step else {
-            // The parsed locator has a non-empty name path. Every name either
-            // bound a rule step, returned an error above, or terminated at a
-            // capture (also returned above), so this state cannot arise from
-            // schema input. Keep the fallback structured if those cases ever
-            // change instead of turning an internal mismatch into a panic.
-            self.shape_error_at(range, format!("ref `{source}` has no bound name step"));
-            return None;
-        };
-        let steps = NonEmpty {
-            first,
-            rest: rest_steps,
-        };
         if let Some(text) = parsed.intrinsic_text() {
-            return Some(BoundOperand::IntrinsicText(
-                ResolvedIntrinsicTextLocator::new(
+            return match cursor {
+                BinderCursor::Section(_) => {
+                    let Some(first) = first_step else {
+                        self.shape_error_at(range, format!("ref `{source}` has no bound heading"));
+                        return None;
+                    };
+                    Some(BoundOperand::IntrinsicText(
+                        ResolvedIntrinsicTextLocator::new(
+                            source.clone(),
+                            anchor,
+                            NonEmpty {
+                                first,
+                                rest: rest_steps,
+                            },
+                            text.position().cloned(),
+                        ),
+                    ))
+                }
+                BinderCursor::NamedItem(path) => self.bind_item_text_intrinsic(
+                    schema,
+                    names.last().map(|name| (&path, name)),
+                    source.as_str(),
+                    range,
+                ),
+                BinderCursor::Items => {
+                    self.bind_item_text_intrinsic(schema, None, source.as_str(), range)
+                }
+                _ => {
+                    self.shape_error_at(
+                        range,
+                        format!("ref `{source}` has no `/text` intrinsic at this terminal"),
+                    );
+                    None
+                }
+            };
+        }
+
+        if matches!(cursor, BinderCursor::Section(_)) {
+            let first = first_step?;
+            Some(BoundOperand::Rule {
+                locator: ResolvedRuleLocator::new(
                     source.clone(),
                     anchor,
-                    steps,
-                    text.position().cloned(),
+                    NonEmpty {
+                        first,
+                        rest: rest_steps,
+                    },
                 ),
-            ));
+                identity,
+                scope: scope_key,
+            })
+        } else {
+            Some(BoundOperand::StructuralTerminal)
         }
-        Some(BoundOperand::Rule {
-            locator: ResolvedRuleLocator::new(source.clone(), anchor, steps),
-            identity,
-            scope: scope_key,
-        })
+    }
+
+    fn plural_step_error(
+        &mut self,
+        context: Context,
+        range: SourceRange,
+        source: &str,
+        step: &str,
+    ) {
+        let kind = match context {
+            Context::Ordered => SchemaErrorKind::OrderedScopeMismatch,
+            Context::Proposition => SchemaErrorKind::InvalidDocumentShape,
+        };
+        let message = if step.starts_with('/') {
+            format!("ref `{source}` descends through plural step `{step}`; narrow it with `[i]`")
+        } else {
+            format!(
+                "ref `{source}` descends through the repeatable rule `{step}`; narrow that step \
+                 with `[i]`"
+            )
+        };
+        self.error_at(kind, range, message);
+    }
+
+    /// The complete provisional §4.4 policy for schema-resident item `/text`.
+    fn bind_item_text_intrinsic(
+        &mut self,
+        schema: &Schema,
+        predecessor: Option<(&ItemRulePath, &BoundName)>,
+        source: &str,
+        range: SourceRange,
+    ) -> Option<BoundOperand> {
+        let Some((path, predecessor)) = predecessor else {
+            self.shape_error_at(
+                range,
+                format!("ref `{source}` uses `/text` after structural `/item`"),
+            );
+            return None;
+        };
+        let Some(item) = item_rule_at_path(schema, path) else {
+            self.shape_error_at(
+                range,
+                format!("ref `{source}` has no named item before `/text`"),
+            );
+            return None;
+        };
+        if matches!(item.matcher, Matcher::Any) {
+            self.shape_error_at(
+                range,
+                format!("ref `{source}` uses `/text` after a wildcard item rule"),
+            );
+            return None;
+        }
+        if !predecessor.narrowed && !predecessor.statically_singular {
+            self.shape_error_at(
+                range,
+                format!(
+                    "ref `{source}` uses `/text` after plural item rule `{}`; narrow it with `[i]`",
+                    predecessor.spelling
+                ),
+            );
+            return None;
+        }
+        Some(BoundOperand::ItemTextTerminal)
     }
 }
 
@@ -649,8 +773,27 @@ enum BoundOperand {
     },
     Capture(ResolvedRuleCaptureLocator),
     IntrinsicText(ResolvedIntrinsicTextLocator),
+    StructuralTerminal,
+    ItemTextTerminal,
     FrontmatterQuery(ResolvedFrontmatterQuery),
     FrontmatterCapture(ResolvedFrontmatterCapture),
+}
+
+/// A schema cursor whose variants encode the only legal next structural step.
+enum BinderCursor {
+    SectionScope,
+    Section(RulePath),
+    Content(ContentRulePath),
+    NamedItem(ItemRulePath),
+    Paragraphs,
+    Lists(Vec<ContentRulePath>),
+    Items,
+}
+
+struct BoundName {
+    spelling: String,
+    narrowed: bool,
+    statically_singular: bool,
 }
 
 /// One step of a locator's canonical key.
@@ -735,9 +878,132 @@ fn query_identity(proposition: &ResolvedFrontmatterQuery, match_case: bool) -> R
     }
 }
 
+fn bind_paragraph_step(schema: &Schema, cursor: &BinderCursor) -> Option<BinderCursor> {
+    let scope = match cursor {
+        BinderCursor::Section(path) => &section_rule_at_path(schema, path)?.content,
+        BinderCursor::SectionScope
+        | BinderCursor::Content(_)
+        | BinderCursor::NamedItem(_)
+        | BinderCursor::Paragraphs
+        | BinderCursor::Lists(_)
+        | BinderCursor::Items => return None,
+    };
+    content_rules(scope)
+        .iter()
+        .any(content_rule_declares_paragraph)
+        .then_some(BinderCursor::Paragraphs)
+}
+
+fn bind_list_step(schema: &Schema, cursor: &BinderCursor) -> Option<BinderCursor> {
+    let BinderCursor::Section(section) = cursor else {
+        return None;
+    };
+    let rules = content_rules(&section_rule_at_path(schema, section)?.content);
+    let mut lists = Vec::new();
+    let mut declared = false;
+    for (index, rule) in rules.iter().enumerate() {
+        match rule {
+            ContentRule::List { .. } => {
+                declared = true;
+                lists.push(ContentRulePath {
+                    owner: ContentOwner::Rule(section.clone()),
+                    index: crate::ContentRuleIndex(index),
+                });
+            }
+            ContentRule::OneOf { alternatives, .. }
+                if alternatives
+                    .iter()
+                    .any(|alternative| matches!(alternative, BlockMatcher::List { .. })) =>
+            {
+                declared = true;
+            }
+            ContentRule::Paragraph { .. } | ContentRule::Any { .. } | ContentRule::OneOf { .. } => {
+            }
+        }
+    }
+    declared.then_some(BinderCursor::Lists(lists))
+}
+
+fn bind_item_step(schema: &Schema, cursor: &BinderCursor) -> Option<BinderCursor> {
+    let declared = match cursor {
+        BinderCursor::Content(path) => list_rule_has_items(content_rule_at_path(schema, path)?),
+        BinderCursor::Lists(paths) => paths
+            .iter()
+            .any(|path| content_rule_at_path(schema, path).is_some_and(list_rule_has_items)),
+        BinderCursor::SectionScope
+        | BinderCursor::Section(_)
+        | BinderCursor::NamedItem(_)
+        | BinderCursor::Paragraphs
+        | BinderCursor::Items => false,
+    };
+    declared.then_some(BinderCursor::Items)
+}
+
+fn content_rule_declares_paragraph(rule: &ContentRule) -> bool {
+    match rule {
+        ContentRule::Paragraph { .. } => true,
+        ContentRule::OneOf { alternatives, .. } => alternatives
+            .iter()
+            .any(|alternative| matches!(alternative, BlockMatcher::Paragraph)),
+        ContentRule::List { .. } | ContentRule::Any { .. } => false,
+    }
+}
+
+fn list_rule_has_items(rule: &ContentRule) -> bool {
+    matches!(
+        rule,
+        ContentRule::List {
+            items: ItemScope::Declared(items),
+            ..
+        } if !items.is_empty()
+    )
+}
+
+fn content_rules(scope: &ContentScope) -> &[ContentRule] {
+    match scope {
+        ContentScope::Omitted => &[],
+        ContentScope::Declared(rules) => rules,
+    }
+}
+
+fn section_rule_at_path<'a>(schema: &'a Schema, path: &RulePath) -> Option<&'a SectionRule> {
+    rules_at_scope(schema, &path.scope)?.get(path.index.0)
+}
+
+fn content_rule_at_path<'a>(schema: &'a Schema, path: &ContentRulePath) -> Option<&'a ContentRule> {
+    let scope = match &path.owner {
+        ContentOwner::Document => match &schema.document {
+            crate::DocumentShape::Outline { content, .. } => content,
+            crate::DocumentShape::Title(crate::TitleSlot::Forbidden { content, .. }) => content,
+            crate::DocumentShape::Title(_) => return None,
+        },
+        ContentOwner::Title => match &schema.document {
+            crate::DocumentShape::Title(title) => title.content(),
+            crate::DocumentShape::Outline { .. } => return None,
+        },
+        ContentOwner::Rule(rule) => &section_rule_at_path(schema, rule)?.content,
+    };
+    content_rules(scope).get(path.index.0)
+}
+
+fn item_rule_at_path<'a>(schema: &'a Schema, path: &ItemRulePath) -> Option<&'a ItemRule> {
+    let ContentRule::List {
+        items: ItemScope::Declared(items),
+        ..
+    } = content_rule_at_path(schema, &path.content)?
+    else {
+        return None;
+    };
+    items.get(path.index.0)
+}
+
+fn is_singular_maximum(maximum: UpperBound) -> bool {
+    matches!(maximum, UpperBound::Bounded(0 | 1))
+}
+
 /// Whether a rule's effective maximum makes an unnarrowed step singular.
 fn is_statically_singular(rule: &SectionRule) -> bool {
-    matches!(rule.cardinality.max(), UpperBound::Bounded(0 | 1))
+    is_singular_maximum(rule.cardinality.max())
 }
 
 /// Reduces a step's selector to the occurrence it can actually denote.
@@ -818,22 +1084,6 @@ fn rules_at_scope<'a>(schema: &'a Schema, scope: &ScopePath) -> Option<&'a [Sect
         rules = rule.children.rules();
     }
     Some(rules)
-}
-
-/// The rule that owns a scope, and therefore declares its capture names.
-///
-/// The addressed root is owned by no rule: the general form's outline scope
-/// has nothing above it, and the sugar's synthesized title rule is transparent
-/// and declares nothing (§4.5).
-fn rule_at_scope<'a>(schema: &'a Schema, scope: &ScopePath) -> Option<&'a SectionRule> {
-    let mut rules = schema.addressed_root_rules();
-    let mut owner = None;
-    for index in &scope.0 {
-        let rule = rules.get(index.0)?;
-        owner = Some(rule);
-        rules = rule.children.rules();
-    }
-    owner
 }
 
 /// The constraint list a public scope path names, in the built schema.

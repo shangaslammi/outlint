@@ -533,6 +533,197 @@ fn value_terminals_bind_but_are_not_propositions() {
 }
 
 #[test]
+fn named_nonwildcard_item_text_binds() {
+    let bound = invalid(
+        r#"
+version: 1
+content:
+  - block: list
+    id: choices
+    items:
+      - id: option
+        match: Option
+sections:
+  - id: other
+    match: Other
+constraints:
+  - any_of: [choices.option/text, other]
+"#,
+    );
+    assert_eq!(bound.errors.rest.len(), 0);
+    assert_eq!(
+        bound.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
+    assert!(bound
+        .errors
+        .first
+        .message
+        .contains("item `/text` is a value"));
+
+    let narrowed = invalid(
+        r#"
+version: 1
+content:
+  - block: list
+    id: choices
+    items:
+      - id: option
+        match: /Option.*/
+        repeat: 0..n
+sections:
+  - id: other
+    match: Other
+constraints:
+  - any_of: ["choices.option[999999999999999999999]/text", other]
+"#,
+    );
+    assert_eq!(narrowed.errors.rest.len(), 0);
+    assert!(narrowed
+        .errors
+        .first
+        .message
+        .contains("item `/text` is a value"));
+
+    let plural = invalid(
+        r#"
+version: 1
+content:
+  - block: list
+    repeat: 0..n
+    items:
+      - id: option
+        match: Option
+sections:
+  - id: other
+    match: Other
+constraints:
+  - any_of: [option/text, other]
+"#,
+    );
+    assert!(plural
+        .errors
+        .first
+        .message
+        .contains("plural item rule `option`"));
+
+    let wildcard = invalid(
+        r#"
+version: 1
+content:
+  - block: list
+    items:
+      - id: option
+        match: "*"
+        repeat: 0..n
+sections:
+  - id: other
+    match: Other
+constraints:
+  - any_of: ["option[0]/text", other]
+"#,
+    );
+    assert!(wildcard.errors.first.message.contains("wildcard item rule"));
+}
+
+#[test]
+fn structural_item_text_is_rejected() {
+    let invalid = invalid(
+        r#"
+version: 1
+sections:
+  - id: owner
+    match: Owner
+    content:
+      - block: list
+        items:
+          - match: Item
+  - id: other
+    match: Other
+constraints:
+  - any_of: ["owner/list[0]/item[0]/text", other]
+"#,
+    );
+    assert_eq!(invalid.errors.rest.len(), 0);
+    assert_eq!(
+        invalid.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
+    assert!(invalid.errors.first.message.contains("structural `/item`"));
+}
+
+#[test]
+fn structural_terminals_are_not_propositions() {
+    for locator in [
+        "owner/p",
+        "owner/list",
+        "owner/list[0]/item",
+        "owner.choices",
+        "owner.choices.option",
+    ] {
+        let schema = format!(
+            r#"
+version: 1
+sections:
+  - id: owner
+    match: Owner
+    content:
+      - block: p
+      - block: list
+        id: choices
+        items:
+          - id: option
+            match: Item
+  - id: other
+    match: Other
+constraints:
+  - any_of: ["{locator}", other]
+"#
+        );
+        let invalid = invalid(&schema);
+        assert_eq!(invalid.errors.rest.len(), 0, "{locator}");
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::InvalidDocumentShape,
+            "{locator}"
+        );
+        assert!(
+            invalid.errors.first.message.contains("not propositions"),
+            "{locator}: {}",
+            invalid.errors.first.message
+        );
+    }
+}
+
+#[test]
+fn unresolved_structural_steps_precede_plurality_checks() {
+    for locator in ["owner/bogus/item", "owner/list/item"] {
+        let invalid = invalid(&format!(
+            r#"
+version: 1
+sections:
+  - id: owner
+    match: Owner
+    repeat: 0..n
+    content:
+      - block: p
+  - id: other
+    match: Other
+constraints:
+  - any_of: ["{locator}", other]
+"#
+        ));
+        assert_eq!(invalid.errors.rest.len(), 0, "{locator}");
+        assert_eq!(
+            invalid.errors.first.kind,
+            SchemaErrorKind::UnresolvedRef,
+            "{locator}: {}",
+            invalid.errors.first.message
+        );
+    }
+}
+
+#[test]
 fn ordered_refuses_value_terminals_with_its_own_error() {
     // §5.1: "Mixing scopes, terminating in a frontmatter or typed value, or
     // otherwise lacking header position is schema error
