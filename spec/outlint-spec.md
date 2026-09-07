@@ -193,10 +193,13 @@ siblings. Frontmatter-like text not recognized by §1.6 keeps its ordinary
 Markdown block interpretation. Implementations MUST use balanced parser
 containers to determine ownership rather than infer it from source prefixes.
 
-The reference parsing contract remains pulldown-cmark with
-`Options::empty()`. GFM tables are not enabled, and pipe-table-looking input
-retains its ordinary paragraph interpretation. `table` is reserved until a
-later parser and rule decision; no table instance exists under this contract.
+Markdown block parsing MUST follow CommonMark with extensions disabled. In
+particular, GFM tables are not enabled, and pipe-table-looking input retains
+its ordinary paragraph interpretation. `table` is reserved until a later
+parser and rule decision; no table instance exists under this contract.
+
+Implementation note: the reference implementation uses pulldown-cmark 0.13.4
+with `Options::empty()`.
 
 1.8. **Lists and direct items.** A Markdown list is one `list` block
 regardless of tightness, looseness, direct-item count, nested lists, or mixed
@@ -1083,7 +1086,7 @@ six heading levels, `R = 0`, `H = 0`, and independently increasing `H`, `R`,
 and `G` cases that demonstrate the bound. Unordered cases MUST cover overlap
 precedence, wildcard shadowing and `unreachable-rule`, extras, guards, and an
 `ordered` constraint. Content/item cases MUST independently vary `B`, `C`,
-`A`, `I`, and `J`, including occurrence-dependent `one_of` costs. No sequence
+`A`, `I`, and `J`, including occurrence-dependent `one_of` costs. A sequence
 implementation MUST NOT use recursive backtracking.
 
 3.8. **Ordering repeated matches by captured value.** Each `order` entry on a

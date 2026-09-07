@@ -13,6 +13,20 @@ output shape, and the library API may all change in a minor release. See
 
 ### Added
 
+- **Preamble content and direct items.** Section rules and the top level may
+  declare an exhaustive `content` grammar over the visible blocks of a
+  preamble (`p`, `list`, `any`, or a local `one_of`, with `list_kind`), and a
+  `block: list` rule may declare an `items` grammar over the list's direct
+  items by item text. Both reuse the section sequence engine (canonical
+  assignment, deterministic recovery). Adds the diagnostic ids
+  `unexpected-block`, `misplaced-block`, `missing-block`, `too-few-blocks`,
+  `too-many-blocks`, `unexpected-item`, `misplaced-item`, `missing-item`,
+  `too-few-items`, and `too-many-items`; the schema error
+  `invalid-content-rule`; the `block`, `missing_block`, `item`, and
+  `missing_item` targets; the `content_rule` and `item_rule` schema nodes;
+  and the `/p`, `/list`, `/item`, and item `/text` locator steps. Omitted
+  `content` and `items` change no verdict. Schema `version` stays 1 and the
+  envelope stays 2 (spec §§1, 2, 3, 4, 6, 8, 10, 11.3–11.4).
 - **Incompatible schema-language revision.** Schema files keep `version: 1`;
   the schema language changed incompatibly in this release. Before release
   1.0, such changes are tracked by the release version and this changelog
