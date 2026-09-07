@@ -133,6 +133,76 @@ fn public_display_implementations_are_concise_and_stable() {
 }
 
 #[test]
+fn rfc5_diagnostic_surface_is_pinned() {
+    use outlint_core::{
+        BlockKind, BlockMatcher, ContentMatcher, ContentOwner, ContentRuleIndex, ContentRulePath,
+        DiagnosticTarget, ItemRuleIndex, ItemRulePath, ListAddress, SchemaNode,
+    };
+
+    let ids = [
+        (DiagnosticId::UnexpectedBlock, "unexpected-block"),
+        (DiagnosticId::MisplacedBlock, "misplaced-block"),
+        (DiagnosticId::MissingBlock, "missing-block"),
+        (DiagnosticId::TooFewBlocks, "too-few-blocks"),
+        (DiagnosticId::TooManyBlocks, "too-many-blocks"),
+        (DiagnosticId::UnexpectedItem, "unexpected-item"),
+        (DiagnosticId::MisplacedItem, "misplaced-item"),
+        (DiagnosticId::MissingItem, "missing-item"),
+        (DiagnosticId::TooFewItems, "too-few-items"),
+        (DiagnosticId::TooManyItems, "too-many-items"),
+    ];
+    for (id, spelling) in ids {
+        assert_eq!(id.as_str(), spelling);
+        assert_eq!(id.to_string(), spelling);
+    }
+
+    let content = ContentRulePath {
+        owner: ContentOwner::Document,
+        index: ContentRuleIndex(2),
+    };
+    let list = ListAddress {
+        parent: HeaderPath(vec!["Parent".into()]),
+        index: 3,
+    };
+    let targets = [
+        DiagnosticTarget::Block {
+            parent: HeaderPath(vec!["Parent".into()]),
+            block: BlockKind::List,
+            index: 3,
+        },
+        DiagnosticTarget::MissingBlock {
+            parent: HeaderPath::default(),
+            matcher: ContentMatcher::Block(BlockMatcher::Paragraph),
+        },
+        DiagnosticTarget::Item {
+            list: list.clone(),
+            index: 4,
+        },
+        DiagnosticTarget::MissingItem {
+            list,
+            matcher: "*".into(),
+        },
+    ];
+    assert!(matches!(targets[0], DiagnosticTarget::Block { .. }));
+    assert!(matches!(targets[1], DiagnosticTarget::MissingBlock { .. }));
+    assert!(matches!(targets[2], DiagnosticTarget::Item { .. }));
+    assert!(matches!(targets[3], DiagnosticTarget::MissingItem { .. }));
+
+    assert!(matches!(
+        SchemaNode::ContentRule(content.clone()),
+        SchemaNode::ContentRule(path) if path == content
+    ));
+    let item = ItemRulePath {
+        content,
+        index: ItemRuleIndex(5),
+    };
+    assert!(matches!(
+        SchemaNode::ItemRule(item.clone()),
+        SchemaNode::ItemRule(path) if path == item
+    ));
+}
+
+#[test]
 fn normalized_newtypes_are_inspectable_without_exposing_construction() {
     let loaded = load_schema(
         r#"

@@ -6,12 +6,14 @@ use crate::typed_value::{
     parse_header, BoundComponent, ParseFailure, ResolvedYamlKind, TypedValue, ValueType,
 };
 use crate::{
-    Block, ByteOffset, CaptureName, CapturePath, Cardinality, ChildScope, Constraint,
-    ConstraintIndex, ConstraintPath, DeclaredScope, Document, DocumentFrontmatter, DocumentShape,
-    ExtrasMode, FrontmatterAnchor, FrontmatterLocation, GuardIndex, GuardPath, HeaderLevel,
-    Heading, HeadingLocation, ListBlock, Matcher, OrderEntryPath, OrderIndex, Preamble, RuleIndex,
-    RulePath, Schema, SchemaNode, ScopeMode, ScopePath, Section, SectionRule, TextRange, TitleSlot,
-    UpperBound,
+    Block, BlockKind, BlockLocation, BlockMatcher, ByteOffset, CaptureName, CapturePath,
+    Cardinality, ChildScope, Constraint, ConstraintIndex, ConstraintPath, ContentMatcher,
+    ContentOwner, ContentRule, ContentRuleIndex, ContentRulePath, ContentScope, DeclaredScope,
+    Document, DocumentFrontmatter, DocumentShape, ExtrasMode, FrontmatterAnchor,
+    FrontmatterLocation, GuardIndex, GuardPath, HeaderLevel, Heading, HeadingLocation,
+    ItemLocation, ItemRule, ItemRuleIndex, ItemRulePath, ItemScope, ListBlock, Matcher,
+    OrderEntryPath, OrderIndex, Preamble, RuleIndex, RulePath, Schema, SchemaNode, ScopeMode,
+    ScopePath, Section, SectionRule, Suppressions, TextRange, TitleSlot, UpperBound,
 };
 
 use crate::locator::QueryLimitExceeded;
@@ -19,7 +21,7 @@ use crate::locator::QueryLimitExceeded;
 use super::constraints::{EvalCtx, Truth};
 use super::diagnostic::{
     Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticTarget, FrontmatterBlock,
-    FrontmatterLineRange, HeaderPath, InvolvedHeader, ValidationOperationalError,
+    FrontmatterLineRange, HeaderPath, InvolvedHeader, ListAddress, ValidationOperationalError,
 };
 use super::frontmatter_values::{self, CaptureFailure, CaptureProblem, FrontmatterValues};
 use super::prepare::{PreparedRule, ValidationPlan};
@@ -86,7 +88,7 @@ pub(super) fn forced_sequence_exhaustion_state(
     let exhausted = matches!(validator.run(plan), Err(RunError::Sequence(_)));
     (
         exhausted,
-        validator.diagnostics.len(),
+        validator.pending_diagnostics.len(),
         validator.post_sequence_actions,
     )
 }
@@ -135,7 +137,7 @@ impl WorkCounter {
 struct Validator<'a> {
     schema: &'a Schema,
     document: &'a Document,
-    diagnostics: Vec<Diagnostic>,
+    pending_diagnostics: Vec<PendingDiagnostic>,
     validation_work: ValidationWork,
     #[cfg(test)]
     work: WorkCounter,
@@ -147,6 +149,11 @@ struct Validator<'a> {
     scope_counts: ScopeCounts,
     #[cfg(test)]
     visit_trace: Vec<VisitEvent>,
+}
+
+struct PendingDiagnostic {
+    diagnostic: Diagnostic,
+    suppressed: bool,
 }
 
 enum RunError {
@@ -185,21 +192,62 @@ struct BindScopeInput<'a, 'd> {
     parent_path: &'a HeaderPath,
 }
 
+struct ContentVisitInput<'a, 'd> {
+    preamble: &'d Preamble,
+    scope: &'a ContentScope,
+    prepared: &'a super::content::PreparedContentScope,
+    owner: ContentOwner,
+    concrete_parent: &'d HeaderPath,
+    absence_parent: &'d HeaderPath,
+    absence_location: DiagnosticLocation,
+}
+
+struct AssignedListsInput<'a, 'd> {
+    preamble: &'d Preamble,
+    schema_rules: &'a [ContentRule],
+    rules: &'a [super::content::PreparedContentRule],
+    assignment: &'a Assignment,
+    ordinals: &'a [usize],
+    owner: ContentOwner,
+    parent_path: &'d HeaderPath,
+}
+
+enum SequenceCardinality<'a, 'd> {
+    Headings {
+        rule: &'a SectionRule,
+        rule_index: usize,
+        retained: &'a [&'a PathedSection<'d>],
+        assignment: &'a Assignment,
+        schema_scope: &'a ScopePath,
+        parent_path: &'a HeaderPath,
+        parent_location: DiagnosticLocation,
+    },
+    Blocks {
+        rule: &'a ContentRule,
+        rule_index: usize,
+        preamble: &'d Preamble,
+        ordinals: &'a [usize],
+        assignment: &'a Assignment,
+        path: ContentRulePath,
+        concrete_parent: &'a HeaderPath,
+        absence_parent: &'a HeaderPath,
+        absence_location: DiagnosticLocation,
+    },
+    Items {
+        rule: &'a ItemRule,
+        rule_index: usize,
+        items: &'a [&'d crate::ListItem],
+        assignment: &'a Assignment,
+        path: ItemRulePath,
+        list: &'a ListAddress,
+        list_location: DiagnosticLocation,
+    },
+}
+
 struct ValueOrderCheck<'a, 'd> {
     rules: &'a [SectionRule],
     occurrences: &'a [BoundSection<'d>],
     schema_scope: &'a ScopePath,
-}
-
-struct CardinalityCheck<'a, 'd> {
-    cardinality: Cardinality,
-    count: usize,
-    rule: &'a SectionRule,
-    rule_index: usize,
-    occurrences: &'a [BoundSection<'d>],
-    schema_scope: &'a ScopePath,
-    parent: Option<&'d Heading>,
-    parent_path: &'a HeaderPath,
 }
 
 impl<'a> Validator<'a> {
@@ -207,7 +255,7 @@ impl<'a> Validator<'a> {
         Self {
             schema,
             document,
-            diagnostics: Vec::new(),
+            pending_diagnostics: Vec::new(),
             validation_work: ValidationWork::default(),
             #[cfg(test)]
             work: WorkCounter::default(),
@@ -230,7 +278,7 @@ impl<'a> Validator<'a> {
                 // semantic and test-observable visitor state as well as the
                 // pending diagnostics so this Validator cannot expose a
                 // partial document verdict after exhaustion.
-                self.diagnostics.clear();
+                self.pending_diagnostics.clear();
                 self.validation_work = ValidationWork::default();
                 #[cfg(test)]
                 {
@@ -281,19 +329,40 @@ impl<'a> Validator<'a> {
             self.validate_skipped_levels(&document.sections, root_level, &HeaderPath::default());
         }
         match &self.schema.document {
-            DocumentShape::Outline { scope, .. } => {
-                self.visit_content(&document.preamble, &plan.content, &HeaderPath::default())?;
+            DocumentShape::Outline { scope, content } => {
+                let root_path = HeaderPath::default();
+                self.visit_content(ContentVisitInput {
+                    preamble: &document.preamble,
+                    scope: content,
+                    prepared: &plan.content,
+                    owner: ContentOwner::Document,
+                    concrete_parent: &root_path,
+                    absence_parent: &root_path,
+                    absence_location: root_location(),
+                })?;
                 self.validate_outline_root(&top, scope, plan, &values)?
             }
             DocumentShape::Title(title @ TitleSlot::Forbidden { .. }) => {
-                self.visit_content(&document.preamble, &plan.content, &HeaderPath::default())?;
+                let root_path = HeaderPath::default();
+                self.visit_content(ContentVisitInput {
+                    preamble: &document.preamble,
+                    scope: title.content(),
+                    prepared: &plan.content,
+                    owner: ContentOwner::Document,
+                    concrete_parent: &root_path,
+                    absence_parent: &root_path,
+                    absence_location: root_location(),
+                })?;
                 self.validate_sugar_root(&top, has_h1, title, plan, &values)?
             }
             DocumentShape::Title(title) => {
                 self.validate_sugar_root(&top, has_h1, title, plan, &values)?
             }
         }
-        Ok(std::mem::take(&mut self.diagnostics))
+        Ok(std::mem::take(&mut self.pending_diagnostics)
+            .into_iter()
+            .filter_map(|pending| (!pending.suppressed).then_some(pending.diagnostic))
+            .collect())
     }
 
     /// Binds the general form's outline scope: `h1` rules on the virtual root.
@@ -463,7 +532,7 @@ impl<'a> Validator<'a> {
                     references: Vec::new(),
                     message: "the document has more than one title".to_owned(),
                 },
-                Some(&excess.section.heading),
+                Some(&excess.section.heading.suppressions),
                 true,
             );
         }
@@ -477,11 +546,24 @@ impl<'a> Validator<'a> {
         // path saying which subtree failed.
         let attribute = occurrences.len() > 1;
         for (index, occurrence) in occurrences.iter().enumerate() {
-            self.visit_content(
-                &occurrence.section.preamble,
-                &plan.content,
-                &occurrence.path,
-            )?;
+            let document_voice = HeaderPath::default();
+            let (absence_parent, absence_location) = if attribute {
+                (
+                    &occurrence.path,
+                    heading_location(&occurrence.section.heading.location),
+                )
+            } else {
+                (&document_voice, root_location())
+            };
+            self.visit_content(ContentVisitInput {
+                preamble: &occurrence.section.preamble,
+                scope: title.content(),
+                prepared: &plan.content,
+                owner: ContentOwner::Title,
+                concrete_parent: &occurrence.path,
+                absence_parent,
+                absence_location,
+            })?;
             let mut children = child_sections(
                 occurrence.section,
                 &occurrence.path,
@@ -759,7 +841,7 @@ impl<'a> Validator<'a> {
                         references: Vec::new(),
                         message: "the heading skips a level below its parent".into(),
                     },
-                    Some(&section.heading),
+                    Some(&section.heading.suppressions),
                     true,
                 );
             }
@@ -775,18 +857,29 @@ impl<'a> Validator<'a> {
     /// assignment is the sole source of rule identity and descendant visits.
     fn visit_content(
         &mut self,
-        preamble: &Preamble,
-        scope: &super::content::PreparedContentScope,
-        parent_path: &HeaderPath,
+        input: ContentVisitInput<'_, '_>,
     ) -> Result<(), super::sequence::SequenceExhausted> {
-        let super::content::PreparedContentScope::Declared(rules) = scope else {
+        let ContentVisitInput {
+            preamble,
+            scope,
+            prepared,
+            owner,
+            concrete_parent,
+            absence_parent,
+            absence_location,
+        } = input;
+        let (
+            ContentScope::Declared(schema_rules),
+            super::content::PreparedContentScope::Declared(rules),
+        ) = (scope, prepared)
+        else {
             return Ok(());
         };
         #[cfg(test)]
         {
             self.scope_counts.content = self.scope_counts.content.saturating_add(1);
             self.visit_trace
-                .push(VisitEvent::Content(parent_path.clone()));
+                .push(VisitEvent::Content(concrete_parent.clone()));
         }
         #[cfg(test)]
         if self.force_sequence_exhaustion {
@@ -798,25 +891,110 @@ impl<'a> Validator<'a> {
         let assignment = super::sequence::assign(&edges.rules, &edges.matches, &edges.costs)?;
         self.validation_work
             .add_dp(preamble.len(), rules.len(), !assignment.accepted)?;
-        self.visit_assigned_lists(preamble, rules, &assignment, parent_path)
+        let ordinals = super::content::block_ordinals(preamble.as_slice())?;
+        let owner_node = content_owner_node(&owner);
+        for (block_index, block) in preamble.iter().enumerate() {
+            if assignment
+                .rules
+                .get(block_index)
+                .copied()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            let misplaced = (0..rules.len())
+                .any(|rule_index| edges.matches.matches(block_index, rule_index) == Some(true));
+            let ordinal = ordinals.get(block_index).copied().unwrap_or_default();
+            let kind = block_kind_label(super::content::block_kind(block));
+            self.emit_block(
+                if misplaced {
+                    DiagnosticId::MisplacedBlock
+                } else {
+                    DiagnosticId::UnexpectedBlock
+                },
+                block,
+                concrete_parent.clone(),
+                ordinal,
+                owner_node.clone(),
+                &if misplaced {
+                    format!(
+                        "the `{kind}` block matches a content rule but cannot occupy its ordered phase"
+                    )
+                } else {
+                    format!("the `{kind}` block matches no content rule")
+                },
+            );
+        }
+        for (rule_index, rule) in schema_rules.iter().enumerate() {
+            self.emit_sequence_cardinality(SequenceCardinality::Blocks {
+                rule,
+                rule_index,
+                preamble,
+                ordinals: &ordinals,
+                assignment: &assignment,
+                path: ContentRulePath {
+                    owner: owner.clone(),
+                    index: ContentRuleIndex(rule_index),
+                },
+                concrete_parent,
+                absence_parent,
+                absence_location,
+            });
+        }
+        self.visit_assigned_lists(AssignedListsInput {
+            preamble,
+            schema_rules,
+            rules,
+            assignment: &assignment,
+            ordinals: &ordinals,
+            owner,
+            parent_path: concrete_parent,
+        })
     }
 
     /// Visits item scopes in physical block order from a final content verdict.
     fn visit_assigned_lists(
         &mut self,
-        preamble: &Preamble,
-        rules: &[super::content::PreparedContentRule],
-        assignment: &Assignment,
-        parent_path: &HeaderPath,
+        input: AssignedListsInput<'_, '_>,
     ) -> Result<(), super::sequence::SequenceExhausted> {
+        let AssignedListsInput {
+            preamble,
+            schema_rules,
+            rules,
+            assignment,
+            ordinals,
+            owner,
+            parent_path,
+        } = input;
         for (block_index, block) in preamble.iter().enumerate() {
             let Some(rule_index) = assignment.rules.get(block_index).copied().flatten() else {
                 continue;
             };
-            let (Block::List(list), Some(rule)) = (block, rules.get(rule_index)) else {
+            let (Block::List(list), Some(rule), Some(schema_rule)) =
+                (block, rules.get(rule_index), schema_rules.get(rule_index))
+            else {
                 continue;
             };
-            self.visit_items(list, &rule.items, parent_path, block_index)?;
+            let ContentRule::List { items, .. } = schema_rule else {
+                continue;
+            };
+            let list_index = ordinals.get(block_index).copied().unwrap_or_default();
+            let content_path = ContentRulePath {
+                owner: owner.clone(),
+                index: ContentRuleIndex(rule_index),
+            };
+            self.visit_items(
+                list,
+                items,
+                &rule.items,
+                ListAddress {
+                    parent: parent_path.clone(),
+                    index: list_index,
+                },
+                content_path,
+                block_index,
+            )?;
         }
         Ok(())
     }
@@ -825,18 +1003,22 @@ impl<'a> Validator<'a> {
     fn visit_items(
         &mut self,
         list: &ListBlock,
-        scope: &super::content::PreparedItemScope,
-        _parent_path: &HeaderPath,
+        scope: &ItemScope,
+        prepared: &super::content::PreparedItemScope,
+        address: ListAddress,
+        content_path: ContentRulePath,
         _block_index: usize,
     ) -> Result<(), super::sequence::SequenceExhausted> {
-        let super::content::PreparedItemScope::Declared(rules) = scope else {
+        let (ItemScope::Declared(schema_rules), super::content::PreparedItemScope::Declared(rules)) =
+            (scope, prepared)
+        else {
             return Ok(());
         };
         #[cfg(test)]
         {
             self.scope_counts.items = self.scope_counts.items.saturating_add(1);
             self.visit_trace.push(VisitEvent::Items {
-                parent: _parent_path.clone(),
+                parent: address.parent.clone(),
                 block: _block_index,
             });
         }
@@ -850,10 +1032,52 @@ impl<'a> Validator<'a> {
         let assignment = super::sequence::assign(&edges.rules, &edges.matches, &edges.costs)?;
         self.validation_work
             .add_dp(items.len(), rules.len(), !assignment.accepted)?;
-        // Stage 3d2 consumes this final assignment for item diagnostics. It
-        // has no descendants, so retaining it through the end of this visit
-        // is sufficient here and deliberately produces no diagnostics yet.
-        let _final_assignment = assignment;
+        for (item_index, item) in items.iter().copied().enumerate() {
+            if assignment
+                .rules
+                .get(item_index)
+                .copied()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            let misplaced = (0..rules.len())
+                .any(|rule_index| edges.matches.matches(item_index, rule_index) == Some(true));
+            self.emit_item(
+                if misplaced {
+                    DiagnosticId::MisplacedItem
+                } else {
+                    DiagnosticId::UnexpectedItem
+                },
+                item,
+                address.clone(),
+                item_index,
+                Some(SchemaNode::ContentRule(content_path.clone())),
+                &if misplaced {
+                    format!(
+                        "direct item {item_index} matches an item rule but cannot occupy its ordered phase"
+                    )
+                } else {
+                    format!("direct item {item_index} matches no item rule")
+                },
+            );
+        }
+        let list_location = block_location(&list.location);
+        for (rule_index, rule) in schema_rules.iter().enumerate() {
+            self.emit_sequence_cardinality(SequenceCardinality::Items {
+                rule,
+                rule_index,
+                items: &items,
+                assignment: &assignment,
+                path: ItemRulePath {
+                    content: content_path.clone(),
+                    index: ItemRuleIndex(rule_index),
+                },
+                list: &address,
+                list_location,
+            });
+        }
         Ok(())
     }
 
@@ -1029,32 +1253,54 @@ impl<'a> Validator<'a> {
         {
             self.post_sequence_actions = self.post_sequence_actions.saturating_add(1);
         }
+        for (heading_index, pathed) in retained.iter().enumerate() {
+            if assignment
+                .rules
+                .get(heading_index)
+                .copied()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            let row_matches = matrix.get(
+                heading_index.saturating_mul(columns)
+                    ..heading_index.saturating_add(1).saturating_mul(columns),
+            );
+            let misplaced = row_matches.is_some_and(|row| row.iter().any(|value| *value));
+            self.emit_present(
+                if misplaced {
+                    DiagnosticId::MisplacedSection
+                } else {
+                    DiagnosticId::UnexpectedSection
+                },
+                pathed.path.clone(),
+                &pathed.section.heading,
+                scope_owner_node(self.schema, schema_scope),
+                if misplaced {
+                    "the section matches a rule but cannot occupy its ordered phase"
+                } else {
+                    "the section matches no accepting rule"
+                },
+            );
+        }
+        for (rule_index, rule) in rules.iter().enumerate() {
+            self.emit_sequence_cardinality(SequenceCardinality::Headings {
+                rule,
+                rule_index,
+                retained: &retained,
+                assignment: &assignment,
+                schema_scope,
+                parent_path,
+                parent_location: parent
+                    .map_or_else(root_location, |heading| heading_location(&heading.location)),
+            });
+        }
         let mut occurrences = Vec::new();
         for (heading_index, pathed) in retained.iter().enumerate() {
             let section = pathed.section;
             let path = pathed.path.clone();
             let Some(rule_index) = assignment.rules.get(heading_index).copied().flatten() else {
-                let row_matches = matrix.get(
-                    heading_index.saturating_mul(columns)
-                        ..heading_index.saturating_add(1).saturating_mul(columns),
-                );
-                let misplaced = scope.mode == ScopeMode::Ordered
-                    && row_matches.is_some_and(|row| row.iter().any(|value| *value));
-                self.emit_present(
-                    if misplaced {
-                        DiagnosticId::MisplacedSection
-                    } else {
-                        DiagnosticId::UnexpectedSection
-                    },
-                    path,
-                    &section.heading,
-                    scope_owner_node(self.schema, schema_scope),
-                    if misplaced {
-                        "the section matches a rule but cannot occupy its ordered phase"
-                    } else {
-                        "the section matches no accepting rule"
-                    },
-                );
                 continue;
             };
             let (Some(rule), Some(prepared_rule)) =
@@ -1076,7 +1322,16 @@ impl<'a> Validator<'a> {
             );
             // §8 completes the assigned section's preamble, including item
             // descendants, before entering its child-heading scope.
-            self.visit_content(&section.preamble, &prepared_rule.content, &path)?;
+            let owning_rule = rule_path(schema_scope, rule_index);
+            self.visit_content(ContentVisitInput {
+                preamble: &section.preamble,
+                scope: &rule.content,
+                prepared: &prepared_rule.content,
+                owner: ContentOwner::Rule(owning_rule),
+                concrete_parent: &path,
+                absence_parent: &path,
+                absence_location: heading_location(&section.heading.location),
+            })?;
             let child_refs = child_sections(section, &path, allow_skipped);
             let mut child_scope_path = schema_scope.clone();
             child_scope_path.0.push(RuleIndex(rule_index));
@@ -1098,24 +1353,6 @@ impl<'a> Validator<'a> {
             });
         }
 
-        for (rule_index, rule) in rules.iter().enumerate() {
-            let cardinality = rule.cardinality;
-            let count = assignment
-                .counts
-                .get(rule_index)
-                .copied()
-                .unwrap_or_default();
-            self.validate_cardinality(CardinalityCheck {
-                cardinality,
-                count,
-                rule,
-                rule_index,
-                occurrences: &occurrences,
-                schema_scope,
-                parent,
-                parent_path,
-            });
-        }
         // §8 runs the typed order entries after cardinality and after the
         // scope's own rule order, and §3.8 makes this mechanism "independent
         // of the across-rule ordering in §3.7": it runs whether or not the
@@ -1301,43 +1538,61 @@ impl<'a> Validator<'a> {
                     references: Vec::new(),
                     message: value_order::violation_message(&violation),
                 },
-                Some(&violation.second.section.heading),
+                Some(&violation.second.section.heading.suppressions),
                 true,
             );
         }
     }
 
-    fn validate_cardinality(&mut self, check: CardinalityCheck<'_, '_>) {
-        let CardinalityCheck {
-            cardinality,
-            count,
-            rule,
-            rule_index,
-            occurrences,
-            schema_scope,
-            parent,
-            parent_path,
-        } = check;
-        let schema_node = Some(SchemaNode::Rule(rule_path(schema_scope, rule_index)));
+    /// Emits the shared zero/nonzero-minimum/first-excess taxonomy for every
+    /// consuming sequence domain. The final assignment supplies both counts
+    /// and concrete occurrences; no matcher is re-run here.
+    fn emit_sequence_cardinality(&mut self, sequence: SequenceCardinality<'_, '_>) {
+        let (cardinality, rule_index, assignment) = match &sequence {
+            SequenceCardinality::Headings {
+                rule,
+                rule_index,
+                assignment,
+                ..
+            } => (rule.cardinality, *rule_index, *assignment),
+            SequenceCardinality::Blocks {
+                rule,
+                rule_index,
+                assignment,
+                ..
+            } => (content_cardinality(rule), *rule_index, *assignment),
+            SequenceCardinality::Items {
+                rule,
+                rule_index,
+                assignment,
+                ..
+            } => (rule.cardinality, *rule_index, *assignment),
+        };
+        let count = assignment
+            .counts
+            .get(rule_index)
+            .copied()
+            .unwrap_or_default();
         if count < cardinality.min() as usize {
-            let id = if count == 0 {
-                DiagnosticId::MissingSection
-            } else {
-                DiagnosticId::TooFewSections
-            };
-            self.emit(
-                Diagnostic {
-                    id,
-                    // No concrete header represents the unmet cardinality —
-                    // matching headers may exist, just too few of them — so the
-                    // last segment can only be the rule's matcher label.
+            let diagnostic = match &sequence {
+                SequenceCardinality::Headings {
+                    rule,
+                    schema_scope,
+                    parent_path,
+                    parent_location,
+                    ..
+                } => Diagnostic {
+                    id: if count == 0 {
+                        DiagnosticId::MissingSection
+                    } else {
+                        DiagnosticId::TooFewSections
+                    },
                     target: DiagnosticTarget::MissingHeader {
-                        parent: parent_path.clone(),
+                        parent: (*parent_path).clone(),
                         matcher: matcher_label(&rule.matcher),
                     },
-                    location: parent
-                        .map_or_else(root_location, |heading| heading_location(&heading.location)),
-                    schema_node: schema_node.clone(),
+                    location: *parent_location,
+                    schema_node: Some(SchemaNode::Rule(rule_path(schema_scope, rule_index))),
                     involved_headers: Vec::new(),
                     references: Vec::new(),
                     message: format!(
@@ -1345,9 +1600,60 @@ impl<'a> Validator<'a> {
                         cardinality.min()
                     ),
                 },
-                None,
-                false,
-            );
+                SequenceCardinality::Blocks {
+                    rule,
+                    path,
+                    absence_parent,
+                    absence_location,
+                    ..
+                } => Diagnostic {
+                    id: if count == 0 {
+                        DiagnosticId::MissingBlock
+                    } else {
+                        DiagnosticId::TooFewBlocks
+                    },
+                    target: DiagnosticTarget::MissingBlock {
+                        parent: (*absence_parent).clone(),
+                        matcher: content_matcher(rule),
+                    },
+                    location: *absence_location,
+                    schema_node: Some(SchemaNode::ContentRule(path.clone())),
+                    involved_headers: Vec::new(),
+                    references: Vec::new(),
+                    message: format!(
+                        "content matcher `{}` matched {count} blocks, but at least {} are required",
+                        content_matcher_label(rule),
+                        cardinality.min()
+                    ),
+                },
+                SequenceCardinality::Items {
+                    rule,
+                    path,
+                    list,
+                    list_location,
+                    ..
+                } => Diagnostic {
+                    id: if count == 0 {
+                        DiagnosticId::MissingItem
+                    } else {
+                        DiagnosticId::TooFewItems
+                    },
+                    target: DiagnosticTarget::MissingItem {
+                        list: (*list).clone(),
+                        matcher: matcher_label(&rule.matcher),
+                    },
+                    location: *list_location,
+                    schema_node: Some(SchemaNode::ItemRule(path.clone())),
+                    involved_headers: Vec::new(),
+                    references: Vec::new(),
+                    message: format!(
+                        "item matcher `{}` matched {count} items, but at least {} are required",
+                        matcher_label(&rule.matcher),
+                        cardinality.min()
+                    ),
+                },
+            };
+            self.emit(diagnostic, None, false);
         }
         let UpperBound::Bounded(max) = cardinality.max() else {
             return;
@@ -1355,27 +1661,89 @@ impl<'a> Validator<'a> {
         if count <= max as usize {
             return;
         }
-        let excess_index = max as usize;
-        let Some(excess) = occurrences
+        let Some(node_index) = assignment
+            .rules
             .iter()
-            .filter(|occurrence| occurrence.rule_index == rule_index)
-            .nth(excess_index)
+            .enumerate()
+            .filter_map(|(node_index, assigned)| {
+                (*assigned == Some(rule_index)).then_some(node_index)
+            })
+            .nth(max as usize)
         else {
             return;
         };
-        self.emit(
-            Diagnostic {
-                id: DiagnosticId::TooManySections,
-                target: DiagnosticTarget::Header(excess.path.clone()),
-                location: heading_location(&excess.section.heading.location),
-                schema_node,
-                involved_headers: Vec::new(),
-                references: Vec::new(),
-                message: format!("more than {max} sections match this rule"),
-            },
-            Some(&excess.section.heading),
-            true,
-        );
+        match sequence {
+            SequenceCardinality::Headings {
+                retained,
+                schema_scope,
+                ..
+            } => {
+                let Some(excess) = retained.get(node_index) else {
+                    return;
+                };
+                self.emit(
+                    Diagnostic {
+                        id: DiagnosticId::TooManySections,
+                        target: DiagnosticTarget::Header(excess.path.clone()),
+                        location: heading_location(&excess.section.heading.location),
+                        schema_node: Some(SchemaNode::Rule(rule_path(schema_scope, rule_index))),
+                        involved_headers: Vec::new(),
+                        references: Vec::new(),
+                        message: format!("more than {max} sections match this rule"),
+                    },
+                    Some(&excess.section.heading.suppressions),
+                    true,
+                );
+            }
+            SequenceCardinality::Blocks {
+                rule,
+                preamble,
+                ordinals,
+                path,
+                concrete_parent,
+                ..
+            } => {
+                let (Some(excess), Some(ordinal)) = (
+                    preamble.as_slice().get(node_index),
+                    ordinals.get(node_index),
+                ) else {
+                    return;
+                };
+                self.emit_block(
+                    DiagnosticId::TooManyBlocks,
+                    excess,
+                    concrete_parent.clone(),
+                    *ordinal,
+                    Some(SchemaNode::ContentRule(path)),
+                    &format!(
+                        "content matcher `{}` matched {count} blocks, but at most {max} are allowed",
+                        content_matcher_label(rule)
+                    ),
+                );
+            }
+            SequenceCardinality::Items {
+                rule,
+                items,
+                path,
+                list,
+                ..
+            } => {
+                let Some(excess) = items.get(node_index) else {
+                    return;
+                };
+                self.emit_item(
+                    DiagnosticId::TooManyItems,
+                    excess,
+                    list.clone(),
+                    node_index,
+                    Some(SchemaNode::ItemRule(path)),
+                    &format!(
+                        "item matcher `{}` matched {count} items, but at most {max} are allowed",
+                        matcher_label(&rule.matcher)
+                    ),
+                );
+            }
+        }
     }
 
     fn validate_constraints<'d>(
@@ -1432,7 +1800,7 @@ impl<'a> Validator<'a> {
                     references: eval.constraint_references(constraint),
                     message: format!("the `{}` constraint is not satisfied", id.as_str()),
                 },
-                parent,
+                parent.map(|heading| &heading.suppressions),
                 true,
             );
         }
@@ -1481,19 +1849,77 @@ impl<'a> Validator<'a> {
                 references: Vec::new(),
                 message: message.into(),
             },
-            Some(heading),
+            Some(&heading.suppressions),
             true,
         );
     }
 
-    fn emit(&mut self, diagnostic: Diagnostic, anchor: Option<&Heading>, inline_allowed: bool) {
+    fn emit_block(
+        &mut self,
+        id: DiagnosticId,
+        block: &Block,
+        parent: HeaderPath,
+        index: usize,
+        schema_node: Option<SchemaNode>,
+        message: &str,
+    ) {
+        let (location, suppressions) = block_metadata(block);
+        self.emit(
+            Diagnostic {
+                id,
+                target: DiagnosticTarget::Block {
+                    parent,
+                    block: super::content::block_kind(block),
+                    index,
+                },
+                location,
+                schema_node,
+                involved_headers: Vec::new(),
+                references: Vec::new(),
+                message: message.into(),
+            },
+            Some(suppressions),
+            true,
+        );
+    }
+
+    fn emit_item(
+        &mut self,
+        id: DiagnosticId,
+        item: &crate::ListItem,
+        list: ListAddress,
+        index: usize,
+        schema_node: Option<SchemaNode>,
+        message: &str,
+    ) {
+        self.emit(
+            Diagnostic {
+                id,
+                target: DiagnosticTarget::Item { list, index },
+                location: item_location(&item.location),
+                schema_node,
+                involved_headers: Vec::new(),
+                references: Vec::new(),
+                message: message.into(),
+            },
+            Some(&item.suppressions),
+            true,
+        );
+    }
+
+    fn emit(
+        &mut self,
+        diagnostic: Diagnostic,
+        anchor: Option<&Suppressions>,
+        inline_allowed: bool,
+    ) {
         let id = diagnostic.id.as_str();
-        if self.document.file_suppressions.contains(id)
-            || (inline_allowed && anchor.is_some_and(|heading| heading.suppressions.contains(id)))
-        {
-            return;
-        }
-        self.diagnostics.push(diagnostic);
+        let suppressed = self.document.file_suppressions.contains(id)
+            || (inline_allowed && anchor.is_some_and(|node| node.contains(id)));
+        self.pending_diagnostics.push(PendingDiagnostic {
+            diagnostic,
+            suppressed,
+        });
     }
 }
 
@@ -1681,6 +2107,33 @@ fn heading_location(location: &HeadingLocation) -> DiagnosticLocation {
     }
 }
 
+fn block_location(location: &BlockLocation) -> DiagnosticLocation {
+    DiagnosticLocation {
+        range: location.line_range,
+        line: location.line,
+        column: location.column,
+    }
+}
+
+fn item_location(location: &ItemLocation) -> DiagnosticLocation {
+    DiagnosticLocation {
+        range: location.line_range,
+        line: location.line,
+        column: location.column,
+    }
+}
+
+fn block_metadata(block: &Block) -> (DiagnosticLocation, &Suppressions) {
+    match block {
+        Block::Paragraph(block)
+        | Block::Quote(block)
+        | Block::Code(block)
+        | Block::Html(block)
+        | Block::Break(block) => (block_location(&block.location), &block.suppressions),
+        Block::List(block) => (block_location(&block.location), &block.suppressions),
+    }
+}
+
 fn appended_path(parent: &HeaderPath, child: &str) -> HeaderPath {
     let mut path = parent.0.clone();
     path.push(child.to_owned());
@@ -1691,6 +2144,73 @@ fn rule_path(scope: &ScopePath, index: usize) -> crate::RulePath {
     crate::RulePath {
         scope: scope.clone(),
         index: RuleIndex(index),
+    }
+}
+
+fn content_owner_node(owner: &ContentOwner) -> Option<SchemaNode> {
+    match owner {
+        ContentOwner::Document => None,
+        ContentOwner::Title => Some(SchemaNode::Title),
+        ContentOwner::Rule(path) => Some(SchemaNode::Rule(path.clone())),
+    }
+}
+
+fn content_cardinality(rule: &ContentRule) -> Cardinality {
+    match rule {
+        ContentRule::Paragraph { cardinality, .. }
+        | ContentRule::List { cardinality, .. }
+        | ContentRule::Any { cardinality, .. }
+        | ContentRule::OneOf { cardinality, .. } => *cardinality,
+    }
+}
+
+fn content_matcher(rule: &ContentRule) -> ContentMatcher {
+    match rule {
+        ContentRule::Paragraph { .. } => ContentMatcher::Block(crate::BlockMatcher::Paragraph),
+        ContentRule::List { list_kind, .. } => ContentMatcher::Block(crate::BlockMatcher::List {
+            list_kind: *list_kind,
+        }),
+        ContentRule::Any { .. } => ContentMatcher::Block(crate::BlockMatcher::Any),
+        ContentRule::OneOf { alternatives, .. } => ContentMatcher::OneOf(alternatives.clone()),
+    }
+}
+
+fn content_matcher_label(rule: &ContentRule) -> String {
+    match content_matcher(rule) {
+        ContentMatcher::Block(matcher) => block_matcher_label(&matcher),
+        ContentMatcher::OneOf(alternatives) => {
+            let labels = alternatives
+                .iter()
+                .map(block_matcher_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("one_of [{labels}]")
+        }
+    }
+}
+
+fn block_matcher_label(matcher: &BlockMatcher) -> String {
+    match matcher {
+        BlockMatcher::Paragraph => "p".into(),
+        BlockMatcher::List { list_kind: None } => "list".into(),
+        BlockMatcher::List {
+            list_kind: Some(crate::ListKind::Bullet),
+        } => "list/bullet".into(),
+        BlockMatcher::List {
+            list_kind: Some(crate::ListKind::Ordered),
+        } => "list/ordered".into(),
+        BlockMatcher::Any => "any".into(),
+    }
+}
+
+fn block_kind_label(kind: BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Paragraph => "p",
+        BlockKind::List => "list",
+        BlockKind::Quote => "quote",
+        BlockKind::Code => "code",
+        BlockKind::Html => "html",
+        BlockKind::Break => "break",
     }
 }
 

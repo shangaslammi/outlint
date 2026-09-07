@@ -17,8 +17,8 @@ mod tests;
 
 pub use diagnostic::{
     Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticReference, DiagnosticTarget,
-    FrontmatterBlock, FrontmatterLineRange, HeaderPath, InvolvedHeader, PrepareValidationError,
-    ValidationError, ValidationOperationalError,
+    FrontmatterBlock, FrontmatterLineRange, HeaderPath, InvolvedHeader, ListAddress,
+    PrepareValidationError, ValidationError, ValidationOperationalError,
 };
 
 use crate::{Document, Schema};

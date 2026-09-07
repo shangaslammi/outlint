@@ -1,8 +1,8 @@
 //! Public diagnostic vocabulary produced by validation.
 
 use crate::{
-    Matcher, ResolvedFrontmatterCapture, ResolvedFrontmatterQuery, ResolvedRuleLocator, SchemaNode,
-    TextRange,
+    BlockKind, ContentMatcher, Matcher, ResolvedFrontmatterCapture, ResolvedFrontmatterQuery,
+    ResolvedRuleLocator, SchemaNode, TextRange,
 };
 use std::{error::Error, fmt};
 
@@ -25,6 +25,26 @@ pub enum DiagnosticId {
     /// More headings matched a rule than its finite maximum, or the document
     /// holds more than one `h1` under a sugar schema.
     TooManySections,
+    /// A visible preamble block matches no content rule.
+    UnexpectedBlock,
+    /// A visible preamble block matches a rule but cannot occupy its phase.
+    MisplacedBlock,
+    /// No visible preamble block matched a rule whose minimum is nonzero.
+    MissingBlock,
+    /// Some visible blocks matched a rule, but fewer than its minimum.
+    TooFewBlocks,
+    /// More visible blocks matched a rule than its finite maximum.
+    TooManyBlocks,
+    /// A direct list item matches no item rule.
+    UnexpectedItem,
+    /// A direct list item matches a rule but cannot occupy its phase.
+    MisplacedItem,
+    /// No direct list item matched a rule whose minimum is nonzero.
+    MissingItem,
+    /// Some direct items matched a rule, but fewer than its minimum.
+    TooFewItems,
+    /// More direct items matched a rule than its finite maximum.
+    TooManyItems,
     /// The schema declares a title but the document has none.
     MissingTitle,
     /// A required frontmatter block is absent.
@@ -76,6 +96,16 @@ impl DiagnosticId {
             Self::MissingSection => "missing-section",
             Self::TooFewSections => "too-few-sections",
             Self::TooManySections => "too-many-sections",
+            Self::UnexpectedBlock => "unexpected-block",
+            Self::MisplacedBlock => "misplaced-block",
+            Self::MissingBlock => "missing-block",
+            Self::TooFewBlocks => "too-few-blocks",
+            Self::TooManyBlocks => "too-many-blocks",
+            Self::UnexpectedItem => "unexpected-item",
+            Self::MisplacedItem => "misplaced-item",
+            Self::MissingItem => "missing-item",
+            Self::TooFewItems => "too-few-items",
+            Self::TooManyItems => "too-many-items",
             Self::MissingTitle => "missing-title",
             Self::MissingFrontmatter => "missing-frontmatter",
             Self::ForbiddenFrontmatter => "forbidden-frontmatter",
@@ -111,6 +141,15 @@ impl HeaderPath {
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
+}
+
+/// The concrete address of a list block containing an item diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ListAddress {
+    /// Case-preserving path of the list's preamble owner.
+    pub parent: HeaderPath,
+    /// Zero-based ordinal among list blocks in that preamble.
+    pub index: usize,
 }
 
 impl fmt::Display for HeaderPath {
@@ -173,7 +212,7 @@ pub enum DiagnosticReference {
 
 /// What a diagnostic is about.
 ///
-/// The four cases carry text of different provenance, and conflating them in
+/// The cases carry text of different provenance, and conflating them in
 /// one [`HeaderPath`] silently mixes document text with schema text. Only
 /// [`Self::Header`] names text that occurs in the document; the matcher label
 /// in [`Self::MissingHeader`] comes from the schema and may occur nowhere in
@@ -206,6 +245,36 @@ pub enum DiagnosticTarget {
         /// The offending block, absent only when the document has none.
         block: Option<FrontmatterBlock>,
     },
+    /// A visible block that exists in a concrete preamble.
+    Block {
+        /// Case-preserving path of the preamble owner.
+        parent: HeaderPath,
+        /// Stable kind of the concrete block.
+        block: BlockKind,
+        /// Zero-based ordinal among blocks of the same kind in the preamble.
+        index: usize,
+    },
+    /// A content rule whose minimum is not satisfied.
+    MissingBlock {
+        /// Case-preserving path used by the preamble owner's diagnostic voice.
+        parent: HeaderPath,
+        /// Normalized matcher of the unsatisfied content rule.
+        matcher: ContentMatcher,
+    },
+    /// A direct item that exists in a concrete list.
+    Item {
+        /// Address of the containing list block.
+        list: ListAddress,
+        /// Zero-based ordinal among all direct items in the list.
+        index: usize,
+    },
+    /// An item rule whose minimum is not satisfied in a concrete list.
+    MissingItem {
+        /// Address of the containing list block.
+        list: ListAddress,
+        /// Label of the unsatisfied item matcher.
+        matcher: String,
+    },
 }
 
 /// The frontmatter block a diagnostic is about, and the value within it.
@@ -223,8 +292,7 @@ pub struct FrontmatterBlock {
 pub struct Diagnostic {
     /// Stable diagnostic category.
     pub id: DiagnosticId,
-    /// What the diagnostic is about: a header, a missing one, the document, or
-    /// frontmatter.
+    /// What the diagnostic is about in the document model.
     pub target: DiagnosticTarget,
     /// Primary Markdown source anchor.
     pub location: DiagnosticLocation,

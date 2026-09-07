@@ -106,6 +106,12 @@ sections:
             DiagnosticTarget::MissingHeader { matcher, .. } => format!("expected {matcher}"),
             DiagnosticTarget::Document => "document".to_owned(),
             DiagnosticTarget::Frontmatter { .. } => "frontmatter".to_owned(),
+            DiagnosticTarget::Block { block, index, .. } => {
+                format!("{block:?} block {index}")
+            }
+            DiagnosticTarget::MissingBlock { .. } => "expected block".to_owned(),
+            DiagnosticTarget::Item { index, .. } => format!("list item {index}"),
+            DiagnosticTarget::MissingItem { matcher, .. } => format!("expected item {matcher}"),
         };
         println!(
             "{}:{} [{}] {} ({target})",

@@ -45,6 +45,6 @@ pub use schema::{
 };
 pub use validator::{
     validate, Diagnostic, DiagnosticId, DiagnosticLocation, DiagnosticReference, DiagnosticTarget,
-    FrontmatterBlock, FrontmatterLineRange, HeaderPath, InvolvedHeader, PrepareValidationError,
-    PreparedValidator, ValidationError, ValidationOperationalError,
+    FrontmatterBlock, FrontmatterLineRange, HeaderPath, InvolvedHeader, ListAddress,
+    PrepareValidationError, PreparedValidator, ValidationError, ValidationOperationalError,
 };

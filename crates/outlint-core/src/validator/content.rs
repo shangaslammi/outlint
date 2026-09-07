@@ -1,7 +1,8 @@
 //! Pure preparation of heading, content, and item sequence edges.
 
 use crate::{
-    Block, BlockMatcher, Cardinality, ContentRule, ItemText, ListItem, Matcher, SectionRule,
+    Block, BlockKind, BlockMatcher, Cardinality, ContentRule, ItemText, ListItem, Matcher,
+    SectionRule,
 };
 
 use super::prepare::PreparedMatcher;
@@ -90,6 +91,45 @@ pub(super) struct PreparedEdges {
     pub(super) rules: Vec<SequenceRule>,
     pub(super) matches: MatchMatrix,
     pub(super) costs: EdgeCosts,
+}
+
+/// Computes each block's ordinal among blocks of its own stable kind.
+///
+/// The single preamble pass keeps target construction independent of rule
+/// assignment and avoids rescanning earlier blocks for every diagnostic.
+pub(super) fn block_ordinals(blocks: &[Block]) -> Result<Vec<usize>, SequenceExhausted> {
+    let mut ordinals = Vec::new();
+    ordinals
+        .try_reserve_exact(blocks.len())
+        .map_err(|_| SequenceExhausted)?;
+    let mut counts = [0usize; 6];
+    for block in blocks {
+        let slot = match block_kind(block) {
+            BlockKind::Paragraph => 0,
+            BlockKind::List => 1,
+            BlockKind::Quote => 2,
+            BlockKind::Code => 3,
+            BlockKind::Html => 4,
+            BlockKind::Break => 5,
+        };
+        let Some(count) = counts.get_mut(slot) else {
+            return Err(SequenceExhausted);
+        };
+        ordinals.push(*count);
+        *count = count.checked_add(1).ok_or(SequenceExhausted)?;
+    }
+    Ok(ordinals)
+}
+
+pub(super) fn block_kind(block: &Block) -> BlockKind {
+    match block {
+        Block::Paragraph(_) => BlockKind::Paragraph,
+        Block::List(_) => BlockKind::List,
+        Block::Quote(_) => BlockKind::Quote,
+        Block::Code(_) => BlockKind::Code,
+        Block::Html(_) => BlockKind::Html,
+        Block::Break(_) => BlockKind::Break,
+    }
 }
 
 /// Exact §3.7 work buckets for a collection of independently prepared scopes.

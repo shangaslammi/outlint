@@ -227,6 +227,33 @@ fn ordered_suppresses_when_any_of_its_locator_descents_is_suppressed() {
     );
 }
 
+#[test]
+fn rfc5_suppression_filters_only_final_diagnostics() {
+    let schema =
+        "version: 1\ncontent:\n  - block: list\n    repeat: 0..1\n    items: []\noutline: []\n";
+    let markdown = "<!-- outlint-disable-file too-many-blocks -->\n\n- first\n\n- second\n";
+    let reported = diagnostics(schema, markdown);
+
+    // The suppressed excess list remains assigned and therefore still opens
+    // its item grammar. Filtering its primary cannot change traversal.
+    assert_eq!(
+        ids(&reported),
+        [DiagnosticId::UnexpectedItem, DiagnosticId::UnexpectedItem]
+    );
+
+    let inline = diagnostics(
+        "version: 1\ncontent: []\noutline: []\n",
+        "<!-- outlint-disable unexpected-block -->\nparagraph\n",
+    );
+    assert!(inline.is_empty());
+
+    let absence = diagnostics(
+        "version: 1\ncontent:\n  - block: p\n    required: true\noutline: []\n",
+        "<!-- outlint-disable missing-block -->\n",
+    );
+    assert_eq!(ids(&absence), [DiagnosticId::MissingBlock]);
+}
+
 // ---------------------------------------------------------------------------
 // §4.6's `fm[...]` boolean read
 // ---------------------------------------------------------------------------

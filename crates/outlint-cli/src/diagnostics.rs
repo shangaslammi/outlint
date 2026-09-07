@@ -349,6 +349,12 @@ fn render_target(target: &DiagnosticTarget) -> RenderedTarget {
             }),
             pointer: block.as_ref().and_then(|block| block.json_pointer.clone()),
         },
+        // RFC 5 block/item target serialization is introduced by stage 4.
+        // Keep this stage's CLI compiling without expanding that surface yet.
+        DiagnosticTarget::Block { .. }
+        | DiagnosticTarget::MissingBlock { .. }
+        | DiagnosticTarget::Item { .. }
+        | DiagnosticTarget::MissingItem { .. } => RenderedTarget::Document,
     }
 }
 
