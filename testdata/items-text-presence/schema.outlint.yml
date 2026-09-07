@@ -1,0 +1,40 @@
+version: 1
+title: null
+sections:
+  - match: Bare Marker
+    required: false
+    content:
+      - block: list
+        items:
+          - match: ""
+  - match: First Block Quote
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Quoted
+  - match: First Block Code
+    required: false
+    content:
+      - block: list
+        items:
+          - match: code
+  - match: Inline Comment Empty
+    required: false
+    content:
+      - block: list
+        items:
+          - match: ""
+  - match: Empty Link Text
+    required: false
+    content:
+      - block: list
+        items:
+          - match: ""
+  - match: Wildcard No Text
+    required: false
+    content:
+      - block: list
+        items:
+          - match: "*"
+            repeat: "1..1"

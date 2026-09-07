@@ -1,0 +1,18 @@
+version: 1
+options:
+  match_case: true
+  strip_inline_markup: false
+title: null
+sections:
+  - match: Case Sensitive Option
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Case
+  - match: Markup Retained Option
+    required: false
+    content:
+      - block: list
+        items:
+          - match: "[Bold](https://example.invalid)"

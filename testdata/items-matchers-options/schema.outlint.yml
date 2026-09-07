@@ -1,0 +1,55 @@
+version: 1
+title: null
+sections:
+  - match: Exact
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Alpha
+  - match: Glob
+    required: false
+    content:
+      - block: list
+        items:
+          - match: "Feature *"
+            repeat: "1..1"
+  - match: Regex
+    required: false
+    content:
+      - block: list
+        items:
+          - match: '/Code [0-9]+/'
+            repeat: "1..1"
+  - match: Wildcard
+    required: false
+    content:
+      - block: list
+        items:
+          - match: "*"
+            repeat: "1..1"
+  - match: Case Sensitive
+    required: false
+    content:
+      - block: list
+        items:
+          - match: '/(?-i:Case)/'
+            repeat: "1..1"
+  - match: Case Folded
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Case
+  - match: Markup Stripped
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Bold link
+  - match: Markup Retained
+    required: false
+    content:
+      - block: list
+        items:
+          - match: Plain

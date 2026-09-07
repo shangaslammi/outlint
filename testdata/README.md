@@ -219,3 +219,7 @@ this backwards is silent: the suite still passes.
 | `content-visible-kinds` | wildcard consumption of unsupported visible kinds; specific rejection; pipe-table input with extensions disabled | §1.7, §2.5, §3.9 |
 | `content-transparency` | complete-comment and reference-definition transparency; visible mixed HTML; inline comments; sibling identity; recognized frontmatter exclusion | §1.6, §1.7, §3.9 |
 | `content-wildcard-one-of` | positioned wildcard phases; alternating and list-kind choices; minimum alternative edge cost; complete missing `one_of` matcher serialization | §2.5, §3.9, §6.1 |
+| `content-recovery` | misplaced versus unexpected blocks; cardinality after recovery; excess assigned lists opening independent item scopes; overlap cost and trace priority | §2.5, §3.9, §6.1–§6.2 |
+| `items-matchers-options` | exact, glob, regex, and wildcard item matchers; case folding; inline-markup stripping | §1.8, §2.2, §2.5, §7 |
+| `items-text-presence` | no-text versus present-empty item text; first non-paragraph blocks; wildcard-only no-text matching | §1.8, §2.5, §3.9 |
+| `items-nondefault-options` | case-sensitive and markup-retaining item matching under non-default options | §1.8, §2.2, §7 |

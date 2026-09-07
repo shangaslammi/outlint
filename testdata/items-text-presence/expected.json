@@ -1,0 +1,35 @@
+{
+  "bare-marker.md": [
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Bare Marker"], "index": 0 }, "index": 0 }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Bare Marker"], "index": 0 }, "matcher": "" }
+    }
+  ],
+  "first-block-quote.md": [
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["First Block Quote"], "index": 0 }, "index": 0 }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["First Block Quote"], "index": 0 }, "matcher": "Quoted" }
+    }
+  ],
+  "first-block-code.md": [
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["First Block Code"], "index": 0 }, "index": 0 }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["First Block Code"], "index": 0 }, "matcher": "code" }
+    }
+  ],
+  "inline-comment-empty.md": [],
+  "empty-link-text.md": [],
+  "wildcard-no-text.md": []
+}

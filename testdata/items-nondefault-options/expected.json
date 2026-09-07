@@ -1,0 +1,13 @@
+{
+  "case-sensitive-option.md": [
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Case Sensitive Option"], "index": 0 }, "index": 0 }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Case Sensitive Option"], "index": 0 }, "matcher": "Case" }
+    }
+  ],
+  "markup-retained-option.md": []
+}

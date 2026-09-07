@@ -1,0 +1,3 @@
+## Empty Link Text
+
+- [](/destination)

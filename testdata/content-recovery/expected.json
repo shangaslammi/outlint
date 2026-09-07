@@ -1,0 +1,56 @@
+{
+  "misplaced.md": [
+    {
+      "id": "misplaced-block",
+      "target": { "kind": "block", "parent": ["Misplaced"], "block": "list", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Misplaced"], "matcher": { "block": "list" } }
+    }
+  ],
+  "unexpected.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Unexpected"], "block": "quote", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Unexpected"], "matcher": { "block": "p" } }
+    }
+  ],
+  "missing-and-misplaced.md": [
+    {
+      "id": "misplaced-block",
+      "target": { "kind": "block", "parent": ["Missing And Misplaced"], "block": "list", "index": 0 }
+    },
+    {
+      "id": "too-few-blocks",
+      "target": { "kind": "missing_block", "parent": ["Missing And Misplaced"], "matcher": { "block": "p" } }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Missing And Misplaced"], "matcher": { "block": "list" } }
+    }
+  ],
+  "too-many-opens-items.md": [
+    {
+      "id": "too-many-blocks",
+      "target": { "kind": "block", "parent": ["Too Many Opens Items"], "block": "list", "index": 1 }
+    },
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Too Many Opens Items"], "index": 1 }, "index": 0 }
+    },
+    {
+      "id": "missing-item",
+      "target": { "kind": "missing_item", "list": { "parent": ["Too Many Opens Items"], "index": 1 }, "matcher": "Good" }
+    }
+  ],
+  "overlap-canonical.md": [
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Overlap Canonical"], "matcher": { "block": "list" } }
+    }
+  ]
+}

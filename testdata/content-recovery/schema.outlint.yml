@@ -1,0 +1,32 @@
+version: 1
+title: null
+sections:
+  - match: Misplaced
+    required: false
+    content:
+      - block: p
+      - block: list
+  - match: Unexpected
+    required: false
+    content:
+      - block: p
+  - match: Missing And Misplaced
+    required: false
+    content:
+      - block: p
+        repeat: "2..2"
+      - block: list
+  - match: Too Many Opens Items
+    required: false
+    content:
+      - block: list
+        repeat: "1..1"
+        items:
+          - match: Good
+  - match: Overlap Canonical
+    required: false
+    content:
+      - block: any
+        required: false
+      - block: p
+      - block: list
