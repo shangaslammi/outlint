@@ -882,7 +882,7 @@ reports one `invalid-content-rule` at `block` and nothing about `list_kind`.
 |---|---|---|
 | applicable `content` or `items` is null, a scalar, or a mapping rather than a sequence | `invalid-content-rule` | the `content` or `items` value |
 | an entry of `content`, `one_of`, or `items` is not a mapping | `invalid-content-rule` | that entry |
-| content rule has neither or both of `block` and `one_of` | `invalid-content-rule` | the rule; the later member when both occur |
+| content rule has neither or both of `block` and `one_of` | `invalid-content-rule` | the rule mapping when neither occurs; the first discriminator key in source order when both occur; `id`, `list_kind`, `items`, `required`, and `repeat` of that rule are not inspected |
 | `block` is non-string, unknown, or a reserved-but-unmatchable label | `invalid-content-rule` | `block` |
 | `list_kind` occurs anywhere except `block: list`, or once applicable is non-string or unknown | `invalid-content-rule` | its key when inapplicable, otherwise its value |
 | `items` occurs anywhere except an outer `block: list` rule | `invalid-content-rule` | its key; value uninspected |
