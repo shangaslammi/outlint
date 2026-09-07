@@ -115,7 +115,7 @@ fn execute_check(options: CheckOptions) -> u8 {
         group.load = match read_and_load_schema(&group.path, &group.display) {
             Ok(Ok(loaded)) => match prepare_validator(&loaded, &group.display) {
                 Ok(validator) => SchemaLoad::Valid {
-                    loaded,
+                    loaded: Box::new(loaded),
                     validator: Box::new(validator),
                 },
                 Err(message) => {
@@ -208,7 +208,7 @@ struct SchemaGroup {
 enum SchemaLoad {
     Pending,
     Valid {
-        loaded: LoadedSchema,
+        loaded: Box<LoadedSchema>,
         validator: Box<PreparedValidator>,
     },
     Invalid(InvalidSchema),

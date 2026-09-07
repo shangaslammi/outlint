@@ -33,7 +33,7 @@ impl ValidationPlan {
                 }
                 DocumentShape::Title(crate::TitleSlot::ImpliedBySections { .. })
                 | DocumentShape::Title(crate::TitleSlot::Forbidden { .. })
-                | DocumentShape::Outline(_) => None,
+                | DocumentShape::Outline { .. } => None,
             },
             frontmatter: schema
                 .frontmatter
@@ -221,7 +221,7 @@ fn prepare_guards(
     match_case: bool,
 ) -> Result<Vec<PreparedMatcher>, PrepareValidationError> {
     match &schema.document {
-        DocumentShape::Outline(scope) => scope
+        DocumentShape::Outline { scope, .. } => scope
             .guards
             .iter()
             .map(|guard| PreparedMatcher::new(&guard.matcher, match_case))

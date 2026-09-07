@@ -20,11 +20,11 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    ByteOffset, ConstraintIndex, ConstraintPath, DocumentShape, GuardPath, InvalidSchema,
-    JsonSchemaResourceContents, LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, NonEmpty,
-    OrderIndex, RelatedLocation, RuleIndex, RulePath, Schema, SchemaError, SchemaErrorKind,
-    SchemaLocations, SchemaNode, SchemaSource, SchemaSources, SchemaVersion, ScopePath, SourceId,
-    SourceLabel, SourceRange, TextRange, TitleSlot,
+    ByteOffset, ConstraintIndex, ConstraintPath, ContentScope, DocumentShape, GuardPath,
+    InvalidSchema, JsonSchemaResourceContents, LinkedJsonSchemaInput, LoadSchemaResult,
+    LoadedSchema, NonEmpty, OrderIndex, RelatedLocation, RuleIndex, RulePath, Schema, SchemaError,
+    SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources, SchemaVersion,
+    ScopePath, SourceId, SourceLabel, SourceRange, TextRange, TitleSlot,
 };
 
 use self::constraints::constraints_mut;
@@ -386,7 +386,10 @@ impl Loader {
                 raw.unordered,
                 raw.constraints,
             )
-            .map(DocumentShape::Outline)
+            .map(|scope| DocumentShape::Outline {
+                scope,
+                content: ContentScope::Omitted,
+            })
         } else {
             let title = raw.title.as_deref().and_then(|matcher| {
                 let range = self.range(RangeKey::DocumentField("title".into()));
@@ -417,14 +420,22 @@ impl Loader {
             );
             children.and_then(|children| {
                 if title_null {
-                    Some(DocumentShape::Title(TitleSlot::Forbidden { children }))
+                    Some(DocumentShape::Title(TitleSlot::Forbidden {
+                        children,
+                        content: ContentScope::Omitted,
+                    }))
                 } else if raw.title.is_some() {
                     title.map(|matcher| {
-                        DocumentShape::Title(TitleSlot::Spelled { matcher, children })
+                        DocumentShape::Title(TitleSlot::Spelled {
+                            matcher,
+                            children,
+                            content: ContentScope::Omitted,
+                        })
                     })
                 } else {
                     Some(DocumentShape::Title(TitleSlot::ImpliedBySections {
                         children,
+                        content: ContentScope::Omitted,
                     }))
                 }
             })

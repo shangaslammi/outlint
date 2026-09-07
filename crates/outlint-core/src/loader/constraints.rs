@@ -792,7 +792,7 @@ fn attachment_identity(schema: &Schema, scope: &ScopePath) -> Vec<CanonicalStep>
 fn scope_is_ordered(schema: &Schema, structural_scope: &[CanonicalStep]) -> bool {
     let mut rules = schema.addressed_root_rules();
     let mut ordered = match &schema.document {
-        crate::DocumentShape::Outline(scope) => scope.mode == crate::ScopeMode::Ordered,
+        crate::DocumentShape::Outline { scope, .. } => scope.mode == crate::ScopeMode::Ordered,
         crate::DocumentShape::Title(title) => match title.children() {
             crate::ChildScope::Declared(scope) => scope.mode == crate::ScopeMode::Ordered,
             _ => true,
@@ -847,7 +847,7 @@ pub(super) fn constraints_mut<'a>(
     scope: &ScopePath,
 ) -> Option<&'a mut Vec<Constraint>> {
     let root = match &mut schema.document {
-        crate::DocumentShape::Outline(root) => root,
+        crate::DocumentShape::Outline { scope, .. } => scope,
         crate::DocumentShape::Title(title) => match title.children_mut() {
             crate::ChildScope::Declared(root) => root,
             _ => return None,

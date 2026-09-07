@@ -237,7 +237,8 @@ pub struct ConstraintPath {
 /// A path to a rule-owned child scope.
 ///
 /// Each index selects a rule whose child scope contains the next index. For an
-/// `outline:` schema, the empty path denotes the rules in [`crate::DocumentShape::Outline`]. For a
+/// `outline:` schema, the empty path denotes the rules in
+/// [`crate::DocumentShape::Outline`]. For a
 /// `title:` + `sections:` sugar schema, it denotes the synthesized title
 /// rule's child scope — the source's top-level `sections:` list. This preserves
 /// the public addressing of the source form after normalization.

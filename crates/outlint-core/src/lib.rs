@@ -32,11 +32,12 @@ pub use markdown::{
     Section, SuppressedDiagnostic, Suppressions,
 };
 pub use schema::{
-    AtLeastTwo, BoundRuleStep, CanonicalFloat, CanonicalInteger, CaptureName, Cardinality,
-    ChildScope, Constraint, DeclaredScope, DocumentShape, ExactText, ExtrasMode,
-    FrontmatterCapture, FrontmatterCaptureView, FrontmatterCaptures, FrontmatterPolicy,
-    FrontmatterScalar, FrontmatterSchema, GlobPattern, HeaderLevel, Matcher, NonEmpty, Options,
-    Proposition, RefAnchor, RegexPattern, ResolvedFrontmatterCapture, ResolvedFrontmatterQuery,
+    AtLeastTwo, BlockMatcher, BoundRuleStep, CanonicalFloat, CanonicalInteger, CaptureName,
+    Cardinality, ChildScope, Constraint, ContentMatcher, ContentRule, ContentScope, DeclaredScope,
+    DocumentShape, ExactText, ExtrasMode, FrontmatterCapture, FrontmatterCaptureView,
+    FrontmatterCaptures, FrontmatterPolicy, FrontmatterScalar, FrontmatterSchema, GlobPattern,
+    HeaderLevel, ItemRule, ItemScope, Matcher, NonEmpty, Options, Proposition, RefAnchor,
+    RegexPattern, ResolvedFrontmatterCapture, ResolvedFrontmatterQuery,
     ResolvedIntrinsicTextLocator, ResolvedOutlineLocator, ResolvedRuleCaptureLocator,
     ResolvedRuleLocator, RuleCapture, RuleId, Schema, SchemaVersion, ScopeMode, SectionGuard,
     SectionRule, TitleSlot, UpperBound, ValueOrderDirection, ValueOrderEntry,

@@ -330,7 +330,7 @@ fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Cardinality, ChildScope, ExactText, Matcher, SectionRule};
+    use crate::{Cardinality, ChildScope, ContentScope, ExactText, Matcher, SectionRule};
     use proptest::prelude::*;
     use std::cmp::Ordering;
     use std::collections::BTreeMap;
@@ -350,6 +350,7 @@ mod tests {
             matcher,
             cardinality: Cardinality::new(min, max).expect("test cardinality is valid"),
             children: ChildScope::Omitted,
+            content: ContentScope::Omitted,
             captures: BTreeMap::new(),
             order: Vec::new(),
         }
@@ -751,6 +752,7 @@ mod tests {
                 matcher: Matcher::Any,
                 cardinality: cardinality.expect("test cardinality is valid"),
                 children: ChildScope::Omitted,
+                content: ContentScope::Omitted,
                 captures: BTreeMap::new(),
                 order: Vec::new(),
             }];

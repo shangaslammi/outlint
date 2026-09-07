@@ -2,9 +2,29 @@ use crate::loader::{json_schema_reference_budget_message, MAX_JSON_SCHEMA_REFERE
 use crate::validator::prepare::PreparedMatcher;
 use crate::validator::{validate, PreparedValidator, ValidationError};
 use crate::{
-    load_schema, parse_markdown, ExactText, FrontmatterPolicy, FrontmatterSchema, GlobPattern,
-    MarkdownOptions, Matcher, RegexPattern,
+    load_schema, parse_markdown, ContentScope, ExactText, FrontmatterPolicy, FrontmatterSchema,
+    GlobPattern, MarkdownOptions, Matcher, RegexPattern,
 };
+
+#[test]
+fn omitted_content_does_not_change_preparation() {
+    let loaded = load_schema("version: 1\ntitle: Doc\nsections:\n  - match: A\n")
+        .expect("the existing schema loads");
+    let crate::DocumentShape::Title(title) = &loaded.schema.document else {
+        panic!("expected title sugar")
+    };
+    assert!(matches!(title.content(), ContentScope::Omitted));
+    let rule = loaded
+        .schema
+        .outline()
+        .first()
+        .expect("the declared rule is retained");
+    assert!(matches!(rule.content, ContentScope::Omitted));
+
+    let prepared = PreparedValidator::new(&loaded.schema).expect("omitted content prepares");
+    assert_eq!(prepared.plan.rules.len(), 1);
+    assert!(prepared.plan.title.is_some());
+}
 
 fn matcher_matches(matcher: &Matcher, text: &str, match_case: bool) -> bool {
     PreparedMatcher::new(matcher, match_case)

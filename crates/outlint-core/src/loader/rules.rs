@@ -280,6 +280,7 @@ impl Loader {
                         matcher,
                         cardinality,
                         children,
+                        content: crate::ContentScope::Omitted,
                         captures,
                         order,
                     });

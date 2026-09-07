@@ -328,7 +328,7 @@ fn current_schema_public_model_and_vocabulary_are_pinned() {
     )
     .expect("the complete root scope is valid");
     assert_eq!(loaded.schema.version, SchemaVersion::V1);
-    let DocumentShape::Outline(scope) = &loaded.schema.document else {
+    let DocumentShape::Outline { scope, .. } = &loaded.schema.document else {
         panic!("the general form exposes a declared outline scope")
     };
     assert_eq!(scope.extras, ExtrasMode::Anywhere);
@@ -358,7 +358,8 @@ fn current_schema_public_model_and_vocabulary_are_pinned() {
     assert!(matches!(
         implied.schema.document,
         DocumentShape::Title(TitleSlot::ImpliedBySections {
-            children: ChildScope::Declared(_)
+            children: ChildScope::Declared(_),
+            ..
         })
     ));
 
@@ -367,7 +368,8 @@ fn current_schema_public_model_and_vocabulary_are_pinned() {
     assert!(matches!(
         guards_only.schema.document,
         DocumentShape::Title(TitleSlot::Forbidden {
-            children: ChildScope::GuardsOnly(_)
+            children: ChildScope::GuardsOnly(_),
+            ..
         })
     ));
 
@@ -380,6 +382,69 @@ fn current_schema_public_model_and_vocabulary_are_pinned() {
         SchemaErrorKind::UnreachableRule.as_str(),
         "unreachable-rule"
     );
+}
+
+#[test]
+fn rfc5_schema_surface_compiles() {
+    use outlint_core::{
+        AtLeastTwo, BlockMatcher, Cardinality, ContentMatcher, ContentRule, ContentScope, ItemRule,
+        ItemScope, ListKind, Matcher, UpperBound,
+    };
+
+    fn assert_model_value<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
+    assert_model_value::<ContentScope>();
+    assert_model_value::<ItemScope>();
+    assert_model_value::<ContentRule>();
+    assert_model_value::<ContentMatcher>();
+    assert_model_value::<BlockMatcher>();
+    assert_model_value::<ItemRule>();
+
+    let exactly_one = Cardinality::new(1, UpperBound::Bounded(1))
+        .expect("exact-one cardinality is representable");
+    let alternatives = AtLeastTwo {
+        first: BlockMatcher::Paragraph,
+        second: BlockMatcher::List {
+            list_kind: Some(ListKind::Bullet),
+        },
+        rest: vec![BlockMatcher::Any],
+    };
+    let rules = vec![
+        ContentRule::Paragraph {
+            id: None,
+            cardinality: exactly_one,
+        },
+        ContentRule::List {
+            id: None,
+            cardinality: exactly_one,
+            list_kind: None,
+            items: ItemScope::Declared(vec![ItemRule {
+                id: None,
+                matcher: Matcher::Any,
+                cardinality: exactly_one,
+            }]),
+        },
+        ContentRule::Any {
+            id: None,
+            cardinality: exactly_one,
+        },
+        ContentRule::OneOf {
+            id: None,
+            cardinality: exactly_one,
+            alternatives: alternatives.clone(),
+        },
+    ];
+    let declared = ContentScope::Declared(rules);
+    let missing = ContentMatcher::OneOf(alternatives);
+    assert!(matches!(declared, ContentScope::Declared(_)));
+    assert!(matches!(missing, ContentMatcher::OneOf(_)));
+
+    let loaded = load_schema("version: 1\ntitle: Guide\nsections: []\n")
+        .expect("a pre-RFC-5 schema remains valid");
+    let outlint_core::DocumentShape::Title(title) = &loaded.schema.document else {
+        panic!("expected title sugar")
+    };
+    assert!(matches!(title.content(), ContentScope::Omitted));
+    assert!(loaded.schema.outline().is_empty());
 }
 
 /// Pins the typed-value declaration surface a schema without `captures` or

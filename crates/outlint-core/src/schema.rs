@@ -10,6 +10,8 @@ use std::{collections::BTreeMap, fmt};
 
 use serde_json::Value as JsonValue;
 
+use crate::markdown::ListKind;
+
 /// A parsed Outlint schema.
 ///
 /// Obtain this value from [`load_schema`](crate::load_schema) or
@@ -31,15 +33,18 @@ pub struct Schema {
 }
 
 impl Schema {
-    #[cfg(test)]
-    pub(crate) fn outline(&self) -> &[SectionRule] {
+    /// Returns the heading rules addressed by the schema's root scope.
+    ///
+    /// For title sugar this is the title slot's exposed `sections` scope,
+    /// preserving the public addressing described by §2.
+    pub fn outline(&self) -> &[SectionRule] {
         self.addressed_root_rules()
     }
 
     #[cfg(test)]
     pub(crate) fn constraints(&self) -> &[Constraint] {
         match &self.document {
-            DocumentShape::Outline(scope) => &scope.constraints,
+            DocumentShape::Outline { scope, .. } => &scope.constraints,
             DocumentShape::Title(title) => title.children().constraints(),
         }
     }
@@ -67,7 +72,7 @@ impl Schema {
     /// [`ScopePath`]: crate::ScopePath
     pub(crate) fn addressed_root_rules(&self) -> &[SectionRule] {
         match &self.document {
-            DocumentShape::Outline(scope) => &scope.rules,
+            DocumentShape::Outline { scope, .. } => &scope.rules,
             DocumentShape::Title(title) => title.children().rules(),
         }
     }
@@ -75,7 +80,7 @@ impl Schema {
     /// The constraints in the empty public scope.
     pub(crate) fn addressed_root_constraints(&self) -> &[Constraint] {
         match &self.document {
-            DocumentShape::Outline(scope) => &scope.constraints,
+            DocumentShape::Outline { scope, .. } => &scope.constraints,
             DocumentShape::Title(title) => title.children().constraints(),
         }
     }
@@ -85,7 +90,12 @@ impl Schema {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocumentShape {
     /// The general form's declared `h1` grammar.
-    Outline(DeclaredScope),
+    Outline {
+        /// The declared `h1` scope.
+        scope: DeclaredScope,
+        /// The normalized grammar for the physical document-root preamble.
+        content: ContentScope,
+    },
     /// The sugar form's special title slot and exposed `h2` scope.
     Title(TitleSlot),
 }
@@ -103,6 +113,8 @@ pub enum TitleSlot {
         matcher: Matcher,
         /// The exposed child scope written with top-level child-scope keys.
         children: ChildScope,
+        /// The normalized grammar for each concrete title's preamble.
+        content: ContentScope,
     },
     /// Bare `sections` implies exactly one `h1` with the any-text matcher.
     ///
@@ -111,11 +123,15 @@ pub enum TitleSlot {
     ImpliedBySections {
         /// The exposed child scope written with top-level child-scope keys.
         children: ChildScope,
+        /// The normalized grammar for each concrete implied title's preamble.
+        content: ContentScope,
     },
     /// `title: null`: every `h1` is forbidden.
     Forbidden {
         /// The exposed child scope written with top-level child-scope keys.
         children: ChildScope,
+        /// The normalized grammar for the physical document-root preamble.
+        content: ContentScope,
     },
 }
 
@@ -124,18 +140,133 @@ impl TitleSlot {
     pub fn children(&self) -> &ChildScope {
         match self {
             Self::Spelled { children, .. }
-            | Self::ImpliedBySections { children }
-            | Self::Forbidden { children } => children,
+            | Self::ImpliedBySections { children, .. }
+            | Self::Forbidden { children, .. } => children,
+        }
+    }
+
+    /// Returns the normalized preamble grammar owned by the title slot.
+    pub fn content(&self) -> &ContentScope {
+        match self {
+            Self::Spelled { content, .. }
+            | Self::ImpliedBySections { content, .. }
+            | Self::Forbidden { content, .. } => content,
         }
     }
 
     pub(crate) fn children_mut(&mut self) -> &mut ChildScope {
         match self {
             Self::Spelled { children, .. }
-            | Self::ImpliedBySections { children }
-            | Self::Forbidden { children } => children,
+            | Self::ImpliedBySections { children, .. }
+            | Self::Forbidden { children, .. } => children,
         }
     }
+}
+
+/// Whether a preamble grammar was omitted or explicitly declared.
+///
+/// The distinction is semantic: omission leaves retained blocks unvisited,
+/// while an explicitly empty declaration requires the preamble to be empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentScope {
+    /// No content grammar was declared.
+    Omitted,
+    /// An exhaustive content grammar, including a possibly empty rule list.
+    Declared(Vec<ContentRule>),
+}
+
+/// Whether an outer list rule omitted or explicitly declared its item grammar.
+///
+/// An explicitly empty declaration rejects every direct syntactic item;
+/// omission performs no item assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemScope {
+    /// No direct-item grammar was declared.
+    Omitted,
+    /// An exhaustive direct-item grammar, including a possibly empty list.
+    Declared(Vec<ItemRule>),
+}
+
+/// A normalized rule for one retained preamble block phase (§2.5).
+///
+/// Separate variants keep list-only item declarations off non-list rules and
+/// keep choice alternatives free of rule identity and cardinality.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentRule {
+    /// Match paragraph blocks.
+    Paragraph {
+        /// Optional structural identifier; content rules have no default id.
+        id: Option<RuleId>,
+        /// Number of consecutive matching blocks consumed by this phase.
+        cardinality: Cardinality,
+    },
+    /// Match list blocks, optionally restricting their marker kind.
+    List {
+        /// Optional structural identifier; content rules have no default id.
+        id: Option<RuleId>,
+        /// Number of consecutive matching blocks consumed by this phase.
+        cardinality: Cardinality,
+        /// Required list kind, or `None` for omitted/source `any`.
+        list_kind: Option<ListKind>,
+        /// Grammar for direct items of each assigned list occurrence.
+        items: ItemScope,
+    },
+    /// Match any retained block kind.
+    Any {
+        /// Optional structural identifier; content rules have no default id.
+        id: Option<RuleId>,
+        /// Number of consecutive matching blocks consumed by this phase.
+        cardinality: Cardinality,
+    },
+    /// Match any one of at least two flat block alternatives.
+    OneOf {
+        /// Optional structural identifier; content rules have no default id.
+        id: Option<RuleId>,
+        /// Number of consecutive matching blocks consumed by this phase.
+        cardinality: Cardinality,
+        /// Normalized alternatives in declaration order.
+        alternatives: AtLeastTwo<BlockMatcher>,
+    },
+}
+
+/// A block predicate usable inside a content rule choice.
+///
+/// This matcher carries no id, cardinality, item scope, or nested choice, so
+/// loader-invalid alternative shapes cannot enter the semantic model.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BlockMatcher {
+    /// Match a paragraph block.
+    Paragraph,
+    /// Match a list block, optionally restricting its marker kind.
+    List {
+        /// Required list kind, or `None` for omitted/source `any`.
+        list_kind: Option<ListKind>,
+    },
+    /// Match any retained block kind.
+    Any,
+}
+
+/// A structured block matcher used when a missing block is reported.
+///
+/// It deliberately excludes rule identity, cardinality, item scopes, and any
+/// selected choice arm.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ContentMatcher {
+    /// A single block predicate.
+    Block(BlockMatcher),
+    /// A flat choice of at least two block predicates.
+    OneOf(AtLeastTwo<BlockMatcher>),
+}
+
+/// A normalized direct-list-item rule (§2.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemRule {
+    /// Optional structural identifier; item rules have no default id.
+    pub id: Option<RuleId>,
+    /// Matcher applied to the item's modeled first-paragraph text.
+    pub matcher: Matcher,
+    /// Number of consecutive matching items consumed by this phase.
+    pub cardinality: Cardinality,
 }
 
 /// The document's normalized frontmatter policy.
@@ -579,6 +710,8 @@ pub struct SectionRule {
     pub cardinality: Cardinality,
     /// The explicitly represented grammar for direct children.
     pub children: ChildScope,
+    /// The normalized grammar for this section's direct preamble blocks.
+    pub content: ContentScope,
     /// Typed values this rule's matcher exports (§2.1, §2.4), keyed by name.
     ///
     /// Empty for a rule that declares no `captures`. The mapping's source

@@ -29,6 +29,7 @@ forbid_sections:
     assert!(!schema.options.allow_skipped_levels);
     let DocumentShape::Title(crate::TitleSlot::ImpliedBySections {
         children: crate::ChildScope::Declared(scope),
+        ..
     }) = &schema.document
     else {
         panic!("bare sections must normalize to an implied title and declared child scope")
@@ -46,6 +47,30 @@ forbid_sections:
     );
     assert_eq!(scope.guards.len(), 1);
     assert_eq!(scope.guards[0].matcher, Matcher::Any);
+}
+
+#[test]
+fn schema_shape_migration_preserves_existing_normalization() {
+    let general = valid("version: 1\noutline:\n  - match: Part\n    sections: []\n");
+    let DocumentShape::Outline { scope, content } = &general.document else {
+        panic!("expected the general outline form")
+    };
+    assert!(matches!(content, crate::ContentScope::Omitted));
+    assert_eq!(general.outline(), scope.rules);
+    let rule = scope.rules.first().expect("the declared rule is retained");
+    assert!(matches!(rule.content, crate::ContentScope::Omitted));
+
+    for source in [
+        "version: 1\ntitle: Guide\nsections: []\n",
+        "version: 1\nsections: []\n",
+        "version: 1\ntitle: null\nsections: []\n",
+    ] {
+        let sugar = valid(source);
+        let DocumentShape::Title(title) = &sugar.document else {
+            panic!("expected title sugar")
+        };
+        assert!(matches!(title.content(), crate::ContentScope::Omitted));
+    }
 }
 
 #[test]
@@ -236,7 +261,7 @@ fn title_null_declares_a_document_without_h1() {
     let DocumentShape::Title(title) = &loaded.schema.document else {
         panic!("expected title form")
     };
-    let crate::TitleSlot::Forbidden { children } = title else {
+    let crate::TitleSlot::Forbidden { children, .. } = title else {
         panic!("title: null must be forbidden")
     };
     assert_eq!(children.rules().len(), 1);
@@ -279,7 +304,7 @@ outline:
 "#;
     let loaded = load_schema(source).expect("a single-rule outline loads");
     let schema = &loaded.schema;
-    assert!(matches!(schema.document, DocumentShape::Outline(_)));
+    assert!(matches!(schema.document, DocumentShape::Outline { .. }));
     assert_eq!(
         schema.outline()[0].matcher,
         Matcher::Exact(ExactText("Part".into()))
@@ -357,7 +382,7 @@ outline:
 "#,
     );
     assert!(matches!(sugar.document, DocumentShape::Title(_)));
-    assert!(matches!(general.document, DocumentShape::Outline(_)));
+    assert!(matches!(general.document, DocumentShape::Outline { .. }));
     assert_ne!(sugar, general);
 }
 

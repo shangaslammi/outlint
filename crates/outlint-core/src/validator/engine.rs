@@ -148,7 +148,7 @@ impl<'a> Validator<'a> {
         // `title: null` declares that shape outright, whatever the document
         // contains.
         let root_level = match &self.schema.document {
-            DocumentShape::Outline(_) => 0,
+            DocumentShape::Outline { .. } => 0,
             DocumentShape::Title(TitleSlot::Forbidden { .. }) => 1,
             DocumentShape::Title(
                 TitleSlot::Spelled { .. } | TitleSlot::ImpliedBySections { .. },
@@ -164,7 +164,7 @@ impl<'a> Validator<'a> {
             self.validate_skipped_levels(&document.sections, root_level, &HeaderPath::default());
         }
         match &self.schema.document {
-            DocumentShape::Outline(scope) => {
+            DocumentShape::Outline { scope, .. } => {
                 self.validate_outline_root(&top, scope, plan, &values)?
             }
             DocumentShape::Title(title) => {
@@ -240,7 +240,7 @@ impl<'a> Validator<'a> {
     ) -> Result<(), QueryLimitExceeded> {
         let schema = self.schema;
         let (matcher, title_children) = match title {
-            TitleSlot::Forbidden { children } => {
+            TitleSlot::Forbidden { children, .. } => {
                 // The headless scope: the virtual root stands in at level 1
                 // and `sections` binds the document's top-level `h2`s.
                 for pathed in top {
@@ -258,8 +258,10 @@ impl<'a> Validator<'a> {
                     admitted_at_root(top, HeaderLevel::H2, schema.options.allow_skipped_levels);
                 return self.bind_sugar_sections(&admitted, children, frontmatter, plan, None);
             }
-            TitleSlot::Spelled { matcher, children } => (matcher, children),
-            TitleSlot::ImpliedBySections { children } => (&Matcher::Any, children),
+            TitleSlot::Spelled {
+                matcher, children, ..
+            } => (matcher, children),
+            TitleSlot::ImpliedBySections { children, .. } => (&Matcher::Any, children),
         };
         if !has_h1 {
             self.emit(
