@@ -5,7 +5,7 @@ use crate::markdown::{
 use crate::HeaderLevel;
 use pulldown_cmark::{Tag, TagEnd};
 
-use super::super::body::FrameStack;
+use super::super::body::{is_comment_only_html, scan_preambles, BlockKind, FrameStack};
 
 fn headings(document: &Document) -> Vec<&Heading> {
     fn visit<'a>(sections: &'a [Section], output: &mut Vec<&'a Heading>) {
@@ -355,6 +355,229 @@ fn bare_cr_delimits_locations_and_suppression_lines() {
     assert!(found[0].suppressions.contains("skipped-level"));
     assert_eq!(found[1].location.line, 3);
     assert_eq!(found[1].location.line_range, text_range(51, 57));
+}
+
+#[test]
+fn direct_blocks_follow_balanced_event_identity() {
+    let source = concat!(
+        "root paragraph\n\n",
+        "<!-- transparent -->\n",
+        "<div>visible</div>\n\n",
+        "> quote\n>\n> ## nested heading\n\n",
+        "- list item\n  - nested item\n\n",
+        "```\ncode\n```\n\n",
+        "---\n\n",
+        "# section\n",
+        "section paragraph\n\n",
+        "> # nested boundary does not close\n> continuation\n\n",
+        "after quote\n\n",
+        "## child\n",
+        "child paragraph\n",
+    );
+    let scanned = scan_preambles(source, MarkdownOptions::default());
+    let root = scanned.root;
+    let headings = scanned.headings;
+
+    assert_eq!(
+        root.iter().map(|record| record.kind).collect::<Vec<_>>(),
+        [
+            BlockKind::Paragraph,
+            BlockKind::Html,
+            BlockKind::Quote,
+            BlockKind::List,
+            BlockKind::Code,
+            BlockKind::Break,
+        ]
+    );
+    assert_eq!(headings.len(), 2);
+    assert_eq!(
+        headings[0]
+            .iter()
+            .map(|record| record.kind)
+            .collect::<Vec<_>>(),
+        [BlockKind::Paragraph, BlockKind::Quote, BlockKind::Paragraph]
+    );
+    assert_eq!(
+        headings[1]
+            .iter()
+            .map(|record| record.kind)
+            .collect::<Vec<_>>(),
+        [BlockKind::Paragraph]
+    );
+}
+
+#[test]
+fn comment_only_html_uses_commonmark_comment_grammar() {
+    for transparent in [
+        "<!-- ordinary -->",
+        " \t\r\n<!-->\x0c<!--->",
+        "<!-- first --><!-- second -->",
+        "<!-- multiline\ncomment -->\r\n",
+    ] {
+        assert!(is_comment_only_html(transparent), "{transparent:?}");
+    }
+    for visible in [
+        "",
+        "<!-- unterminated",
+        "<!-- ok -->suffix",
+        "<div><!-- nested --></div>",
+        "<!-- first --><hr><!-- second -->",
+        "<!-- first -->\x0b<!-- second -->",
+        "\u{00a0}<!-- non-ASCII whitespace -->",
+    ] {
+        assert!(!is_comment_only_html(visible), "{visible:?}");
+    }
+
+    let source = "<!-- only -->\n\ntext <!-- inline --> stays\n";
+    let root = scan_preambles(source, MarkdownOptions::default()).root;
+    assert_eq!(root.len(), 1);
+    assert_eq!(root[0].kind, BlockKind::Paragraph);
+
+    let vertical_tab = "<!-- first -->\x0b<!-- second -->\n";
+    let root = scan_preambles(vertical_tab, MarkdownOptions::default()).root;
+    assert_eq!(root.len(), 1);
+    assert_eq!(root[0].kind, BlockKind::Html);
+}
+
+#[test]
+fn duplicate_normalized_reference_labels_do_not_create_or_merge_direct_blocks() {
+    let source = "before\n\n[A  B]: /first\n[a b]: /duplicate\n\nafter\n";
+    let scanned = scan_preambles(source, MarkdownOptions::default());
+    let root = scanned.root;
+    let definitions = scanned.reference_definitions;
+
+    assert_eq!(
+        root.iter().map(|record| record.kind).collect::<Vec<_>>(),
+        [BlockKind::Paragraph, BlockKind::Paragraph]
+    );
+    assert_eq!(definitions.len(), 1);
+    assert!(definitions.contains_key("a b"));
+    assert_eq!(root[0].range.start, 0);
+    assert!([6, 7].contains(&root[0].range.end));
+    assert_eq!(
+        source.get(root[0].range.clone()).map(trim_one_line_ending),
+        Some("before")
+    );
+    let after_start = source.find("after").unwrap_or_else(|| unreachable!());
+    assert_eq!(root[1].range.start, after_start);
+    assert!([source.len() - 1, source.len()].contains(&root[1].range.end));
+    assert_eq!(
+        source.get(root[1].range.clone()).map(trim_one_line_ending),
+        Some("after")
+    );
+    for span in definitions.values() {
+        assert!(root
+            .iter()
+            .all(|record| ranges_do_not_overlap(&record.range, span)));
+    }
+}
+
+#[test]
+fn multiple_reference_definitions_in_one_region_do_not_create_or_merge_direct_blocks() {
+    let source = "before\n\n[first]: /one\n[second]: /two\n[third]: /three\n\nafter\n";
+    let scanned = scan_preambles(source, MarkdownOptions::default());
+    let root = scanned.root;
+    let definitions = scanned.reference_definitions;
+
+    assert_eq!(definitions.len(), 3);
+    assert_eq!(root.len(), 2);
+    assert_eq!(root[0].range.start, 0);
+    assert!([6, 7].contains(&root[0].range.end));
+    assert_eq!(
+        source.get(root[0].range.clone()).map(trim_one_line_ending),
+        Some("before")
+    );
+    let after_start = source.find("after").unwrap_or_else(|| unreachable!());
+    assert_eq!(root[1].range.start, after_start);
+    assert!([source.len() - 1, source.len()].contains(&root[1].range.end));
+    assert_eq!(
+        source.get(root[1].range.clone()).map(trim_one_line_ending),
+        Some("after")
+    );
+    for span in definitions.values() {
+        assert!(root
+            .iter()
+            .all(|record| ranges_do_not_overlap(&record.range, span)));
+    }
+}
+
+fn ranges_do_not_overlap(left: &std::ops::Range<usize>, right: &std::ops::Range<usize>) -> bool {
+    left.end <= right.start || right.end <= left.start
+}
+
+fn trim_one_line_ending(text: &str) -> &str {
+    text.strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix(['\r', '\n']))
+        .unwrap_or(text)
+}
+
+#[test]
+fn reference_definitions_inside_quotes_and_list_items_do_not_create_or_merge_direct_blocks() {
+    let source = concat!(
+        "> quoted\n>\n> [quote]: /q\n>\n> after\n\n",
+        "- listed\n\n  [item]: /i\n\n  after\n\n",
+        "tail\n",
+    );
+    let scanned = scan_preambles(source, MarkdownOptions::default());
+    let root = scanned.root;
+    let definitions = scanned.reference_definitions;
+
+    assert_eq!(
+        root.iter().map(|record| record.kind).collect::<Vec<_>>(),
+        [BlockKind::Quote, BlockKind::List, BlockKind::Paragraph]
+    );
+    assert_eq!(definitions.len(), 2);
+}
+
+#[test]
+fn parser_ranges_pin_kind_specific_anchors_and_exclude_trailing_blanks() {
+    let source = concat!(
+        "<!-- å -->\r\n\r\n",
+        "   paragraph\r\n\r\n",
+        "  > quote\r\n\r\n",
+        "    indented\r\n\r\n",
+        "   12. ordered\r\n\r\n",
+        "   ```rust\r\ncode\r\n   ```\r\n\r\n",
+        "   <x-tag>\r\n\r\n",
+        "  ***\r\n\r\n",
+    );
+    let root = scan_preambles(source, MarkdownOptions::default()).root;
+    let anchors = [
+        (BlockKind::Paragraph, "paragraph"),
+        (BlockKind::Quote, ">"),
+        (BlockKind::Code, "indented"),
+        (BlockKind::List, "12."),
+        (BlockKind::Code, "```"),
+        (BlockKind::Html, "<x-tag>"),
+        (BlockKind::Break, "***"),
+    ];
+
+    assert_eq!(root.len(), anchors.len());
+    for (record, (kind, spelling)) in root.iter().zip(anchors) {
+        assert_eq!(record.kind, kind);
+        assert_eq!(
+            source.get(record.range.start..record.range.start + spelling.len()),
+            Some(spelling)
+        );
+        assert_eq!(
+            record.line_range.start + record.column as usize - 1,
+            record.range.start
+        );
+        assert!(!source
+            .get(record.range.clone())
+            .unwrap_or_default()
+            .ends_with("\r\n\r\n"));
+        assert!(record.suppressions.0.is_empty());
+    }
+
+    let promoted = scan_preambles(
+        "setext\r---\rsection paragraph\r",
+        MarkdownOptions::default(),
+    );
+    assert!(promoted.root.is_empty());
+    assert_eq!(promoted.headings.len(), 1);
+    assert_eq!(promoted.headings[0].len(), 1);
+    assert_eq!(promoted.headings[0][0].kind, BlockKind::Paragraph);
 }
 
 #[test]

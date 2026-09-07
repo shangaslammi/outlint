@@ -8,6 +8,7 @@ use crate::markdown::{
 };
 use crate::{HeaderLevel, TextRange};
 
+use super::super::body::scan_preambles;
 use super::assert_distinct_anchors;
 
 fn assert_valid_range(source: &str, range: TextRange) {
@@ -316,6 +317,34 @@ fn arbitrary_frontmatter_document() -> impl Strategy<Value = String> {
 }
 
 proptest! {
+    #[test]
+    fn parser_spans_and_anchors_are_in_bounds_utf8_boundaries(
+        prefix in "[é界]{0,4}",
+        indent in 0usize..4,
+        content in "[a-zé界]{1,16}",
+        ending in prop_oneof![Just("\n"), Just("\r\n"), Just("\r")],
+    ) {
+        let source = format!(
+            "<!-- {prefix} -->{ending}{ending}{}{content}{ending}{ending}# next{ending}",
+            " ".repeat(indent),
+        );
+        let scanned = scan_preambles(&source, MarkdownOptions::default());
+        let root = scanned.root;
+        let headings = scanned.headings;
+        prop_assert_eq!(root.len(), 1);
+        prop_assert_eq!(headings.len(), 1);
+        let record = &root[0];
+        let expected_start = "<!--  -->".len() + prefix.len() + ending.len() * 2 + indent;
+        prop_assert_eq!(record.range.start, expected_start);
+        prop_assert!(record.range.start <= record.range.end);
+        prop_assert!(record.range.end <= expected_start + content.len() + ending.len());
+        prop_assert!(source.is_char_boundary(record.range.start));
+        prop_assert!(source.is_char_boundary(record.range.end));
+        prop_assert!(record.line_range.start <= record.range.start);
+        prop_assert!(record.range.start <= record.line_range.end);
+        prop_assert_eq!(record.column as usize, indent + 1);
+    }
+
     #[test]
     fn frame_scan_preserves_heading_projection(
         cases in proptest::collection::vec(

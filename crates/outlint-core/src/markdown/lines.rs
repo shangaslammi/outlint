@@ -106,7 +106,43 @@ pub(super) fn text_range(start: usize, end: usize) -> TextRange {
 }
 
 pub(super) fn byte_column(line_start: usize, offset: usize) -> u64 {
-    (offset - line_start + 1) as u64
+    offset
+        .checked_sub(line_start)
+        .and_then(|column| column.checked_add(1))
+        .and_then(|column| u64::try_from(column).ok())
+        .unwrap_or(1)
+}
+
+pub(super) fn without_trailing_blank_lines(
+    source: &str,
+    range: std::ops::Range<usize>,
+    lines: &LineIndex,
+) -> std::ops::Range<usize> {
+    let safe = clamp_range(range, source.len());
+    if safe.is_empty() {
+        return safe;
+    }
+
+    let mut end = safe.end;
+    loop {
+        let probe = end.checked_sub(1).unwrap_or(safe.start).max(safe.start);
+        let line = lines.line_number(probe);
+        let Some(text) = lines.line_text(source, line) else {
+            break;
+        };
+        if !text.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+            break;
+        }
+        let line_start = lines.line_start(line);
+        if line_start < safe.start {
+            break;
+        }
+        end = line_start;
+        if end == safe.start {
+            break;
+        }
+    }
+    safe.start..end
 }
 
 pub(super) fn physical_lines(source: &str) -> Vec<&str> {

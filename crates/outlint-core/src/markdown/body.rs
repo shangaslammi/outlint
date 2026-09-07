@@ -6,7 +6,9 @@ use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, 
 
 use crate::HeaderLevel;
 
-use super::lines::{byte_column, clamp_range, physical_lines, text_range, LineIndex};
+use super::lines::{
+    byte_column, clamp_range, physical_lines, text_range, without_trailing_blank_lines, LineIndex,
+};
 use super::model::{
     Heading, HeadingLocation, MarkdownOptions, Section, SuppressedDiagnostic, Suppressions,
 };
@@ -17,6 +19,78 @@ pub(super) struct ParsedBody {
     pub(super) sections: Vec<Section>,
     /// Diagnostic ids disabled everywhere in this document.
     pub(super) file_suppressions: Suppressions,
+}
+
+struct ScannedBody {
+    headings: Vec<HeadingRecord>,
+    file_suppressions: Suppressions,
+    root_preamble: Vec<BlockRecord>,
+    reference_definitions: BTreeMap<String, std::ops::Range<usize>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlockKind {
+    Paragraph,
+    List,
+    Quote,
+    Code,
+    Html,
+    Break,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BlockRecord {
+    pub(super) kind: BlockKind,
+    pub(super) range: std::ops::Range<usize>,
+    pub(super) line_range: std::ops::Range<usize>,
+    pub(super) line: usize,
+    pub(super) column: u64,
+    pub(super) suppressions: Suppressions,
+}
+
+pub(super) struct PreambleBuilder {
+    records: Vec<BlockRecord>,
+    open: bool,
+}
+
+impl PreambleBuilder {
+    fn new() -> Self {
+        Self {
+            records: Vec::new(),
+            open: true,
+        }
+    }
+
+    fn push(&mut self, record: BlockRecord) {
+        if self.open {
+            self.records.push(record);
+        }
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+    }
+
+    fn finish(self) -> Vec<BlockRecord> {
+        self.records
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    Root,
+    HeadingRecord(usize),
+}
+
+struct HeadingRecord {
+    heading: Heading,
+    preamble: PreambleBuilder,
+}
+
+struct BlockBuilder {
+    kind: BlockKind,
+    expected_end: TagEnd,
+    parser_range: std::ops::Range<usize>,
 }
 
 /// Scans the CommonMark body for headings and suppression directives.
@@ -31,44 +105,107 @@ pub(super) fn parse(
     options: MarkdownOptions,
     line_index: &LineIndex,
 ) -> ParsedBody {
-    let mut headings = Vec::new();
+    let ScannedBody {
+        headings,
+        file_suppressions,
+        root_preamble,
+        reference_definitions,
+    } = scan_events(source, parser_source, options, line_index);
+    let (sections, heading_preambles) = build_section_tree(headings);
+    // These parser-private records become the public preamble model in 3a3.
+    let _ = (root_preamble, heading_preambles, reference_definitions);
+    ParsedBody {
+        sections,
+        file_suppressions,
+    }
+}
+
+fn scan_events(
+    source: &str,
+    parser_source: &str,
+    options: MarkdownOptions,
+    line_index: &LineIndex,
+) -> ScannedBody {
+    let mut headings: Vec<HeadingRecord> = Vec::new();
+    let mut root_preamble = PreambleBuilder::new();
+    let mut owner = Owner::Root;
     let mut file_suppressions = Suppressions::default();
     let mut line_suppressions = BTreeMap::new();
     let mut active_heading: Option<HeadingBuilder> = None;
+    let mut active_direct_block: Option<BlockBuilder> = None;
     let mut frames = FrameStack::default();
 
-    for (event, range) in
-        Parser::new_ext(parser_source, CommonMarkOptions::empty()).into_offset_iter()
-    {
+    let parser = Parser::new_ext(parser_source, CommonMarkOptions::empty());
+    let mut reference_definitions = BTreeMap::new();
+    for (label, definition) in parser.reference_definitions().iter() {
+        let normalized = normalize_reference_label(label);
+        reference_definitions
+            .entry(normalized)
+            .or_insert_with(|| definition.span.clone());
+    }
+
+    for (event, range) in parser.into_offset_iter() {
         match event {
             Event::Start(tag) => {
+                let direct_kind = frames.is_top_level().then(|| block_kind(&tag)).flatten();
                 let heading = match &tag {
                     Tag::Heading { level, .. }
                         if frames.is_top_level()
                             && is_eligible_heading(source, &range, *level, line_index) =>
                     {
+                        close_owner(&mut root_preamble, &mut headings, owner);
                         Some(HeadingBuilder::new(*level))
                     }
                     Tag::Heading { .. } => None,
                     _ => active_heading.take(),
                 };
                 active_heading = heading;
+                if let Some(kind) = direct_kind {
+                    active_direct_block = Some(BlockBuilder {
+                        kind,
+                        expected_end: tag.to_end(),
+                        parser_range: range.clone(),
+                    });
+                }
                 frames.push(tag, range);
             }
             Event::End(end) => match frames.close(end) {
                 Ok(frame) if matches!(frame.expected_end, TagEnd::Heading(_)) => {
                     if let Some(builder) = active_heading.take() {
-                        headings.push(builder.finish(
+                        let heading = builder.finish(
                             source,
                             frame.range,
                             options,
                             line_index,
                             &line_suppressions,
-                        ));
+                        );
+                        headings.push(HeadingRecord {
+                            heading,
+                            preamble: PreambleBuilder::new(),
+                        });
+                        if let Some(index) = headings.len().checked_sub(1) {
+                            owner = Owner::HeadingRecord(index);
+                        }
                     }
                 }
-                Ok(_) => {}
-                Err(()) => active_heading = None,
+                Ok(frame) => {
+                    if frame.direct_block {
+                        let Some(builder) = active_direct_block.take() else {
+                            continue;
+                        };
+                        if builder.expected_end != end {
+                            continue;
+                        }
+                        if let Some(record) = builder.finish(source, line_index, &line_suppressions)
+                        {
+                            push_owned_block(&mut root_preamble, &mut headings, owner, record);
+                        }
+                    }
+                }
+                Err(()) => {
+                    active_heading = None;
+                    active_direct_block = None;
+                }
             },
             Event::Text(text) => {
                 if let Some(builder) = active_heading.as_mut() {
@@ -95,14 +232,209 @@ pub(super) fn parse(
                     &mut line_suppressions,
                 );
             }
+            Event::Rule if frames.is_top_level() => {
+                if let Some(record) = make_block_record(
+                    BlockKind::Break,
+                    range,
+                    source,
+                    line_index,
+                    &line_suppressions,
+                ) {
+                    push_owned_block(&mut root_preamble, &mut headings, owner, record);
+                }
+            }
             _ => {}
         }
     }
 
-    ParsedBody {
-        sections: build_section_tree(headings),
+    close_owner(&mut root_preamble, &mut headings, owner);
+    let root_preamble = root_preamble.finish();
+    ScannedBody {
+        headings,
         file_suppressions,
+        root_preamble,
+        reference_definitions,
     }
+}
+
+#[cfg(test)]
+pub(super) struct ScannedPreambles {
+    pub(super) root: Vec<BlockRecord>,
+    pub(super) headings: Vec<Vec<BlockRecord>>,
+    pub(super) reference_definitions: BTreeMap<String, std::ops::Range<usize>>,
+}
+
+#[cfg(test)]
+pub(super) fn scan_preambles(source: &str, options: MarkdownOptions) -> ScannedPreambles {
+    let lines = LineIndex::new(source);
+    let parser_source = super::lines::normalize_bare_cr(source);
+    let scanned = scan_events(source, &parser_source, options, &lines);
+    let (_, heading_preambles) = build_section_tree(scanned.headings);
+    ScannedPreambles {
+        root: scanned.root_preamble,
+        headings: heading_preambles,
+        reference_definitions: scanned.reference_definitions,
+    }
+}
+
+fn block_kind(tag: &Tag<'_>) -> Option<BlockKind> {
+    match tag {
+        Tag::Paragraph => Some(BlockKind::Paragraph),
+        Tag::List(_) => Some(BlockKind::List),
+        Tag::BlockQuote(_) => Some(BlockKind::Quote),
+        Tag::CodeBlock(_) => Some(BlockKind::Code),
+        Tag::HtmlBlock => Some(BlockKind::Html),
+        _ => None,
+    }
+}
+
+fn close_owner(root: &mut PreambleBuilder, headings: &mut [HeadingRecord], owner: Owner) {
+    match owner {
+        Owner::Root => root.close(),
+        Owner::HeadingRecord(index) => {
+            if let Some(record) = headings.get_mut(index) {
+                record.preamble.close();
+            }
+        }
+    }
+}
+
+fn push_owned_block(
+    root: &mut PreambleBuilder,
+    headings: &mut [HeadingRecord],
+    owner: Owner,
+    record: BlockRecord,
+) {
+    match owner {
+        Owner::Root => root.push(record),
+        Owner::HeadingRecord(index) => {
+            if let Some(heading) = headings.get_mut(index) {
+                heading.preamble.push(record);
+            }
+        }
+    }
+}
+
+impl BlockBuilder {
+    fn finish(
+        self,
+        source: &str,
+        lines: &LineIndex,
+        line_suppressions: &BTreeMap<usize, Suppressions>,
+    ) -> Option<BlockRecord> {
+        let record = make_block_record(
+            self.kind,
+            self.parser_range,
+            source,
+            lines,
+            line_suppressions,
+        )?;
+        if record.kind == BlockKind::Html
+            && source
+                .get(record.range.clone())
+                .is_some_and(is_comment_only_html)
+        {
+            None
+        } else {
+            Some(record)
+        }
+    }
+}
+
+fn make_block_record(
+    kind: BlockKind,
+    parser_range: std::ops::Range<usize>,
+    source: &str,
+    lines: &LineIndex,
+    line_suppressions: &BTreeMap<usize, Suppressions>,
+) -> Option<BlockRecord> {
+    let parser_range = without_trailing_blank_lines(source, parser_range, lines);
+    let start = block_anchor(kind, source, &parser_range, lines)?;
+    if start > parser_range.end || !source.is_char_boundary(start) {
+        return None;
+    }
+    let range = start..parser_range.end;
+    let line = lines.line_number(start);
+    let line_start = lines.line_start(line);
+    let line_end = lines.line_end(line, source.len());
+    let suppressions = line
+        .checked_sub(1)
+        .and_then(|prior| line_suppressions.get(&prior))
+        .cloned()
+        .unwrap_or_default();
+    Some(BlockRecord {
+        kind,
+        range,
+        line_range: line_start..line_end,
+        line,
+        column: byte_column(line_start, start),
+        suppressions,
+    })
+}
+
+fn block_anchor(
+    kind: BlockKind,
+    source: &str,
+    parser_range: &std::ops::Range<usize>,
+    lines: &LineIndex,
+) -> Option<usize> {
+    let line = lines.line_number(parser_range.start);
+    let line_end = lines.line_end(line, source.len()).min(parser_range.end);
+    let first_line = source.get(parser_range.start..line_end)?;
+    match kind {
+        BlockKind::List => first_line
+            .char_indices()
+            .find(|(_, character)| !matches!(character, ' ' | '\t'))
+            .map(|(offset, _)| parser_range.start + offset),
+        _ => Some(parser_range.start),
+    }
+}
+
+pub(super) fn is_comment_only_html(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut comments = 0usize;
+    loop {
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| is_commonmark_whitespace(*byte))
+        {
+            cursor += 1;
+        }
+        if cursor == bytes.len() {
+            return comments > 0;
+        }
+        if !bytes
+            .get(cursor..)
+            .is_some_and(|rest| rest.starts_with(b"<!--"))
+        {
+            return false;
+        }
+        let search_start = cursor.saturating_add(2);
+        let Some(relative_end) = bytes
+            .get(search_start..)
+            .and_then(|rest| rest.windows(3).position(|window| window == b"-->"))
+        else {
+            return false;
+        };
+        cursor = search_start.saturating_add(relative_end).saturating_add(3);
+        comments = comments.saturating_add(1);
+    }
+}
+
+fn is_commonmark_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r')
+}
+
+fn normalize_reference_label(label: &str) -> String {
+    let mut normalized = String::new();
+    for word in label.split_ascii_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.extend(crate::case_fold::simple_fold(word));
+    }
+    normalized
 }
 
 /// One balanced parser container, retaining its matching end kind and span for
@@ -110,6 +442,7 @@ pub(super) fn parse(
 pub(super) struct Frame {
     pub(super) expected_end: TagEnd,
     pub(super) range: std::ops::Range<usize>,
+    direct_block: bool,
 }
 
 #[derive(Default)]
@@ -124,9 +457,11 @@ impl FrameStack {
     }
 
     pub(super) fn push(&mut self, tag: Tag<'_>, range: std::ops::Range<usize>) {
+        let direct_block = self.is_top_level() && block_kind(&tag).is_some();
         self.frames.push(Frame {
             expected_end: tag.to_end(),
             range,
+            direct_block,
         });
     }
 
@@ -472,11 +807,14 @@ fn parse_suppression(html: &str) -> Option<(bool, Suppressions)> {
     }
 }
 
-fn build_section_tree(headings: Vec<Heading>) -> Vec<Section> {
+fn build_section_tree(headings: Vec<HeadingRecord>) -> (Vec<Section>, Vec<Vec<BlockRecord>>) {
     let mut roots = Vec::new();
     let mut path = Vec::<usize>::new();
+    let mut preambles = Vec::with_capacity(headings.len());
 
-    for heading in headings {
+    for record in headings {
+        let HeadingRecord { heading, preamble } = record;
+        preambles.push(preamble.finish());
         while let Some(parent) = section_at_path(&roots, &path) {
             if parent.heading.level < heading.level {
                 break;
@@ -494,7 +832,7 @@ fn build_section_tree(headings: Vec<Heading>) -> Vec<Section> {
         path.push(siblings.len() - 1);
     }
 
-    roots
+    (roots, preambles)
 }
 
 fn section_at_path<'a>(roots: &'a [Section], path: &[usize]) -> Option<&'a Section> {
