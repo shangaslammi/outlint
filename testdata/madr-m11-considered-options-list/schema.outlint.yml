@@ -1,0 +1,9 @@
+version: 1
+title: "*"
+sections:
+  - id: considered-options
+    match: "Considered Options"
+    content:
+      - block: list
+        list_kind: bullet
+    sections: []

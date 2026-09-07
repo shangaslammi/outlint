@@ -1,0 +1,29 @@
+{
+  "pass.md": [],
+  "fail-paragraph.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Choose a datastore", "Decision Drivers"], "block": "p", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Choose a datastore", "Decision Drivers"], "matcher": { "block": "list", "list_kind": "bullet" } }
+    }
+  ],
+  "fail-ordered.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Choose a datastore", "Decision Drivers"], "block": "list", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Choose a datastore", "Decision Drivers"], "matcher": { "block": "list", "list_kind": "bullet" } }
+    }
+  ],
+  "fail-two-lists.md": [
+    {
+      "id": "too-many-blocks",
+      "target": { "kind": "block", "parent": ["Choose a datastore", "Decision Drivers"], "block": "list", "index": 1 }
+    }
+  ]
+}

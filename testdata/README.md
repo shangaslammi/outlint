@@ -49,7 +49,7 @@ in a comment in its schema.
 
 ## Targets
 
-A target is an object whose `kind` selects one of four shapes. The kinds are
+A target is an object whose `kind` selects one of eight shapes. The kinds are
 kept apart because the text they carry has different provenance, and one flat
 path cannot say which is which:
 
@@ -59,6 +59,10 @@ path cannot say which is which:
 | `missing_header` | `parent`, `matcher` | A section the schema requires and the document does not contain. `parent` is the document path of the header whose scope should have contained it, and is empty when no header names that scope: the document root's own scope — where the missing section is an `h1`, the title included — and the `title` sugar's single-`h1` document voice, which keeps `parent` empty for the lone `h1`'s `sections` scope; when several `h1`s bind the title rule, each miss instead carries its owning `h1`'s path. `matcher` is the **schema's** matcher label — exact text, a glob, a `/regex/`, or `*` — and may occur nowhere in the document. |
 | `document` | — | The document as a whole, for a violation no single header can name. |
 | `frontmatter` | `line_range`?, `pointer`? | A frontmatter block, or a value inside it. It has no header path. |
+| `block` | `parent`, `block`, `index` | A visible preamble block that exists. |
+| `missing_block` | `parent`, `matcher` | A content rule not satisfied in a preamble. |
+| `item` | `list`, `index` | A direct item that exists in a concrete list. |
+| `missing_item` | `list`, `matcher` | An item rule not satisfied in a concrete list. |
 
 `header.path` and `missing_header.parent` are arrays of segments, never a
 joined string: a header literally named `A > B` would be indistinguishable
@@ -226,3 +230,7 @@ this backwards is silent: the suite still passes.
 | `items-direct-and-tightness` | tight/loose first-paragraph equivalence; mixed and nested block boundaries; direct-item isolation; ordered markers | §1.8, §2.5, §3.9 |
 | `items-recovery` | misplaced versus unexpected items; all item cardinality diagnostics; empty declarations; overlap cost; structured list addresses | §2.5, §3.9, §6.1–§6.2 |
 | `items-parent-isolation` | sibling and repeated list scopes; repeated and same-name section parents; nested-item address ordinals; identical-target multiplicity | §1.8, §3.6, §3.9, §6.1–§6.2 |
+| `madr-m09-context-content` | MADR Context and Problem Statement requires one or more paragraphs and no child headings | §2.5, §3.9, §6.1–§6.2 |
+| `madr-m10-decision-drivers-list` | MADR Decision Drivers requires exactly one syntactic bullet list, independent of item prose | §1.8, §2.5, §3.9, §6.1–§6.2 |
+| `madr-m11-considered-options-list` | MADR Considered Options requires exactly one syntactic nonempty bullet list | §1.7–§1.8, §2.5, §3.9, §6.1–§6.2 |
+| `madr-m14-consequence-items` | MADR Consequences requires one bullet list whose direct items have explicit one-plus classified cardinality | §1.8, §2.2, §2.5, §3.9, §6.1–§6.2 |
