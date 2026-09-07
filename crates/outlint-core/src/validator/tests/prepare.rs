@@ -1,5 +1,6 @@
 use crate::loader::{json_schema_reference_budget_message, MAX_JSON_SCHEMA_REFERENCES};
-use crate::validator::prepare::PreparedMatcher;
+use crate::validator::content::{PreparedContentScope, PreparedItemScope};
+use crate::validator::prepare::{PreparationCount, PreparedMatcher};
 use crate::validator::{validate, PreparedValidator, ValidationError};
 use crate::{
     load_schema, parse_markdown, ContentScope, ExactText, FrontmatterPolicy, FrontmatterSchema,
@@ -24,6 +25,44 @@ fn omitted_content_does_not_change_preparation() {
     let prepared = PreparedValidator::new(&loaded.schema).expect("omitted content prepares");
     assert_eq!(prepared.plan.rules.len(), 1);
     assert!(prepared.plan.title.is_some());
+}
+
+#[test]
+fn rfc5_matchers_prepare_once_per_schema() {
+    let loaded = load_schema(
+        "version: 1\ncontent:\n  - one_of: [{block: p}, {block: any}]\n  - block: list\n    items:\n      - match: Exact\n      - match: '/item.*/'\n        required: false\noutline:\n  - match: Parent\n    content:\n      - block: list\n        items:\n          - match: 'child*'\n            required: false\n    sections:\n      - match: Child\n",
+    )
+    .expect("RFC 5 schema is valid");
+    let prepared = PreparedValidator::new(&loaded.schema).expect("schema prepares once");
+
+    assert_eq!(
+        prepared.plan.preparation_count,
+        PreparationCount {
+            content_alternatives: 4,
+            item_matchers: 3,
+        }
+    );
+    assert_eq!(prepared.plan.rules.len(), 1);
+    assert_eq!(prepared.plan.rules[0].sections.len(), 1);
+    assert!(prepared
+        .plan
+        .rules
+        .first()
+        .is_some_and(|rule| matches!(&rule.content, PreparedContentScope::Declared(_))));
+
+    let declared_empty = load_schema(
+        "version: 1\ncontent:\n  - block: list\n    items: []\n  - block: p\n    required: false\noutline: []\n",
+    )
+    .expect("empty declarations are valid");
+    let declared_empty =
+        PreparedValidator::new(&declared_empty.schema).expect("empty declarations prepare");
+    let PreparedContentScope::Declared(rules) = &declared_empty.plan.content else {
+        panic!("content is declared rather than omitted")
+    };
+    let PreparedItemScope::Declared(items) = &rules[0].items else {
+        panic!("items are declared rather than omitted")
+    };
+    assert!(items.is_empty());
 }
 
 fn matcher_matches(matcher: &Matcher, text: &str, match_case: bool) -> bool {

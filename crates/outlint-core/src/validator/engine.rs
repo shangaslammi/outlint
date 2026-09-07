@@ -162,52 +162,6 @@ struct CardinalityCheck<'a, 'd> {
     parent_path: &'a HeaderPath,
 }
 
-fn prepare_heading_sequence(
-    rules: &[SectionRule],
-    rows: usize,
-    cells: &[bool],
-) -> Result<
-    (
-        Vec<super::sequence::SequenceRule>,
-        super::sequence::MatchMatrix,
-        super::sequence::EdgeCosts,
-    ),
-    super::sequence::SequenceExhausted,
-> {
-    let mut sequence_rules = Vec::new();
-    sequence_rules
-        .try_reserve_exact(rules.len())
-        .map_err(|_| super::sequence::SequenceExhausted)?;
-    for rule in rules {
-        sequence_rules.push(super::sequence::SequenceRule {
-            cardinality: rule.cardinality,
-            preference: if matches!(rule.matcher, Matcher::Any) {
-                super::sequence::Preference::Reluctant
-            } else {
-                super::sequence::Preference::Greedy
-            },
-        });
-    }
-    let mut matrix_cells = Vec::new();
-    matrix_cells
-        .try_reserve_exact(cells.len())
-        .map_err(|_| super::sequence::SequenceExhausted)?;
-    matrix_cells.extend_from_slice(cells);
-    let matrix = super::sequence::MatchMatrix::new(rows, rules.len(), matrix_cells)?;
-    let mut edge_cells = Vec::new();
-    edge_cells
-        .try_reserve_exact(cells.len())
-        .map_err(|_| super::sequence::SequenceExhausted)?;
-    for (index, matched) in cells.iter().enumerate() {
-        let wildcard = rules
-            .get(index % rules.len().max(1))
-            .is_some_and(|rule| matches!(rule.matcher, Matcher::Any));
-        edge_cells.push(u32::from(*matched && wildcard));
-    }
-    let costs = super::sequence::EdgeCosts::new_for(&matrix, edge_cells)?;
-    Ok((sequence_rules, matrix, costs))
-}
-
 impl<'a> Validator<'a> {
     fn new(schema: &'a Schema, document: &'a Document) -> Self {
         Self {
@@ -823,23 +777,24 @@ impl<'a> Validator<'a> {
                 if self.force_sequence_exhaustion {
                     return Err(super::sequence::SequenceExhausted);
                 }
-                let prepared = prepare_heading_sequence(rules, retained.len(), &matrix).and_then(
-                    |(sequence_rules, match_matrix, costs)| {
-                        #[cfg(test)]
-                        {
-                            super::sequence::assign_counted(
-                                &sequence_rules,
-                                &match_matrix,
-                                &costs,
-                                &mut self.work.sequence_operations,
-                            )
-                        }
-                        #[cfg(not(test))]
-                        {
-                            super::sequence::assign(&sequence_rules, &match_matrix, &costs)
-                        }
-                    },
-                );
+                let prepared =
+                    super::content::prepare_heading_edges(rules, retained.len(), &matrix).and_then(
+                        |edges| {
+                            #[cfg(test)]
+                            {
+                                super::sequence::assign_counted(
+                                    &edges.rules,
+                                    &edges.matches,
+                                    &edges.costs,
+                                    &mut self.work.sequence_operations,
+                                )
+                            }
+                            #[cfg(not(test))]
+                            {
+                                super::sequence::assign(&edges.rules, &edges.matches, &edges.costs)
+                            }
+                        },
+                    );
                 prepared?
             }
             ScopeMode::Unordered => {

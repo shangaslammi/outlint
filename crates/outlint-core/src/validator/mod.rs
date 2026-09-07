@@ -4,6 +4,7 @@
 //! and parse fixture text once, then pass only values to [`validate`].
 
 mod constraints;
+mod content;
 mod diagnostic;
 mod engine;
 mod frontmatter_values;

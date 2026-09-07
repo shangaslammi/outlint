@@ -1,13 +1,171 @@
+use crate::validator::content::{
+    prepare_content_edges, prepare_heading_edges, prepare_item_edges, PreparedContentScope,
+    PreparedItemScope, ValidationWork,
+};
 use crate::validator::engine::{
     forced_sequence_exhaustion_state, root_location, validation_work_count, WorkCounter,
 };
 use crate::validator::prepare::ValidationPlan;
+use crate::validator::sequence::{assign, SequenceExhausted};
 use crate::validator::{validate, Diagnostic, DiagnosticId, DiagnosticTarget, HeaderPath};
 use crate::{load_schema, parse_markdown, MarkdownOptions, RuleIndex, SchemaNode, ScopePath};
 use proptest::prelude::*;
 use std::time::{Duration, Instant};
 
 use super::ids_and_targets;
+
+#[test]
+fn work_is_exact_sum_of_concrete_scope_costs() {
+    let loaded = load_schema(
+        "version: 1\ncontent:\n  - block: list\n    items:\n      - match: '*'\n        repeat: 0..n\n      - match: Item\n        required: false\n  - one_of: [{block: any}, {block: p}]\n    repeat: 0..n\nforbid_sections:\n  - match: Denied\n  - match: Never\noutline:\n  - match: Heading\n    repeat: 0..n\n",
+    )
+    .expect("work schema is valid");
+    let plan = ValidationPlan::new(&loaded.schema).expect("schema prepares");
+    let left = parse_markdown(
+        "- Item\n\nParagraph\n# Heading\n",
+        MarkdownOptions::default(),
+    );
+    let right = parse_markdown("- Other\n# Other\n", MarkdownOptions::default());
+
+    fn concrete_work(
+        schema: &crate::Schema,
+        plan: &ValidationPlan,
+        document: &crate::Document,
+    ) -> Result<ValidationWork, SequenceExhausted> {
+        let mut work = ValidationWork::default();
+        let mut retained = Vec::new();
+        for section in &document.sections {
+            let text = section.heading.text.as_str();
+            let mut guarded = false;
+            for guard in &plan.guards {
+                work.add_matcher_text(text)?;
+                if guard.matches(text) {
+                    guarded = true;
+                    break;
+                }
+            }
+            if !guarded {
+                retained.push(section);
+            }
+        }
+        let cell_count = retained
+            .len()
+            .checked_mul(plan.rules.len())
+            .ok_or(SequenceExhausted)?;
+        let mut heading_cells = Vec::new();
+        heading_cells
+            .try_reserve_exact(cell_count)
+            .map_err(|_| SequenceExhausted)?;
+        for section in retained.iter().copied() {
+            for rule in &plan.rules {
+                work.add_matcher_text(&section.heading.text)?;
+                heading_cells.push(rule.matcher.matches(&section.heading.text));
+            }
+        }
+        let heading_edges =
+            prepare_heading_edges(schema.outline(), retained.len(), &heading_cells)?;
+        let heading_assignment = assign(
+            &heading_edges.rules,
+            &heading_edges.matches,
+            &heading_edges.costs,
+        )?;
+        work.add_dp(
+            retained.len(),
+            plan.rules.len(),
+            !heading_assignment.accepted,
+        )?;
+
+        let PreparedContentScope::Declared(content_rules) = &plan.content else {
+            return Ok(work);
+        };
+        let (content_edges, content_work) =
+            prepare_content_edges(document.preamble.as_slice(), content_rules)?;
+        work = work.checked_add(content_work)?;
+        let content_assignment = assign(
+            &content_edges.rules,
+            &content_edges.matches,
+            &content_edges.costs,
+        )?;
+        work.add_dp(
+            document.preamble.len(),
+            content_rules.len(),
+            !content_assignment.accepted,
+        )?;
+
+        for (block_index, block) in document.preamble.iter().enumerate() {
+            let Some(rule_index) = content_assignment.rules.get(block_index).copied().flatten()
+            else {
+                continue;
+            };
+            let (crate::Block::List(list), Some(rule)) = (block, content_rules.get(rule_index))
+            else {
+                continue;
+            };
+            let PreparedItemScope::Declared(item_rules) = &rule.items else {
+                continue;
+            };
+            let direct_items: Vec<_> = list.items.iter().cloned().collect();
+            let (item_edges, item_work) = prepare_item_edges(&direct_items, item_rules)?;
+            work = work.checked_add(item_work)?;
+            let item_assignment =
+                assign(&item_edges.rules, &item_edges.matches, &item_edges.costs)?;
+            work.add_dp(
+                direct_items.len(),
+                item_rules.len(),
+                !item_assignment.accepted,
+            )?;
+        }
+        Ok(work)
+    }
+
+    fn batch_work(
+        schema: &crate::Schema,
+        plan: &ValidationPlan,
+        documents: &[&crate::Document],
+    ) -> Result<ValidationWork, SequenceExhausted> {
+        documents
+            .iter()
+            .try_fold(ValidationWork::default(), |sum, document| {
+                sum.checked_add(concrete_work(schema, plan, document)?)
+            })
+    }
+
+    let left_work = concrete_work(&loaded.schema, &plan, &left).expect("left work fits");
+    let right_work = concrete_work(&loaded.schema, &plan, &right).expect("right work fits");
+    let combined = batch_work(&loaded.schema, &plan, &[&left, &right]).expect("batch work fits");
+
+    // Left has B=2, A=3, C=2: 2*3 predicates and 2*2 reductions.
+    // Its heading invokes two guards and one acceptor over 7 bytes; its item
+    // invokes two matchers over 4 bytes. All three sequences accept, costing
+    // (1+1)(1+1) + (2+1)(2+1) + (1+1)(2+1) = 19 DP cells.
+    let expected_left = ValidationWork {
+        content_predicates: 2 * 3,
+        choice_reductions: 2 * 2,
+        matcher_bytes: 2 * 7 + 7 + 2 * 4,
+        dp_cells: 2 * 2 + 3 * 3 + 2 * 3,
+    };
+    // Right has B=1 with the same A=3 and C=2. Its 5-byte heading and item
+    // have the same matcher invocation counts. Heading acceptance fails, so
+    // its 2*2 rectangle is charged twice; content and items each charge 2*3.
+    let expected_right = ValidationWork {
+        content_predicates: 3,
+        choice_reductions: 2,
+        matcher_bytes: 2 * 5 + 5 + 2 * 5,
+        dp_cells: 2 * 2 * 2 + 2 * 3 + 2 * 3,
+    };
+    let expected_batch = expected_left
+        .checked_add(expected_right)
+        .expect("fixture expectation fits");
+
+    assert_eq!(left_work, expected_left);
+    assert_eq!(right_work, expected_right);
+    assert_eq!(combined, expected_batch);
+    assert_eq!(
+        combined,
+        left_work.checked_add(right_work).expect("sum fits")
+    );
+    assert_eq!(combined.total().expect("total fits"), 108);
+}
 
 #[test]
 fn diagnostics_retain_normative_document_and_schema_anchors() {

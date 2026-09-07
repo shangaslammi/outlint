@@ -7,7 +7,8 @@ use crate::loader::{
 use crate::locator::PreparedQuery;
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::{
-    Constraint, DocumentShape, FrontmatterSchema, Matcher, Proposition, Schema, SectionRule,
+    Constraint, ContentScope, DocumentShape, FrontmatterSchema, ItemScope, Matcher, Proposition,
+    Schema, SectionRule,
 };
 
 use std::collections::BTreeMap;
@@ -20,13 +21,29 @@ pub(super) struct ValidationPlan {
     pub(super) title: Option<PreparedMatcher>,
     pub(super) frontmatter: Option<jsonschema::Validator>,
     pub(super) queries: PreparedQueries,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) content: super::content::PreparedContentScope,
+    #[cfg(test)]
+    pub(super) preparation_count: PreparationCount,
 }
 
 impl ValidationPlan {
     pub(super) fn new(schema: &Schema) -> Result<Self, PrepareValidationError> {
+        let match_case = schema.options.match_case;
+        let mut preparation_observer = PreparationObserver::new();
+        let rules = prepare_rules(
+            schema.addressed_root_rules(),
+            match_case,
+            &mut preparation_observer,
+        )?;
+        let content = prepare_content_scope(
+            document_content(&schema.document),
+            match_case,
+            &mut preparation_observer,
+        )?;
         Ok(Self {
-            rules: prepare_rules(schema.addressed_root_rules(), schema.options.match_case)?,
-            guards: prepare_guards(schema, schema.options.match_case)?,
+            rules,
+            guards: prepare_guards(schema, match_case)?,
             title: match &schema.document {
                 DocumentShape::Title(crate::TitleSlot::Spelled { matcher, .. }) => {
                     Some(PreparedMatcher::new(matcher, schema.options.match_case)?)
@@ -41,7 +58,64 @@ impl ValidationPlan {
                 .map(compile_frontmatter_schema)
                 .transpose()?,
             queries: PreparedQueries::new(schema)?,
+            content,
+            #[cfg(test)]
+            preparation_count: preparation_observer.count,
         })
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PreparationCount {
+    pub(super) content_alternatives: u64,
+    pub(super) item_matchers: u64,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct PreparationObserver {
+    count: PreparationCount,
+}
+
+#[cfg(not(test))]
+#[derive(Default)]
+struct PreparationObserver;
+
+impl PreparationObserver {
+    fn new() -> Self {
+        #[cfg(test)]
+        {
+            Self::default()
+        }
+        #[cfg(not(test))]
+        {
+            Self
+        }
+    }
+
+    #[inline(always)]
+    fn content_alternative(&mut self) {
+        #[cfg(test)]
+        {
+            self.count.content_alternatives = self
+                .count
+                .content_alternatives
+                .checked_add(1)
+                .expect("test preparation alternative count fits u64");
+        }
+    }
+
+    #[inline(always)]
+    fn item_matcher(&mut self) {
+        #[cfg(test)]
+        {
+            self.count.item_matchers = self
+                .count
+                .item_matchers
+                .checked_add(1)
+                .expect("test preparation matcher count fits u64");
+        }
     }
 }
 
@@ -194,26 +268,94 @@ pub(super) struct PreparedRule {
     pub(super) matcher: PreparedMatcher,
     pub(super) sections: Vec<PreparedRule>,
     pub(super) guards: Vec<PreparedMatcher>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) content: super::content::PreparedContentScope,
 }
 
 fn prepare_rules(
     rules: &[SectionRule],
     match_case: bool,
+    preparation_observer: &mut PreparationObserver,
 ) -> Result<Vec<PreparedRule>, PrepareValidationError> {
     rules
         .iter()
         .map(|rule| {
             Ok(PreparedRule {
                 matcher: PreparedMatcher::new(&rule.matcher, match_case)?,
-                sections: prepare_rules(rule.children.rules(), match_case)?,
+                sections: prepare_rules(rule.children.rules(), match_case, preparation_observer)?,
                 guards: rule
                     .children
                     .guards()
                     .map(|guard| PreparedMatcher::new(&guard.matcher, match_case))
                     .collect::<Result<_, _>>()?,
+                content: prepare_content_scope(&rule.content, match_case, preparation_observer)?,
             })
         })
         .collect()
+}
+
+fn document_content(document: &DocumentShape) -> &ContentScope {
+    match document {
+        DocumentShape::Outline { content, .. } => content,
+        DocumentShape::Title(title) => title.content(),
+    }
+}
+
+fn prepare_content_scope(
+    scope: &ContentScope,
+    match_case: bool,
+    preparation_observer: &mut PreparationObserver,
+) -> Result<super::content::PreparedContentScope, PrepareValidationError> {
+    Ok(match scope {
+        ContentScope::Omitted => super::content::PreparedContentScope::Omitted,
+        ContentScope::Declared(rules) => super::content::PreparedContentScope::Declared(
+            rules
+                .iter()
+                .map(|rule| {
+                    let items = match rule {
+                        crate::ContentRule::List { items, .. } => {
+                            prepare_item_scope(items, match_case, preparation_observer)?
+                        }
+                        crate::ContentRule::Paragraph { .. }
+                        | crate::ContentRule::Any { .. }
+                        | crate::ContentRule::OneOf { .. } => {
+                            super::content::PreparedItemScope::Omitted
+                        }
+                    };
+                    Ok(super::content::PreparedContentRule::new(
+                        rule,
+                        items,
+                        || {
+                            preparation_observer.content_alternative();
+                        },
+                    ))
+                })
+                .collect::<Result<_, PrepareValidationError>>()?,
+        ),
+    })
+}
+
+fn prepare_item_scope(
+    scope: &ItemScope,
+    match_case: bool,
+    preparation_observer: &mut PreparationObserver,
+) -> Result<super::content::PreparedItemScope, PrepareValidationError> {
+    Ok(match scope {
+        ItemScope::Omitted => super::content::PreparedItemScope::Omitted,
+        ItemScope::Declared(rules) => super::content::PreparedItemScope::Declared(
+            rules
+                .iter()
+                .map(|rule| {
+                    let matcher = PreparedMatcher::new(&rule.matcher, match_case)?;
+                    preparation_observer.item_matcher();
+                    Ok(super::content::PreparedItemRule {
+                        matcher,
+                        cardinality: rule.cardinality,
+                    })
+                })
+                .collect::<Result<_, PrepareValidationError>>()?,
+        ),
+    })
 }
 
 fn prepare_guards(
@@ -279,6 +421,10 @@ impl PreparedMatcher {
             Self::Glob(regex) | Self::Regex(regex) => regex.is_match(text),
             Self::Any => true,
         }
+    }
+
+    pub(super) fn is_wildcard(&self) -> bool {
+        matches!(self, Self::Any)
     }
 
     /// The named groups this matcher binds in `text`, borrowed from `text`.
