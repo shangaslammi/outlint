@@ -1,6 +1,151 @@
 mod common;
 
+// The total-order contract is defined over rendering values before JSON is
+// emitted. Reuse that module here so this integration contract can construct
+// deliberately tied diagnostics rather than hoping a Markdown fixture happens
+// to produce ties across every new target shape.
+#[allow(dead_code)]
+#[path = "../src/diagnostics.rs"]
+mod rendered_diagnostics;
+
 use common::*;
+
+#[test]
+fn envelope_version_remains_two() {
+    let directory = TempDir::new("rfc5-envelope-version");
+    directory.write("schema.yml", "version: 1\noutline: []\n");
+    directory.write("doc.md", "");
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(json_output(&output)["version"], 2);
+}
+
+#[test]
+fn rfc5_optional_members_are_omitted_not_null() {
+    let directory = TempDir::new("rfc5-optional-members");
+    directory.write(
+        "schema.yml",
+        "version: 1\ncontent:\n  - block: list\n    list_kind: any\noutline: []\n",
+    );
+    directory.write("doc.md", "");
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+    let matcher = &json_output(&output)["results"][0]["diagnostics"][0]["target"]["matcher"];
+    assert_eq!(matcher, &serde_json::json!({"block":"list"}));
+    assert!(matcher
+        .as_object()
+        .expect("matcher is an object")
+        .get("list_kind")
+        .is_none());
+}
+
+#[test]
+fn rfc5_total_order_covers_every_new_variant() {
+    use rendered_diagnostics::{
+        sort_diagnostics, RenderedBlockMatcher, RenderedContentMatcher, RenderedDiagnostic,
+        RenderedListAddress, RenderedTarget,
+    };
+
+    fn targets() -> Vec<RenderedTarget> {
+        let list = |parent: &str, index| RenderedListAddress {
+            parent: vec![parent.into()],
+            index,
+        };
+        let block = |block: &str, list_kind: Option<&str>| RenderedBlockMatcher {
+            block: block.into(),
+            list_kind: list_kind.map(ToOwned::to_owned),
+        };
+        vec![
+            RenderedTarget::Block {
+                parent: vec!["A".into()],
+                block: "p".into(),
+                index: 9,
+            },
+            RenderedTarget::Block {
+                parent: vec!["B".into()],
+                block: "a".into(),
+                index: 0,
+            },
+            RenderedTarget::MissingBlock {
+                parent: Vec::new(),
+                matcher: RenderedContentMatcher::Block(block("list", None)),
+            },
+            RenderedTarget::MissingBlock {
+                parent: Vec::new(),
+                matcher: RenderedContentMatcher::Block(block("list", Some("bullet"))),
+            },
+            RenderedTarget::MissingBlock {
+                parent: Vec::new(),
+                matcher: RenderedContentMatcher::OneOf(vec![block("list", None), block("p", None)]),
+            },
+            RenderedTarget::Item {
+                list: list("A", 9),
+                index: 99,
+            },
+            RenderedTarget::Item {
+                list: list("B", 1),
+                index: 0,
+            },
+            RenderedTarget::Item {
+                list: list("B", 1),
+                index: 1,
+            },
+            RenderedTarget::MissingItem {
+                list: list("A", 0),
+                matcher: "A".into(),
+            },
+            RenderedTarget::MissingItem {
+                list: list("A", 0),
+                matcher: "B".into(),
+            },
+        ]
+    }
+
+    let expected = targets()
+        .iter()
+        .map(|target| format!("Some({target:?})"))
+        .collect::<Vec<_>>();
+    let mut diagnostics = targets()
+        .into_iter()
+        .rev()
+        .map(|target| RenderedDiagnostic {
+            id: "same-id".into(),
+            message: "same message".into(),
+            source_path: "same.md".into(),
+            line: 1,
+            column: 1,
+            target: Some(target),
+            schema_node: None,
+            schema_location: None,
+            involved_headers: Vec::new(),
+            references: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    sort_diagnostics(&mut diagnostics);
+    let actual = diagnostics
+        .iter()
+        .map(|diagnostic| format!("{:?}", diagnostic.target))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
 use std::{
     fs,
     io::Write,

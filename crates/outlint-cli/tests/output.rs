@@ -3,6 +3,104 @@ mod common;
 use common::*;
 
 #[test]
+fn rfc5_targets_serialize_in_normative_member_order() {
+    let directory = TempDir::new("rfc5-target-json");
+    directory.write(
+        "schema.yml",
+        concat!(
+            "version: 1\n",
+            "content:\n",
+            "  - block: p\n",
+            "  - block: list\n",
+            "    list_kind: bullet\n",
+            "    items:\n",
+            "      - match: A\n",
+            "        repeat: 2..2\n",
+            "outline: []\n",
+        ),
+    );
+    directory.write("doc.md", "> quote\n\n- A\n- B\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let raw = stdout(&output);
+    for expected in [
+        "\"target\":{\"kind\":\"missing_block\",\"parent\":[],\"matcher\":{\"block\":\"p\"}}",
+        "\"target\":{\"kind\":\"block\",\"parent\":[],\"block\":\"quote\",\"index\":0}",
+        "\"target\":{\"kind\":\"missing_item\",\"list\":{\"parent\":[],\"index\":0},\"matcher\":\"A\"}",
+        "\"target\":{\"kind\":\"item\",\"list\":{\"parent\":[],\"index\":0},\"index\":1}",
+        "\"schema_node\":{\"kind\":\"content_rule\",\"owner\":{\"kind\":\"document\"},\"index\":0}",
+        "\"schema_node\":{\"kind\":\"item_rule\",\"content\":{\"owner\":{\"kind\":\"document\"},\"index\":1},\"index\":0}",
+    ] {
+        assert!(raw.contains(expected), "missing ordered fragment {expected}: {raw}");
+    }
+    let envelope = json_output(&output);
+    let diagnostics = envelope["results"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    let targets = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic["target"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        targets,
+        [
+            serde_json::json!({"kind":"missing_block","parent":[],"matcher":{"block":"p"}}),
+            serde_json::json!({"kind":"block","parent":[],"block":"quote","index":0}),
+            serde_json::json!({"kind":"missing_item","list":{"parent":[],"index":0},"matcher":"A"}),
+            serde_json::json!({"kind":"item","list":{"parent":[],"index":0},"index":1}),
+        ]
+    );
+    assert_eq!(
+        diagnostics[0]["schema_node"],
+        serde_json::json!({"kind":"content_rule","owner":{"kind":"document"},"index":0})
+    );
+    assert_eq!(
+        diagnostics[2]["schema_node"],
+        serde_json::json!({"kind":"item_rule","content":{"owner":{"kind":"document"},"index":1},"index":0})
+    );
+}
+
+#[test]
+fn rfc5_human_messages_escape_user_text() {
+    let directory = TempDir::new("rfc5-human-escape");
+    directory.write(
+        "schema.yml",
+        "version: 1\ntitle: '*'\ncontent: []\nsections: []\n",
+    );
+    directory.write("doc.md", "# A \"\u{202e}\n\nvisible\n");
+
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "doc.md",
+            "--schema",
+            "schema.yml",
+            "--color",
+            "never",
+        ],
+    );
+    let rendered = stdout(&output);
+    assert!(
+        rendered.contains("preamble: \"A \\\"\\u{202e}\""),
+        "{rendered}"
+    );
+    assert!(!rendered.contains('\u{202e}'), "{rendered}");
+    assert!(rendered.contains("block: p occurrence 0"), "{rendered}");
+}
+
+#[test]
 fn constraint_details_are_preserved_in_json_and_current_human_presentation() {
     let directory = TempDir::new("constraint-details");
     directory.write(

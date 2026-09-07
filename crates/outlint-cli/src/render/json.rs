@@ -12,9 +12,9 @@ use serde_json::{json, Map, Value};
 const ENVELOPE_VERSION: u64 = 2;
 
 use crate::diagnostics::{
-    RenderedContentOwner, RenderedContentRulePath, RenderedDiagnostic, RenderedMatcher,
-    RenderedPosition, RenderedReference, RenderedScalar, RenderedSchemaNode, RenderedTarget,
-    ResultKind, ValidationResult,
+    RenderedBlockMatcher, RenderedContentMatcher, RenderedContentOwner, RenderedContentRulePath,
+    RenderedDiagnostic, RenderedListAddress, RenderedMatcher, RenderedPosition, RenderedReference,
+    RenderedScalar, RenderedSchemaNode, RenderedTarget, ResultKind, ValidationResult,
 };
 
 pub(super) fn render_json(results: &[ValidationResult]) -> String {
@@ -41,19 +41,137 @@ pub(super) fn render_json(results: &[ValidationResult]) -> String {
         .filter(|result| result["kind"] == "document")
         .count();
     let schema_count = results.len() - document_count;
-    format!(
-        "{}\n",
-        json!({
-            "version": ENVELOPE_VERSION,
-            "results": results,
-            "summary": {
-                "files": results.len(),
-                "documents": document_count,
-                "schemas": schema_count,
-                "diagnostics": diagnostic_count
+    let envelope = json!({
+        "version": ENVELOPE_VERSION,
+        "results": results,
+        "summary": {
+            "files": results.len(),
+            "documents": document_count,
+            "schemas": schema_count,
+            "diagnostics": diagnostic_count
+        }
+    });
+    let mut output = String::new();
+    write_json_value(&envelope, JsonContext::Default, &mut output);
+    output.push('\n');
+    output
+}
+
+#[derive(Clone, Copy)]
+enum JsonContext {
+    Default,
+    BlockTarget,
+    MissingBlockTarget,
+    ItemTarget,
+    MissingItemTarget,
+    ContentRuleNode,
+    ItemRuleNode,
+    ListAddress,
+    ContentMatcher,
+    BlockMatcher,
+    ContentOwner,
+    ContentRulePath,
+}
+
+/// Writes compact JSON while preserving the historical key-sorted encoding
+/// everywhere except the appended RFC 5 objects whose member order §11.3
+/// specifies verbatim.
+fn write_json_value(value: &Value, context: JsonContext, output: &mut String) {
+    match value {
+        Value::Null => output.push_str("null"),
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Number(value) => output.push_str(&value.to_string()),
+        Value::String(value) => output.push_str(&json!(value).to_string()),
+        Value::Array(values) => {
+            output.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                let child_context = if matches!(context, JsonContext::ContentMatcher) {
+                    JsonContext::BlockMatcher
+                } else {
+                    JsonContext::Default
+                };
+                write_json_value(value, child_context, output);
             }
-        })
-    )
+            output.push(']');
+        }
+        Value::Object(object) => write_json_object(object, context, output),
+    }
+}
+
+fn write_json_object(object: &Map<String, Value>, context: JsonContext, output: &mut String) {
+    let context = match context {
+        JsonContext::Default => match object.get("kind").and_then(Value::as_str) {
+            Some("block") => JsonContext::BlockTarget,
+            Some("missing_block") => JsonContext::MissingBlockTarget,
+            Some("item") => JsonContext::ItemTarget,
+            Some("missing_item") => JsonContext::MissingItemTarget,
+            Some("content_rule") => JsonContext::ContentRuleNode,
+            Some("item_rule") => JsonContext::ItemRuleNode,
+            _ => JsonContext::Default,
+        },
+        JsonContext::ContentMatcher if object.contains_key("one_of") => JsonContext::ContentMatcher,
+        JsonContext::ContentMatcher => JsonContext::BlockMatcher,
+        context => context,
+    };
+    let keys: &[&str] = match context {
+        JsonContext::BlockTarget => &["kind", "parent", "block", "index"],
+        JsonContext::MissingBlockTarget => &["kind", "parent", "matcher"],
+        JsonContext::ItemTarget => &["kind", "list", "index"],
+        JsonContext::MissingItemTarget => &["kind", "list", "matcher"],
+        JsonContext::ContentRuleNode => &["kind", "owner", "index"],
+        JsonContext::ItemRuleNode => &["kind", "content", "index"],
+        JsonContext::ListAddress => &["parent", "index"],
+        JsonContext::BlockMatcher => &["block", "list_kind"],
+        JsonContext::ContentOwner => &["kind", "scope", "index"],
+        JsonContext::ContentRulePath => &["owner", "index"],
+        JsonContext::ContentMatcher => &["one_of"],
+        JsonContext::Default => &[],
+    };
+
+    output.push('{');
+    let mut written = 0_usize;
+    if keys.is_empty() {
+        for (key, value) in object {
+            write_json_member(key, value, JsonContext::Default, &mut written, output);
+        }
+    } else {
+        for key in keys {
+            let Some(value) = object.get(*key) else {
+                continue;
+            };
+            let child_context = match (context, *key) {
+                (JsonContext::MissingBlockTarget, "matcher") => JsonContext::ContentMatcher,
+                (JsonContext::ItemTarget | JsonContext::MissingItemTarget, "list") => {
+                    JsonContext::ListAddress
+                }
+                (JsonContext::ContentRuleNode, "owner") => JsonContext::ContentOwner,
+                (JsonContext::ItemRuleNode, "content") => JsonContext::ContentRulePath,
+                (JsonContext::ContentRulePath, "owner") => JsonContext::ContentOwner,
+                _ => JsonContext::Default,
+            };
+            write_json_member(key, value, child_context, &mut written, output);
+        }
+    }
+    output.push('}');
+}
+
+fn write_json_member(
+    key: &str,
+    value: &Value,
+    context: JsonContext,
+    written: &mut usize,
+    output: &mut String,
+) {
+    if *written != 0 {
+        output.push(',');
+    }
+    *written = (*written).saturating_add(1);
+    output.push_str(&json!(key).to_string());
+    output.push(':');
+    write_json_value(value, context, output);
 }
 
 fn diagnostic_json(diagnostic: &RenderedDiagnostic) -> Value {
@@ -133,7 +251,47 @@ fn target_json(target: &RenderedTarget) -> Value {
             }
             Value::Object(object)
         }
+        RenderedTarget::Block {
+            parent,
+            block,
+            index,
+        } => json!({ "kind": "block", "parent": parent, "block": block, "index": index }),
+        RenderedTarget::MissingBlock { parent, matcher } => json!({
+            "kind": "missing_block",
+            "parent": parent,
+            "matcher": content_matcher_json(matcher)
+        }),
+        RenderedTarget::Item { list, index } => {
+            json!({ "kind": "item", "list": list_address_json(list), "index": index })
+        }
+        RenderedTarget::MissingItem { list, matcher } => json!({
+            "kind": "missing_item",
+            "list": list_address_json(list),
+            "matcher": matcher
+        }),
     }
+}
+
+fn list_address_json(address: &RenderedListAddress) -> Value {
+    json!({ "parent": address.parent, "index": address.index })
+}
+
+fn content_matcher_json(matcher: &RenderedContentMatcher) -> Value {
+    match matcher {
+        RenderedContentMatcher::Block(matcher) => block_matcher_json(matcher),
+        RenderedContentMatcher::OneOf(alternatives) => json!({
+            "one_of": alternatives.iter().map(block_matcher_json).collect::<Vec<_>>()
+        }),
+    }
+}
+
+fn block_matcher_json(matcher: &RenderedBlockMatcher) -> Value {
+    let mut object = Map::new();
+    object.insert("block".into(), json!(matcher.block));
+    if let Some(list_kind) = &matcher.list_kind {
+        object.insert("list_kind".into(), json!(list_kind));
+    }
+    Value::Object(object)
 }
 
 fn schema_node_json(node: &RenderedSchemaNode) -> Value {
@@ -296,9 +454,11 @@ mod tests {
         target_json,
     };
     use crate::diagnostics::{
-        RenderedDiagnostic, RenderedInvolvedHeader, RenderedLineRange, RenderedLocation,
-        RenderedMatcher, RenderedPosition, RenderedReference, RenderedScalar, RenderedSchemaNode,
-        RenderedTarget, ResultKind, ValidationResult,
+        RenderedBlockMatcher, RenderedContentMatcher, RenderedContentOwner,
+        RenderedContentRulePath, RenderedDiagnostic, RenderedInvolvedHeader, RenderedLineRange,
+        RenderedListAddress, RenderedLocation, RenderedMatcher, RenderedPosition,
+        RenderedReference, RenderedScalar, RenderedSchemaNode, RenderedTarget, ResultKind,
+        ValidationResult,
     };
 
     /// A `[i]` subscript far beyond `u64::MAX`, as §11.3's "consumers MUST NOT
@@ -325,7 +485,7 @@ mod tests {
         }
     }
 
-    /// §6.1's four target kinds and every optional-member combination the
+    /// §6.1's eight target kinds and every optional-member combination the
     /// `frontmatter` kind admits. Absent `line_range` and absent `pointer` are
     /// omitted rather than emitted as null, and `Some("")` — the root pointer
     /// naming the mapping itself — stays distinct from `None`.
@@ -392,6 +552,60 @@ mod tests {
                         "line_range": {"start_line": 1, "end_line": 3},
                         "pointer": "/release"
                     }),
+                ),
+                (
+                    RenderedTarget::Block {
+                        parent: vec!["A".into()],
+                        block: "list".into(),
+                        index: 2,
+                    },
+                    json!({"kind":"block","parent":["A"],"block":"list","index":2}),
+                ),
+                (
+                    RenderedTarget::MissingBlock {
+                        parent: vec!["A".into()],
+                        matcher: RenderedContentMatcher::Block(RenderedBlockMatcher {
+                            block: "list".into(),
+                            list_kind: None,
+                        }),
+                    },
+                    json!({"kind":"missing_block","parent":["A"],"matcher":{"block":"list"}}),
+                ),
+                (
+                    RenderedTarget::MissingBlock {
+                        parent: Vec::new(),
+                        matcher: RenderedContentMatcher::OneOf(vec![
+                            RenderedBlockMatcher {
+                                block: "p".into(),
+                                list_kind: None,
+                            },
+                            RenderedBlockMatcher {
+                                block: "list".into(),
+                                list_kind: Some("bullet".into()),
+                            },
+                        ]),
+                    },
+                    json!({"kind":"missing_block","parent":[],"matcher":{"one_of":[{"block":"p"},{"block":"list","list_kind":"bullet"}]}}),
+                ),
+                (
+                    RenderedTarget::Item {
+                        list: RenderedListAddress {
+                            parent: vec!["A".into()],
+                            index: 2,
+                        },
+                        index: 3,
+                    },
+                    json!({"kind":"item","list":{"parent":["A"],"index":2},"index":3}),
+                ),
+                (
+                    RenderedTarget::MissingItem {
+                        list: RenderedListAddress {
+                            parent: vec!["A".into()],
+                            index: 2,
+                        },
+                        matcher: "/entry/".into(),
+                    },
+                    json!({"kind":"missing_item","list":{"parent":["A"],"index":2},"matcher":"/entry/"}),
                 ),
             ],
         );
@@ -464,6 +678,26 @@ mod tests {
                 (
                     RenderedSchemaNode::Constraint { scope, index },
                     json!({"kind": "constraint", "scope": [1, 0], "index": 2}),
+                ),
+                (
+                    RenderedSchemaNode::ContentRule {
+                        owner: RenderedContentOwner::Rule {
+                            scope: vec![1, 0],
+                            index: 2,
+                        },
+                        index: 3,
+                    },
+                    json!({"kind":"content_rule","owner":{"kind":"rule","scope":[1,0],"index":2},"index":3}),
+                ),
+                (
+                    RenderedSchemaNode::ItemRule {
+                        content: RenderedContentRulePath {
+                            owner: RenderedContentOwner::Title,
+                            index: 3,
+                        },
+                        index: 4,
+                    },
+                    json!({"kind":"item_rule","content":{"owner":{"kind":"title"},"index":3},"index":4}),
                 ),
             ],
         );

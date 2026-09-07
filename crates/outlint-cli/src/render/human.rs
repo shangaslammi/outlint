@@ -1,8 +1,8 @@
 //! Human-readable output: headlines, details, evidence, and escaping.
 
 use crate::diagnostics::{
-    RenderedDiagnostic, RenderedMatcher, RenderedReference, RenderedSchemaNode, RenderedTarget,
-    ValidationResult,
+    RenderedBlockMatcher, RenderedContentMatcher, RenderedDiagnostic, RenderedListAddress,
+    RenderedMatcher, RenderedReference, RenderedSchemaNode, RenderedTarget, ValidationResult,
 };
 
 pub(super) fn render_human(results: &[ValidationResult], use_color: bool) -> String {
@@ -104,6 +104,32 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
                     }
                 }
             }
+            RenderedTarget::Block {
+                parent,
+                block,
+                index,
+            } => {
+                append_human_owner_detail(output, "preamble", parent);
+                output.push_str(&format!(
+                    "  block: {} occurrence {index}\n",
+                    escape_human(block)
+                ));
+            }
+            RenderedTarget::MissingBlock { parent, matcher } => {
+                append_human_owner_detail(output, "expected within", parent);
+                output.push_str(&format!(
+                    "  expected block: {}\n",
+                    human_content_matcher(matcher)
+                ));
+            }
+            RenderedTarget::Item { list, index } => {
+                append_human_list_detail(output, list);
+                output.push_str(&format!("  item: {index}\n"));
+            }
+            RenderedTarget::MissingItem { list, matcher } => {
+                append_human_list_detail(output, list);
+                append_human_quoted_detail(output, "expected item", matcher);
+            }
         }
     }
 
@@ -128,6 +154,8 @@ fn append_human_details(output: &mut String, diagnostic: &RenderedDiagnostic) {
             // the thing just named was declared.
             let label = match diagnostic.schema_node.as_ref() {
                 Some(RenderedSchemaNode::Constraint { .. }) => "constraint",
+                Some(RenderedSchemaNode::ContentRule { .. }) => "content rule",
+                Some(RenderedSchemaNode::ItemRule { .. }) => "item rule",
                 Some(RenderedSchemaNode::Rule { .. }) => "rule",
                 Some(RenderedSchemaNode::Guard { .. }) => "guard",
                 Some(RenderedSchemaNode::Capture { .. })
@@ -183,6 +211,41 @@ fn append_human_quoted_detail(output: &mut String, label: &str, value: &str) {
 
 fn append_human_header_detail(output: &mut String, label: &str, path: &[String]) {
     output.push_str(&format!("  {label}: \"{}\"\n", human_header_path(path)));
+}
+
+fn append_human_owner_detail(output: &mut String, label: &str, path: &[String]) {
+    if path.is_empty() {
+        output.push_str(&format!("  {label}: <document root>\n"));
+    } else {
+        append_human_header_detail(output, label, path);
+    }
+}
+
+fn append_human_list_detail(output: &mut String, list: &RenderedListAddress) {
+    append_human_owner_detail(output, "list within", &list.parent);
+    output.push_str(&format!("  list: {}\n", list.index));
+}
+
+fn human_content_matcher(matcher: &RenderedContentMatcher) -> String {
+    match matcher {
+        RenderedContentMatcher::Block(matcher) => human_block_matcher(matcher),
+        RenderedContentMatcher::OneOf(alternatives) => alternatives
+            .iter()
+            .map(human_block_matcher)
+            .collect::<Vec<_>>()
+            .join(" or "),
+    }
+}
+
+fn human_block_matcher(matcher: &RenderedBlockMatcher) -> String {
+    match matcher.list_kind.as_deref() {
+        Some(list_kind) => format!(
+            "{} ({})",
+            escape_human(&matcher.block),
+            escape_human(list_kind)
+        ),
+        None => escape_human(&matcher.block),
+    }
 }
 
 fn append_human_ordering_evidence(output: &mut String, diagnostic: &RenderedDiagnostic) {

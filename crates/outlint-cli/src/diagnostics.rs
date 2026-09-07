@@ -7,9 +7,9 @@
 use std::cmp::Ordering;
 
 use outlint_core::{
-    Diagnostic, DiagnosticReference, DiagnosticTarget, FrontmatterScalar, InvalidSchema,
-    LoadedSchema, Matcher, RefAnchor, SchemaError, SchemaLocations, SchemaNode, SchemaSources,
-    SourceRange,
+    BlockKind, BlockMatcher, ContentMatcher, Diagnostic, DiagnosticReference, DiagnosticTarget,
+    FrontmatterScalar, InvalidSchema, ListKind, LoadedSchema, Matcher, RefAnchor, SchemaError,
+    SchemaLocations, SchemaNode, SchemaSources, SourceRange,
 };
 use serde_json::Number;
 
@@ -52,9 +52,9 @@ pub(crate) struct RenderedDiagnostic {
 /// The rendering of [`DiagnosticTarget`], one variant per kind.
 ///
 /// The variants are kept apart rather than flattened into one path because the
-/// text they carry has different provenance: only [`Self::Header`] names text
-/// that occurs in the document, [`Self::MissingHeader`]'s matcher is schema
-/// text, and the remaining two name no header at all.
+/// text they carry has different provenance: present-node variants identify
+/// document values, while missing-node variants carry normalized schema
+/// matchers.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RenderedTarget {
     Header {
@@ -71,6 +71,41 @@ pub(crate) enum RenderedTarget {
         /// `Some("")` is the root JSON Pointer; `None` is no pointer at all.
         pointer: Option<String>,
     },
+    Block {
+        parent: Vec<String>,
+        block: String,
+        index: usize,
+    },
+    MissingBlock {
+        parent: Vec<String>,
+        matcher: RenderedContentMatcher,
+    },
+    Item {
+        list: RenderedListAddress,
+        index: usize,
+    },
+    MissingItem {
+        list: RenderedListAddress,
+        matcher: String,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct RenderedListAddress {
+    pub(crate) parent: Vec<String>,
+    pub(crate) index: usize,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RenderedContentMatcher {
+    Block(RenderedBlockMatcher),
+    OneOf(Vec<RenderedBlockMatcher>),
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct RenderedBlockMatcher {
+    pub(crate) block: String,
+    pub(crate) list_kind: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -349,12 +384,79 @@ fn render_target(target: &DiagnosticTarget) -> RenderedTarget {
             }),
             pointer: block.as_ref().and_then(|block| block.json_pointer.clone()),
         },
-        // RFC 5 block/item target serialization is introduced by stage 4.
-        // Keep this stage's CLI compiling without expanding that surface yet.
-        DiagnosticTarget::Block { .. }
-        | DiagnosticTarget::MissingBlock { .. }
-        | DiagnosticTarget::Item { .. }
-        | DiagnosticTarget::MissingItem { .. } => RenderedTarget::Document,
+        DiagnosticTarget::Block {
+            parent,
+            block,
+            index,
+        } => RenderedTarget::Block {
+            parent: parent.0.clone(),
+            block: render_block_kind(*block).to_owned(),
+            index: *index,
+        },
+        DiagnosticTarget::MissingBlock { parent, matcher } => RenderedTarget::MissingBlock {
+            parent: parent.0.clone(),
+            matcher: render_content_matcher(matcher),
+        },
+        DiagnosticTarget::Item { list, index } => RenderedTarget::Item {
+            list: RenderedListAddress {
+                parent: list.parent.0.clone(),
+                index: list.index,
+            },
+            index: *index,
+        },
+        DiagnosticTarget::MissingItem { list, matcher } => RenderedTarget::MissingItem {
+            list: RenderedListAddress {
+                parent: list.parent.0.clone(),
+                index: list.index,
+            },
+            matcher: matcher.clone(),
+        },
+    }
+}
+
+fn render_content_matcher(matcher: &ContentMatcher) -> RenderedContentMatcher {
+    match matcher {
+        ContentMatcher::Block(matcher) => {
+            RenderedContentMatcher::Block(render_block_matcher(matcher))
+        }
+        ContentMatcher::OneOf(alternatives) => {
+            RenderedContentMatcher::OneOf(alternatives.iter().map(render_block_matcher).collect())
+        }
+    }
+}
+
+fn render_block_matcher(matcher: &BlockMatcher) -> RenderedBlockMatcher {
+    match matcher {
+        BlockMatcher::Paragraph => RenderedBlockMatcher {
+            block: "p".to_owned(),
+            list_kind: None,
+        },
+        BlockMatcher::List { list_kind } => RenderedBlockMatcher {
+            block: "list".to_owned(),
+            list_kind: list_kind.map(render_list_kind).map(ToOwned::to_owned),
+        },
+        BlockMatcher::Any => RenderedBlockMatcher {
+            block: "any".to_owned(),
+            list_kind: None,
+        },
+    }
+}
+
+fn render_block_kind(kind: BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Paragraph => "p",
+        BlockKind::List => "list",
+        BlockKind::Quote => "quote",
+        BlockKind::Code => "code",
+        BlockKind::Html => "html",
+        BlockKind::Break => "break",
+    }
+}
+
+fn render_list_kind(kind: ListKind) -> &'static str {
+    match kind {
+        ListKind::Bullet => "bullet",
+        ListKind::Ordered => "ordered",
     }
 }
 
@@ -580,9 +682,9 @@ fn diagnostic_sort_key(diagnostic: &RenderedDiagnostic) -> DiagnosticSortKey<'_>
 /// 2. diagnostic `id`, lexicographically;
 /// 3. `schema_location` as `(path, line, column)`, absent first;
 /// 4. `target`, by kind in the §6.1 order (`header`, `missing_header`,
-///    `document`, `frontmatter`), then by its members in declaration order
-///    (path segments; parent then matcher; line range then pointer), absent
-///    first — schema errors have no target;
+///    `document`, `frontmatter`, `block`, `missing_block`, `item`,
+///    `missing_item`), then by its members in declaration order, absent first
+///    — schema errors have no target;
 /// 5. `message`, lexicographically by bytes;
 /// 6. `schema_node`, by kind in the §11.3 order and then by its members in
 ///    declaration order;
@@ -618,9 +720,11 @@ mod tests {
     use std::fmt::Debug;
 
     use super::{
-        diagnostic_sort_key, line_column, sort_diagnostics, RenderedDiagnostic,
-        RenderedInvolvedHeader, RenderedLineRange, RenderedLocation, RenderedMatcher,
-        RenderedPosition, RenderedReference, RenderedScalar, RenderedSchemaNode, RenderedTarget,
+        diagnostic_sort_key, line_column, sort_diagnostics, RenderedBlockMatcher,
+        RenderedContentMatcher, RenderedContentOwner, RenderedContentRulePath, RenderedDiagnostic,
+        RenderedInvolvedHeader, RenderedLineRange, RenderedListAddress, RenderedLocation,
+        RenderedMatcher, RenderedPosition, RenderedReference, RenderedScalar, RenderedSchemaNode,
+        RenderedTarget,
     };
 
     /// Asserts that `chain` is strictly increasing, which is how every §11.4
@@ -665,7 +769,7 @@ mod tests {
         assert!(position("10") < position("340282366920938463463374607431768211456"));
     }
 
-    /// §6.1's four kinds in order, then each kind's members in declaration
+    /// §6.1's eight kinds in order, then each kind's members in declaration
     /// order: a header path segment by segment, `parent` before `matcher`,
     /// and `line_range` before `pointer` — with absence first for both of the
     /// frontmatter kind's optional members, so a block-level diagnostic sorts
@@ -713,7 +817,127 @@ mod tests {
                 frontmatter(range(1, 3), Some("/a")),
                 frontmatter(range(1, 4), Some("/a")),
                 frontmatter(range(2, 3), Some("/a")),
+                RenderedTarget::Block {
+                    parent: Vec::new(),
+                    block: "p".into(),
+                    index: 0,
+                },
+                RenderedTarget::MissingBlock {
+                    parent: Vec::new(),
+                    matcher: RenderedContentMatcher::Block(RenderedBlockMatcher {
+                        block: "p".into(),
+                        list_kind: None,
+                    }),
+                },
+                RenderedTarget::Item {
+                    list: RenderedListAddress {
+                        parent: Vec::new(),
+                        index: 0,
+                    },
+                    index: 0,
+                },
+                RenderedTarget::MissingItem {
+                    list: RenderedListAddress {
+                        parent: Vec::new(),
+                        index: 0,
+                    },
+                    matcher: "A".into(),
+                },
             ],
+        );
+    }
+
+    #[test]
+    fn rfc5_total_order_covers_every_new_variant() {
+        let block = |value: &str, list_kind: Option<&str>| RenderedBlockMatcher {
+            block: value.into(),
+            list_kind: list_kind.map(ToOwned::to_owned),
+        };
+        assert_ascending(
+            "structured content matchers",
+            &[
+                RenderedContentMatcher::Block(block("list", None)),
+                RenderedContentMatcher::Block(block("list", Some("bullet"))),
+                RenderedContentMatcher::Block(block("list", Some("ordered"))),
+                RenderedContentMatcher::Block(block("p", None)),
+                RenderedContentMatcher::OneOf(vec![block("list", None), block("p", None)]),
+                RenderedContentMatcher::OneOf(vec![block("list", None), block("quote", None)]),
+            ],
+        );
+
+        assert_ascending(
+            "list addresses and item indices",
+            &[
+                RenderedTarget::Item {
+                    list: RenderedListAddress {
+                        parent: vec!["A".into()],
+                        index: 9,
+                    },
+                    index: 99,
+                },
+                RenderedTarget::Item {
+                    list: RenderedListAddress {
+                        parent: vec!["B".into()],
+                        index: 1,
+                    },
+                    index: 0,
+                },
+                RenderedTarget::Item {
+                    list: RenderedListAddress {
+                        parent: vec!["B".into()],
+                        index: 2,
+                    },
+                    index: 0,
+                },
+                RenderedTarget::Item {
+                    list: RenderedListAddress {
+                        parent: vec!["B".into()],
+                        index: 2,
+                    },
+                    index: 1,
+                },
+            ],
+        );
+
+        assert_ascending(
+            "content owner and appended schema nodes",
+            &[
+                RenderedSchemaNode::ContentRule {
+                    owner: RenderedContentOwner::Document,
+                    index: 9,
+                },
+                RenderedSchemaNode::ContentRule {
+                    owner: RenderedContentOwner::Title,
+                    index: 0,
+                },
+                RenderedSchemaNode::ContentRule {
+                    owner: RenderedContentOwner::Rule {
+                        scope: vec![0],
+                        index: 1,
+                    },
+                    index: 0,
+                },
+                RenderedSchemaNode::ItemRule {
+                    content: RenderedContentRulePath {
+                        owner: RenderedContentOwner::Document,
+                        index: 0,
+                    },
+                    index: 0,
+                },
+            ],
+        );
+
+        assert!("z".as_bytes() < "å".as_bytes());
+        assert!(
+            RenderedTarget::Block {
+                parent: vec!["z".into()],
+                block: "p".into(),
+                index: usize::MAX,
+            } < RenderedTarget::Block {
+                parent: vec!["å".into()],
+                block: "a".into(),
+                index: 0,
+            }
         );
     }
 
@@ -758,6 +982,17 @@ mod tests {
                 RenderedSchemaNode::Constraint {
                     scope: scope(),
                     index: 1,
+                },
+                RenderedSchemaNode::ContentRule {
+                    owner: RenderedContentOwner::Document,
+                    index: 0,
+                },
+                RenderedSchemaNode::ItemRule {
+                    content: RenderedContentRulePath {
+                        owner: RenderedContentOwner::Document,
+                        index: 0,
+                    },
+                    index: 0,
                 },
             ],
         );

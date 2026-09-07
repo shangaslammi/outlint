@@ -3,6 +3,121 @@ mod common;
 use common::*;
 
 #[test]
+fn all_rfc5_ids_are_valid_suppressions() {
+    let directory = TempDir::new("rfc5-suppressions");
+    let cases = [
+        (
+            "unexpected-block",
+            "version: 1\ncontent: []\noutline: []\n",
+            "text\n",
+        ),
+        (
+            "misplaced-block",
+            "version: 1\ncontent:\n  - block: p\n  - block: list\noutline: []\n",
+            "- item\n\ntext\n",
+        ),
+        (
+            "missing-block",
+            "version: 1\ncontent:\n  - block: p\noutline: []\n",
+            "",
+        ),
+        (
+            "too-few-blocks",
+            "version: 1\ncontent:\n  - block: p\n    repeat: 2..2\noutline: []\n",
+            "text\n",
+        ),
+        (
+            "too-many-blocks",
+            "version: 1\ncontent:\n  - block: p\n    repeat: 0..1\noutline: []\n",
+            "one\n\ntwo\n",
+        ),
+        (
+            "unexpected-item",
+            "version: 1\ncontent:\n  - block: list\n    items: []\noutline: []\n",
+            "- A\n",
+        ),
+        (
+            "misplaced-item",
+            "version: 1\ncontent:\n  - block: list\n    items:\n      - match: A\n      - match: B\noutline: []\n",
+            "- B\n- A\n",
+        ),
+        (
+            "missing-item",
+            "version: 1\ncontent:\n  - block: list\n    items:\n      - match: A\noutline: []\n",
+            "- B\n",
+        ),
+        (
+            "too-few-items",
+            "version: 1\ncontent:\n  - block: list\n    items:\n      - match: A\n        repeat: 2..2\noutline: []\n",
+            "- A\n",
+        ),
+        (
+            "too-many-items",
+            "version: 1\ncontent:\n  - block: list\n    items:\n      - match: A\n        repeat: 0..1\noutline: []\n",
+            "- A\n- A\n",
+        ),
+    ];
+
+    for (index, (id, schema, markdown)) in cases.iter().enumerate() {
+        let schema_path = format!("schema-{index}.yml");
+        let plain_path = format!("plain-{index}.md");
+        let suppressed_path = format!("suppressed-{index}.md");
+        directory.write(&schema_path, schema);
+        directory.write(&plain_path, markdown);
+        directory.write(
+            &suppressed_path,
+            format!("<!-- outlint-disable-file {id} -->\n{markdown}"),
+        );
+
+        let plain = run(
+            &directory,
+            &[
+                "check",
+                &plain_path,
+                "--schema",
+                &schema_path,
+                "--format",
+                "json",
+            ],
+        );
+        let plain_envelope = json_output(&plain);
+        let plain_ids = plain_envelope["results"][0]["diagnostics"]
+            .as_array()
+            .expect("diagnostics is an array")
+            .iter()
+            .filter_map(|diagnostic| diagnostic["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            plain_ids.contains(id),
+            "fixture did not produce {id}: {plain_ids:?}"
+        );
+
+        let suppressed = run(
+            &directory,
+            &[
+                "check",
+                &suppressed_path,
+                "--schema",
+                &schema_path,
+                "--format",
+                "json",
+            ],
+        );
+        let suppressed_envelope = json_output(&suppressed);
+        let suppressed_ids = suppressed_envelope["results"][0]["diagnostics"]
+            .as_array()
+            .expect("diagnostics is an array")
+            .iter()
+            .filter_map(|diagnostic| diagnostic["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !suppressed_ids.contains(id),
+            "{id} was not suppressed: {suppressed_ids:?}"
+        );
+    }
+}
+
+#[test]
 fn human_check_is_quiet_on_pass_and_reports_failures() {
     let directory = TempDir::new("human");
     directory.write("schema.yml", VALID_SCHEMA);
