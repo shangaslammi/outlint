@@ -14,7 +14,8 @@ mod validator;
 mod yaml;
 
 pub use load_result::{
-    ByteOffset, CapturePath, ConstraintIndex, ConstraintPath, GuardIndex, GuardPath, InvalidSchema,
+    ByteOffset, CapturePath, ConstraintIndex, ConstraintPath, ContentOwner, ContentRuleIndex,
+    ContentRulePath, GuardIndex, GuardPath, InvalidSchema, ItemRuleIndex, ItemRulePath,
     JsonSchemaExternalReference, JsonSchemaResourceContents, JsonSchemaResourceInput,
     LinkedJsonSchemaInput, LoadSchemaResult, LoadedSchema, OrderEntryPath, OrderIndex,
     RelatedLocation, RuleIndex, RulePath, SchemaError, SchemaErrorKind, SchemaLocations,

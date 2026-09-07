@@ -127,6 +127,27 @@ pub(crate) enum RenderedSchemaNode {
         scope: Vec<usize>,
         index: usize,
     },
+    ContentRule {
+        owner: RenderedContentOwner,
+        index: usize,
+    },
+    ItemRule {
+        content: RenderedContentRulePath,
+        index: usize,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RenderedContentOwner {
+    Document,
+    Title,
+    Rule { scope: Vec<usize>, index: usize },
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct RenderedContentRulePath {
+    pub(crate) owner: RenderedContentOwner,
+    pub(crate) index: usize,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -361,6 +382,28 @@ fn render_schema_node(node: &SchemaNode) -> RenderedSchemaNode {
             order_index: path.order_index.0,
         },
         SchemaNode::Constraint(path) => RenderedSchemaNode::Constraint {
+            scope: path.scope.0.iter().map(|index| index.0).collect(),
+            index: path.index.0,
+        },
+        SchemaNode::ContentRule(path) => RenderedSchemaNode::ContentRule {
+            owner: render_content_owner(&path.owner),
+            index: path.index.0,
+        },
+        SchemaNode::ItemRule(path) => RenderedSchemaNode::ItemRule {
+            content: RenderedContentRulePath {
+                owner: render_content_owner(&path.content.owner),
+                index: path.content.index.0,
+            },
+            index: path.index.0,
+        },
+    }
+}
+
+fn render_content_owner(owner: &outlint_core::ContentOwner) -> RenderedContentOwner {
+    match owner {
+        outlint_core::ContentOwner::Document => RenderedContentOwner::Document,
+        outlint_core::ContentOwner::Title => RenderedContentOwner::Title,
+        outlint_core::ContentOwner::Rule(path) => RenderedContentOwner::Rule {
             scope: path.scope.0.iter().map(|index| index.0).collect(),
             index: path.index.0,
         },

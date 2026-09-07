@@ -12,8 +12,9 @@ use serde_json::{json, Map, Value};
 const ENVELOPE_VERSION: u64 = 2;
 
 use crate::diagnostics::{
-    RenderedDiagnostic, RenderedMatcher, RenderedPosition, RenderedReference, RenderedScalar,
-    RenderedSchemaNode, RenderedTarget, ResultKind, ValidationResult,
+    RenderedContentOwner, RenderedContentRulePath, RenderedDiagnostic, RenderedMatcher,
+    RenderedPosition, RenderedReference, RenderedScalar, RenderedSchemaNode, RenderedTarget,
+    ResultKind, ValidationResult,
 };
 
 pub(super) fn render_json(results: &[ValidationResult]) -> String {
@@ -170,7 +171,34 @@ fn schema_node_json(node: &RenderedSchemaNode) -> Value {
         RenderedSchemaNode::Constraint { scope, index } => {
             json!({ "kind": "constraint", "scope": scope, "index": index })
         }
+        RenderedSchemaNode::ContentRule { owner, index } => json!({
+            "kind": "content_rule",
+            "owner": content_owner_json(owner),
+            "index": index
+        }),
+        RenderedSchemaNode::ItemRule { content, index } => json!({
+            "kind": "item_rule",
+            "content": content_rule_path_json(content),
+            "index": index
+        }),
     }
+}
+
+fn content_owner_json(owner: &RenderedContentOwner) -> Value {
+    match owner {
+        RenderedContentOwner::Document => json!({ "kind": "document" }),
+        RenderedContentOwner::Title => json!({ "kind": "title" }),
+        RenderedContentOwner::Rule { scope, index } => {
+            json!({ "kind": "rule", "scope": scope, "index": index })
+        }
+    }
+}
+
+fn content_rule_path_json(path: &RenderedContentRulePath) -> Value {
+    json!({
+        "owner": content_owner_json(&path.owner),
+        "index": path.index
+    })
 }
 
 fn reference_json(reference: &RenderedReference) -> Value {

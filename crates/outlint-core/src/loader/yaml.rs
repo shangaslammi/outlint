@@ -19,7 +19,7 @@ use crate::{
 use super::shape::{
     CAPTURES_FIELD, DOCUMENT_FIELDS, FRONTMATTER_FIELDS, OPTION_FIELDS, ORDER_FIELD, RULE_FIELDS,
 };
-use super::{JsonMap, RangeKey};
+use super::{JsonMap, RangeKey, RawContentOwner};
 
 #[derive(Default)]
 pub(super) struct RangeIndex {
@@ -47,6 +47,14 @@ impl RangeIndex {
                     node_range(node, expansion, char_offsets),
                 );
             }
+        }
+        if let Some(node) = schema_mapping_get(mapping, "content") {
+            index.collect_content(
+                node,
+                &RawContentOwner::Document,
+                subtree_expansion(node, expansion),
+                char_offsets,
+            );
         }
         for (section, fields) in [
             ("options", OPTION_FIELDS),
@@ -150,6 +158,14 @@ impl RangeIndex {
                 self.ranges
                     .insert(RangeKey::RuleOrderEntry(path.clone(), order_index), range);
             }
+            if let Some(content) = schema_mapping_get(mapping, "content") {
+                self.collect_content(
+                    content,
+                    &RawContentOwner::Rule(path.clone()),
+                    subtree_expansion(content, expansion),
+                    char_offsets,
+                );
+            }
             let mut child_scope = scope.clone();
             child_scope.0.push(RuleIndex(index));
             if let Some(node) = schema_mapping_get(mapping, "sections") {
@@ -204,6 +220,18 @@ impl RangeIndex {
                 self.ranges.insert(
                     RangeKey::OutlineRuleOrderEntry(RuleIndex(index), order_index),
                     range,
+                );
+            }
+            if let Some(content) = schema_mapping_get(mapping, "content") {
+                let owner = RawContentOwner::Rule(RulePath {
+                    scope: ScopePath(Vec::new()),
+                    index: RuleIndex(index),
+                });
+                self.collect_content(
+                    content,
+                    &owner,
+                    subtree_expansion(content, expansion),
+                    char_offsets,
                 );
             }
             let child_scope = ScopePath(vec![RuleIndex(index)]);
@@ -270,6 +298,131 @@ impl RangeIndex {
                     index: ConstraintIndex(index),
                 }),
                 node_range(node, expansion, char_offsets),
+            );
+        }
+    }
+
+    fn collect_content(
+        &mut self,
+        node: &SchemaYamlNode,
+        owner: &RawContentOwner,
+        expansion: Option<(usize, usize)>,
+        char_offsets: &[usize],
+    ) {
+        let Some(rules) = node.as_sequence() else {
+            return;
+        };
+        for (rule_index, rule) in rules.iter().enumerate() {
+            self.ranges.insert(
+                RangeKey::ContentRule(owner.clone(), rule_index),
+                node_range(rule, expansion, char_offsets),
+            );
+            let rule_expansion = subtree_expansion(rule, expansion);
+            let Some(mapping) = rule.as_mapping() else {
+                continue;
+            };
+            self.collect_content_fields(mapping, owner, rule_index, rule_expansion, char_offsets);
+            if let Some(one_of) = schema_mapping_get(mapping, "one_of") {
+                let alternatives_expansion = subtree_expansion(one_of, rule_expansion);
+                if let Some(alternatives) = one_of.as_sequence() {
+                    for (alternative_index, alternative) in alternatives.iter().enumerate() {
+                        self.ranges.insert(
+                            RangeKey::ContentAlternative(
+                                owner.clone(),
+                                rule_index,
+                                alternative_index,
+                            ),
+                            node_range(alternative, alternatives_expansion, char_offsets),
+                        );
+                        let alternative_expansion =
+                            subtree_expansion(alternative, alternatives_expansion);
+                        if let Some(fields) = alternative.as_mapping() {
+                            for (key, value) in fields {
+                                let Some(name) = key.scalar_text() else {
+                                    continue;
+                                };
+                                self.ranges.insert(
+                                    RangeKey::ContentAlternativeFieldKey(
+                                        owner.clone(),
+                                        rule_index,
+                                        alternative_index,
+                                        name.to_owned(),
+                                    ),
+                                    node_range(key, alternative_expansion, char_offsets),
+                                );
+                                self.ranges.insert(
+                                    RangeKey::ContentAlternativeFieldValue(
+                                        owner.clone(),
+                                        rule_index,
+                                        alternative_index,
+                                        name.to_owned(),
+                                    ),
+                                    node_range(value, alternative_expansion, char_offsets),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(items) = schema_mapping_get(mapping, "items") {
+                let items_expansion = subtree_expansion(items, rule_expansion);
+                if let Some(item_rules) = items.as_sequence() {
+                    for (item_index, item) in item_rules.iter().enumerate() {
+                        self.ranges.insert(
+                            RangeKey::ItemRule(owner.clone(), rule_index, item_index),
+                            node_range(item, items_expansion, char_offsets),
+                        );
+                        let item_expansion = subtree_expansion(item, items_expansion);
+                        if let Some(fields) = item.as_mapping() {
+                            for (key, value) in fields {
+                                let Some(name) = key.scalar_text() else {
+                                    continue;
+                                };
+                                self.ranges.insert(
+                                    RangeKey::ItemRuleFieldKey(
+                                        owner.clone(),
+                                        rule_index,
+                                        item_index,
+                                        name.to_owned(),
+                                    ),
+                                    node_range(key, item_expansion, char_offsets),
+                                );
+                                self.ranges.insert(
+                                    RangeKey::ItemRuleFieldValue(
+                                        owner.clone(),
+                                        rule_index,
+                                        item_index,
+                                        name.to_owned(),
+                                    ),
+                                    node_range(value, item_expansion, char_offsets),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_content_fields(
+        &mut self,
+        mapping: &[(SchemaYamlNode, SchemaYamlNode)],
+        owner: &RawContentOwner,
+        rule_index: usize,
+        expansion: Option<(usize, usize)>,
+        char_offsets: &[usize],
+    ) {
+        for (key, value) in mapping {
+            let Some(name) = key.scalar_text() else {
+                continue;
+            };
+            self.ranges.insert(
+                RangeKey::ContentRuleFieldKey(owner.clone(), rule_index, name.to_owned()),
+                node_range(key, expansion, char_offsets),
+            );
+            self.ranges.insert(
+                RangeKey::ContentRuleFieldValue(owner.clone(), rule_index, name.to_owned()),
+                node_range(value, expansion, char_offsets),
             );
         }
     }

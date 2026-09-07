@@ -27,9 +27,10 @@ use std::{
 
 use outlint_core::{
     json_schema_external_references, linked_frontmatter_schema_path, load_schema,
-    load_schema_with_resources, CapturePath, ConstraintPath, JsonSchemaResourceContents,
-    JsonSchemaResourceInput, LinkedJsonSchemaInput, LoadedSchema, OrderEntryPath, RulePath,
-    SchemaNode, ScopePath, SourceLabel, SourceRange,
+    load_schema_with_resources, CapturePath, ConstraintPath, ContentOwner, ContentRuleIndex,
+    ContentRulePath, ItemRuleIndex, ItemRulePath, JsonSchemaResourceContents,
+    JsonSchemaResourceInput, LinkedJsonSchemaInput, LoadedSchema, OrderEntryPath, RuleIndex,
+    RulePath, SchemaNode, ScopePath, SourceLabel, SourceRange,
 };
 
 #[test]
@@ -86,12 +87,98 @@ fn malformed_schema_error_ranges_match_the_committed_baseline() {
                         encode_range(&error.range, source),
                         quote(&error.message)
                     );
+                    for related in &error.related {
+                        let _ = writeln!(
+                            report,
+                            "    related {} {}",
+                            encode_range(&related.range, source),
+                            quote(&related.message)
+                        );
+                    }
                 }
             }
         }
         report.push('\n');
     }
     compare_or_update("malformed_schema_ranges.txt", &report);
+}
+
+#[test]
+fn rfc5_rejection_ranges_are_exact() {
+    let source = "version: 1\ncontent:\n  - one_of:\n      - block: list\n        list_kind: any\n      - block: list\noutline: []\n";
+    let invalid = load_schema(source).expect_err("normalized alternatives are duplicates");
+    assert_eq!(invalid.errors.iter().count(), 1);
+    let error = &invalid.errors.first;
+    assert_eq!(error.kind.as_str(), "invalid-content-rule");
+    assert_eq!(
+        source.get(error.range.range.start.0..error.range.range.end.0),
+        Some("block: list\n")
+    );
+    assert_eq!(error.related.len(), 1);
+    let related = error.related.first().expect("one related location");
+    assert_eq!(
+        source.get(related.range.range.start.0..related.range.range.end.0),
+        Some("block: list\n        list_kind: any\n      ")
+    );
+}
+
+#[test]
+fn successful_content_and_item_rule_ranges_cover_every_owner() {
+    let cases = [
+        (
+            "version: 1\ncontent: [{block: p}]\noutline: []\n",
+            ContentOwner::Document,
+            "{block: p}",
+        ),
+        (
+            "version: 1\ntitle: Doc\ncontent: [{block: any}]\nsections: []\n",
+            ContentOwner::Title,
+            "{block: any}",
+        ),
+        (
+            "version: 1\noutline:\n  - match: A\n    content: [{block: p}]\n",
+            ContentOwner::Rule(RulePath {
+                scope: ScopePath(Vec::new()),
+                index: RuleIndex(0),
+            }),
+            "{block: p}",
+        ),
+    ];
+    for (source, owner, expected) in cases {
+        let loaded = load_schema(source).expect("content schema loads");
+        let path = ContentRulePath {
+            owner,
+            index: ContentRuleIndex(0),
+        };
+        let range = loaded
+            .locations
+            .nodes
+            .get(&SchemaNode::ContentRule(path))
+            .expect("content rule range is retained");
+        assert_eq!(
+            source.get(range.range.start.0..range.range.end.0),
+            Some(expected)
+        );
+    }
+
+    let source = "version: 1\ncontent: [{block: list, items: [{match: Item}]}]\noutline: []\n";
+    let loaded = load_schema(source).expect("item schema loads");
+    let path = ItemRulePath {
+        content: ContentRulePath {
+            owner: ContentOwner::Document,
+            index: ContentRuleIndex(0),
+        },
+        index: ItemRuleIndex(0),
+    };
+    let range = loaded
+        .locations
+        .nodes
+        .get(&SchemaNode::ItemRule(path))
+        .expect("item rule range is retained");
+    assert_eq!(
+        source.get(range.range.start.0..range.range.end.0),
+        Some("{match: Item}")
+    );
 }
 
 /// Malformed schema sources chosen to reach every positioned diagnostic once.
@@ -124,6 +211,50 @@ fn malformed_schema_error_ranges_match_the_committed_baseline() {
 /// unambiguous failure — an unknown type, an unknown order-entry field, an
 /// empty collection — so the recorded slice is read against exactly one error.
 const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
+    (
+        "rfc5-document-content-null",
+        "version: 1\ncontent: null\noutline: []\n",
+    ),
+    (
+        "rfc5-section-content-null",
+        "version: 1\noutline:\n  - match: A\n    content: null\n",
+    ),
+    (
+        "rfc5-one-of-non-mapping-alternative",
+        "version: 1\ncontent:\n  - one_of:\n      - block: p\n      - nope\noutline: []\n",
+    ),
+    (
+        "rfc5-content-not-a-sequence",
+        "version: 1\ncontent: nope\noutline: []\n",
+    ),
+    (
+        "rfc5-content-entry-not-a-mapping",
+        "version: 1\ncontent:\n  - nope\noutline: []\n",
+    ),
+    (
+        "rfc5-content-outer-neither",
+        "version: 1\ncontent:\n  - id: ignored\noutline: []\n",
+    ),
+    (
+        "rfc5-content-outer-both-and-unknown",
+        "version: 1\ncontent:\n  - one_of: []\n    deferred: false\n    block: p\n    items: nope\noutline: []\n",
+    ),
+    (
+        "rfc5-content-inapplicable-and-malformed-members",
+        "version: 1\ncontent:\n  - block: p\n    list_kind: bullet\n    items: nope\n  - block: list\n    list_kind: nope\n    required: true\n    repeat: 2..1\noutline: []\n",
+    ),
+    (
+        "rfc5-choice-alternatives-and-duplicate",
+        "version: 1\ncontent:\n  - one_of:\n      - block: list\n        list_kind: any\n      - block: list\n      - one_of: []\noutline: []\n",
+    ),
+    (
+        "rfc5-items-container-and-entry",
+        "version: 1\ncontent:\n  - block: list\n    items: nope\n  - block: list\n    items:\n      - nope\noutline: []\n",
+    ),
+    (
+        "rfc5-item-shape-matcher-and-cardinality",
+        "version: 1\ncontent:\n  - block: list\n    items:\n      - id: BAD\n        match: 7\n        required: nope\n        repeat: 3\n        content: deferred\n      - match: '/[bad/'\n      - match: '*'\noutline: []\n",
+    ),
     (
         "document-field-version",
         "version: 1\nsections: []\n",
@@ -576,6 +707,27 @@ fn encode_node(node: &SchemaNode) -> String {
         ),
         SchemaNode::Constraint(ConstraintPath { scope, index }) => {
             format!("constraint {}", index_path(scope, index.0))
+        }
+        SchemaNode::ContentRule(path) => format!(
+            "content-rule {} {}",
+            encode_content_owner(&path.owner),
+            path.index.0
+        ),
+        SchemaNode::ItemRule(path) => format!(
+            "item-rule {} {} {}",
+            encode_content_owner(&path.content.owner),
+            path.content.index.0,
+            path.index.0
+        ),
+    }
+}
+
+fn encode_content_owner(owner: &ContentOwner) -> String {
+    match owner {
+        ContentOwner::Document => "document".into(),
+        ContentOwner::Title => "title".into(),
+        ContentOwner::Rule(RulePath { scope, index }) => {
+            format!("rule-{}", index_path(scope, index.0))
         }
     }
 }

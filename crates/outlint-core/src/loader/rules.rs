@@ -252,8 +252,14 @@ impl Loader {
             let cardinality = self.build_cardinality(
                 raw.required,
                 raw.repeat.as_deref(),
-                matcher.as_ref(),
+                matches!(matcher, Some(Matcher::Exact(_))),
                 outcome_range,
+            );
+            let content = self.build_content_scope(
+                raw.content.as_ref(),
+                &super::RawContentOwner::Rule(rule_path.clone()),
+                crate::ContentOwner::Rule(rule_path.clone()),
+                match_case,
             );
             let captures =
                 self.build_rule_captures(raw.captures.as_ref(), &rule_path, matcher.as_ref());
@@ -273,14 +279,21 @@ impl Loader {
                 match_case,
                 captures.as_ref().map(|entries| (&rule_path, entries)),
             );
-            match (matcher, cardinality, children, captures, order) {
-                (Some(matcher), Some(cardinality), Some(children), Some(captures), Some(order)) => {
+            match (matcher, cardinality, children, content, captures, order) {
+                (
+                    Some(matcher),
+                    Some(cardinality),
+                    Some(children),
+                    Some(content),
+                    Some(captures),
+                    Some(order),
+                ) => {
                     semantic.push(SectionRule {
                         id,
                         matcher,
                         cardinality,
                         children,
-                        content: crate::ContentScope::Omitted,
+                        content,
                         captures,
                         order,
                     });
@@ -847,11 +860,11 @@ impl Loader {
         Some(Matcher::Exact(ExactText(source.to_owned())))
     }
 
-    fn build_cardinality(
+    pub(super) fn build_cardinality(
         &mut self,
         required: Option<bool>,
         repeat: Option<&str>,
-        matcher: Option<&Matcher>,
+        implicit_exact_one: bool,
         range: SourceRange,
     ) -> Option<Cardinality> {
         if required.is_some() && repeat.is_some() {
@@ -876,9 +889,7 @@ impl Loader {
                     return None;
                 }
             },
-            (None, None) if matches!(matcher, Some(Matcher::Exact(_))) => {
-                Cardinality::new(1, UpperBound::Bounded(1))?
-            }
+            (None, None) if implicit_exact_one => Cardinality::new(1, UpperBound::Bounded(1))?,
             (None, None) => {
                 self.error_at(
                     SchemaErrorKind::MissingCardinality,
@@ -898,7 +909,7 @@ impl Loader {
 ///
 /// The reservation is on top-level *rule ids* only: a nested rule may take
 /// either name, and §2.2 gives capture names no reserved words at all.
-fn reserved_root_id(id: &str) -> Option<&'static str> {
+pub(super) fn reserved_root_id(id: &str) -> Option<&'static str> {
     match id {
         "fm" => Some("frontmatter refs"),
         // §4.1 holds the name for a later document source; it has no

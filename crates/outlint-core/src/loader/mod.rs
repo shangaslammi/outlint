@@ -6,6 +6,7 @@
 #![allow(clippy::result_large_err)]
 
 mod constraints;
+mod content;
 mod frontmatter_schema;
 mod rules;
 mod shape;
@@ -16,11 +17,11 @@ mod tests;
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::{
-    ByteOffset, ConstraintIndex, ConstraintPath, ContentScope, DocumentShape, GuardPath,
+    ByteOffset, ConstraintIndex, ConstraintPath, ContentOwner, DocumentShape, GuardPath,
     InvalidSchema, JsonSchemaResourceContents, LinkedJsonSchemaInput, LoadSchemaResult,
     LoadedSchema, NonEmpty, OrderIndex, RelatedLocation, RuleIndex, RulePath, Schema, SchemaError,
     SchemaErrorKind, SchemaLocations, SchemaNode, SchemaSource, SchemaSources, SchemaVersion,
@@ -101,6 +102,9 @@ struct RawSchema {
     options: RawOptions,
     #[serde(default)]
     frontmatter: Option<RawFrontmatter>,
+    /// Retained raw so §2.5 can apply its range-aware rejection lattice.
+    #[serde(default)]
+    content: RawOptionalValue,
     /// Absent only when `outline` is declared; the shape validation enforces
     /// exactly one of the two before this structure is built.
     sections: Option<Vec<RawRule>>,
@@ -153,6 +157,9 @@ struct RawRule {
     matcher: String,
     required: Option<bool>,
     repeat: Option<String>,
+    /// Retained raw so nested content failures keep their own source ranges.
+    #[serde(default)]
+    content: RawOptionalValue,
     sections: Option<Vec<RawRule>>,
     #[serde(default)]
     forbid_sections: Vec<RawGuard>,
@@ -176,6 +183,32 @@ struct RawRule {
 struct RawGuard {
     #[serde(rename = "match")]
     matcher: String,
+}
+
+/// An optional raw field that distinguishes omission from an explicit null.
+#[derive(Debug, Default)]
+enum RawOptionalValue {
+    #[default]
+    Absent,
+    Present(Value),
+}
+
+impl RawOptionalValue {
+    fn as_ref(&self) -> Option<&Value> {
+        match self {
+            Self::Absent => None,
+            Self::Present(value) => Some(value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RawOptionalValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Value::deserialize(deserializer).map(Self::Present)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -208,6 +241,24 @@ enum RangeKey {
     RuleOrderEntry(RulePath, OrderIndex),
     /// One entry of an `h1`-level `outline` rule's `order` list.
     OutlineRuleOrderEntry(RuleIndex, OrderIndex),
+    ContentRule(RawContentOwner, usize),
+    ContentRuleFieldKey(RawContentOwner, usize, String),
+    ContentRuleFieldValue(RawContentOwner, usize, String),
+    ContentAlternative(RawContentOwner, usize, usize),
+    ContentAlternativeFieldKey(RawContentOwner, usize, usize, String),
+    ContentAlternativeFieldValue(RawContentOwner, usize, usize, String),
+    ItemRule(RawContentOwner, usize, usize),
+    ItemRuleFieldKey(RawContentOwner, usize, usize, String),
+    ItemRuleFieldValue(RawContentOwner, usize, usize, String),
+}
+
+/// Source-range indexing form of a content owner, used while raw mappings
+/// are still being validated. Successful rules are re-keyed by the public
+/// `ContentOwner`/`ContentRulePath`/`ItemRulePath` types in `SchemaLocations`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum RawContentOwner {
+    Document,
+    Rule(RulePath),
 }
 
 struct Loader {
@@ -375,6 +426,17 @@ impl Loader {
         let options = Self::build_options(&raw.options);
         let match_case = options.match_case;
         let root_scope = ScopePath(Vec::new());
+        let content_owner = if raw.outline.is_some() || title_null {
+            ContentOwner::Document
+        } else {
+            ContentOwner::Title
+        };
+        let content = self.build_content_scope(
+            raw.content.as_ref(),
+            &RawContentOwner::Document,
+            content_owner,
+            match_case,
+        );
         let document = if let Some(entries) = raw.outline {
             self.outline_general = true;
             self.build_outline_scope(
@@ -386,10 +448,7 @@ impl Loader {
                 raw.unordered,
                 raw.constraints,
             )
-            .map(|scope| DocumentShape::Outline {
-                scope,
-                content: ContentScope::Omitted,
-            })
+            .and_then(|scope| content.map(|content| DocumentShape::Outline { scope, content }))
         } else {
             let title = raw.title.as_deref().and_then(|matcher| {
                 let range = self.range(RangeKey::DocumentField("title".into()));
@@ -419,23 +478,24 @@ impl Loader {
                 None,
             );
             children.and_then(|children| {
+                let content = content?;
                 if title_null {
                     Some(DocumentShape::Title(TitleSlot::Forbidden {
                         children,
-                        content: ContentScope::Omitted,
+                        content,
                     }))
                 } else if raw.title.is_some() {
                     title.map(|matcher| {
                         DocumentShape::Title(TitleSlot::Spelled {
                             matcher,
                             children,
-                            content: ContentScope::Omitted,
+                            content,
                         })
                     })
                 } else {
                     Some(DocumentShape::Title(TitleSlot::ImpliedBySections {
                         children,
-                        content: ContentScope::Omitted,
+                        content,
                     }))
                 }
             })

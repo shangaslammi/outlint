@@ -1,3 +1,71 @@
+case rfc5-document-content-null
+  source "version: 1\ncontent: null\noutline: []\n"
+  verdict invalid
+  error invalid-content-rule 0:20..24 "null" "content must be a sequence and cannot be null"
+
+case rfc5-section-content-null
+  source "version: 1\noutline:\n  - match: A\n    content: null\n"
+  verdict invalid
+  error invalid-content-rule 0:46..50 "null" "content must be a sequence and cannot be null"
+
+case rfc5-one-of-non-mapping-alternative
+  source "version: 1\ncontent:\n  - one_of:\n      - block: p\n      - nope\noutline: []\n"
+  verdict invalid
+  error invalid-content-rule 0:57..61 "nope" "each `one_of` alternative must be a mapping"
+
+case rfc5-content-not-a-sequence
+  source "version: 1\ncontent: nope\noutline: []\n"
+  verdict invalid
+  error invalid-content-rule 0:20..24 "nope" "content must be a sequence and cannot be null"
+
+case rfc5-content-entry-not-a-mapping
+  source "version: 1\ncontent:\n  - nope\noutline: []\n"
+  verdict invalid
+  error invalid-content-rule 0:24..28 "nope" "each content entry must be a mapping"
+
+case rfc5-content-outer-neither
+  source "version: 1\ncontent:\n  - id: ignored\noutline: []\n"
+  verdict invalid
+  error invalid-content-rule 0:24..36 "id: ignored\n" "content rule must declare exactly one of `block` and `one_of`"
+
+case rfc5-content-outer-both-and-unknown
+  source "version: 1\ncontent:\n  - one_of: []\n    deferred: false\n    block: p\n    items: nope\noutline: []\n"
+  verdict invalid
+  error invalid-document-shape 0:39..47 "deferred" "unknown field `deferred`"
+  error invalid-content-rule 0:24..30 "one_of" "content rule cannot declare both `block` and `one_of`"
+
+case rfc5-content-inapplicable-and-malformed-members
+  source "version: 1\ncontent:\n  - block: p\n    list_kind: bullet\n    items: nope\n  - block: list\n    list_kind: nope\n    required: true\n    repeat: 2..1\noutline: []\n"
+  verdict invalid
+  error invalid-content-rule 0:37..46 "list_kind" "`list_kind` is only applicable to `block: list`"
+  error invalid-content-rule 0:59..64 "items" "`items` is only applicable to `block: list`"
+  error conflicting-cardinality 0:138..142 "2..1" "required and repeat cannot both be declared"
+  error invalid-content-rule 0:102..106 "nope" "`list_kind` must be one of `bullet`, `ordered`, or `any`"
+
+case rfc5-choice-alternatives-and-duplicate
+  source "version: 1\ncontent:\n  - one_of:\n      - block: list\n        list_kind: any\n      - block: list\n      - one_of: []\noutline: []\n"
+  verdict invalid
+  error invalid-content-rule 0:83..101 "block: list\n      " "duplicate normalized `one_of` alternative"
+    related 0:40..81 "block: list\n        list_kind: any\n      " "first equivalent alternative declared here"
+  error invalid-content-rule 0:103..114 "one_of: []\n" "each `one_of` alternative must declare exactly one `block`"
+
+case rfc5-items-container-and-entry
+  source "version: 1\ncontent:\n  - block: list\n    items: nope\n  - block: list\n    items:\n      - nope\noutline: []\n"
+  verdict invalid
+  error invalid-content-rule 0:47..51 "nope" "`items` must be a sequence and cannot be null"
+  error invalid-content-rule 0:87..91 "nope" "each item rule must be a mapping"
+
+case rfc5-item-shape-matcher-and-cardinality
+  source "version: 1\ncontent:\n  - block: list\n    items:\n      - id: BAD\n        match: 7\n        required: nope\n        repeat: 3\n        content: deferred\n      - match: '/[bad/'\n      - match: '*'\noutline: []\n"
+  verdict invalid
+  error invalid-document-shape 0:129..136 "content" "unknown field `content`"
+  error invalid-document-shape 0:59..62 "BAD" "rule id `BAD` is not a lowercase slug"
+  error invalid-document-shape 0:78..79 "7" "item rule `match` must be a string and cannot be null"
+  error invalid-document-shape 0:98..102 "nope" "item rule `required` must be a bool and cannot be null"
+  error invalid-document-shape 0:119..120 "3" "item rule `repeat` must be a string and cannot be null"
+  error invalid-matcher 0:162..170 "'/[bad/'" "invalid regex matcher `/[bad/`: regex parse error:\n    \\A(?:[bad)\\z\n         ^\nerror: unclosed character class"
+  error missing-cardinality 0:186..189 "'*'" "regex, glob, and wildcard rules must declare `required` or `repeat`"
+
 case document-field-version
   source "version: 1\nsections: []\n"
   verdict valid
@@ -131,6 +199,7 @@ case rule-field-duplicate-id
   source "version: 1\nsections:\n  - id: intro\n    match: Intro\n  - id: intro\n    match: Other\n"
   verdict invalid
   error duplicate-id 0:60..65 "intro" "duplicate rule id `intro` in one scope"
+    related 0:29..34 "intro" "first declared by sibling rule 0"
 
 case rule-field-unknown
   source "version: 1\nsections:\n  - match: Intro\n    unexpected: true\n"
@@ -248,6 +317,7 @@ case alias-expanded-into-a-rule
   source "version: 1\nsections:\n  - &base\n    match: Intro\n  - *base\n"
   verdict invalid
   error duplicate-id 0:52..57 "*base" "duplicate rule id `intro` in one scope"
+    related 0:42..47 "Intro" "first declared by sibling rule 0"
 
 case alias-in-key-position
   source "version: 1\nsections: []\nanchors: &a name\n*a : 1\n"

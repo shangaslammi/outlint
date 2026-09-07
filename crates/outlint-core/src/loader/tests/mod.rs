@@ -1,6 +1,7 @@
 //! Shared helpers for the loader's unit tests.
 
 mod constraints;
+mod content;
 mod frontmatter_schema;
 mod rules;
 mod yaml;

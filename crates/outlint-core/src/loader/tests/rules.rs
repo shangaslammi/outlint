@@ -783,16 +783,12 @@ fn unordered_reachability_uses_each_independently_parsed_matcher() {
 }
 
 #[test]
-fn reserved_content_keys_are_rejected_in_every_section_mapping() {
-    for key in ["content", "block"] {
-        let invalid = invalid(&format!(
-            "version: 1\nsections:\n  - match: A\n    {key}: []\n"
-        ));
-        assert_eq!(
-            invalid.errors.first.kind,
-            SchemaErrorKind::InvalidDocumentShape
-        );
-    }
+fn block_remains_rejected_in_every_section_mapping() {
+    let invalid = invalid("version: 1\nsections:\n  - match: A\n    block: []\n");
+    assert_eq!(
+        invalid.errors.first.kind,
+        SchemaErrorKind::InvalidDocumentShape
+    );
 }
 
 #[test]

@@ -3,20 +3,16 @@ use crate::loader::{linked_frontmatter_schema_path, load_schema};
 use crate::{ByteOffset, DocumentShape, Matcher, SchemaErrorKind, SchemaVersion};
 
 #[test]
-fn content_remains_rejected_before_rfc5_loader_stage() {
+fn content_is_accepted_at_document_and_section_owners() {
     for source in [
         "version: 1\ncontent: []\nsections: []\n",
         "version: 1\nsections:\n  - match: A\n    content: []\n",
     ] {
-        let invalid = invalid(source);
-        assert_eq!(
-            invalid.errors.first.kind,
-            SchemaErrorKind::InvalidDocumentShape
-        );
-        assert!(invalid
-            .errors
-            .iter()
-            .any(|error| error.message == "unknown field `content`"));
+        let schema = valid(source);
+        assert!(matches!(
+            schema.document,
+            DocumentShape::Title(_) | DocumentShape::Outline { .. }
+        ));
     }
 }
 

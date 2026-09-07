@@ -180,6 +180,39 @@ pub enum SchemaNode {
     OrderEntry(OrderEntryPath),
     /// A constraint at a structural path.
     Constraint(ConstraintPath),
+    /// A preamble content rule at its structural owner and declaration index.
+    ContentRule(ContentRulePath),
+    /// A direct-item rule nested beneath its owning content rule.
+    ItemRule(ItemRulePath),
+}
+
+/// The schema construct whose preamble a content grammar describes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ContentOwner {
+    /// The physical Markdown document root.
+    Document,
+    /// The synthesized non-null title slot.
+    Title,
+    /// A concrete section rule's preamble.
+    Rule(RulePath),
+}
+
+/// The structural address of one preamble content rule.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContentRulePath {
+    /// The document, title slot, or section rule owning the grammar.
+    pub owner: ContentOwner,
+    /// The rule's zero-based position within that grammar.
+    pub index: ContentRuleIndex,
+}
+
+/// The structural address of one direct-list-item rule.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ItemRulePath {
+    /// The list content rule owning the item grammar.
+    pub content: ContentRulePath,
+    /// The rule's zero-based position within that item grammar.
+    pub index: ItemRuleIndex,
 }
 
 /// The structural address of a section rule.
@@ -266,6 +299,16 @@ pub struct ConstraintIndex(pub usize);
 #[repr(transparent)]
 pub struct OrderIndex(pub usize);
 
+/// A zero-based content-rule index within one preamble grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct ContentRuleIndex(pub usize);
+
+/// A zero-based item-rule index within one list content rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct ItemRuleIndex(pub usize);
+
 /// A half-open byte range in [`SchemaSource::text`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TextRange {
@@ -327,6 +370,8 @@ pub enum SchemaErrorKind {
     Syntax,
     /// The parsed value does not have the required schema document shape.
     InvalidDocumentShape,
+    /// A preamble content rule, block alternative, or item scope is malformed.
+    InvalidContentRule,
     /// The declared schema version is not supported.
     UnsupportedVersion,
     /// Two rules in one sibling scope resolve to the same id.
@@ -370,6 +415,7 @@ impl SchemaErrorKind {
         match self {
             Self::Syntax => "syntax",
             Self::InvalidDocumentShape => "invalid-document-shape",
+            Self::InvalidContentRule => "invalid-content-rule",
             Self::UnsupportedVersion => "unsupported-version",
             Self::DuplicateId => "duplicate-id",
             Self::UnresolvedRef => "unresolved-ref",
@@ -408,6 +454,7 @@ mod tests {
                 SchemaErrorKind::InvalidDocumentShape,
                 "invalid-document-shape",
             ),
+            (SchemaErrorKind::InvalidContentRule, "invalid-content-rule"),
             (SchemaErrorKind::UnsupportedVersion, "unsupported-version"),
             (SchemaErrorKind::DuplicateId, "duplicate-id"),
             (SchemaErrorKind::UnresolvedRef, "unresolved-ref"),
