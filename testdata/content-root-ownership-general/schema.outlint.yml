@@ -1,0 +1,8 @@
+version: 1
+# General-form top-level content belongs to the physical root. The wildcard
+# outline accepts the later h1 without assigning its preamble to this content.
+content:
+  - block: p
+outline:
+  - match: "*"
+    repeat: "0..n"

@@ -18,6 +18,32 @@ constraints rule 0 0:211..254 "id: a\n    match: \"A\"\n    required: false\n  "
 constraints rule 1 0:256..299 "id: b\n    match: \"B\"\n    required: false\n  "
 constraints rule 2 0:301..342 "id: c\n    match: \"C\"\n    required: false\n"
 constraints title 0:176..180 "null"
+content-cardinality content-rule rule-0 0 0:91..102 "block: p\n  "
+content-cardinality content-rule rule-1 0 0:160..200 "block: list\n        list_kind: bullet\n  "
+content-cardinality content-rule rule-2 0 0:258..292 "block: p\n        repeat: \"2..3\"\n  "
+content-cardinality content-rule rule-3 0 0:351..385 "block: p\n        repeat: \"1..2\"\n  "
+content-cardinality content-rule rule-4 0 0:444..482 "block: list\n        required: false\n  "
+content-cardinality content-rule rule-5 0 0:545..586 "block: p\n        repeat: \"2..4294967295\"\n"
+content-cardinality rule 0 0:37..102 "match: Exact\n    required: false\n    content:\n  "...
+content-cardinality rule 1 0:104..200 "match: Missing\n    required: false\n    content:\n"...
+content-cardinality rule 2 0:202..292 "match: Too Few\n    required: false\n    content:\n"...
+content-cardinality rule 3 0:294..385 "match: Too Many\n    required: false\n    content:"...
+content-cardinality rule 4 0:387..482 "match: Optional\n    required: false\n    content:"...
+content-cardinality rule 5 0:484..586 "match: Large Repeat\n    required: false\n    cont"...
+content-cardinality title 0:18..22 "null"
+content-omitted-empty content-rule rule-2 0 0:186..222 "block: any\n        repeat: \"0..n\"\n  "
+content-omitted-empty content-rule rule-3 0 0:286..298 "block: list\n"
+content-omitted-empty rule 0 0:37..74 "match: Omitted\n    required: false\n  "
+content-omitted-empty rule 1 0:76..127 "match: Empty\n    required: false\n    content: []"...
+content-omitted-empty rule 2 0:129..222 "match: Wildcard\n    required: false\n    content:"...
+content-omitted-empty rule 3 0:224..298 "match: Items Omitted\n    required: false\n    con"...
+content-omitted-empty title 0:18..22 "null"
+content-preamble-boundaries content-rule document 0 0:256..286 "block: any\n    repeat: \"3..3\"\n"
+content-preamble-boundaries title 0:18..22 "null"
+content-preamble-ownership content-rule title 0 0:192..201 "block: p\n"
+content-preamble-ownership title 0:173..178 "Title"
+content-root-ownership-general content-rule document 0 0:179..188 "block: p\n"
+content-root-ownership-general rule 0 0:201..231 "match: \"*\"\n    repeat: \"0..n\"\n"
 deny-under-title guard 0 0:67..78 "\"Forbidden\""
 deny-under-title title 0:18..25 "\"Title\""
 detached-sections rule 0 0:583..620 "match: \"Overview\"\n    required: true\n"

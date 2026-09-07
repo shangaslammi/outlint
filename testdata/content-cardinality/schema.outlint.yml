@@ -1,0 +1,32 @@
+version: 1
+title: null
+sections:
+  - match: Exact
+    required: false
+    content:
+      - block: p
+  - match: Missing
+    required: false
+    content:
+      - block: list
+        list_kind: bullet
+  - match: Too Few
+    required: false
+    content:
+      - block: p
+        repeat: "2..3"
+  - match: Too Many
+    required: false
+    content:
+      - block: p
+        repeat: "1..2"
+  - match: Optional
+    required: false
+    content:
+      - block: list
+        required: false
+  - match: Large Repeat
+    required: false
+    content:
+      - block: p
+        repeat: "2..4294967295"

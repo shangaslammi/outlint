@@ -1,0 +1,25 @@
+{
+  "title-preamble-pass.md": [],
+  "title-content-pass.md": [],
+  "pre-title-ignored.md": [],
+  "title-mismatch-content.md": [
+    {
+      "id": "not-allowed",
+      "target": { "kind": "header", "path": ["Wrong"] }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": [], "matcher": { "block": "p" } }
+    }
+  ],
+  "surplus-titles-isolated.md": [
+    {
+      "id": "too-many-sections",
+      "target": { "kind": "header", "path": ["Title"] }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Title"], "matcher": { "block": "p" } }
+    }
+  ]
+}

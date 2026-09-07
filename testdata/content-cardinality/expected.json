@@ -1,0 +1,28 @@
+{
+  "exact-pass.md": [],
+  "missing.md": [
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Missing"], "matcher": { "block": "list", "list_kind": "bullet" } }
+    }
+  ],
+  "too-few.md": [
+    {
+      "id": "too-few-blocks",
+      "target": { "kind": "missing_block", "parent": ["Too Few"], "matcher": { "block": "p" } }
+    }
+  ],
+  "too-many.md": [
+    {
+      "id": "too-many-blocks",
+      "target": { "kind": "block", "parent": ["Too Many"], "block": "p", "index": 2 }
+    }
+  ],
+  "optional.md": [],
+  "large-repeat.md": [
+    {
+      "id": "too-few-blocks",
+      "target": { "kind": "missing_block", "parent": ["Large Repeat"], "matcher": { "block": "p" } }
+    }
+  ]
+}

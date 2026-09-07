@@ -1,0 +1,12 @@
+{
+  "omitted-visible-pass.md": [],
+  "empty-empty-pass.md": [],
+  "empty-visible-fail.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Empty"], "block": "p", "index": 0 }
+    }
+  ],
+  "wildcard-assigns.md": [],
+  "omitted-does-not-visit-items.md": []
+}

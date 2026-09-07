@@ -1,0 +1,17 @@
+version: 1
+title: null
+sections:
+  - match: Omitted
+    required: false
+  - match: Empty
+    required: false
+    content: []
+  - match: Wildcard
+    required: false
+    content:
+      - block: any
+        repeat: "0..n"
+  - match: Items Omitted
+    required: false
+    content:
+      - block: list

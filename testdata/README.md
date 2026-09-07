@@ -210,3 +210,8 @@ this backwards is silent: the suite still passes.
 | `frontmatter-jsonpath` | `fm[...]` boolean reads and equality over the guaranteed core: wildcard, negative index, quoted member name, typed literals, `=null` always false | §4.6, §5.3 |
 | `frontmatter-query-suppression` | a non-boolean read node yielding `invalid-value` and suppressing the whole constraint, with no short-circuit rescue; absent block gives an empty result, not suppression | §4.6, §5.3, §6.1 |
 | `frontmatter-capture-propositions` | `fm.name` propositions; a bound `false` unsatisfied; empty text bound; each suppressing state leaving only its own primary diagnostic | §4.6, §5.3, §6.2 |
+| `content-preamble-ownership` | non-null title preamble ownership; ignored physical-root content; mismatch traversal; independent surplus-title scopes and diagnostic voice | §1.1, §2, §3.9, §6.2 |
+| `content-root-ownership-general` | general-form physical-root content ownership, including proof that an h1 preamble cannot satisfy the root declaration | §1.1, §2, §3.9, §6.2 |
+| `content-preamble-boundaries` | ATX, Setext, skipped, and nested-container heading effects on physical-root preamble boundaries | §1.1, §1.7, §3.9 |
+| `content-omitted-empty` | omitted versus empty content; wildcard assignment; omitted item scope | §2.5, §3.9, §6.2 |
+| `content-cardinality` | default exact-one, optional, finite repeat, maximum repeat bound, and cardinality diagnostic targets | §2.5, §3.9, §6.2 |

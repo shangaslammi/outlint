@@ -1,0 +1,7 @@
+version: 1
+# A non-null title owns top-level content: physical-root blocks are ignored,
+# while every h1 occupying the title slot opens an independent content scope.
+title: Title
+content:
+  - block: p
+sections: []

@@ -1,0 +1,8 @@
+version: 1
+title: null
+# Exactly three physical-root blocks make every heading boundary observable:
+# a nested heading must not truncate them, and a later top-level heading must
+# prevent its following block from becoming a fourth root block.
+content:
+  - block: any
+    repeat: "3..3"
