@@ -1,4 +1,6 @@
-use crate::validator::engine::{root_location, validation_work_count, WorkCounter};
+use crate::validator::engine::{
+    forced_sequence_exhaustion_state, root_location, validation_work_count, WorkCounter,
+};
 use crate::validator::prepare::ValidationPlan;
 use crate::validator::{validate, Diagnostic, DiagnosticId, DiagnosticTarget, HeaderPath};
 use crate::{load_schema, parse_markdown, MarkdownOptions, RuleIndex, SchemaNode, ScopePath};
@@ -1191,6 +1193,77 @@ fn ordered_recovery_distinguishes_misplaced_from_unexpected() {
     assert!(diagnostics
         .iter()
         .any(|(id, _)| *id == DiagnosticId::UnexpectedSection));
+}
+
+#[test]
+fn heading_diagnostics_are_unchanged_after_generic_sequence() {
+    assert_eq!(
+        ids_and_targets(
+            "version: 1\ntitle: '*'\nsections:\n  - match: A\n  - match: B\n",
+            "# Doc\n## B\n## X\n## A\n",
+        ),
+        [
+            (
+                DiagnosticId::MisplacedSection,
+                DiagnosticTarget::Header(HeaderPath(vec!["Doc".into(), "B".into()])),
+            ),
+            (
+                DiagnosticId::UnexpectedSection,
+                DiagnosticTarget::Header(HeaderPath(vec!["Doc".into(), "X".into()])),
+            ),
+            (
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "B".into(),
+                },
+            ),
+        ]
+    );
+}
+
+#[test]
+fn heading_adapter_wildcard_policy_drives_real_validation() {
+    let reluctant = "version: 1\noutline:\n  - match: '*'\n    repeat: 0..n\n    sections: []\n  - match: '*'\n    repeat: 0..n\n";
+    assert!(ids_and_targets(reluctant, "# Parent\n## Child\n").is_empty());
+
+    let recovery =
+        "version: 1\noutline:\n  - match: '*'\n    repeat: 2..2\n  - match: A\n    repeat: 2..2\n";
+    assert_eq!(
+        ids_and_targets(recovery, "# A\n"),
+        [
+            (
+                DiagnosticId::MissingSection,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "*".into(),
+                },
+            ),
+            (
+                DiagnosticId::TooFewSections,
+                DiagnosticTarget::MissingHeader {
+                    parent: HeaderPath::default(),
+                    matcher: "A".into(),
+                },
+            ),
+        ]
+    );
+}
+
+#[test]
+fn sequence_exhaustion_stops_before_diagnostics_captures_and_children() {
+    let loaded = load_schema(
+        "version: 1\noutline:\n  - match: '/(?P<value>.*)/'\n    required: true\n    captures:\n      value: int\n    sections: []\n",
+    )
+    .expect("test schema is valid");
+    let plan = ValidationPlan::new(&loaded.schema).expect("test schema prepares");
+    let document = parse_markdown("# not-an-int\n## Child\n", MarkdownOptions::default());
+
+    let (exhausted, diagnostics, post_sequence_actions) =
+        forced_sequence_exhaustion_state(&loaded.schema, &document, &plan);
+    assert!(exhausted);
+    assert_eq!(diagnostics, 0);
+    assert_eq!(post_sequence_actions, 0);
 }
 
 #[test]

@@ -40,7 +40,7 @@ pub(super) fn validate_document(
     let mut validator = Validator::new(schema, document);
     validator
         .run(plan)
-        .map_err(|limit| ValidationOperationalError::new(limit.to_string()))
+        .map_err(|error| ValidationOperationalError::new(error.to_string()))
 }
 
 #[cfg(test)]
@@ -54,6 +54,22 @@ pub(super) fn validation_work_count(
         .run(plan)
         .map_err(|limit| ValidationOperationalError::new(limit.to_string()))?;
     Ok(validator.work)
+}
+
+#[cfg(test)]
+pub(super) fn forced_sequence_exhaustion_state(
+    schema: &Schema,
+    document: &Document,
+    plan: &ValidationPlan,
+) -> (bool, usize, usize) {
+    let mut validator = Validator::new(schema, document);
+    validator.force_sequence_exhaustion = true;
+    let exhausted = matches!(validator.run(plan), Err(RunError::Sequence(_)));
+    (
+        exhausted,
+        validator.diagnostics.len(),
+        validator.post_sequence_actions,
+    )
 }
 
 #[cfg(test)]
@@ -87,6 +103,36 @@ struct Validator<'a> {
     diagnostics: Vec<Diagnostic>,
     #[cfg(test)]
     work: WorkCounter,
+    #[cfg(test)]
+    force_sequence_exhaustion: bool,
+    #[cfg(test)]
+    post_sequence_actions: usize,
+}
+
+enum RunError {
+    Query(QueryLimitExceeded),
+    Sequence(super::sequence::SequenceExhausted),
+}
+
+impl From<QueryLimitExceeded> for RunError {
+    fn from(error: QueryLimitExceeded) -> Self {
+        Self::Query(error)
+    }
+}
+
+impl From<super::sequence::SequenceExhausted> for RunError {
+    fn from(error: super::sequence::SequenceExhausted) -> Self {
+        Self::Sequence(error)
+    }
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Query(error) => error.fmt(formatter),
+            Self::Sequence(error) => error.fmt(formatter),
+        }
+    }
 }
 
 struct BindScopeInput<'a, 'd> {
@@ -116,6 +162,52 @@ struct CardinalityCheck<'a, 'd> {
     parent_path: &'a HeaderPath,
 }
 
+fn prepare_heading_sequence(
+    rules: &[SectionRule],
+    rows: usize,
+    cells: &[bool],
+) -> Result<
+    (
+        Vec<super::sequence::SequenceRule>,
+        super::sequence::MatchMatrix,
+        super::sequence::EdgeCosts,
+    ),
+    super::sequence::SequenceExhausted,
+> {
+    let mut sequence_rules = Vec::new();
+    sequence_rules
+        .try_reserve_exact(rules.len())
+        .map_err(|_| super::sequence::SequenceExhausted)?;
+    for rule in rules {
+        sequence_rules.push(super::sequence::SequenceRule {
+            cardinality: rule.cardinality,
+            preference: if matches!(rule.matcher, Matcher::Any) {
+                super::sequence::Preference::Reluctant
+            } else {
+                super::sequence::Preference::Greedy
+            },
+        });
+    }
+    let mut matrix_cells = Vec::new();
+    matrix_cells
+        .try_reserve_exact(cells.len())
+        .map_err(|_| super::sequence::SequenceExhausted)?;
+    matrix_cells.extend_from_slice(cells);
+    let matrix = super::sequence::MatchMatrix::new(rows, rules.len(), matrix_cells)?;
+    let mut edge_cells = Vec::new();
+    edge_cells
+        .try_reserve_exact(cells.len())
+        .map_err(|_| super::sequence::SequenceExhausted)?;
+    for (index, matched) in cells.iter().enumerate() {
+        let wildcard = rules
+            .get(index % rules.len().max(1))
+            .is_some_and(|rule| matches!(rule.matcher, Matcher::Any));
+        edge_cells.push(u32::from(*matched && wildcard));
+    }
+    let costs = super::sequence::EdgeCosts::new_for(&matrix, edge_cells)?;
+    Ok((sequence_rules, matrix, costs))
+}
+
 impl<'a> Validator<'a> {
     fn new(schema: &'a Schema, document: &'a Document) -> Self {
         Self {
@@ -124,10 +216,14 @@ impl<'a> Validator<'a> {
             diagnostics: Vec::new(),
             #[cfg(test)]
             work: WorkCounter::default(),
+            #[cfg(test)]
+            force_sequence_exhaustion: false,
+            #[cfg(test)]
+            post_sequence_actions: 0,
         }
     }
 
-    fn run(&mut self, plan: &ValidationPlan) -> Result<Vec<Diagnostic>, QueryLimitExceeded> {
+    fn run(&mut self, plan: &ValidationPlan) -> Result<Vec<Diagnostic>, RunError> {
         self.validate_frontmatter(plan.frontmatter.as_ref());
         // §8 evaluates the declared frontmatter captures once, straight after
         // the block's own checks and before the outline walk. §2.3 keeps this
@@ -185,7 +281,7 @@ impl<'a> Validator<'a> {
         scope: &'a DeclaredScope,
         plan: &ValidationPlan,
         frontmatter: &FrontmatterValues<'a>,
-    ) -> Result<(), QueryLimitExceeded> {
+    ) -> Result<(), RunError> {
         let schema = self.schema;
         let admitted = admitted_at_root(top, HeaderLevel::H1, schema.options.allow_skipped_levels);
         let root_scope = ScopePath(Vec::new());
@@ -198,8 +294,8 @@ impl<'a> Validator<'a> {
             schema_scope: &root_scope,
             parent: None,
             parent_path: &root_path,
-        });
-        self.validate_constraints(
+        })?;
+        Ok(self.validate_constraints(
             EvalCtx {
                 current: &root,
                 current_rules: &scope.rules,
@@ -213,7 +309,7 @@ impl<'a> Validator<'a> {
             &root_scope,
             None,
             &root_path,
-        )
+        )?)
     }
 
     /// Binds a sugar schema's synthesized `h1` rule with its legacy voice.
@@ -237,7 +333,7 @@ impl<'a> Validator<'a> {
         title: &'a crate::TitleSlot,
         plan: &ValidationPlan,
         frontmatter: &FrontmatterValues<'a>,
-    ) -> Result<(), QueryLimitExceeded> {
+    ) -> Result<(), RunError> {
         let schema = self.schema;
         let (matcher, title_children) = match title {
             TitleSlot::Forbidden { children, .. } => {
@@ -389,7 +485,7 @@ impl<'a> Validator<'a> {
         frontmatter: &FrontmatterValues<'a>,
         plan: &ValidationPlan,
         owner: Option<(&'a Heading, &HeaderPath)>,
-    ) -> Result<(), QueryLimitExceeded> {
+    ) -> Result<(), RunError> {
         let scope = ScopePath(Vec::new());
         let (parent, path) = match owner {
             Some((heading, path)) => (Some(heading), path.clone()),
@@ -403,8 +499,8 @@ impl<'a> Validator<'a> {
             &scope,
             parent,
             &path,
-        );
-        self.validate_constraints(
+        )?;
+        Ok(self.validate_constraints(
             EvalCtx {
                 current: &bound,
                 current_rules: child_scope.rules(),
@@ -420,7 +516,7 @@ impl<'a> Validator<'a> {
             &scope,
             parent,
             &path,
-        )
+        )?)
     }
 
     /// Evaluates every declared frontmatter capture once (§2.3).
@@ -640,7 +736,10 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn bind_scope<'d>(&mut self, input: BindScopeInput<'_, 'd>) -> BoundScope<'d> {
+    fn bind_scope<'d>(
+        &mut self,
+        input: BindScopeInput<'_, 'd>,
+    ) -> Result<BoundScope<'d>, super::sequence::SequenceExhausted> {
         let BindScopeInput {
             sections,
             scope,
@@ -721,18 +820,27 @@ impl<'a> Validator<'a> {
         let assignment = match scope.mode {
             ScopeMode::Ordered => {
                 #[cfg(test)]
-                {
-                    super::sequence::assign_counted(
-                        rules,
-                        &matrix,
-                        retained.len(),
-                        &mut self.work.sequence_operations,
-                    )
+                if self.force_sequence_exhaustion {
+                    return Err(super::sequence::SequenceExhausted);
                 }
-                #[cfg(not(test))]
-                {
-                    super::sequence::assign(rules, &matrix, retained.len())
-                }
+                let prepared = prepare_heading_sequence(rules, retained.len(), &matrix).and_then(
+                    |(sequence_rules, match_matrix, costs)| {
+                        #[cfg(test)]
+                        {
+                            super::sequence::assign_counted(
+                                &sequence_rules,
+                                &match_matrix,
+                                &costs,
+                                &mut self.work.sequence_operations,
+                            )
+                        }
+                        #[cfg(not(test))]
+                        {
+                            super::sequence::assign(&sequence_rules, &match_matrix, &costs)
+                        }
+                    },
+                );
+                prepared?
             }
             ScopeMode::Unordered => {
                 #[cfg(test)]
@@ -778,11 +886,15 @@ impl<'a> Validator<'a> {
                     accepted: true,
                     recovery_cost: super::sequence::RecoveryCost {
                         unassigned: 0,
-                        wildcard: 0,
+                        edge: 0,
                     },
                 }
             }
         };
+        #[cfg(test)]
+        {
+            self.post_sequence_actions = self.post_sequence_actions.saturating_add(1);
+        }
         let mut occurrences = Vec::new();
         for (heading_index, pathed) in retained.iter().enumerate() {
             let section = pathed.section;
@@ -839,7 +951,7 @@ impl<'a> Validator<'a> {
                 &child_scope_path,
                 Some(&section.heading),
                 &path,
-            );
+            )?;
             occurrences.push(BoundSection {
                 rule_index,
                 section,
@@ -882,10 +994,10 @@ impl<'a> Validator<'a> {
         // same counts, precisely so that a locator descent never has to ask
         // whether a `too-many-sections` diagnostic survived §6.3 filtering.
         let singular = assignment.counts.iter().map(|count| *count <= 1).collect();
-        BoundScope {
+        Ok(BoundScope {
             occurrences,
             singular,
-        }
+        })
     }
 
     fn first_matching_guard(
@@ -916,7 +1028,7 @@ impl<'a> Validator<'a> {
         schema_scope: &ScopePath,
         parent: Option<&'d Heading>,
         parent_path: &HeaderPath,
-    ) -> BoundScope<'d> {
+    ) -> Result<BoundScope<'d>, super::sequence::SequenceExhausted> {
         match child_scope {
             ChildScope::Declared(scope) => self.bind_scope(BindScopeInput {
                 sections,
@@ -927,10 +1039,10 @@ impl<'a> Validator<'a> {
                 parent,
                 parent_path,
             }),
-            ChildScope::Omitted => BoundScope {
+            ChildScope::Omitted => Ok(BoundScope {
                 occurrences: Vec::new(),
                 singular: Vec::new(),
-            },
+            }),
             ChildScope::GuardsOnly(_) => {
                 for pathed in sections {
                     if let Some(index) =
@@ -948,10 +1060,10 @@ impl<'a> Validator<'a> {
                         );
                     }
                 }
-                BoundScope {
+                Ok(BoundScope {
                     occurrences: Vec::new(),
                     singular: Vec::new(),
-                }
+                })
             }
         }
     }
