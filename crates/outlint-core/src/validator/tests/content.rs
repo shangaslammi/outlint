@@ -4,6 +4,7 @@ use crate::validator::content::{
 };
 use crate::validator::engine::{validation_scope_state, ScopeCounts};
 use crate::validator::prepare::ValidationPlan;
+use crate::validator::sequence::assign;
 use crate::validator::{DiagnosticId, DiagnosticTarget, HeaderPath, ListAddress};
 use crate::{
     load_schema, parse_markdown, Block, BlockKind, ContentOwner, ContentRuleIndex, ContentRulePath,
@@ -39,6 +40,26 @@ fn one_of_reduces_to_match_and_minimum_cost_only() {
     assert_eq!(oracle.minimum_cost, Some(0));
     assert_eq!(oracle.first_minimum, Some(1));
     assert!(oracle.matched);
+}
+
+#[test]
+fn outer_one_of_is_greedy_in_canonical_assignment() {
+    let (schema, document) = plan_and_document(
+        "version: 1\ncontent:\n  - one_of: [{block: p}, {block: list}]\n    repeat: 0..n\n  - block: p\n    repeat: 0..n\noutline: []\n",
+        "first\n\nsecond\n",
+    );
+    let plan = ValidationPlan::new(&schema).expect("schema prepares");
+    let PreparedContentScope::Declared(rules) = &plan.content else {
+        panic!("content is declared")
+    };
+    let (edges, _) =
+        prepare_content_edges(document.preamble.as_slice(), rules).expect("content edges prepare");
+    let assignment =
+        assign(&edges.rules, &edges.matches, &edges.costs).expect("canonical assignment succeeds");
+
+    assert!(assignment.accepted);
+    assert_eq!(assignment.counts, [2, 0]);
+    assert_eq!(assignment.rules, [Some(0), Some(0)]);
 }
 
 #[test]

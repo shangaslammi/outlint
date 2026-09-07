@@ -1,0 +1,21 @@
+version: 1
+title: null
+sections:
+  - match: Any Quote
+    required: false
+    content: [{block: any}]
+  - match: Any Code
+    required: false
+    content: [{block: any}]
+  - match: Any HTML
+    required: false
+    content: [{block: any}]
+  - match: Any Break
+    required: false
+    content: [{block: any}]
+  - match: Pipe Table
+    required: false
+    content: [{block: p}]
+  - match: Specific Rejects
+    required: false
+    content: [{block: p}]

@@ -1,0 +1,30 @@
+version: 1
+title: null
+sections:
+  - match: Bullet Pass
+    required: false
+    content:
+      - block: list
+        list_kind: bullet
+  - match: Ordered Pass
+    required: false
+    content:
+      - block: list
+        list_kind: ordered
+  - match: Wrong Kind
+    required: false
+    content:
+      - block: list
+        list_kind: bullet
+  - match: Adjacent Same List
+    required: false
+    content:
+      - block: list
+        list_kind: bullet
+  - match: Adjacent Distinct Lists
+    required: false
+    content:
+      - block: list
+        list_kind: bullet
+      - block: list
+        list_kind: ordered

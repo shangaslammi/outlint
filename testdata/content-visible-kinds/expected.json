@@ -1,0 +1,17 @@
+{
+  "any-consumes-quote.md": [],
+  "any-consumes-code.md": [],
+  "any-consumes-html.md": [],
+  "any-consumes-break.md": [],
+  "pipe-table-is-paragraph.md": [],
+  "specific-rejects-unsupported.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Specific Rejects"], "block": "quote", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Specific Rejects"], "matcher": { "block": "p" } }
+    }
+  ]
+}

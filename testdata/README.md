@@ -215,3 +215,7 @@ this backwards is silent: the suite still passes.
 | `content-preamble-boundaries` | ATX, Setext, skipped, and nested-container heading effects on physical-root preamble boundaries | §1.1, §1.7, §3.9 |
 | `content-omitted-empty` | omitted versus empty content; wildcard assignment; omitted item scope | §2.5, §3.9, §6.2 |
 | `content-cardinality` | default exact-one, optional, finite repeat, maximum repeat bound, and cardinality diagnostic targets | §2.5, §3.9, §6.2 |
+| `content-list-kind` | parser-established list identity; bullet and ordered predicates; adjacent same-kind and different-kind lists | §1.8, §2.5, §3.9 |
+| `content-visible-kinds` | wildcard consumption of unsupported visible kinds; specific rejection; pipe-table input with extensions disabled | §1.7, §2.5, §3.9 |
+| `content-transparency` | complete-comment and reference-definition transparency; visible mixed HTML; inline comments; sibling identity; recognized frontmatter exclusion | §1.6, §1.7, §3.9 |
+| `content-wildcard-one-of` | positioned wildcard phases; alternating and list-kind choices; minimum alternative edge cost; complete missing `one_of` matcher serialization | §2.5, §3.9, §6.1 |

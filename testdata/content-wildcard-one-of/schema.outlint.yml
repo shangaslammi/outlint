@@ -1,0 +1,40 @@
+version: 1
+title: null
+sections:
+  - match: Positioned Gap Pass
+    required: false
+    content:
+      - block: p
+      - block: any
+        required: false
+      - block: list
+  - match: Positioned Gap Fail
+    required: false
+    content:
+      - block: p
+      - block: any
+        required: false
+      - block: list
+  - match: Alternating One Of
+    required: false
+    content:
+      - one_of: [{block: p}, {block: list}]
+        repeat: "4..4"
+  - match: List Kind Choice
+    required: false
+    content:
+      - one_of:
+          - {block: list, list_kind: bullet}
+          - {block: list, list_kind: ordered}
+        repeat: "2..2"
+  - match: One Of Any Cost
+    required: false
+    content:
+      - block: any
+      - one_of: [{block: any}, {block: p}]
+  - match: Missing Choice
+    required: false
+    content:
+      - one_of:
+          - {block: p}
+          - {block: list, list_kind: bullet}

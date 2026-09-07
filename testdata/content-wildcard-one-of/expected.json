@@ -1,0 +1,36 @@
+{
+  "positioned-gap-pass.md": [],
+  "positioned-gap-fail.md": [
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Positioned Gap Fail"], "matcher": { "block": "list" } }
+    },
+    {
+      "id": "too-many-blocks",
+      "target": { "kind": "block", "parent": ["Positioned Gap Fail"], "block": "quote", "index": 0 }
+    }
+  ],
+  "alternating-one-of.md": [],
+  "list-kind-choice.md": [],
+  "one-of-any-cost.md": [
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["One Of Any Cost"], "matcher": { "block": "any" } }
+    }
+  ],
+  "missing-choice.md": [
+    {
+      "id": "missing-block",
+      "target": {
+        "kind": "missing_block",
+        "parent": ["Missing Choice"],
+        "matcher": {
+          "one_of": [
+            { "block": "p" },
+            { "block": "list", "list_kind": "bullet" }
+          ]
+        }
+      }
+    }
+  ]
+}

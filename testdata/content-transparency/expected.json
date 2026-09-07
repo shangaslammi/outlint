@@ -1,0 +1,14 @@
+{
+  "comment-only.md": [],
+  "multiple-comments.md": [],
+  "mixed-html-visible.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Mixed HTML"], "block": "html", "index": 0 }
+    }
+  ],
+  "inline-comment-paragraph.md": [],
+  "reference-definition.md": [],
+  "definition-between-paragraphs.md": [],
+  "recognized-frontmatter.md": []
+}

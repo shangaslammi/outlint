@@ -1,0 +1,16 @@
+{
+  "bullet-pass.md": [],
+  "ordered-pass.md": [],
+  "wrong-kind.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Wrong Kind"], "block": "list", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Wrong Kind"], "matcher": { "block": "list", "list_kind": "bullet" } }
+    }
+  ],
+  "adjacent-same-list.md": [],
+  "adjacent-distinct-lists.md": []
+}
