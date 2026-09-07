@@ -6,11 +6,12 @@ use crate::typed_value::{
     parse_header, BoundComponent, ParseFailure, ResolvedYamlKind, TypedValue, ValueType,
 };
 use crate::{
-    ByteOffset, CaptureName, CapturePath, Cardinality, ChildScope, Constraint, ConstraintIndex,
-    ConstraintPath, DeclaredScope, Document, DocumentFrontmatter, DocumentShape, ExtrasMode,
-    FrontmatterAnchor, FrontmatterLocation, GuardIndex, GuardPath, HeaderLevel, Heading,
-    HeadingLocation, Matcher, OrderEntryPath, OrderIndex, RuleIndex, RulePath, Schema, SchemaNode,
-    ScopeMode, ScopePath, Section, SectionRule, TextRange, TitleSlot, UpperBound,
+    Block, ByteOffset, CaptureName, CapturePath, Cardinality, ChildScope, Constraint,
+    ConstraintIndex, ConstraintPath, DeclaredScope, Document, DocumentFrontmatter, DocumentShape,
+    ExtrasMode, FrontmatterAnchor, FrontmatterLocation, GuardIndex, GuardPath, HeaderLevel,
+    Heading, HeadingLocation, ListBlock, Matcher, OrderEntryPath, OrderIndex, Preamble, RuleIndex,
+    RulePath, Schema, SchemaNode, ScopeMode, ScopePath, Section, SectionRule, TextRange, TitleSlot,
+    UpperBound,
 };
 
 use crate::locator::QueryLimitExceeded;
@@ -23,6 +24,7 @@ use super::diagnostic::{
 use super::frontmatter_values::{self, CaptureFailure, CaptureProblem, FrontmatterValues};
 use super::prepare::{PreparedRule, ValidationPlan};
 use super::value_order;
+use super::{content::ValidationWork, sequence::Assignment};
 
 /// Validates one parsed document against a schema and its prepared plan.
 ///
@@ -57,6 +59,23 @@ pub(super) fn validation_work_count(
 }
 
 #[cfg(test)]
+pub(super) fn validation_scope_state(
+    schema: &Schema,
+    document: &Document,
+    plan: &ValidationPlan,
+) -> Result<(ValidationWork, ScopeCounts, Vec<VisitEvent>), ValidationOperationalError> {
+    let mut validator = Validator::new(schema, document);
+    validator
+        .run(plan)
+        .map_err(|error| ValidationOperationalError::new(error.to_string()))?;
+    Ok((
+        validator.validation_work,
+        validator.scope_counts,
+        validator.visit_trace,
+    ))
+}
+
+#[cfg(test)]
 pub(super) fn forced_sequence_exhaustion_state(
     schema: &Schema,
     document: &Document,
@@ -85,6 +104,22 @@ pub(super) struct WorkCounter {
 }
 
 #[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ScopeCounts {
+    pub(super) headings: usize,
+    pub(super) content: usize,
+    pub(super) items: usize,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum VisitEvent {
+    Headings(HeaderPath),
+    Content(HeaderPath),
+    Items { parent: HeaderPath, block: usize },
+}
+
+#[cfg(test)]
 impl WorkCounter {
     pub(super) fn total(self) -> usize {
         self.guard_matcher_evaluations
@@ -101,12 +136,17 @@ struct Validator<'a> {
     schema: &'a Schema,
     document: &'a Document,
     diagnostics: Vec<Diagnostic>,
+    validation_work: ValidationWork,
     #[cfg(test)]
     work: WorkCounter,
     #[cfg(test)]
     force_sequence_exhaustion: bool,
     #[cfg(test)]
     post_sequence_actions: usize,
+    #[cfg(test)]
+    scope_counts: ScopeCounts,
+    #[cfg(test)]
+    visit_trace: Vec<VisitEvent>,
 }
 
 enum RunError {
@@ -168,16 +208,43 @@ impl<'a> Validator<'a> {
             schema,
             document,
             diagnostics: Vec::new(),
+            validation_work: ValidationWork::default(),
             #[cfg(test)]
             work: WorkCounter::default(),
             #[cfg(test)]
             force_sequence_exhaustion: false,
             #[cfg(test)]
             post_sequence_actions: 0,
+            #[cfg(test)]
+            scope_counts: ScopeCounts::default(),
+            #[cfg(test)]
+            visit_trace: Vec::new(),
         }
     }
 
     fn run(&mut self, plan: &ValidationPlan) -> Result<Vec<Diagnostic>, RunError> {
+        match self.run_inner(plan) {
+            Ok(diagnostics) => Ok(diagnostics),
+            Err(error) => {
+                // §8/§11.5 make every operational failure atomic. Clear all
+                // semantic and test-observable visitor state as well as the
+                // pending diagnostics so this Validator cannot expose a
+                // partial document verdict after exhaustion.
+                self.diagnostics.clear();
+                self.validation_work = ValidationWork::default();
+                #[cfg(test)]
+                {
+                    self.work = WorkCounter::default();
+                    self.post_sequence_actions = 0;
+                    self.scope_counts = ScopeCounts::default();
+                    self.visit_trace.clear();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn run_inner(&mut self, plan: &ValidationPlan) -> Result<Vec<Diagnostic>, RunError> {
         self.validate_frontmatter(plan.frontmatter.as_ref());
         // §8 evaluates the declared frontmatter captures once, straight after
         // the block's own checks and before the outline walk. §2.3 keeps this
@@ -215,7 +282,12 @@ impl<'a> Validator<'a> {
         }
         match &self.schema.document {
             DocumentShape::Outline { scope, .. } => {
+                self.visit_content(&document.preamble, &plan.content, &HeaderPath::default())?;
                 self.validate_outline_root(&top, scope, plan, &values)?
+            }
+            DocumentShape::Title(title @ TitleSlot::Forbidden { .. }) => {
+                self.visit_content(&document.preamble, &plan.content, &HeaderPath::default())?;
+                self.validate_sugar_root(&top, has_h1, title, plan, &values)?
             }
             DocumentShape::Title(title) => {
                 self.validate_sugar_root(&top, has_h1, title, plan, &values)?
@@ -351,18 +423,18 @@ impl<'a> Validator<'a> {
             if pathed.section.heading.level == HeaderLevel::H1 {
                 // Only a spelled title matcher can miss: the bare-sections
                 // any-text matcher accepts every `h1`.
-                if plan
-                    .title
-                    .as_ref()
-                    .is_some_and(|matcher| !matcher.matches(&pathed.section.heading.text))
-                {
-                    self.emit_present(
-                        DiagnosticId::NotAllowed,
-                        pathed.path.clone(),
-                        &pathed.section.heading,
-                        Some(SchemaNode::Title),
-                        "the title does not match the schema title matcher",
-                    );
+                if let Some(matcher) = &plan.title {
+                    self.validation_work
+                        .add_matcher_text(&pathed.section.heading.text)?;
+                    if !matcher.matches(&pathed.section.heading.text) {
+                        self.emit_present(
+                            DiagnosticId::NotAllowed,
+                            pathed.path.clone(),
+                            &pathed.section.heading,
+                            Some(SchemaNode::Title),
+                            "the title does not match the schema title matcher",
+                        );
+                    }
                 }
                 occurrences.push(pathed);
             } else {
@@ -405,6 +477,11 @@ impl<'a> Validator<'a> {
         // path saying which subtree failed.
         let attribute = occurrences.len() > 1;
         for (index, occurrence) in occurrences.iter().enumerate() {
+            self.visit_content(
+                &occurrence.section.preamble,
+                &plan.content,
+                &occurrence.path,
+            )?;
             let mut children = child_sections(
                 occurrence.section,
                 &occurrence.path,
@@ -690,6 +767,96 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Validates one concrete preamble and follows only list assignments.
+    ///
+    /// §3.9 distinguishes omission from a declared empty grammar before any
+    /// matrix is built. Once declared, this method prepares and assigns the
+    /// concrete sequence exactly once; the resulting success or recovery
+    /// assignment is the sole source of rule identity and descendant visits.
+    fn visit_content(
+        &mut self,
+        preamble: &Preamble,
+        scope: &super::content::PreparedContentScope,
+        parent_path: &HeaderPath,
+    ) -> Result<(), super::sequence::SequenceExhausted> {
+        let super::content::PreparedContentScope::Declared(rules) = scope else {
+            return Ok(());
+        };
+        #[cfg(test)]
+        {
+            self.scope_counts.content = self.scope_counts.content.saturating_add(1);
+            self.visit_trace
+                .push(VisitEvent::Content(parent_path.clone()));
+        }
+        #[cfg(test)]
+        if self.force_sequence_exhaustion {
+            return Err(super::sequence::SequenceExhausted);
+        }
+        let (edges, preparation_work) =
+            super::content::prepare_content_edges(preamble.as_slice(), rules)?;
+        self.validation_work = self.validation_work.checked_add(preparation_work)?;
+        let assignment = super::sequence::assign(&edges.rules, &edges.matches, &edges.costs)?;
+        self.validation_work
+            .add_dp(preamble.len(), rules.len(), !assignment.accepted)?;
+        self.visit_assigned_lists(preamble, rules, &assignment, parent_path)
+    }
+
+    /// Visits item scopes in physical block order from a final content verdict.
+    fn visit_assigned_lists(
+        &mut self,
+        preamble: &Preamble,
+        rules: &[super::content::PreparedContentRule],
+        assignment: &Assignment,
+        parent_path: &HeaderPath,
+    ) -> Result<(), super::sequence::SequenceExhausted> {
+        for (block_index, block) in preamble.iter().enumerate() {
+            let Some(rule_index) = assignment.rules.get(block_index).copied().flatten() else {
+                continue;
+            };
+            let (Block::List(list), Some(rule)) = (block, rules.get(rule_index)) else {
+                continue;
+            };
+            self.visit_items(list, &rule.items, parent_path, block_index)?;
+        }
+        Ok(())
+    }
+
+    /// Validates the direct syntactic items of one assigned list occurrence.
+    fn visit_items(
+        &mut self,
+        list: &ListBlock,
+        scope: &super::content::PreparedItemScope,
+        _parent_path: &HeaderPath,
+        _block_index: usize,
+    ) -> Result<(), super::sequence::SequenceExhausted> {
+        let super::content::PreparedItemScope::Declared(rules) = scope else {
+            return Ok(());
+        };
+        #[cfg(test)]
+        {
+            self.scope_counts.items = self.scope_counts.items.saturating_add(1);
+            self.visit_trace.push(VisitEvent::Items {
+                parent: _parent_path.clone(),
+                block: _block_index,
+            });
+        }
+        #[cfg(test)]
+        if self.force_sequence_exhaustion {
+            return Err(super::sequence::SequenceExhausted);
+        }
+        let items = list.items.iter().collect::<Vec<_>>();
+        let (edges, preparation_work) = super::content::prepare_item_edges(&items, rules)?;
+        self.validation_work = self.validation_work.checked_add(preparation_work)?;
+        let assignment = super::sequence::assign(&edges.rules, &edges.matches, &edges.costs)?;
+        self.validation_work
+            .add_dp(items.len(), rules.len(), !assignment.accepted)?;
+        // Stage 3d2 consumes this final assignment for item diagnostics. It
+        // has no descendants, so retaining it through the end of this visit
+        // is sufficient here and deliberately produces no diagnostics yet.
+        let _final_assignment = assignment;
+        Ok(())
+    }
+
     fn bind_scope<'d>(
         &mut self,
         input: BindScopeInput<'_, 'd>,
@@ -703,11 +870,18 @@ impl<'a> Validator<'a> {
             parent,
             parent_path,
         } = input;
+        #[cfg(test)]
+        {
+            self.scope_counts.headings = self.scope_counts.headings.saturating_add(1);
+            self.visit_trace
+                .push(VisitEvent::Headings(parent_path.clone()));
+        }
         let rules = &scope.rules;
         let allow_skipped = self.schema.options.allow_skipped_levels;
         let mut retained = Vec::new();
         for pathed in sections {
-            let guarded = self.first_matching_guard(prepared_guards, &pathed.section.heading.text);
+            let guarded =
+                self.first_matching_guard(prepared_guards, &pathed.section.heading.text)?;
             if let Some(guard_index) = guarded {
                 self.emit_present(
                     DiagnosticId::NotAllowed,
@@ -729,6 +903,8 @@ impl<'a> Validator<'a> {
         for pathed in &retained {
             let mut eligible = false;
             for rule in prepared_rules {
+                self.validation_work
+                    .add_matcher_text(&pathed.section.heading.text)?;
                 #[cfg(test)]
                 {
                     self.work.accepting_matcher_evaluations =
@@ -795,7 +971,10 @@ impl<'a> Validator<'a> {
                             }
                         },
                     );
-                prepared?
+                let assignment = prepared?;
+                self.validation_work
+                    .add_dp(retained.len(), rules.len(), !assignment.accepted)?;
+                assignment
             }
             ScopeMode::Unordered => {
                 #[cfg(test)]
@@ -895,6 +1074,9 @@ impl<'a> Validator<'a> {
                 &path,
                 &rule_path(schema_scope, rule_index),
             );
+            // §8 completes the assigned section's preamble, including item
+            // descendants, before entering its child-heading scope.
+            self.visit_content(&section.preamble, &prepared_rule.content, &path)?;
             let child_refs = child_sections(section, &path, allow_skipped);
             let mut child_scope_path = schema_scope.clone();
             child_scope_path.0.push(RuleIndex(rule_index));
@@ -959,18 +1141,19 @@ impl<'a> Validator<'a> {
         &mut self,
         guards: &[super::prepare::PreparedMatcher],
         heading: &str,
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>, super::sequence::SequenceExhausted> {
         for (index, guard) in guards.iter().enumerate() {
+            self.validation_work.add_matcher_text(heading)?;
             #[cfg(test)]
             {
                 self.work.guard_matcher_evaluations =
                     self.work.guard_matcher_evaluations.saturating_add(1);
             }
             if guard.matches(heading) {
-                return Some(index);
+                return Ok(Some(index));
             }
         }
-        None
+        Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1001,7 +1184,7 @@ impl<'a> Validator<'a> {
             ChildScope::GuardsOnly(_) => {
                 for pathed in sections {
                     if let Some(index) =
-                        self.first_matching_guard(prepared_guards, &pathed.section.heading.text)
+                        self.first_matching_guard(prepared_guards, &pathed.section.heading.text)?
                     {
                         self.emit_present(
                             DiagnosticId::NotAllowed,

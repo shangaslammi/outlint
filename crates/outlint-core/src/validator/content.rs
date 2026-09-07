@@ -266,7 +266,7 @@ pub(super) fn prepare_content_edges(
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn prepare_item_edges(
-    items: &[ListItem],
+    items: &[&ListItem],
     rules: &[PreparedItemRule],
 ) -> Result<(PreparedEdges, ValidationWork), SequenceExhausted> {
     let cell_count = items

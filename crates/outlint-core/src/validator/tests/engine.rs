@@ -3,7 +3,8 @@ use crate::validator::content::{
     PreparedItemScope, ValidationWork,
 };
 use crate::validator::engine::{
-    forced_sequence_exhaustion_state, root_location, validation_work_count, WorkCounter,
+    forced_sequence_exhaustion_state, root_location, validation_scope_state, validation_work_count,
+    ScopeCounts, VisitEvent, WorkCounter,
 };
 use crate::validator::prepare::ValidationPlan;
 use crate::validator::sequence::{assign, SequenceExhausted};
@@ -104,7 +105,7 @@ fn work_is_exact_sum_of_concrete_scope_costs() {
             let PreparedItemScope::Declared(item_rules) = &rule.items else {
                 continue;
             };
-            let direct_items: Vec<_> = list.items.iter().cloned().collect();
+            let direct_items: Vec<_> = list.items.iter().collect();
             let (item_edges, item_work) = prepare_item_edges(&direct_items, item_rules)?;
             work = work.checked_add(item_work)?;
             let item_assignment =
@@ -165,6 +166,129 @@ fn work_is_exact_sum_of_concrete_scope_costs() {
         left_work.checked_add(right_work).expect("sum fits")
     );
     assert_eq!(combined.total().expect("total fits"), 108);
+}
+
+#[test]
+fn validation_order_follows_section_eight() {
+    let loaded = load_schema(
+        "version: 1\ncontent:\n  - block: list\n    items: []\noutline:\n  - match: Parent\n    content:\n      - block: list\n        items: []\n    sections:\n      - match: Child\n        content: []\n        sections: []\n",
+    )
+    .expect("schema is valid");
+    let document = parse_markdown(
+        "- root\n# Parent\n1. item\n## Child\n",
+        MarkdownOptions::default(),
+    );
+    let plan = ValidationPlan::new(&loaded.schema).expect("schema prepares");
+    let (_, _, trace) =
+        validation_scope_state(&loaded.schema, &document, &plan).expect("validation completes");
+
+    assert_eq!(
+        trace,
+        [
+            VisitEvent::Content(HeaderPath::default()),
+            VisitEvent::Items {
+                parent: HeaderPath::default(),
+                block: 0,
+            },
+            VisitEvent::Headings(HeaderPath::default()),
+            VisitEvent::Content(HeaderPath(vec!["Parent".into()])),
+            VisitEvent::Items {
+                parent: HeaderPath(vec!["Parent".into()]),
+                block: 0,
+            },
+            VisitEvent::Headings(HeaderPath(vec!["Parent".into()])),
+            VisitEvent::Content(HeaderPath(vec!["Parent".into(), "Child".into()])),
+            VisitEvent::Headings(HeaderPath(vec!["Parent".into(), "Child".into()])),
+        ]
+    );
+
+    let title_null = load_schema("version: 1\ncontent: []\ntitle: null\nsections: []\n")
+        .expect("title-null schema is valid");
+    let title_null_document = parse_markdown("root paragraph\n", MarkdownOptions::default());
+    let title_null_plan = ValidationPlan::new(&title_null.schema).expect("schema prepares");
+    let (_, _, title_null_trace) =
+        validation_scope_state(&title_null.schema, &title_null_document, &title_null_plan)
+            .expect("validation completes");
+    assert_eq!(
+        title_null_trace,
+        [
+            VisitEvent::Content(HeaderPath::default()),
+            VisitEvent::Headings(HeaderPath::default()),
+        ]
+    );
+
+    let titled = load_schema("version: 1\ntitle: Doc\ncontent: []\nsections: []\n")
+        .expect("titled schema is valid");
+    let titled_document = parse_markdown("# Doc\ntitle paragraph\n", MarkdownOptions::default());
+    let titled_plan = ValidationPlan::new(&titled.schema).expect("schema prepares");
+    let (_, _, titled_trace) =
+        validation_scope_state(&titled.schema, &titled_document, &titled_plan)
+            .expect("validation completes");
+    assert_eq!(
+        titled_trace,
+        [
+            VisitEvent::Content(HeaderPath(vec!["Doc".into()])),
+            VisitEvent::Headings(HeaderPath::default()),
+        ]
+    );
+}
+
+#[test]
+fn visitor_counts_each_concrete_scope_once() {
+    let loaded = load_schema(
+        "version: 1\ncontent:\n  - block: list\n    items:\n      - match: Root\noutline:\n  - match: Parent\n    repeat: 0..n\n    content:\n      - block: list\n        items:\n          - match: Item\n    sections:\n      - match: Child\n        repeat: 0..n\n        content: []\n        sections: []\n",
+    )
+    .expect("schema is valid");
+    let document = parse_markdown(
+        "- Root\n# Parent\n- Item\n## Child\n# Parent\n- Item\n## Child\n",
+        MarkdownOptions::default(),
+    );
+    let plan = ValidationPlan::new(&loaded.schema).expect("schema prepares");
+    let (work, counts, _) =
+        validation_scope_state(&loaded.schema, &document, &plan).expect("validation completes");
+
+    assert_eq!(
+        counts,
+        ScopeCounts {
+            headings: 5,
+            content: 5,
+            items: 3,
+        }
+    );
+    assert_eq!(
+        work,
+        ValidationWork {
+            content_predicates: 3,
+            choice_reductions: 3,
+            matcher_bytes: 34,
+            dp_cells: 42,
+        }
+    );
+
+    let titled =
+        load_schema("version: 1\ntitle: Doc\nsections: []\n").expect("titled schema is valid");
+    let titled_plan = ValidationPlan::new(&titled.schema).expect("schema prepares");
+    let single_title = parse_markdown("# Doc\n", MarkdownOptions::default());
+    let repeated_titles = parse_markdown("# Doc\n# Doc\n", MarkdownOptions::default());
+    let (single_work, _, _) = validation_scope_state(&titled.schema, &single_title, &titled_plan)
+        .expect("validation completes");
+    let (repeated_work, _, _) =
+        validation_scope_state(&titled.schema, &repeated_titles, &titled_plan)
+            .expect("validation completes");
+    assert_eq!(
+        single_work,
+        ValidationWork {
+            matcher_bytes: 3,
+            dp_cells: 1,
+            ..ValidationWork::default()
+        }
+    );
+    assert_eq!(
+        repeated_work,
+        single_work
+            .checked_add(single_work)
+            .expect("two title visits fit")
+    );
 }
 
 #[test]
