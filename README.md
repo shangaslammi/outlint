@@ -188,8 +188,9 @@ The pieces:
   phases; `unordered: true` scopes classify with the first matching rule.
 - **Cardinality.** `required: true` means `1..1`, `required: false` means
   `0..1`, `repeat: "min..max"` sets explicit bounds with `n` for unbounded,
-  exact rules default to `1..1`; collection matchers require an explicit
-  cardinality.
+  section and item exact matchers default to `1..1`, and their pattern
+  matchers require an explicit cardinality. Content rules, including
+  `block: any` and `one_of`, always default to `1..1`.
 - **Scopes.** A rule's `sections` describes the headings one level deeper.
   Every declared list is exhaustive; `extras: anywhere` filters unmatched
   headings, while `forbid_sections` guards reject before assignment.
@@ -227,14 +228,15 @@ The pieces:
   `deployment.rollback-plan` reads relative to the scope the constraint is
   attached to, `$.overview.goals` from the outermost scope, and `[i]`
   narrows a step to its i-th match (`$.release[0]`). Name steps are joined
-  with `.` and structural steps with `/` — `/text`, a heading's own text, is
-  the one such step this version allocates — and a name step may never
-  follow a structural one. Every non-terminal step must be singular, by
-  declared cardinality or by `[i]`; only the last step may stay plural. A
-  locator that ends in a rule id is a proposition, satisfied when it matches
-  at least one header; an outline locator ending in a captured or intrinsic
-  value is a value, not automatically a proposition, and is rejected where a
-  proposition is required.
+  with `.` and structural steps with `/`; the current specification also
+  allocates `/p`, `/list`, `/item`, and item `/text` for declared preamble
+  content. A name step may never follow a structural one. Every non-terminal
+  step must be singular, by declared cardinality or by `[i]`; structural kind
+  steps are always statically plural unless indexed. Only the last step may
+  stay plural. A locator that ends in a section-rule id is a proposition,
+  satisfied when it matches at least one header; an outline locator ending in
+  a captured or intrinsic value is a value, not automatically a proposition,
+  and is rejected where a proposition is required.
 - **Frontmatter.** outlint checks presence (`required`, `allow`) and
   delegates structural validation to either a self-contained inline JSON
   Schema or a linked JSON Schema whose path is relative to the Outlint schema
@@ -434,9 +436,9 @@ including the complete `--help` surface.
 
 ## Status and stability
 
-outlint is at version 0.1.0. It implements the current Outlint Schema specification,
-including its command-line contract in §11, and the shared conformance corpus
-in `testdata/` runs in CI.
+outlint is at version 0.1.0. The normative specification may lead the staged
+implementation on integration branches; the released implementation and its
+shared conformance corpus are kept aligned before release.
 
 This is a 0.x release: expect breaking changes to the schema language, the
 diagnostic set, the JSON shape, and the library API before 1.0. Where an

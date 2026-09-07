@@ -4,10 +4,11 @@ Status: Normative public specification; may change before 1.0. The reference
 implementation in this repository may lag newly specified features.
 Normative keywords MUST / MUST NOT / SHOULD / MAY per RFC 2119.
 
-Outlint is a declarative schema language for validating the header structure
-(outline) of Markdown documents. A schema constrains which headers may/must
-appear, their nesting, cardinality, order, typed values captured from headers
-and frontmatter, and cross-section presence logic.
+Outlint is a declarative schema language for validating the outline and
+selected structural content of Markdown documents. A schema constrains which
+headers and preamble blocks may or must appear, their nesting, cardinality,
+and order, direct list-item text, typed values captured from headers and
+frontmatter, and cross-section presence logic.
 
 Conventions: schema files are named `.outlint.yml` (directory default),
 `<stem>.outlint.yml` (per-document, discovered for the matching document),
@@ -26,6 +27,20 @@ non-normative examples and guidance.
 level ≤ *n*. The headers within that span that no other header in the span
 owns are its **children** — normally level *n+1*, or deeper when a level is
 skipped (§1.5).
+
+The document root and every section also own a **preamble**. The root
+preamble is the sequence of top-level blocks from byte zero, excluding
+recognized frontmatter, until the first recognized top-level heading. A
+section preamble is the sequence of top-level blocks after its opening
+heading and before the first subsequent recognized top-level heading in its
+span. Only direct children enter a preamble; blocks nested in a list, quote,
+or another container remain descendants of that containing block.
+
+The first recognized top-level heading ends a preamble even when it starts a
+skipped-level subtree that §1.5 later prunes. Same-level and shallower
+headings likewise end the section. ATX and normalized Setext headings have
+identical boundary behavior. A heading event inside a block container does
+not end the surrounding preamble.
 
 1.2. Only ATX headers (`#`..`######`) are considered: 1–6 `#` characters at
 the start of a line (up to 3 leading spaces allowed), followed by a space or
@@ -151,6 +166,76 @@ however shallowly each of those lines is written. What such a limit bounds MUST
 therefore be the depth of the value the block resolves to rather than the depth
 its text is written at.
 
+1.7. **Preamble blocks.** The public document model distinguishes these
+stable block kinds:
+
+| Label | Document node |
+|---|---|
+| `p` | paragraph |
+| `list` | Markdown list |
+| `quote` | block quote |
+| `code` | fenced or indented code block |
+| `html` | visible HTML block |
+| `break` | thematic break |
+| `table` | reserved table node |
+
+Each visible block records its complete half-open byte range, a source
+anchor under §6.2, and anchor-scoped suppressions. Blank lines are not blocks.
+Recognized frontmatter is separate from the root preamble. Link-reference
+definitions occupy no preamble position. A top-level HTML block containing
+only whitespace and one or more complete HTML comments is transparent; every
+other HTML block is a visible `html` block. An inline HTML comment inside a
+paragraph does not make the paragraph transparent.
+
+Block identity is established before transparent nodes are removed. Removing
+a comment or link-reference definition therefore MUST NOT merge its visible
+siblings. Frontmatter-like text not recognized by §1.6 keeps its ordinary
+Markdown block interpretation. Implementations MUST use balanced parser
+containers to determine ownership rather than infer it from source prefixes.
+
+The reference parsing contract remains pulldown-cmark with
+`Options::empty()`. GFM tables are not enabled, and pipe-table-looking input
+retains its ordinary paragraph interpretation. `table` is reserved until a
+later parser and rule decision; no table instance exists under this contract.
+
+1.8. **Lists and direct items.** A Markdown list is one `list` block
+regardless of tightness, looseness, direct-item count, nested lists, or mixed
+child blocks. The outer marker determines whether its kind is `bullet` or
+`ordered`; bullet-marker spelling and an ordered list's start number are not
+schema predicates. Parser structure, not blank-line or marker heuristics,
+decides whether adjacent source forms form one list or sibling lists.
+
+Every parsed list has at least one syntactic direct item; a bare marker is an
+item. A list records its complete range and its direct items. Each direct item
+records its complete range, marker anchor, suppressions, and optional
+processed text. Nested items belong to nested lists and are not direct items
+of the outer list.
+
+An item's text is the §1.3-processed inline content of its first block exactly
+when that block is a paragraph. Paragraph recognition follows parser-event
+structure, including a direct inline-event run immediately beneath a tight
+list item's item event; absence of an explicit paragraph wrapper MUST NOT be
+treated as absence of item text. A loose list's explicit paragraph event and
+a tight list's direct inline run therefore produce the same model. This is an
+implementation note about pulldown-cmark 0.13.4: its first pass rewrites list
+item paragraphs as tight paragraphs, and its offset iterator omits those
+wrapper events while retaining their inline children.
+
+An item has no text when its first direct child is a non-inline block or it
+ends before any paragraph/direct inline run. No text differs from present text
+that processes to the empty string. The list marker is excluded. Nested
+blocks contribute nothing beyond the independently recognized first
+paragraph, and task-marker handling is not defined. Matcher input follows
+`options.strip_inline_markup` and matching follows `options.match_case`;
+case-preserving diagnostic text always strips inline markup. A no-text item
+matches only the wildcard matcher `"*"`, never an exact empty string, glob,
+or regex.
+
+An exposed document API MUST represent block kind, list kind, optional item
+text, and parentage with enums or newtypes that make impossible combinations
+unrepresentable. Adding root/section preambles and block/list/item nodes is a
+permitted pre-1.0 public API break under the version policy of §2.
+
 ---
 
 ## 2. Schema format
@@ -172,6 +257,7 @@ options:                           # optional, see §7
   strip_inline_markup: true
   allow_skipped_levels: false
 frontmatter: <frontmatter-object>  # optional, see §2.3
+content: [<content-rule>, ...]     # optional root-preamble grammar (§2.5)
 outline: [<rule>, ...]             # accepting rules for h1 headers
 forbid_sections: [<guard>, ...]    # optional guards for the h1 scope
 extras: anywhere                   # optional openness for unmatched h1s
@@ -194,6 +280,7 @@ version: 1
 title: <matcher>                   # optional; or null — no h1 is allowed
 options: ...
 frontmatter: ...
+content: [<content-rule>, ...]     # optional title-preamble grammar (§2.5)
 sections: [<rule>, ...]            # optional accepting rules for h2s
 forbid_sections: [<guard>, ...]    # optional guards for that h2 scope
 extras: anywhere                   # optional openness for unmatched h2s
@@ -204,15 +291,32 @@ constraints: [<constraint>, ...]
 `title:` plus `sections:` is permanent sugar for one exact-one h1 rule:
 
 ```yaml
-title: <matcher>          #     outline:
-sections: [<rule>, ...]   #  ≡    - match: <matcher>
-                          #       sections: [<rule>, ...]
+title: <matcher>
+content: [<content-rule>, ...]
+sections: [<rule>, ...]
+
+# is equivalent to:
+outline:
+  - match: <matcher>
+    content: [<content-rule>, ...]
+    sections: [<rule>, ...]
 ```
 
 The synthesized rule uses this revision's exact-one default. It is exempt from
 `missing-cardinality` even when its matcher is a regex, glob, or wildcard.
 Its child `forbid_sections`, `extras`, `unordered`, and `constraints` are the
 corresponding top-level sugar members.
+
+Top-level `content` follows the same ownership transformation. In the general
+form it validates the physical document-root preamble. Under non-null title
+sugar, including bare `sections` and its implied `title: "*"`, it validates
+the section preamble of each concrete h1 occupying the synthesized title
+slot; the physical pre-title root preamble is unvalidated. Under
+`title: null`, it validates the physical document-root preamble. A mismatched
+or surplus h1 that occupies a non-null title slot still opens its `content`
+scope, just as it opens the title rule's other declarations. If no h1 occupies
+that slot, no title-preamble content scope exists and `missing-title` stands
+alone.
 
 The title slot retains special mismatch behavior. Every h1 occupies the slot
 whether or not its text matches. An h1 rejected by the matcher produces
@@ -248,23 +352,34 @@ child-scope `constraints` MUST also declare `sections`; otherwise it is
 
 The forms are mutually exclusive. `outline` together with `title` or
 `sections` is `conflicting-outline`, anchored at the later shape-defining
-key. Top-level `forbid_sections`, `extras`, `unordered`, and `constraints` do
-not select a form. Without `outline`, `title`, or `sections`, any of them is
+key. Top-level `content`, `forbid_sections`, `extras`, `unordered`, and
+`constraints` do not select a form. Without `outline`, `title`, or `sections`,
+any of them is
 `invalid-document-shape`. `extras` and `unordered` additionally require a
 declared accepting list in the scope to which they apply; either beside an
 omitted sugar `sections` is `invalid-document-shape`. `sections: []` is a
 declared accepting list.
 
-Every Outlint mapping — the top level, `options`, `frontmatter`, each rule,
-each guard, each order entry, and each constraint — admits only the keys this
-specification names for it. An unknown key is
+Every Outlint mapping — the top level, `options`, `frontmatter`, each section
+rule, content rule, block alternative, item rule, guard, order entry, and
+constraint — admits only the keys this specification names for it. An unknown key is
 `invalid-document-shape`, except where a construct assigns a more specific
-schema error. In particular, the 0.1.0 rule members `strict`, `allow`, and `ordered`
-and `options.ordered_sections` are rejected as `invalid-document-shape`
-regardless of their values. Frontmatter `allow` is the separate presence
-policy of §2.3 and is unaffected. An inline `frontmatter.schema` is JSON
-Schema, not an Outlint mapping, and its unknown keywords are that dialect's
-business.
+schema error. The complete allowed-key inventories for the top-level and
+section-rule mappings are:
+
+| Mapping | Allowed keys |
+|---|---|
+| general top level | `version`, `options`, `frontmatter`, `content`, `outline`, `forbid_sections`, `extras`, `unordered`, `constraints` |
+| sugar top level | `version`, `options`, `frontmatter`, `content`, `title`, `sections`, `forbid_sections`, `extras`, `unordered`, `constraints` |
+| section rule | `id`, `match`, `required`, `repeat`, `captures`, `order`, `content`, `sections`, `forbid_sections`, `extras`, `unordered`, `constraints` |
+
+In particular, the 0.1.0 rule members `strict`, `allow`, and `ordered`,
+`options.ordered_sections`, and the old-draft spellings `content_strict`,
+`content_ordered`, `items_strict`, and `items_ordered` are rejected as
+`invalid-document-shape` regardless of their values. Content/item `allow` is
+likewise rejected. Frontmatter `allow` is the separate presence policy of
+§2.3 and is unaffected. An inline `frontmatter.schema` is JSON Schema, not an
+Outlint mapping, and its unknown keywords are that dialect's business.
 
 **Title diagnostics.** The synthesized title rule keeps the title vocabulary:
 a missing h1 is `missing-title` rather than `missing-section`, a surplus h1
@@ -294,6 +409,8 @@ than the six header levels of §1.2 can address.
     - by: <capture-name>
       dir: asc            # optional: asc or desc; default asc
       strict: false       # optional bool; default false
+  content:                # optional exhaustive preamble grammar (§2.5)
+    - block: p
   sections: [<rule>...]   # optional; rules for this section's children (one level deeper)
   forbid_sections:        # optional matcher-only guards for those children
     - match: <matcher>
@@ -306,6 +423,11 @@ The same rule object serves at two levels: as an entry of `outline`, where
 `match` tests an h1 and `sections` describes its h2s, and as an entry of any
 `sections` list, one level deeper each time. Nothing in the object is
 level-specific.
+
+`content` describes the rule's assigned section preamble. Omission performs
+no preamble validation and creates no content assignment; an empty list is a
+declared exhaustive grammar requiring no retained visible block. Each
+concrete assigned section has an independent content scope (§3.9).
 
 Cardinality resolution counts sibling headings assigned to a rule within one
 concrete parent scope:
@@ -617,6 +739,139 @@ The following boundary cases are consequences of these rules:
 | `dotted` component `4294967296` | `invalid-value` |
 | frontmatter `text` whose YAML kind is integer | `invalid-value`, not coercion |
 
+### 2.5 Content and item rules
+
+`content` is an optional sequence on the top-level mapping and on every
+section rule. Its complete grammar is:
+
+```text
+content           = YAML sequence of zero or more content-rule mappings
+content-rule      = block-rule / choice-rule
+
+block-rule        = mapping with exactly the applicable members below
+  id              = optional slug
+  block           = required, one of "p" / "list" / "any"
+  required        = optional boolean
+  repeat          = optional repeat string
+  list_kind       = optional only with block "list",
+                    one of "bullet" / "ordered" / "any"
+  items           = optional only with block "list"; item-scope
+
+choice-rule       = mapping with exactly the applicable members below
+  id              = optional slug
+  one_of          = required sequence of at least two block alternatives
+  required        = optional boolean
+  repeat          = optional repeat string
+
+block-alternative = mapping with exactly:
+  block           = required, one of "p" / "list" / "any"
+  list_kind       = optional only with block "list",
+                    one of "bullet" / "ordered" / "any"
+
+item-scope        = YAML sequence of zero or more item-rule mappings
+item-rule         = mapping with exactly:
+  id              = optional slug
+  match           = required matcher string
+  required        = optional boolean
+  repeat          = optional repeat string
+```
+
+“Exactly” permits only omission of members marked optional; extension keys
+are not admitted. A content rule MUST contain exactly one of `block` and
+`one_of`. An alternative cannot carry `id`, cardinality, `items`, or nested
+`one_of`. An outer choice rule cannot carry `list_kind` or `items`.
+
+Only `p`, `list`, and `any` are matchable block labels. The document labels
+`quote`, `code`, `html`, `break`, and `table` are reserved as specific
+matcher values; they remain visible in retained input and can be consumed by
+`block: any`, but using one as `block` is `invalid-content-rule`.
+`list_kind: any` and omission have identical semantics and normalize to no
+list-kind predicate. `one_of` MUST contain at least two alternatives; after
+that normalization, no later alternative may duplicate an earlier one.
+
+An item `match` accepts all §2.2 forms over the item text of §1.8, with the
+same whole-text anchoring, portable regex dialect, `options.match_case`, and
+`options.strip_inline_markup`. A no-text item has the wildcard-only behavior
+specified in §1.8.
+
+Content cardinality is:
+
+| Declaration | Effective cardinality |
+|---|---:|
+| neither `required` nor `repeat` | `1..1` |
+| `required: true` | `1..1` |
+| `required: false` | `0..1` |
+| `repeat: "a..b"` | `a..b` |
+
+This unconditional default applies to `block: any` and `one_of` as well as
+specific block rules. A content rule never produces `missing-cardinality`.
+Item cardinality instead follows the section matcher-sensitive rule:
+
+| Declaration | Effective cardinality |
+|---|---:|
+| neither member, exact matcher | `1..1` |
+| neither member, regex/glob/wildcard matcher | `missing-cardinality` |
+| `required: true` | `1..1` |
+| `required: false` | `0..1` |
+| `repeat: "a..b"` | `a..b` |
+
+For both rule kinds, `required` and `repeat` conflict even if their effective
+values would agree. `conflicting-cardinality`, the exact repeat grammar and
+`invalid-repeat` cases, and the 4,294,967,295 finite-bound ceiling are those
+of §2.1. A non-boolean `required` is `invalid-document-shape`. Content and
+item ids have no default, regardless of matcher; omission creates no name and
+opens no named scope.
+
+Omission and declaration are observably distinct:
+
+- omitted `content` performs no preamble matching, creates no content-rule
+  assignment, and visits no item declaration through that absent scope;
+- `content: []` declares an exhaustive grammar requiring an empty retained
+  block sequence, while a nonempty list validates the complete sequence;
+- omitted `items` performs no direct-item matching or assignment;
+- `items: []` declares an exhaustive grammar requiring an empty direct-item
+  sequence, and therefore produces one `unexpected-item` for every item in an
+  assigned parsed list; and
+- each assigned list occurrence opens an independent item scope. Repeated
+  list blocks and lists under repeated section parents never pool items.
+
+These omission rules preserve the behavior of every schema written before
+content rules existed: when `content` is omitted, no preamble block or list
+item can change the document's verdict.
+
+The following rejection table is exhaustive for this subsection. Member
+applicability is checked before the member's value shape. An inapplicable
+recognized member emits exactly one error at its key and its value MUST NOT be
+inspected. After applicability succeeds, exactly the first applicable shape
+row for that member is used. Independent errors on distinct members are
+collected, but no check whose input could not be built is run; no two rows
+fire for one member occurrence.
+
+| Rejected spelling or condition | Schema error | Anchor |
+|---|---|---|
+| applicable `content` or `items` is null, a scalar, or a mapping rather than a sequence | `invalid-content-rule` | the `content` or `items` value |
+| an entry of `content`, `one_of`, or `items` is not a mapping | `invalid-content-rule` | that entry |
+| content rule has neither or both of `block` and `one_of` | `invalid-content-rule` | the rule; the later member when both occur |
+| `block` is non-string, unknown, or a reserved-but-unmatchable label | `invalid-content-rule` | `block` |
+| `list_kind` occurs anywhere except `block: list`, or once applicable is non-string or unknown | `invalid-content-rule` | its key when inapplicable, otherwise its value |
+| `items` occurs anywhere except an outer `block: list` rule | `invalid-content-rule` | its key; value uninspected |
+| `one_of` is not a sequence, has fewer than two alternatives, nests, or has an alternative without exactly one `block` | `invalid-content-rule` | `one_of` or the faulty alternative |
+| an alternative carries `id`, cardinality, `items`, or `one_of` | `invalid-content-rule` | the inapplicable member |
+| a later alternative duplicates an earlier normalized alternative | `invalid-content-rule` | the later alternative, with the first as a related location |
+| item rule omits `match`, or `match` is not a string | `invalid-document-shape` | the rule or `match` |
+| matcher string cannot be parsed or compiled | `invalid-matcher` | `match` |
+| item regex, glob, or wildcard omits cardinality | `missing-cardinality` | `match` |
+| malformed `repeat`, conflicting cardinality, invalid id, reserved outermost id, or name collision | `invalid-repeat`, `conflicting-cardinality`, `invalid-document-shape`, `reserved-id`, or `duplicate-id`, respectively | as in §§2.1, 4, and 6.3 |
+| an unknown key in any new mapping | `invalid-document-shape` | that key |
+| `content_strict`, `content_ordered`, `items_strict`, `items_ordered`, or content/item `allow` | `invalid-document-shape` regardless of value | that key |
+| content/item `captures`, `order`, child `content`, task or checked predicates, guards, `extras`, `unordered`, or constraints where the grammar does not list them | `invalid-document-shape` | that key |
+
+Duplicate YAML keys remain `syntax`. An exposed normalized schema API MUST
+use distinct content-rule, block-alternative, and item-rule types, preserve
+omitted versus declared scopes, and make section-only members unrepresentable
+on them. Surface defaults are resolved before semantic values are exposed;
+schema source ranges remain in `SchemaLocations`, not semantic schema values.
+
 ---
 
 ## 3. Matching semantics
@@ -753,10 +1008,12 @@ Duplicate heading texts are legal per se; assignment and cardinality decide
 their validity.
 
 3.6. **Dependent features and recursion.** Every assigned heading opens the
-child declaration of its assigned rule. This applies to exact, glob, regex,
-and wildcard rules, including recovery assignments beyond a maximum. Omitted
-`sections` leaves that child scope unvalidated; `sections: []` applies the
-retained-sequence rule; and a nonempty list validates its exhaustive grammar.
+preamble and child-section declarations of its assigned rule. This applies to
+exact, glob, regex, and wildcard rules, including recovery assignments beyond
+a maximum. Omitted `content` leaves its preamble unvalidated, while a declared
+list applies §3.9. Omitted `sections` leaves that child scope unvalidated;
+`sections: []` applies the retained-sequence rule; and a nonempty list
+validates its exhaustive grammar.
 Forbidden, extra, and unassigned headings open no child validation scope. A
 wildcard constrains only the sibling heading it consumes and has no
 implicit recursive meaning.
@@ -765,7 +1022,7 @@ Omitted `sections` and an explicit all-wildcard list can admit the same child
 heading texts but do not create the same bindings. Omission assigns and visits
 nothing. The wildcard list assigns each retained child to that rule and
 therefore applies its id, captures, constraints, guards, and any declared
-child grammar.
+content, item, or child-section grammar.
 
 Captures bind through successful, recovered, or unordered assignment and are
 parsed for every assigned heading, including excess headings. Unassigned,
@@ -788,13 +1045,31 @@ use `O(H + 1)` memory; canonical reconstruction and recovery MAY use
 uses `O(R + 1)` count memory in addition to document bindings. An
 implementation MAY retain `O(H + 1)` assignment indices.
 
-An unbounded or larger finite maximum is clamped to `H` for state-space
-purposes. Minimums larger than `H` are compared arithmetically and make the
-corresponding acceptance states unreachable. An implementation MUST NOT
-expand a repeat into one state per permitted occurrence. Regexes retain the
-linear-time dialect of §2.2; matcher input length is accounted for by summing
-the cost of each invoked matcher over its processed heading text. Document
-cost is the sum over concrete scopes, never a product across ancestors.
+Content and item scopes use the same prepared sequence engine. Let `B` be
+the number of visible blocks in one concrete preamble, `C` its content-rule
+count, and `A` the total alternatives tested across those rules, counting a
+plain block rule as one. Preparing block edges and minimum costs takes
+`O(B * A)` block-predicate work. Let `I` be the direct-item count of one
+concrete list and `J` its item-rule count. Preparing item edges takes
+`O(I * J)` matcher evaluations plus the summed cost over processed item-text
+lengths. Each ordered acceptance, canonical reconstruction, or recovery then
+takes `O((B + 1)(C + 1))` or `O((I + 1)(J + 1))` sequence work. Acceptance
+alone MAY retain one rolling row and use linear memory; reconstruction and
+recovery MAY use the corresponding full rectangular table.
+
+For state-space purposes, an unbounded or larger finite maximum is clamped to
+the retained-node count of its domain: `H`, `B`, or `I`. Minimums larger than
+that count are compared arithmetically and make the corresponding acceptance
+states unreachable. An implementation MUST NOT
+expand a repeat into one state per permitted occurrence. Per-rule prefix
+costs and sliding range minima MUST handle occurrence-dependent `one_of`
+costs without enumerating predecessors. Regexes retain the linear-time
+dialect of §2.2; matcher input length is accounted for by summing the cost of
+each invoked matcher over its processed heading or item text. Parsing and
+complete-comment recognition are linear in source size. Document cost is the
+sum over concrete heading scopes, concrete preambles, and concrete assigned
+lists, never a product across ancestors. A descendant scope MUST NOT rescan or
+pool a sibling's nodes.
 
 An implementation MAY impose a documented work or memory limit. Exhausting
 it is an operational error: no document verdict exists and the implementation
@@ -802,11 +1077,14 @@ MUST NOT return a truncated diagnostic set. It is not a schema error or
 document diagnostic (§11.5).
 
 A conformance suite for this algorithm MUST cover overlapping matchers,
-adjacent nullable phases, wildcard-heavy lists, finite maxima above `H`, all
+adjacent nullable phases, wildcard-heavy lists, finite maxima above the
+retained-node count, all
 six heading levels, `R = 0`, `H = 0`, and independently increasing `H`, `R`,
 and `G` cases that demonstrate the bound. Unordered cases MUST cover overlap
 precedence, wildcard shadowing and `unreachable-rule`, extras, guards, and an
-`ordered` constraint.
+`ordered` constraint. Content/item cases MUST independently vary `B`, `C`,
+`A`, `I`, and `J`, including occurrence-dependent `one_of` costs. No sequence
+implementation MUST NOT use recursive backtracking.
 
 3.8. **Ordering repeated matches by captured value.** Each `order` entry on a
 rule independently orders the occurrences matched by that rule. `by` MUST
@@ -854,28 +1132,95 @@ For example, under a SemVer capture ordered descending, the sequence
 header and no `order-violation` for that entry and scope. It does not compare
 the first and third values as if they were adjacent.
 
-3.9. **Reserved content-sequence contract.** This version introduces no
-preamble paragraph or list rule syntax. If such validation is added, its
-declared `content` list MUST reuse §3.2's consuming-sequence core and §8's
-acceptance, canonical partition, bounded dynamic program, and recovery
-priorities over visible blocks. Content rules MUST default to `1..1`;
-declared `content` MUST be exhaustive; omitted `content` MUST be unvalidated;
-and `content: []` MUST require emptiness. `block: any` is reserved as its
-visible-block wildcard and `one_of` as its local-alternative form; content
-violations will use their own block diagnostic taxonomy. Content rules MUST
-NOT admit `allow` or `strict`. Their feature-specific edge-cost function MAY
-distinguish specific from wildcard alternatives — for example, cost 0 for a
-specific `one_of` alternative and 1 only when its wildcard alternative is
-required — but MUST minimize total wildcard cost before applying the
-count-vector tie-break.
-Content-level prohibition guards, extras, and unordered scopes remain
-undefined; using them in such a context has no semantics in this revision.
+3.9. **Content and item scopes.** A content scope pairs one concrete selected
+root or assigned-section preamble with one declared `content` list. An item
+scope pairs one concrete assigned list occurrence with the `items` list on
+its assigned content rule. Top-level ownership is §2; repeated parents always
+open independent scopes.
+
+The retained content input is every visible direct preamble block in document
+order after the transparent constructs of §1.7 are removed. Unsupported
+visible kinds remain retained, fail every specific block predicate, and can
+be consumed only by `block: any`. The retained item input is every direct
+syntactic item in document order; item scopes have no transparency filter.
+There is no skipped-level pruning, guard, extras filter, unordered
+classification, or scope constraint in either kind of scope. Their complete
+substitution into the ordered sequence machinery is:
+
+| Section-sequence concept | Content scope | Item scope |
+|---|---|---|
+| concrete parent | selected root or assigned-section preamble | assigned list occurrence |
+| retained node | visible direct block | direct syntactic item |
+| declared rule | content rule | item rule |
+| match predicate | block alternative and optional list kind | complete item-text matcher |
+| positioned wildcard | `block: any` | `match: "*"` |
+| input/rule dimensions | `B` blocks / `C` rules | `I` items / `J` rules |
+| assigned descendant | an assigned `list` may open `items` | none |
+| present diagnostics | block taxonomy | item taxonomy |
+
+Each declared list is a concatenation of cardinality-bounded contiguous rule
+phases. Acceptance requires a complete partition: every retained node is
+consumed exactly once by a matching rule, every real cardinality holds, and
+no node remains before, between, or after phases. A wildcard remains a
+positioned consuming phase. Overlap is legal and acceptance is existential.
+
+For a block `b` and content rule `r`, prepare no edge if no alternative
+matches. Otherwise the edge cost is 0 for a matching `block: p` or
+`block: list` alternative, including its satisfied `list_kind` predicate,
+and 1 for a matching `block: any` alternative. For `one_of`, reduce all
+alternatives before sequence matching to one boolean and the minimum matching
+alternative cost. Implementations MUST NOT backtrack over an alternative.
+If several alternatives achieve the minimum, the first in schema order is
+retained only for deterministic explanation; it changes no assignment,
+identity, target, or diagnostic.
+
+For an item and item rule, a successful wildcard edge costs 1 and every
+successful exact, glob, or regex edge costs 0. A no-text item has an edge only
+to wildcard item rules. A successful partition first minimizes the sum of
+its edge costs. It then compares its rule-count vector in declaration order:
+at the first difference, the smaller count wins for a bare `block: any`
+content rule or wildcard item rule, and the larger count wins for every other
+rule. Every outer `one_of` is specific for this direction even when a
+concrete occurrence needed its `any` alternative. Contiguous phases make the
+selected counts identify one partition.
+
+Assignment depends only on retained nodes, prepared matches and costs, and
+cardinalities. Explicit ids, locators, item text availability beyond its
+matcher result, and descendant validity MUST NOT influence it. In particular,
+failure of an `items` scope never reassigns its containing list.
+
+If no successful partition exists, relax every rule to `0..n` and permit
+every retained node to remain unassigned. Recovery minimizes, in order:
+
+1. the number of unassigned nodes;
+2. total edge cost; and
+3. the lexicographically first transition trace under **consume, leave
+   unassigned, advance rule**.
+
+Recovery never makes a scope valid. Recovered counts are checked against real
+cardinalities. An assigned node, including one in excess of a maximum, keeps
+its rule identity; an unassigned node matching at least one rule is
+misplaced, and one matching none is unexpected.
+
+Only assigned nodes open descendants. A section assigned by ordered success,
+unordered section classification, or ordered recovery applies its declared
+`content`, including when it is in excess of the section rule's maximum. A
+forbidden, extra, skipped, or unassigned heading opens no content scope. A
+list assigned by content success or recovery applies its declared `items`,
+including when it is in excess of the content rule's maximum. A recovery-
+unassigned block opens no item scope. Omission assigns or visits nothing; an
+all-wildcard declaration may accept the same concrete sequence but creates
+assignments, bindings, and descendant visits.
+
+Cardinality and recovery diagnostic multiplicity is exactly §6.2. Content
+and item rule identities are created exclusively by canonical success or
+recovery and participate in names and locators as §4 specifies.
 
 ---
 
 ## 4. Names and locators
 
-4.1. An explicit rule `id` MUST be a slug:
+4.1. An explicit section, content, or item rule `id` MUST be a slug:
 `[a-z0-9]+(-[a-z0-9]+)*`. Capture names use the distinct grammar in §2.2.
 The leading names `fm` and `linkdefs` are reserved: a top-level rule with
 either id is schema error `reserved-id`. `fm` is defined in §4.6;
@@ -906,24 +1251,45 @@ id. The complete classification is:
 A declared rule id wins over a colliding implicit concrete id. Skipped
 subtrees removed by §1.5 are unreachable. Schema-resident locators cannot use
 an implicit document-side id. Markdown provides no corresponding default
-identity below headings; future content or item rules are
-explicit-id-or-unnameable, while concrete nodes are reached structurally.
+identity below headings: content and item rules are
+explicit-id-or-unnameable, while concrete blocks and items are reached
+structurally.
 
 4.3. **Named scopes and uniqueness.** The schema root and every section rule
-open a named scope. A rule's child section ids and the captures declared by
-that rule are names in the scope it opens. Names are unique within that scope,
-not globally. An explicit/default id collision, a child-rule/capture
+open a named scope. A rule's child section ids, its preamble content ids after
+anonymous-container hoisting, and the captures declared by that rule are
+names in the scope it opens. Names are unique within that scope, not globally.
+An explicit/default id collision, a child-rule/capture
 collision, or any other collision among names from otherwise well-formed
 declarations in one named scope is schema error `duplicate-id`. A key repeated
 within one `captures` mapping is instead `invalid-capture` and is rejected
 before named-scope collision checking (§2.1, §2.3).
 
-Future structural content rules follow the same model: a rule with an
-explicit id opens a named scope; an anonymous structural rule does not, and
-names nested within it are hoisted to the nearest enclosing named scope.
-Naming such a container moves those nested names into the new scope. This
-paragraph fixes locator namespace behavior but does not introduce content or
-item rule syntax.
+Content and item rules follow the same model with no default ids: a rule with
+an explicit id opens a named scope; an anonymous structural rule does not,
+and names nested within it are hoisted to the nearest enclosing named scope.
+Naming such a container moves those nested names into the new scope. A named
+rule hoisted through anonymous structural ancestors has an effective maximum
+in the receiving named scope equal to the saturating product of its own
+maximum and every skipped ancestor maximum. An unbounded factor or numeric
+product above the §2.1 finite-bound ceiling saturates to a plural sentinel.
+For locator binding the only observable distinction is singular versus
+plural: the product is singular exactly when every factor is at most one. A
+named ancestor stops the product because it opens the scope in which the
+descendant name resides.
+
+Top-level content ids occupy the existing outermost named scope in every
+schema form. Thus a top-level `id: intro` is `$.intro` in general form, under
+non-null title sugar, and under `title: null`; the synthesized title remains
+namespace-transparent. A top-level section rule and top-level content rule
+with the same id therefore collide under sugar. An id hoisted to this scope
+cannot use the reserved leading name `fm` or `linkdefs`.
+
+For example, an anonymous list rule beneath section id
+`considered-options`, containing item rule `id: option`, gives that item rule
+the name `$.considered-options.option`. Adding `id: choices` to the list rule
+moves it to `$.considered-options.choices.option`; there is no implicit
+upward or downward name search.
 
 Frontmatter captures occupy a separate named scope rooted at `fm`; they do
 not collide with names at the schema root. A declared capture is a terminal
@@ -940,7 +1306,8 @@ rollback-plan                 relative name
 deployment.rollback-plan      relative name path
 $.overview.goals              absolute name path
 $.release[0].notes            positional narrowing
-$.section/list[0]/item[2]     structural traversal (when those kinds exist)
+$.section/list[0]/item[2]     structural block and item traversal
+$.considered-options.option[0]/text  named item text intrinsic
 $.release[0].version          declared capture value
 $.release[0]/text             intrinsic heading text value
 ```
@@ -968,10 +1335,16 @@ feature defining those nodes; `[i]` then retains only the i-th result in
 document order, or the empty list if it does not exist. `/text` is a terminal
 intrinsic value for a heading and is its case-preserving §1.3 text. Intrinsic
 values use structural syntax so they cannot collide with declared names.
-Other structural kinds and intrinsic members, including `/label`, remain
-unallocated until the document features that own them are specified.
 
-Every non-terminal step MUST be singular. It is singular statically when a
+This version allocates `/p`, `/list`, and `/item`, plus `/text` on an item.
+`/p` and `/list` filter the direct preamble blocks of a document root or
+heading; `/item` filters a list's direct items. `/text` on a concrete item is
+its case-preserving §1.8 text and selects nothing when that item has no text.
+Headings retain their existing terminal `/text`. Paragraphs, lists, and
+content alternatives have no text intrinsic. Other structural kinds and
+intrinsic members, including `/label`, remain unallocated.
+
+Every non-terminal step MUST be singular. A name step is singular statically when a
 schema-declared rule's effective maximum is at most one — including every
 rule using the omitted exact-matcher cardinality — or dynamically for a
 document-bound locator when the concrete default id is unique; `[i]` makes
@@ -983,6 +1356,27 @@ unnarrowed, statically plural non-terminal step is
 `invalid-document-shape`. The same id applies when an otherwise valid
 locator's terminal kind is not accepted by its consuming context, unless that
 context assigns a more specific error.
+
+Every `/p`, `/list`, or `/item` kind step is statically plural because
+accepting-rule maxima cannot bound traversal over all concrete direct
+children, including unassigned ones. A non-terminal structural kind step
+therefore MUST carry `[i]`; only a terminal kind step may remain plural.
+
+At schema binding time, `/p` or `/list` MUST land in a scope with at least one
+specific declaration of that kind, either a block rule or a `one_of`
+alternative. A bare `block: any` does not establish a kind binding. `/item`
+MUST land on a declared list rule having a declared `items` list with at least
+one item rule. A missing declaration is `unresolved-ref`. At document time,
+the step filters every direct concrete child of that kind, including nodes
+assigned through `any` or recovery.
+
+In a schema-resident locator, item `/text` is permitted only immediately
+after a named non-wildcard item rule. The preceding name must be statically
+singular under the effective-maximum rule of §4.3 or narrowed with `[i]`.
+`/text` after structural `/item`, or after a wildcard item rule, is
+`invalid-document-shape`. Exact, glob, and regex item rules reject no-text
+items, making this schema intrinsic total. The concrete document-bound
+no-text behavior remains empty selection as stated above.
 
 **Dependency suppression.** When a downstream check is defined only on the
 condition that an upstream check holds, failure of the upstream check leaves
@@ -1012,8 +1406,7 @@ data and are evaluated during validation. Consequently a schema-resident
 locator cannot use any implicit document-side id. A
 schema-resident structural kind step MUST land on a declared structural rule
 of that kind; a document-bound consumer instead traverses the concrete
-document freely. Because this version declares no content or item rules, it
-currently allocates no such schema-resident kind step.
+document freely.
 Invalid locator syntax is `invalid-document-shape`; failure to bind a
 declared name or schema-required structure is `unresolved-ref`.
 
@@ -1040,6 +1433,11 @@ not change that definition. Locators ending in a capture or intrinsic value
 are value locators and are not propositions in this version. Universal
 requirements ("every API section has an Errors child") MUST be expressed
 structurally with `required: true`, not by a proposition.
+
+A locator ending in a content rule, item rule, `/p`, `/list`, `/item`, or an
+item `/text` is not an outline proposition. Using one in a boolean constraint
+position is `invalid-document-shape`. This version adds no value-constraint
+position that consumes item text.
 
 YAML sequences in constraint positions always denote lists of locators, not
 locator paths: `[deployment, rollback-plan]` is two locators.
@@ -1236,16 +1634,23 @@ identical and either both lack equality or their equality literals resolve to
 values equal under §4.6. Syntactically different JSONPath queries
 are not treated as duplicates merely because they may select the same nodes.
 
-5.5. **Reserved and deferred typed-value features.** `equal-values`,
+5.5. **Reserved and deferred features.** `equal-values`,
 `subset-values`, and selection objects using `select` are reserved for future
 value constraints; they have no validation semantics in this version.
 Likewise, `sequence` contiguity, capture cardinality refinements and optional
 participation, integer coercion or rounding, and `numbered` are not defined.
 Using any of those words where §2 does not admit it remains an unknown-key or
 invalid-shape error; reservation does not activate syntax. `linkdefs` is only
-the reserved locator root of §4.1. Captures on item rules will be specified
-with item scopes and are not introduced by this heading-only document model.
-The `#` character has no reserved capture or projection meaning.
+the reserved locator root of §4.1. The following features remain deferred and
+their names do not activate schema syntax: item-text correspondence and
+selection constraints (`F3`); paragraph-text and first-line/lead matching
+(`F4`); link-reference-definition validation (`F6`); structured editing and
+concrete document edit paths; task items and checked state; matchable
+`quote`/`code`/`html`/`break`/`table` predicates and GFM table parsing; nested
+item and cell validation; item captures and `order`; content/item guards,
+extras, unordered scopes or phases, and constraints; and a
+meaningful/nonblank-item predicate. The `#` character has no reserved capture
+or projection meaning.
 
 ---
 
@@ -1259,9 +1664,11 @@ schema file itself; they have no target and MUST omit it entirely.
 
 ### 6.1 Targets
 
-A target is a tagged value whose `kind` selects one of four shapes. The kinds
+A target is a tagged value whose `kind` selects one of eight shapes. The kinds
 are kept apart because the text they carry has different provenance, and one
 flat path cannot say which is which.
+
+The table order is the target variant order for §11.4.
 
 | `kind` | Members | Names |
 |---|---|---|
@@ -1269,6 +1676,10 @@ flat path cannot say which is which.
 | `missing_header` | `parent`, `matcher` | A section the schema requires and the document does not contain |
 | `document` | — | The document as a whole, for a violation belonging to no header's scope |
 | `frontmatter` | `line_range`?, `pointer`? | A frontmatter block, or a value inside one |
+| `block` | `parent`, `block`, `index` | A visible preamble block that exists |
+| `missing_block` | `parent`, `matcher` | A content rule not satisfied in a preamble |
+| `item` | `list`, `index` | A direct item that exists in a concrete list |
+| `missing_item` | `list`, `matcher` | An item rule not satisfied in a concrete list |
 
 A **header path** is the complete document-tree ancestor chain of a header,
 outermost first and ending with the header itself. Two same-named sections
@@ -1315,6 +1726,44 @@ its source anchor is the deepest resolving positioned ancestor of the absent
 path, falling back to the block's first line. The pointer continues to name
 the intended absent path rather than that ancestor.
 
+For block targets, `parent` is the case-preserving header path of the concrete
+preamble owner and is empty only for the physical root. A present block in a
+title h1's preamble names that h1 even when absence diagnostics for the same
+scope use the sugar document voice. `block` is one stable §1.7 label. `index`
+is the zero-based ordinal among visible blocks of that same kind in the
+owner's preamble; transparent constructs do not count.
+
+An item target's `list` is an object with members `parent`, then `index`. It
+identifies the containing list by its preamble-owner path and zero-based
+ordinal among `list` blocks in that preamble. The target item's `index` is its
+zero-based ordinal among all direct items of that list.
+
+`missing_block.matcher` is normalized structured schema data in one of these
+forms; members serialize in the displayed order:
+
+```json
+{"block":"p"}
+{"block":"list"}
+{"block":"list","list_kind":"bullet"}
+{"block":"any"}
+{"one_of":[{"block":"p"},{"block":"list","list_kind":"bullet"}]}
+```
+
+Omitted `list_kind` and source `list_kind: any` both omit the serialized
+member. `one_of` alternatives remain in schema order; a selected alternative
+is never serialized. `missing_item.matcher` is the matcher-label string
+already defined for `missing_header`: exact or glob source verbatim, a
+slash-delimited normalized regex body, or `*`.
+
+Representative new targets are:
+
+```json
+{"kind":"block","parent":["Changelog","Added"],"block":"list","index":0}
+{"kind":"missing_block","parent":["Changelog","Added"],"matcher":{"block":"list","list_kind":"bullet"}}
+{"kind":"item","list":{"parent":["Changelog","Added"],"index":0},"index":2}
+{"kind":"missing_item","list":{"parent":["Changelog","Added"],"index":0},"matcher":"/(Good|Neutral|Bad), because .+/"}
+```
+
 ### 6.2 Target and location per diagnostic
 
 A source anchor is one position in the document: a one-based line, and a
@@ -1326,6 +1775,21 @@ Setext heading), or the first byte of the frontmatter entry named by
 `pointer` — and 1 wherever the row names a whole line or falls back to one.
 Where a row provides for a fallback anchor, the column is the first byte of
 whatever that fallback names.
+
+Present blocks and direct items use this total anchor table. Each node also
+retains its complete half-open original-source range.
+
+| Kind | Source anchor |
+|---|---|
+| `p` | first byte of paragraph source after up to three leading spaces; a Setext paragraph promoted to a heading is not a block |
+| `list` | first byte of the first outer bullet marker or ordered-marker digit, after up to three leading spaces |
+| `item` | first byte of that direct item's bullet marker or ordered-marker digit |
+| `quote` | first `>` marker byte after up to three leading spaces |
+| fenced `code` | first fence-marker byte on the opening fence, including a fence indented by up to three spaces |
+| indented `code` | first content byte on the first nonblank code line, after the indentation establishing the code block |
+| `html` | first byte of HTML block source after up to three leading spaces |
+| `break` | first thematic-break marker byte after up to three leading spaces |
+| `table` | no instance exists under `Options::empty()`; table activation MUST define an anchor before producing this node |
 
 | Diagnostic | Target | Source anchor |
 |---|---|---|
@@ -1339,6 +1803,12 @@ whatever that fallback names.
 | `invalid-value` from a frontmatter capture or `fm[...]` boolean read | `frontmatter` with the failing value's pointer | the failing entry, with the same fallback rule as `frontmatter-schema` |
 | `missing-value` | `frontmatter` with the absent capture's pointer when one can be normalized | deepest resolving positioned ancestor of the addressed path; block's first line as floor |
 | `order-violation` | `header` of the violating adjacent pair's second header | that second header's line |
+| `unexpected-block`, `misplaced-block` | `block` of the recovery-unassigned visible block | that block's §6.2 kind anchor |
+| `too-many-blocks` | `block` of the first assigned block in excess | that block's §6.2 kind anchor |
+| `missing-block`, `too-few-blocks` | `missing_block`: `parent` is the owner path and `matcher` the normalized content matcher | owner heading; line 1 for the physical root or sugar document voice |
+| `unexpected-item`, `misplaced-item` | `item` of the recovery-unassigned direct item | that item's marker |
+| `too-many-items` | `item` of the first assigned item in excess | that item's marker |
+| `missing-item`, `too-few-items` | `missing_item`: `list` identifies the containing list and `matcher` the item-rule label | the containing list's first marker |
 | constraint keywords | `header` of the scope's parent section; `document` for a constraint whose scope is the document root's, which has no parent header, and under the sugar's single-h1 voice (below) | the parent section's header line; line 1 for a `document` target |
 
 `unexpected-section` and `misplaced-section` are attributed to the owner of
@@ -1350,6 +1820,25 @@ mismatch is attributed to the title node. `misplaced-section` has no
 `involved_headers`, because its target already identifies the one offending
 heading. A guard-attributed diagnostic's schema location is that guard's
 `match` declaration.
+
+Block and item multiplicity follows the canonical success or recovery
+assignment. A rule with count zero below a nonzero minimum emits exactly one
+`missing-block` or `missing-item`; a rule with a nonzero count below its
+minimum emits exactly one `too-few-blocks` or `too-few-items`; a rule above a
+finite maximum emits exactly one `too-many-blocks` or `too-many-items` at its
+first assigned occurrence in document order beyond that maximum. Every
+recovery-unassigned node emits exactly one misplaced diagnostic if it matched
+at least one rule, otherwise exactly one unexpected diagnostic.
+
+Block/item cardinality diagnostics are attributed to their responsible
+`content_rule` or `item_rule` schema node. Unexpected or misplaced blocks are
+attributed to the owning section rule, to `title` under non-null sugar, or to
+no schema node at the general-form or `title: null` physical root. Unexpected
+or misplaced items are attributed to the owning list's `content_rule`, not to
+one of the possibly overlapping item rules. No new diagnostic carries
+`involved_headers` or `references`. Its message MUST identify the kind or
+matcher and actual versus expected cardinality where applicable; consumers
+still key behavior on the id and structured target.
 
 An `invalid-value` message MUST identify the expected type and the responsible
 capture or frontmatter query. A rule-capture diagnostic is attributed to that
@@ -1425,31 +1914,83 @@ at its header line, and a constraint violation targets and anchors on the
 h1. The general form has no document voice to keep: an h1 rule's child
 scope reports like any nested scope, with the h1 as parent.
 
+The same voice applies to top-level `content`. Under non-null sugar with at
+most one h1, and always under `title: null`, a missing or too-few block target
+has empty `parent` and anchors at line 1. With several h1s occupying a
+non-null title slot, each title preamble is validated independently and the
+target names and anchors at its concrete h1. General-form root content uses
+the physical-root empty parent and line 1.
+
 Constraint diagnostics additionally list the concrete headers involved, if
 any, each by its own header path (§5.3). An `order-violation` lists exactly
 the first and second headers of its violating adjacent pair, in that order.
 Which diagnostics the `title` rule produces, and in what voice, is defined in
 §1.4 and §2.
 
-### 6.3 Reserved ids
+### 6.3 Diagnostic and schema-error inventories
 
-Diagnostic ids: `skipped-level`, `not-allowed`, `unexpected-section`,
-`misplaced-section`,
-`missing-section`, `too-few-sections`, `too-many-sections`,
-`missing-title`, `missing-frontmatter`,
-`forbidden-frontmatter`, `invalid-frontmatter`, `frontmatter-schema`,
-`invalid-value`, `missing-value`, `order-violation`, plus
-the constraint keywords `one_of`, `any_of`, `at_most_one`, `all_or_none`,
-`requires`, `conflicts`, `ordered`.
+The document-diagnostic inventory is closed:
 
-Schema errors: `syntax`, `invalid-document-shape`, `unsupported-version`,
-`duplicate-id`, `unresolved-ref`, `duplicate-ref`,
-`reserved-id`, `invalid-matcher`, `invalid-repeat`, `invalid-capture`,
-`invalid-order`, `missing-cardinality`, `unreachable-rule`,
-`ordered-scope-mismatch`, `conflicting-cardinality`, `conflicting-outline`,
-`conflicting-frontmatter`, `invalid-frontmatter-schema`. These are load-time
-failures reported against the schema document and share the stability
-contract of the diagnostic ids above.
+| Diagnostic id | Category |
+|---|---|
+| `skipped-level` | heading structure |
+| `not-allowed` | prohibited section or title mismatch |
+| `unexpected-section` | unmatched heading |
+| `misplaced-section` | recovery-unassigned matching heading |
+| `missing-section` | zero occurrences below a section minimum |
+| `too-few-sections` | nonzero occurrences below a section minimum |
+| `too-many-sections` | section maximum exceeded |
+| `unexpected-block` | unmatched visible block |
+| `misplaced-block` | recovery-unassigned matching block |
+| `missing-block` | zero occurrences below a content minimum |
+| `too-few-blocks` | nonzero occurrences below a content minimum |
+| `too-many-blocks` | content maximum exceeded |
+| `unexpected-item` | unmatched direct item |
+| `misplaced-item` | recovery-unassigned matching direct item |
+| `missing-item` | zero occurrences below an item minimum |
+| `too-few-items` | nonzero occurrences below an item minimum |
+| `too-many-items` | item maximum exceeded |
+| `missing-title` | absent required title |
+| `missing-frontmatter` | absent required frontmatter |
+| `forbidden-frontmatter` | prohibited frontmatter |
+| `invalid-frontmatter` | malformed frontmatter |
+| `frontmatter-schema` | delegated JSON Schema failure |
+| `invalid-value` | typed-value failure |
+| `missing-value` | absent required capture value |
+| `order-violation` | typed-value ordering failure |
+| `one_of` | constraint violation |
+| `any_of` | constraint violation |
+| `at_most_one` | constraint violation |
+| `all_or_none` | constraint violation |
+| `requires` | constraint violation |
+| `conflicts` | constraint violation |
+| `ordered` | constraint violation |
+
+The schema-error inventory is likewise closed. These are load-time failures
+reported against the schema document and share the diagnostic stability
+contract:
+
+| Schema error id |
+|---|
+| `syntax` |
+| `invalid-document-shape` |
+| `unsupported-version` |
+| `duplicate-id` |
+| `unresolved-ref` |
+| `duplicate-ref` |
+| `reserved-id` |
+| `invalid-matcher` |
+| `invalid-repeat` |
+| `invalid-capture` |
+| `invalid-order` |
+| `missing-cardinality` |
+| `unreachable-rule` |
+| `ordered-scope-mismatch` |
+| `conflicting-cardinality` |
+| `conflicting-outline` |
+| `conflicting-frontmatter` |
+| `invalid-frontmatter-schema` |
+| `invalid-content-rule` |
 
 Independent schema errors MUST be collected together, but a check whose input
 could not be built MUST NOT be attempted. Thus a malformed `captures` mapping
@@ -1464,6 +2005,8 @@ malformed guards, and
 invalid `extras` or `unordered` declarations use
 `invalid-document-shape`.
 
+`invalid-content-rule` uses the complete precedence and anchors of §2.5.
+
 `invalid-capture` anchors at the offending capture declaration, or at the
 `captures` key when the collection as a whole is invalid. `invalid-order`
 anchors at the offending entry, or at the `order` key when the collection as
@@ -1477,9 +2020,12 @@ following the top-level conflict convention of §2.
 
 **Suppression.** An HTML comment
 `<!-- outlint-disable <diag-id>[, <diag-id>...] -->` on the line
-immediately preceding a header suppresses the listed diagnostics *anchored
-to that header*, including `misplaced-section` (consequently, absence
-diagnostics are not suppressible per header — only file-wide).
+immediately preceding a header, visible block, or direct item suppresses the
+listed diagnostics *anchored to that node*, including `misplaced-section`,
+`misplaced-block`, and `misplaced-item`. Matching uses the node's anchor line;
+a comment-only directive block remains transparent. Absence diagnostics and
+the too-few diagnostics have no present node at their anchor and are therefore
+not suppressible inline — only file-wide.
 `<!-- outlint-disable-file <diag-id>... -->`
 anywhere in the file suppresses the listed diagnostics file-wide. Schema
 errors are load-time failures and are never suppressible. Dependency
@@ -1493,6 +2039,10 @@ Suppression filtering likewise does not change canonical assignment,
 recovery, unordered classification, captures, locator binding, or dependency
 suppression.
 
+Every document diagnostic id in the inventory above, including all ten block
+and item ids, is valid in `outlint-disable-file`. Schema error
+`invalid-content-rule` is not.
+
 ---
 
 ## 7. Options
@@ -1502,6 +2052,10 @@ suppression.
 | `match_case` | bool | `false` | case-sensitive matching for all matcher forms |
 | `strip_inline_markup` | bool | `true` | reduce inline markup to text before matching (§1.3) |
 | `allow_skipped_levels` | bool | `false` | permit e.g. h4 directly under h2 |
+
+Content block matching adds no option. Item text uses `match_case` and
+`strip_inline_markup` exactly as header text does; `allow_skipped_levels`
+affects only the heading tree and does not prune preamble blocks or items.
 
 ---
 
@@ -1517,6 +2071,9 @@ load_schema:
       implies title "*"; retain title-null behavior and diagnostic voice
     require a declared accepting list beside extras, unordered, or
       child-scope constraints
+    retain content omission versus declaration; attach top-level content to
+      the physical root in general/title-null form and to the synthesized
+      title rule in non-null sugar
   load frontmatter.schema if given; for an inline schema reject every
     $ref/$dynamicRef that is not fragment-only; compile JSON Schema
     (dialect per $schema)
@@ -1530,18 +2087,25 @@ load_schema:
               uniqueness; reject reserved root ids "fm" and "linkdefs";
               validate guards, extras, and unordered; in each unordered
               scope reject every rule after its first wildcard
+              validate each declared content list and nested items list under
+              §2.5's applicability-first rejection table; normalize block
+              alternatives, list kinds, cardinalities, and explicit-only ids
+  build named scopes: hoist names through anonymous structural rules, compute
+    saturating-product effective maxima, and check all resulting collisions
   bind every schema locator (§4): submit full RFC 9535 queries to the JSONPath
     provider; enforce the §4.6 guaranteed core's index bound and semantics;
     admit vendor-tier constructs without a subset gate;
     reject unknown functions and implementation-specific operators, dangling
-    names, plural non-terminal steps, duplicate locators, arity < 2 in set
+    names or structural declarations, plural non-terminal steps, invalid item
+    /text projections, duplicate locators, arity < 2 in set
     forms, and ordered locators crossing scopes or resolving outside an
     unordered scope
 
 validate(doc):
-  split frontmatter (§1.6); parse markdown -> header tree under the
-    virtual level-0 document root (§1.4)
-    (ignore code fences; normalize setext)
+  split frontmatter (§1.6); parse markdown -> header tree with root/section
+    preambles, visible blocks, lists, direct items, ranges and anchors under
+    §§1.4 and 1.7–1.8 (ignore headings in code; normalize setext; remove
+    transparent nodes only after establishing block identity)
   check frontmatter presence vs required/allow; if present and schema
     compiled, run JSON Schema validation -> frontmatter-schema diagnostics
   if frontmatter is a valid mapping, evaluate each frontmatter capture ->
@@ -1563,28 +2127,56 @@ validate(doc):
     parse captures for every assigned heading
     for each rule order entry not suppressed by an invalid capture:
       compare every adjacent value pair -> order-violation
-    for every assigned heading, process its rule's declared child guards,
-      then stop if the accepting list is omitted, otherwise visit the child scope
+    for every assigned heading in document order:
+      visit_content(the assigned heading's preamble, its rule.content)
+      process its rule's declared child guards, then stop if sections is
+        omitted, otherwise visit the child scope
     for each constraint: evaluate locator propositions (§4.4–§4.6),
       suppressing the whole constraint on a failed cardinality or typed-value
       dependency -> report
+  visit_content(owner preamble, declaration):
+    if content is omitted: stop without assignment or descendant visits
+    retain every visible direct block after transparency filtering
+    prepare each block/rule edge and its minimum alternative cost (§3.9)
+    run generic ordered acceptance; on failure run generic recovery
+    compute block cardinality and unassigned-block diagnostics
+    for every assigned list block in document order:
+      visit_items(the list, its assigned rule.items)
+  visit_items(list, declaration):
+    if items is omitted: stop without assignment
+    retain every direct syntactic item; prepare item/rule edges and costs
+    run generic ordered acceptance; on failure run generic recovery
+    compute item cardinality and unassigned-item diagnostics
   sort serialized diagnostics by §11.4 after suppression filtering
 ```
 
-The following dynamic programs are normative. Indices are zero-based here.
-Within these recurrences, let retained headings be `h[0..H)`; this `H` is no
-larger than the pre-guard `H` used for the whole-scope bound in §3.7. Let
-rules be `r[0..R)`, and let `a[j]` and `b[j]`
-be rule `j`'s real minimum and maximum, and `M[i,j]` say whether heading `i`
-matches rule `j`. For state-space purposes, replace an unbounded or finite
-`b[j] > H` by `H`; do not clamp `a[j]`. Let `w(i,j)` be 1 when rule `j` is a
-wildcard and 0 otherwise. A sum involving unreachable state infinity remains
+For general-form and `title: null` root content, `visit_content` runs once on
+the physical root preamble before the exposed root heading scope. Under
+non-null sugar it runs once for each h1
+occupying the title slot, after title assignment and before that h1's child
+heading scope. Within any assigned section, content and its nested item scopes
+are completed before that section's child-heading scope. This recursion order
+does not affect diagnostic sorting, which remains §11.4, but it fixes work
+accounting and ensures each concrete descendant scope is visited once.
+
+The following generic dynamic programs are normative for ordered heading,
+content, and item scopes. Indices are zero-based. Let retained nodes be
+`x[0..N)` and rules `r[0..Q)`. For headings use `(N,Q) = (H,R)` after guards
+and extras; for content use `(B,C)`; for items use `(I,J)`. Let `a[j]` and
+`b[j]` be rule `j`'s real minimum and maximum. Let `M[i,j]` say whether the
+prepared edge exists and let `w(i,j)` be that edge's cost: heading/item
+wildcards cost 1 and their other matches 0; content uses §3.9's reduced
+minimum alternative cost. Set `w(i,j) = 0` where `M[i,j]` is false; that
+sentinel participates only in prefix-cost arithmetic, never in a consume
+transition.
+For state-space purposes replace an unbounded or finite `b[j] > N` by `N`;
+do not clamp `a[j]`. A sum involving unreachable-state infinity remains
 infinity.
 
-For ordered acceptance, `D[j,q]` is the minimum wildcard cost with which the
-first `j` rules consume exactly the first `q` headings. Initialize
+For ordered acceptance, `D[j,q]` is the minimum total edge cost with which
+the first `j` rules consume exactly the first `q` nodes. Initialize
 `D[0,0] = 0` and `D[0,q] = infinity` for `q > 0`. For `j` from 0 through
-`R-1`, compute:
+`Q-1`, compute:
 
 ```text
 D[j+1,q] = min over p of
@@ -1593,23 +2185,23 @@ where a[j] <= q-p <= b[j]
   and M[i,j] is true for every p <= i < q.
 ```
 
-The scope is accepted exactly when `D[R,H]` is finite. This recurrence MUST
-be evaluated in `O((H + 1)(R + 1))`, not by enumerating every `p`. For one
+The scope is accepted exactly when `D[Q,N]` is finite. This recurrence MUST
+be evaluated in `O((N + 1)(Q + 1))`, not by enumerating every `p`. For one
 rule, form prefix costs `P[q] = sum(i=0..q-1, w(i,j))`. For each `q`, let
 `F[q]` be one plus the greatest index `< q` whose matcher result is false, or
 0 if none. The valid predecessors are the interval
 `[max(0, q-b[j], F[q]), q-a[j]]`; within it the minimized expression is
 `D[j,p] - P[p]`, plus the constant `P[q]`. A sliding range-minimum deque (or
 an equivalent linear-time interval-minimum method) therefore computes the
-whole next row in `O(H + 1)`. Empty intervals yield infinity. The same
+whole next row in `O(N + 1)`. Empty intervals yield infinity. The same
 construction in reverse computes a suffix table `S[j,i]`, the minimum cost
-to consume `h[i..H)` with `r[j..R)`. Precisely,
-`S[R,H] = 0`, `S[R,i] = infinity` for `i < H`, and
+to consume `x[i..N)` with `r[j..Q)`. Precisely,
+`S[Q,N] = 0`, `S[Q,i] = infinity` for `i < N`, and
 
 ```text
 S[j,i] = min over k of
            sum(t=i..i+k-1, w(t,j)) + S[j+1,i+k]
-where a[j] <= k <= b[j], i+k <= H,
+where a[j] <= k <= b[j], i+k <= N,
   and M[t,j] is true for every i <= t < i+k.
 ```
 
@@ -1624,19 +2216,22 @@ consecutive matching run for which
 sum(t=i..i+k-1, w(t,j)) + S[j+1,i+k] = S[j,i].
 ```
 
-Choose the smallest such `k` for a wildcard rule and the largest for every
-other rule, assign those `k` consecutive headings, and continue at
-`(j+1,i+k)`. This reconstructs minimum wildcard cost and then the required
-wildcard-ascending/specific-descending count vector. Suffix prefix sums and
-range extrema MUST keep reconstruction within `O((H + 1)(R + 1))`; an
+Choose the smallest such `k` for a reluctant rule and the largest for every
+other rule, assign those `k` consecutive nodes, and continue at
+`(j+1,i+k)`. A reluctant rule is a heading wildcard, a bare `block: any`
+content rule, or a wildcard item rule. Every other rule, including every
+outer `one_of`, is specific. This reconstructs minimum total edge cost and
+then the required reluctant-ascending/specific-descending count vector.
+Suffix prefix sums and range extrema MUST keep reconstruction within
+`O((N + 1)(Q + 1))`; an
 implementation MUST NOT rescan an unbounded range per state.
 
-If `D[R,H]` is infinite, compute recovery over states `K[i,j]`. Its value is
-the lexicographically minimum pair `(unassigned_count, wildcard_cost)` from
-heading `i` and rule `j` to the end when every rule has relaxed cardinality
-`0..n`. The terminal is `K[H,R] = (0,0)`. Missing rows or columns follow the
-same transitions: with no rule left, headings can only be left unassigned;
-with no heading left, rules can only be advanced. At every other state take
+If `D[Q,N]` is infinite, compute recovery over states `K[i,j]`. Its value is
+the lexicographically minimum pair `(unassigned_count, edge_cost)` from node
+`i` and rule `j` to the end when every rule has relaxed cardinality `0..n`.
+The terminal is `K[N,Q] = (0,0)`. Missing rows or columns follow the same
+transitions: with no rule left, nodes can only be left unassigned; with no
+node left, rules can only be advanced. At every other state take
 the lexicographic minimum cost among applicable transitions:
 
 ```text
@@ -1647,14 +2242,13 @@ advance rule:                  K[i,j+1]
 
 Reconstruct forward by choosing, among transitions preserving `K[i,j]`, the
 first in the fixed order consume, leave unassigned, advance rule. Thus an
-overlapping heading binds to an earlier rule when the two numeric costs do not
+overlapping node binds to an earlier rule when the two numeric costs do not
 worsen, and that rule remains available across an equally costly unassigned
-heading. This table and reconstruction have
-`O((H + 1)(R + 1))` time and memory bounds. The recovered assignment opens
-child scopes and supplies captures and locator bindings; its counts are then
-checked against the real cardinalities. Unassigned headings use the complete
-matcher table to distinguish `unexpected-section` from
-`misplaced-section`.
+node. This table and reconstruction have `O((N + 1)(Q + 1))` time and memory
+bounds. Recovered assignments open the descendants and supply the bindings
+defined for their domain; counts are then checked against real cardinalities.
+An unassigned node uses its complete prepared matcher row to distinguish its
+domain's unexpected diagnostic from its misplaced diagnostic.
 
 For an unordered scope, scan retained headings independently. For each, scan
 rules from index 0 and assign it to the first true `M[i,j]`, or leave it
@@ -1810,7 +2404,188 @@ document order — selects the assigned rule.
 
 ---
 
-## 10. Authoring guidance (non-normative)
+## 10. Examples and authoring guidance (non-normative)
+
+### 10.1 Content and item examples
+
+#### 10.1.1 MADR considered-options list
+
+This requires exactly one bullet list and one or more direct items having
+text, while leaving item correspondence to a later feature:
+
+```yaml
+version: 1
+title: "*"
+sections:
+  - id: considered-options
+    match: "Considered Options"
+    sections: []
+    content:
+      - block: list
+        list_kind: bullet
+        items:
+          - id: option
+            match: '/.+/'
+            repeat: "1..n"
+```
+
+```markdown
+# Choose a database
+
+## Considered Options
+
+- PostgreSQL
+- SQLite
+```
+
+The two direct items bind to `$.considered-options.option`. No nested item,
+paragraph-text, or correspondence predicate is implied.
+
+#### 10.1.2 Keep a Changelog categories
+
+Each optional category is classified without sibling order, but its preamble
+is exhaustive as exactly one bullet list:
+
+```yaml
+version: 1
+title: Changelog
+content:
+  - block: p
+    repeat: "1..n"
+sections:
+  - id: release
+    match: '/\[[0-9]+\.[0-9]+\.[0-9]+\] - [0-9]{4}-[0-9]{2}-[0-9]{2}/'
+    repeat: "1..n"
+    unordered: true
+    sections:
+      - {match: Added, required: false, content: [{block: list, list_kind: bullet}], sections: []}
+      - {match: Changed, required: false, content: [{block: list, list_kind: bullet}], sections: []}
+      - {match: Deprecated, required: false, content: [{block: list, list_kind: bullet}], sections: []}
+      - {match: Removed, required: false, content: [{block: list, list_kind: bullet}], sections: []}
+      - {match: Fixed, required: false, content: [{block: list, list_kind: bullet}], sections: []}
+      - {match: Security, required: false, content: [{block: list, list_kind: bullet}], sections: []}
+```
+
+```markdown
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+## [1.2.0] - 2026-09-07
+
+### Added
+
+- Direct-item validation.
+
+### Fixed
+
+- Stable block targets.
+```
+
+#### 10.1.3 A `one_of` preamble
+
+The one repeatable specific phase accepts arbitrary alternation between
+paragraphs and bullet lists. Ordered lists and other visible blocks fail.
+
+```yaml
+version: 1
+title: Notes
+content:
+  - one_of:
+      - block: p
+      - block: list
+        list_kind: bullet
+    repeat: "1..n"
+```
+
+```markdown
+# Notes
+
+First paragraph.
+
+- one
+- two
+
+Last paragraph.
+```
+
+#### 10.1.4 Root preamble under title sugar
+
+Top-level content under non-null sugar selects the title preamble, so the
+quote before the h1 is not validated and the paragraph after it is:
+
+```yaml
+version: 1
+title: Handbook
+content:
+  - block: p
+```
+
+```markdown
+> generated notice
+
+# Handbook
+
+Welcome.
+```
+
+To validate the physical root preamble, use general form or `title: null`.
+This headless form also passes:
+
+```yaml
+version: 1
+title: null
+content:
+  - block: p
+```
+
+```markdown
+Welcome without an H1.
+```
+
+#### 10.1.5 Recovery and exact diagnostics
+
+```yaml
+version: 1
+title: T
+content:
+  - block: p
+  - block: list
+```
+
+```markdown
+# T
+- first
+
+Afterward.
+```
+
+The retained sequence `(list, p)` has no complete partition against
+`(p, list)`. Recovery leaves the list unassigned and consumes the paragraph
+with rule 0. Exactly one `missing-block` and one `misplaced-block` result:
+
+```json
+[
+  {
+    "id": "missing-block",
+    "location": {"line": 1, "column": 1},
+    "target": {"kind": "missing_block", "parent": [], "matcher": {"block": "list"}},
+    "schema_node": {"kind": "content_rule", "owner": {"kind": "title"}, "index": 1}
+  },
+  {
+    "id": "misplaced-block",
+    "location": {"line": 2, "column": 1},
+    "target": {"kind": "block", "parent": ["T"], "block": "list", "index": 0},
+    "schema_node": {"kind": "title"}
+  }
+]
+```
+
+Real CLI records also contain `message` and any available
+`schema_location`; those fields are omitted only to focus this example on the
+diagnostic multiset, anchors, targets, and attribution.
+
+### 10.2 Authoring guidance
 
 - Prefer the sugar. `title:` + `sections:` says at a glance that the
   document is a single-title one; reach for `outline:` only when the
@@ -1820,12 +2595,16 @@ document order — selects the assigned rule.
 - Prefer explicit `id` on any rule referenced by constraints; rely on
   default ids only for throwaway exact matchers. Renaming a header text changes
   its default id and breaks locators (loudly, at load time). Avoid using future
-  structural kind words such as `list` or `item` as ids even though the two
-  syntactic roads cannot collide.
+  structural kind words as ids even though name and `/kind` syntax cannot
+  collide. Content and item rules need explicit ids when they must be named.
 - Treat omission and emptiness deliberately. Omitted `sections` leaves child
   headings unvalidated and unvisited. `sections: []` processes the scope and
   requires no retained child; with `extras: anywhere`, that empty grammar
   instead admits every non-forbidden child as an unassigned extra.
+- The same distinction applies below headings: omitted `content` preserves
+  pre-content behavior, while `content: []` requires no visible preamble
+  blocks. Omitted `items` leaves a matched list's direct items unvalidated;
+  `items: []` rejects every syntactic direct item.
 - A declared list is already exhaustive. Use `forbid_sections` for a heading
   that is prohibited anywhere in the scope; do not add a trailing wildcard
   merely to close the scope.
@@ -1833,6 +2612,10 @@ document order — selects the assigned rule.
   positioned phase, so give it an explicit repeat and put it exactly where
   the extension region belongs. Use `extras: anywhere` when unrelated
   unmatched headings may float without binding or child validation.
+- Use `block: any` or a wildcard item rule with `repeat: "0..n"` for an
+  explicit positioned gap. `one_of` is a local alternative within one phase,
+  not an unordered scope. Every content rule defaults to exact one; pattern
+  item matchers still require explicit cardinality.
 - Declare `unordered: true` locally when the whole scope is a classifier and
   document order is irrelevant. Put specific rules before general ones there,
   because declaration order is first-match precedence; a wildcard makes every
@@ -2039,7 +2822,27 @@ strength of a matching number alone. From release 1.0 onward the member is a
 compatibility promise: a consumer that understands only an older number MUST
 reject a newer one rather than interpreting it as an older shape. Any exposed
 diagnostic-id enum MUST include every id this specification defines,
-including `misplaced-section`.
+including `misplaced-section`. This revision adds ten block/item diagnostic
+ids, the `block`, `missing_block`, `item`, and `missing_item` target variants,
+the `content_rule` and `item_rule` schema-node variants, and the
+`invalid-content-rule` schema error under envelope version 2.
+
+The schema-node inventory and variant order are total:
+
+| Order | `kind` |
+|---:|---|
+| 1 | `title` |
+| 2 | `frontmatter` |
+| 3 | `frontmatter_schema_declaration` |
+| 4 | `frontmatter_schema_document` |
+| 5 | `rule` |
+| 6 | `guard` |
+| 7 | `capture` |
+| 8 | `frontmatter_capture` |
+| 9 | `order_entry` |
+| 10 | `constraint` |
+| 11 | `content_rule` |
+| 12 | `item_rule` |
 
 Each diagnostic object has `id`, `message`, and `location` with one-based
 `line` and byte `column`. The `message` member is explanatory prose: its
@@ -2050,7 +2853,9 @@ present when the corresponding semantic data exists and omitted otherwise:
 
 - `schema_node`, using this tagged-variant order: `title`, `frontmatter`,
   `frontmatter_schema_declaration`, `frontmatter_schema_document`, `rule`,
-  `guard`, `capture`, `frontmatter_capture`, `order_entry`, `constraint`.
+  `guard`, `capture`, `frontmatter_capture`, `order_entry`, `constraint`,
+  `content_rule`, `item_rule`. The final two variants are appended by this
+  revision.
   Rule and constraint nodes retain their zero-based `scope` accepting-rule
   index path and `index`; `capture` adds its `name` to its owning rule
   coordinates, `frontmatter_capture` has `name`, and `order_entry` adds
@@ -2058,7 +2863,28 @@ present when the corresponding semantic data exists and omitted otherwise:
   members in declaration order `kind`, `scope`, `index`: `kind` is
   `"guard"`, `scope` is the array of zero-based accepting-rule indices leading
   to the guarded scope (empty for an exposed root scope), and `index` is the
-  guard's zero-based index in `forbid_sections`;
+  guard's zero-based index in `forbid_sections`. A content owner is the tagged
+  union, in order, `document`, `title`, `rule`:
+
+  ```json
+  {"kind":"document"}
+  {"kind":"title"}
+  {"kind":"rule","scope":[0,2],"index":1}
+  ```
+
+  `document` owns top-level content in general form and under `title: null`;
+  `title` owns it under non-null sugar; `rule` uses the existing `RulePath`
+  coordinates. A content-rule path is an object with members `owner`, then
+  `index`. New schema nodes have exactly these member orders and shapes:
+
+  ```json
+  {"kind":"content_rule","owner":{"kind":"title"},"index":0}
+  {"kind":"content_rule","owner":{"kind":"rule","scope":[0],"index":2},"index":1}
+  {"kind":"item_rule","content":{"owner":{"kind":"rule","scope":[0],"index":2},"index":1},"index":0}
+  ```
+
+  Complete-rule source ranges for these nodes live in `SchemaLocations` and
+  supply `schema_location` on attributed diagnostics;
 - `schema_location`, with `path`, one-based `line`, and one-based byte
   `column`;
 - `involved_headers`, whose entries have a `header_path` string array and a
@@ -2067,6 +2893,17 @@ present when the corresponding semantic data exists and omitted otherwise:
 
 `extras` and `unordered` do not have schema-node variants. Their declarations
 change scope behavior but do not attribute document diagnostics directly.
+
+The four appended target variants have exactly the following JSON member
+orders and shapes. The nested list address always has `parent`, then `index`;
+the structured content matcher forms are defined in §6.1.
+
+```json
+{"kind":"block","parent":["Changelog","Added"],"block":"list","index":0}
+{"kind":"missing_block","parent":["Changelog","Added"],"matcher":{"block":"list","list_kind":"bullet"}}
+{"kind":"item","list":{"parent":["Changelog","Added"],"index":0},"index":2}
+{"kind":"missing_item","list":{"parent":["Changelog","Added"],"index":0},"matcher":"/entry/"}
+```
 
 Every `references` entry has an explicit `kind` member whose value is `rule`,
 `frontmatter_query`, or `frontmatter_capture`, and a `locator` member
@@ -2117,6 +2954,30 @@ structured values compare by their variants in the order listed in Sections
 6.1 and 11.3, then by members in declaration order. This order is a function
 of rendered diagnostic data and MUST NOT depend on sequence search, recovery,
 unordered assignment, validator traversal, or discovery order.
+
+For clarity, the complete target variant order is `header`, `missing_header`,
+`document`, `frontmatter`, `block`, `missing_block`, `item`,
+`missing_item`. A header-path array compares lexicographically by its segment
+strings. A list address compares `parent` first and numeric `index` second.
+An `item` target compares its list address and then its numeric item `index`;
+a `missing_item` compares its list address and then its matcher-label string.
+`block` and `missing_block` compare the members in their §11.3 declaration
+order. All indices compare numerically.
+
+Within `missing_block.matcher`, the block form precedes the `one_of` form. A
+block form compares `block` by UTF-8 bytes and then optional `list_kind`, with
+absence first and present values compared by UTF-8 bytes. A `one_of` form
+compares its alternatives lexicographically using that block-form order.
+
+The complete schema-node variant order is `title`, `frontmatter`,
+`frontmatter_schema_declaration`, `frontmatter_schema_document`, `rule`,
+`guard`, `capture`, `frontmatter_capture`, `order_entry`, `constraint`,
+`content_rule`, `item_rule`. Within a content owner, the variant order is
+`document`, `title`, `rule`; the `rule` variant then compares `scope` and
+numeric `index`. A content-rule path compares `owner` and then numeric
+`index`. The new schema nodes compare their members in §11.3 declaration
+order after their variant. These rules also govern the same structures when
+nested inside another compared value.
 
 For `references`, "members in declaration order" means the member order
 stated for each tagged variant in §11.3; the `equals` object likewise compares
