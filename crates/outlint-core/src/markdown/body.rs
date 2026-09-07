@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag};
+use pulldown_cmark::{Event, HeadingLevel, Options as CommonMarkOptions, Parser, Tag, TagEnd};
 
 use crate::HeaderLevel;
 
@@ -35,32 +35,41 @@ pub(super) fn parse(
     let mut file_suppressions = Suppressions::default();
     let mut line_suppressions = BTreeMap::new();
     let mut active_heading: Option<HeadingBuilder> = None;
-    let mut container_depth = 0_usize;
+    let mut frames = FrameStack::default();
 
     for (event, range) in
         Parser::new_ext(parser_source, CommonMarkOptions::empty()).into_offset_iter()
     {
         match event {
-            Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item) => {
-                container_depth += 1;
+            Event::Start(tag) => {
+                let heading = match &tag {
+                    Tag::Heading { level, .. }
+                        if frames.is_top_level()
+                            && is_eligible_heading(source, &range, *level, line_index) =>
+                    {
+                        Some(HeadingBuilder::new(*level))
+                    }
+                    Tag::Heading { .. } => None,
+                    _ => active_heading.take(),
+                };
+                active_heading = heading;
+                frames.push(tag, range);
             }
-            Event::End(
-                pulldown_cmark::TagEnd::BlockQuote(_)
-                | pulldown_cmark::TagEnd::List(_)
-                | pulldown_cmark::TagEnd::Item,
-            ) => {
-                container_depth -= 1;
-            }
-            Event::Start(Tag::Heading { level, .. }) => {
-                active_heading = (container_depth == 0
-                    && is_eligible_heading(source, &range, level, line_index))
-                .then(|| HeadingBuilder::new(level, range));
-            }
-            Event::End(pulldown_cmark::TagEnd::Heading(_)) => {
-                if let Some(builder) = active_heading.take() {
-                    headings.push(builder.finish(source, options, line_index, &line_suppressions));
+            Event::End(end) => match frames.close(end) {
+                Ok(frame) if matches!(frame.expected_end, TagEnd::Heading(_)) => {
+                    if let Some(builder) = active_heading.take() {
+                        headings.push(builder.finish(
+                            source,
+                            frame.range,
+                            options,
+                            line_index,
+                            &line_suppressions,
+                        ));
+                    }
                 }
-            }
+                Ok(_) => {}
+                Err(()) => active_heading = None,
+            },
             Event::Text(text) => {
                 if let Some(builder) = active_heading.as_mut() {
                     builder.push_visible(&text);
@@ -96,17 +105,53 @@ pub(super) fn parse(
     }
 }
 
+/// One balanced parser container, retaining its matching end kind and span for
+/// the block ownership pass that follows this heading-preserving migration.
+pub(super) struct Frame {
+    pub(super) expected_end: TagEnd,
+    pub(super) range: std::ops::Range<usize>,
+}
+
+#[derive(Default)]
+pub(super) struct FrameStack {
+    frames: Vec<Frame>,
+    malformed: bool,
+}
+
+impl FrameStack {
+    pub(super) fn is_top_level(&self) -> bool {
+        !self.malformed && self.frames.is_empty()
+    }
+
+    pub(super) fn push(&mut self, tag: Tag<'_>, range: std::ops::Range<usize>) {
+        self.frames.push(Frame {
+            expected_end: tag.to_end(),
+            range,
+        });
+    }
+
+    pub(super) fn close(&mut self, end: TagEnd) -> Result<Frame, ()> {
+        let matches = self
+            .frames
+            .last()
+            .is_some_and(|frame| frame.expected_end == end);
+        if !matches {
+            self.malformed = true;
+            return Err(());
+        }
+        self.frames.pop().ok_or(())
+    }
+}
+
 struct HeadingBuilder {
     level: HeaderLevel,
-    range: std::ops::Range<usize>,
     diagnostic_text: String,
 }
 
 impl HeadingBuilder {
-    fn new(level: HeadingLevel, range: std::ops::Range<usize>) -> Self {
+    fn new(level: HeadingLevel) -> Self {
         Self {
             level: convert_level(level),
-            range,
             diagnostic_text: String::new(),
         }
     }
@@ -118,11 +163,12 @@ impl HeadingBuilder {
     fn finish(
         self,
         source: &str,
+        range: std::ops::Range<usize>,
         options: MarkdownOptions,
         lines: &LineIndex,
         line_suppressions: &BTreeMap<usize, Suppressions>,
     ) -> Heading {
-        let safe_range = clamp_range(self.range, source.len());
+        let safe_range = clamp_range(range, source.len());
         let line = lines.line_number(safe_range.start);
         let line_start = lines.line_start(line);
         let line_end = lines.line_end(line, source.len());

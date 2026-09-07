@@ -3,6 +3,9 @@ use crate::markdown::{
     parse_markdown, Document, DocumentFrontmatter, Heading, MarkdownOptions, Section,
 };
 use crate::HeaderLevel;
+use pulldown_cmark::{Tag, TagEnd};
+
+use super::super::body::FrameStack;
 
 fn headings(document: &Document) -> Vec<&Heading> {
     fn visit<'a>(sections: &'a [Section], output: &mut Vec<&'a Heading>) {
@@ -15,6 +18,52 @@ fn headings(document: &Document) -> Vec<&Heading> {
     let mut output = Vec::new();
     visit(&document.sections, &mut output);
     output
+}
+
+#[test]
+fn frame_stack_checks_nested_typed_closes_and_retains_ranges() {
+    let mut frames = FrameStack::default();
+    frames.push(Tag::BlockQuote(None), 2..40);
+    frames.push(Tag::List(Some(1)), 5..35);
+    frames.push(Tag::Item, 8..30);
+
+    let item = frames
+        .close(TagEnd::Item)
+        .unwrap_or_else(|()| unreachable!());
+    let list = frames
+        .close(TagEnd::List(true))
+        .unwrap_or_else(|()| unreachable!());
+    let quote = frames
+        .close(TagEnd::BlockQuote(None))
+        .unwrap_or_else(|()| unreachable!());
+
+    assert_eq!(item.expected_end, TagEnd::Item);
+    assert_eq!(item.range, 8..30);
+    assert_eq!(list.expected_end, TagEnd::List(true));
+    assert_eq!(list.range, 5..35);
+    assert_eq!(quote.expected_end, TagEnd::BlockQuote(None));
+    assert_eq!(quote.range, 2..40);
+    assert!(frames.is_top_level());
+}
+
+#[test]
+fn frame_stack_mismatched_close_fails_closed_permanently() {
+    let mut frames = FrameStack::default();
+    frames.push(Tag::Paragraph, 4..12);
+
+    assert!(frames.close(TagEnd::CodeBlock).is_err());
+    assert!(!frames.is_top_level());
+    assert!(frames.close(TagEnd::Paragraph).is_ok());
+    assert!(!frames.is_top_level());
+}
+
+#[test]
+fn frame_stack_checked_empty_close_fails_closed() {
+    let mut frames = FrameStack::default();
+
+    assert!(frames.is_top_level());
+    assert!(frames.close(TagEnd::Paragraph).is_err());
+    assert!(!frames.is_top_level());
 }
 
 #[test]
@@ -66,6 +115,81 @@ fn accepts_only_top_level_physical_heading_lines() {
         .collect();
 
     assert_eq!(actual, ["physical atx", "physical setext"]);
+}
+
+#[test]
+fn balanced_frames_preserve_heading_records() {
+    let source = concat!(
+        "<!-- outlint-disable skipped-level -->\n",
+        "   # **Top &amp; one** #\r\n",
+        "> quoted paragraph with *markup*\n>\n> ## nested\n\n",
+        "Top `two`\n",
+        "===\n",
+    );
+    let document = parse_markdown(source, MarkdownOptions::default());
+    let found = headings(&document);
+
+    assert_eq!(found.len(), 2);
+    assert_eq!(found[0].level, HeaderLevel::H1);
+    assert_eq!(found[0].text, "Top & one");
+    assert_eq!(found[0].diagnostic_text, "Top & one");
+    assert_eq!(found[0].source_text, "**Top &amp; one**");
+    assert_eq!(found[0].location.line, 2);
+    assert_eq!(found[0].location.column, 4);
+    assert!(found[0].suppressions.contains("skipped-level"));
+    assert_eq!(found[1].level, HeaderLevel::H1);
+    assert_eq!(found[1].text, "Top two");
+    assert_eq!(found[1].diagnostic_text, "Top two");
+    assert_eq!(found[1].source_text, "Top `two`");
+}
+
+#[test]
+fn nested_container_headings_remain_ineligible() {
+    let source = concat!(
+        "> # quote\n\n",
+        "- ## list\n",
+        "  - ### nested list\n\n",
+        "> - #### list in quote\n\n",
+        "<div>\n# html\n</div>\n\n",
+        "```md\n# code\n```\n\n",
+        "# top level\n",
+    );
+    let document = parse_markdown(source, MarkdownOptions::default());
+    let actual: Vec<_> = headings(&document)
+        .into_iter()
+        .map(|heading| heading.text.as_str())
+        .collect();
+
+    assert_eq!(actual, ["top level"]);
+}
+
+#[test]
+fn setext_and_atx_eligibility_is_unchanged() {
+    let source = concat!(
+        "# atx one\n",
+        "   ## atx two ##\n",
+        "setext one\n===\n",
+        "   setext two\n   ---\n",
+        "> nested setext\n> ===\n\n",
+        "- nested atx\n\n  ### still nested\n\n",
+        "    # indented code\n",
+        "####### seven hashes\n",
+    );
+    let document = parse_markdown(source, MarkdownOptions::default());
+    let actual: Vec<_> = headings(&document)
+        .into_iter()
+        .map(|heading| (heading.level, heading.text.as_str()))
+        .collect();
+
+    assert_eq!(
+        actual,
+        [
+            (HeaderLevel::H1, "atx one"),
+            (HeaderLevel::H2, "atx two"),
+            (HeaderLevel::H1, "setext one"),
+            (HeaderLevel::H2, "setext two"),
+        ]
+    );
 }
 
 #[test]

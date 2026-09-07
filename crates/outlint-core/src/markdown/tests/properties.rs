@@ -3,10 +3,10 @@ use proptest::prelude::*;
 use crate::markdown::frontmatter::yaml::push_pointer_token;
 use crate::markdown::lines::LineIndex;
 use crate::markdown::{
-    parse_markdown, DocumentFrontmatter, FrontmatterAnchors, FrontmatterLocation, MarkdownOptions,
-    Section,
+    parse_markdown, DocumentFrontmatter, FrontmatterAnchors, FrontmatterLocation, Heading,
+    MarkdownOptions, Section,
 };
-use crate::TextRange;
+use crate::{HeaderLevel, TextRange};
 
 use super::assert_distinct_anchors;
 
@@ -25,6 +25,23 @@ fn assert_valid_section_ranges(source: &str, sections: &[Section]) {
         assert!(section.heading.location.column >= 1);
         assert_valid_section_ranges(source, &section.children);
     }
+}
+
+fn heading_projection(sections: &[Section]) -> Vec<(HeaderLevel, String)> {
+    fn visit(sections: &[Section], output: &mut Vec<(HeaderLevel, String)>) {
+        for Section {
+            heading: Heading { level, text, .. },
+            children,
+        } in sections
+        {
+            output.push((*level, text.clone()));
+            visit(children, output);
+        }
+    }
+
+    let mut output = Vec::new();
+    visit(sections, &mut output);
+    output
 }
 
 fn assert_valid_anchors(
@@ -299,6 +316,61 @@ fn arbitrary_frontmatter_document() -> impl Strategy<Value = String> {
 }
 
 proptest! {
+    #[test]
+    fn frame_scan_preserves_heading_projection(
+        cases in proptest::collection::vec(
+            (0usize..5, 1usize..8, "[a-z]{1,8}", any::<bool>(), any::<bool>()),
+            0..40,
+        ),
+    ) {
+        let mut source = String::new();
+        let mut expected = Vec::new();
+        for (indent, level, text, setext, nested) in cases {
+            let spaces = " ".repeat(indent);
+            if nested {
+                if setext {
+                    let underline = if level % 2 == 0 { '-' } else { '=' };
+                    source.push_str(&format!("> {text}\n> {}\n\n", underline.to_string().repeat(3)));
+                } else {
+                    source.push_str(&format!("> {} {text}\n\n", "#".repeat(level)));
+                }
+                continue;
+            }
+
+            if setext {
+                let (underline, expected_level) = if level % 2 == 0 {
+                    ('-', HeaderLevel::H2)
+                } else {
+                    ('=', HeaderLevel::H1)
+                };
+                source.push_str(&format!(
+                    "{spaces}{text}\n{spaces}{}\n\n",
+                    underline.to_string().repeat(3),
+                ));
+                if indent <= 3 {
+                    expected.push((expected_level, text));
+                }
+            } else {
+                source.push_str(&format!("{spaces}{} {text}\n\n", "#".repeat(level)));
+                if indent <= 3 && level <= 6 {
+                    let expected_level = match level {
+                        1 => HeaderLevel::H1,
+                        2 => HeaderLevel::H2,
+                        3 => HeaderLevel::H3,
+                        4 => HeaderLevel::H4,
+                        5 => HeaderLevel::H5,
+                        6 => HeaderLevel::H6,
+                        _ => continue,
+                    };
+                    expected.push((expected_level, text));
+                }
+            }
+        }
+
+        let document = parse_markdown(&source, MarkdownOptions::default());
+        prop_assert_eq!(heading_projection(&document.sections), expected);
+    }
+
     #[test]
     fn arbitrary_utf8_input_is_total_and_offsets_are_valid(source in any::<String>()) {
         let document = parse_markdown(&source, MarkdownOptions::default());
