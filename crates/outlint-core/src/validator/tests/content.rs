@@ -63,6 +63,118 @@ fn outer_one_of_is_greedy_in_canonical_assignment() {
 }
 
 #[test]
+fn overlapping_choices_and_adjacent_variable_repeats_reduce_once() {
+    let (schema, document) = plan_and_document(
+        "version: 1\ncontent:\n  - one_of: [{block: any}, {block: p}]\n    repeat: 0..n\n  - one_of: [{block: any}, {block: list, list_kind: bullet}]\n    repeat: 0..4294967295\n  - block: any\n    repeat: 0..n\noutline: []\n",
+        "paragraph\n\n- bullet\n\nsecond paragraph\n",
+    );
+    let plan = ValidationPlan::new(&schema).expect("schema prepares");
+    let PreparedContentScope::Declared(rules) = &plan.content else {
+        panic!("content is declared")
+    };
+    let (edges, work) =
+        prepare_content_edges(document.preamble.as_slice(), rules).expect("edges prepare");
+    let assignment =
+        assign(&edges.rules, &edges.matches, &edges.costs).expect("assignment completes");
+
+    // The first two cells on each applicable choice use their specific arm's
+    // cost, while the outer choices remain greedy phases. The huge maximum is
+    // clamped to B and never creates occurrence states.
+    assert_eq!(work.content_predicates, 3 * 5);
+    assert_eq!(work.choice_reductions, 3 * 3);
+    assert_eq!(edges.costs.cost(&edges.matches, 0, 0), Some(0));
+    assert_eq!(edges.costs.cost(&edges.matches, 1, 1), Some(0));
+    assert_eq!(edges.costs.cost(&edges.matches, 2, 2), Some(1));
+    assert!(assignment.accepted);
+    // Both [3,0,0] and [1,1,1] cost one; the first outer choice is specific
+    // (and therefore greedy), even where its winning arm is `any`.
+    assert_eq!(assignment.counts, [3, 0, 0]);
+}
+
+#[test]
+fn preparation_counters_vary_b_c_a_i_j_independently() {
+    fn content_work(blocks: usize, rules: usize, alternatives: usize) -> (u64, u64) {
+        let arms = [
+            "{block: p}",
+            "{block: any}",
+            "{block: list, list_kind: bullet}",
+            "{block: list, list_kind: ordered}",
+        ];
+        let mut schema = "version: 1\ncontent:\n".to_owned();
+        for rule_index in 0..rules {
+            if rule_index == 0 && alternatives > 1 {
+                schema.push_str("  - one_of: [");
+                schema.push_str(&arms[..alternatives].join(", "));
+                schema.push_str("]\n    repeat: 0..n\n");
+            } else {
+                schema.push_str("  - block: p\n    repeat: 0..n\n");
+            }
+        }
+        schema.push_str("outline: []\n");
+        let markdown = (0..blocks)
+            .map(|index| format!("block {index}\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (schema, document) = plan_and_document(&schema, &markdown);
+        let plan = ValidationPlan::new(&schema).expect("schema prepares");
+        let PreparedContentScope::Declared(prepared) = &plan.content else {
+            panic!("content is declared")
+        };
+        let (_, work) = prepare_content_edges(document.preamble.as_slice(), prepared)
+            .expect("content edges prepare once");
+        (work.content_predicates, work.choice_reductions)
+    }
+
+    for (blocks, rules, alternatives) in [
+        (0usize, 2usize, 2usize),
+        (1, 2, 2),
+        (4, 2, 2),
+        (4, 1, 1),
+        (4, 3, 1),
+        (4, 3, 2),
+        (4, 1, 4),
+    ] {
+        let total_alternatives = alternatives + rules.saturating_sub(1);
+        assert_eq!(
+            content_work(blocks, rules, alternatives),
+            (
+                (blocks * total_alternatives) as u64,
+                (blocks * rules) as u64,
+            )
+        );
+    }
+
+    for (items, rules) in [(0, 2), (1, 2), (5, 2), (5, 0), (5, 1), (5, 4)] {
+        let mut schema = "version: 1\ncontent:\n  - block: list\n".to_owned();
+        if rules == 0 {
+            schema.push_str("    items: []\n");
+        } else {
+            schema.push_str("    items:\n");
+            for _ in 0..rules {
+                schema.push_str("      - match: X\n        repeat: 0..n\n");
+            }
+        }
+        schema.push_str("outline: []\n");
+        let markdown = (0..items.max(1)).map(|_| "- X\n").collect::<String>();
+        let (schema, document) = plan_and_document(&schema, &markdown);
+        let plan = ValidationPlan::new(&schema).expect("schema prepares");
+        let PreparedContentScope::Declared(content) = &plan.content else {
+            panic!("content is declared")
+        };
+        let PreparedItemScope::Declared(item_rules) = &content[0].items else {
+            panic!("items are declared")
+        };
+        let Block::List(list) = &document.preamble.as_slice()[0] else {
+            panic!("document contains one list")
+        };
+        let direct_items = list.items.iter().take(items).collect::<Vec<_>>();
+        let (_, work) =
+            prepare_item_edges(&direct_items, item_rules).expect("item edges prepare once");
+        assert_eq!(work.matcher_bytes, (items * rules) as u64);
+    }
+}
+
+#[test]
 fn no_text_matches_only_item_wildcard() {
     let (schema, document) = plan_and_document(
         "version: 1\ncontent:\n  - block: list\n    items:\n      - match: '*'\n        repeat: 0..n\n      - match: ''\n        required: false\noutline: []\n",

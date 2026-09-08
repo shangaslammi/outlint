@@ -683,6 +683,16 @@ mod tests {
         }
         Ordering::Equal
     }
+
+    fn oracle_bounds(rule: &SequenceRule, nodes: usize) -> (usize, usize) {
+        let minimum = usize::try_from(rule.cardinality.min()).unwrap_or(usize::MAX);
+        let maximum = match rule.cardinality.max() {
+            UpperBound::Bounded(value) => usize::try_from(value).unwrap_or(usize::MAX).min(nodes),
+            UpperBound::Unbounded => nodes,
+        };
+        (minimum, maximum)
+    }
+
     fn oracle_accept(rules: &[SequenceRule], m: &MatchMatrix, c: &EdgeCosts) -> Option<Oracle> {
         #[allow(clippy::too_many_arguments)]
         fn visit(
@@ -713,7 +723,7 @@ mod tests {
                 }
                 return;
             }
-            let (min, max) = bounds(&rules[col], m.rows);
+            let (min, max) = oracle_bounds(&rules[col], m.rows);
             if min > max {
                 return;
             }
@@ -809,17 +819,127 @@ mod tests {
         best.expect("recovery has a trace")
     }
 
+    fn assignment_edge_cost(
+        assignment: &[Option<usize>],
+        matrix: &MatchMatrix,
+        costs: &EdgeCosts,
+    ) -> u64 {
+        assignment
+            .iter()
+            .enumerate()
+            .filter_map(|(row, column)| {
+                column.and_then(|column| costs.cost(matrix, row, column).map(u64::from))
+            })
+            .sum()
+    }
+
     #[test]
-    fn variable_cost_assignment_matches_exhaustive_oracle() {
+    fn all_small_cost_matrices_match_exhaustive_oracle() {
+        // This deliberately enumerates complete partitions and transition
+        // strings, sharing neither production recurrence nor tie-breaking
+        // reconstruction. Two-by-two is enough to exhaust every boolean
+        // matrix, every 0/1 cost on its true edges, both preferences, empty
+        // dimensions, and the cardinality boundary classes of §3.7.
+        let cardinalities = [
+            (0, UpperBound::Bounded(1)),
+            (1, UpperBound::Bounded(1)),
+            (0, UpperBound::Bounded(u32::MAX)),
+            (u32::MAX, UpperBound::Bounded(u32::MAX)),
+            (0, UpperBound::Unbounded),
+        ];
+        for rows in 0..=2 {
+            for columns in 0..=2 {
+                let cell_count = rows * columns;
+                for matrix_bits in 0..(1usize << cell_count) {
+                    let cells = (0..cell_count)
+                        .map(|index| matrix_bits & (1 << index) != 0)
+                        .collect::<Vec<_>>();
+                    let true_count = cells.iter().filter(|cell| **cell).count();
+                    for cost_bits in 0..(1usize << true_count) {
+                        let mut true_index = 0;
+                        let edge = cells
+                            .iter()
+                            .map(|matched| {
+                                if !matched {
+                                    return 0;
+                                }
+                                let cost = u32::from(cost_bits & (1 << true_index) != 0);
+                                true_index += 1;
+                                cost
+                            })
+                            .collect::<Vec<_>>();
+                        for preference_bits in 0..(1usize << columns) {
+                            let shape_count = cardinalities.len().pow(columns as u32);
+                            for shapes in 0..shape_count {
+                                let mut remaining = shapes;
+                                let rules = (0..columns)
+                                    .map(|column| {
+                                        let (min, max) =
+                                            cardinalities[remaining % cardinalities.len()];
+                                        remaining /= cardinalities.len();
+                                        rule(
+                                            min,
+                                            max,
+                                            if preference_bits & (1 << column) == 0 {
+                                                Preference::Reluctant
+                                            } else {
+                                                Preference::Greedy
+                                            },
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                let (matrix, costs) =
+                                    inputs(rows, &rules, cells.clone(), edge.clone());
+                                let actual = assign_with_trace_for_test(&rules, &matrix, &costs)
+                                    .expect("exhaustive dimensions fit");
+                                if let Some(expected) = oracle_accept(&rules, &matrix, &costs) {
+                                    assert!(actual.assignment.accepted);
+                                    assert_eq!(actual.assignment.rules, expected.assignment);
+                                    assert_eq!(actual.assignment.counts, expected.counts);
+                                    assert_eq!(
+                                        assignment_edge_cost(
+                                            &actual.assignment.rules,
+                                            &matrix,
+                                            &costs,
+                                        ),
+                                        expected.cost.edge
+                                    );
+                                    assert_eq!(actual.trace, expected.trace);
+                                } else {
+                                    let expected = oracle_recover(&rules, &matrix, &costs);
+                                    assert!(!actual.assignment.accepted);
+                                    assert_eq!(actual.assignment.rules, expected.assignment);
+                                    assert_eq!(actual.assignment.counts, expected.counts);
+                                    assert_eq!(actual.assignment.recovery_cost, expected.cost);
+                                    assert_eq!(
+                                        assignment_edge_cost(
+                                            &actual.assignment.rules,
+                                            &matrix,
+                                            &costs,
+                                        ),
+                                        expected.cost.edge
+                                    );
+                                    assert_eq!(actual.trace, expected.trace);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn successful_three_by_three_mixed_non_binary_costs_match_exhaustive_oracle() {
         for rows in 0..=3 {
             for columns in 0..=3 {
                 for bits in 0..(1usize << (rows * columns)) {
                     let rules = (0..columns)
-                        .map(|i| {
+                        .map(|index| {
                             rule(
                                 0,
                                 UpperBound::Bounded(2),
-                                if i % 2 == 0 {
+                                if index % 2 == 0 {
                                     Preference::Greedy
                                 } else {
                                     Preference::Reluctant
@@ -827,18 +947,24 @@ mod tests {
                             )
                         })
                         .collect::<Vec<_>>();
-                    let cells = (0..rows * columns).map(|i| bits & (1 << i) != 0).collect();
-                    let edge = (0..rows * columns)
-                        .map(|i| u32::try_from((i * 3 + 1) % 5).unwrap_or(0))
+                    let cells = (0..rows * columns)
+                        .map(|index| bits & (1 << index) != 0)
                         .collect();
-                    let (m, c) = inputs(rows, &rules, cells, edge);
-                    let actual = assign(&rules, &m, &c).expect("valid dimensions");
-                    if let Some(expected) = oracle_accept(&rules, &m, &c) {
+                    let edge = (0..rows * columns)
+                        .map(|index| u32::try_from((index * 3 + 1) % 5).unwrap_or(0))
+                        .collect();
+                    let (matrix, costs) = inputs(rows, &rules, cells, edge);
+                    let actual = assign(&rules, &matrix, &costs).expect("valid dimensions");
+                    if let Some(expected) = oracle_accept(&rules, &matrix, &costs) {
                         assert!(actual.accepted);
                         assert_eq!(actual.rules, expected.assignment);
                         assert_eq!(actual.counts, expected.counts);
+                        assert_eq!(
+                            assignment_edge_cost(&actual.rules, &matrix, &costs),
+                            expected.cost.edge
+                        );
                     } else {
-                        let expected = oracle_recover(&rules, &m, &c);
+                        let expected = oracle_recover(&rules, &matrix, &costs);
                         assert!(!actual.accepted);
                         assert_eq!(actual.rules, expected.assignment);
                         assert_eq!(actual.counts, expected.counts);
@@ -911,34 +1037,57 @@ mod tests {
     }
 
     #[test]
-    fn adversarial_bounds_do_not_expand_occurrences() {
-        for cardinality in [
+    fn adversarial_nullable_and_huge_bounds_do_not_expand_repeats() {
+        let cardinalities = [
             card(u32::MAX, UpperBound::Bounded(u32::MAX)),
             card(0, UpperBound::Bounded(u32::MAX)),
             card(0, UpperBound::Unbounded),
-        ] {
-            let rules = [SequenceRule {
-                cardinality,
-                preference: Preference::Reluctant,
-            }];
-            let (matrix, costs) = inputs(8, &rules, vec![true; 8], vec![1; 8]);
+        ];
+        let mut observed_work = Vec::new();
+        for maximum in cardinalities {
+            // Adjacent nullable, overlapping phases with alternating costs
+            // force both preference directions without making the huge bound
+            // part of either the matrix dimensions or the work count.
+            let rules = [
+                SequenceRule {
+                    cardinality: card(0, UpperBound::Unbounded),
+                    preference: Preference::Reluctant,
+                },
+                SequenceRule {
+                    cardinality: maximum,
+                    preference: Preference::Greedy,
+                },
+                SequenceRule {
+                    cardinality: card(0, UpperBound::Bounded(u32::MAX)),
+                    preference: Preference::Reluctant,
+                },
+            ];
+            let edge = (0..8 * rules.len())
+                .map(|index| u32::from(index % 2 != 0))
+                .collect();
+            let (matrix, costs) = inputs(8, &rules, vec![true; 8 * rules.len()], edge);
             let mut work = 0;
             let actual =
                 assign_counted(&rules, &matrix, &costs, &mut work).expect("valid dimensions");
-            assert!(work <= 13 * (8 + 1) * (1 + 1));
             assert_eq!(actual.rules.len(), 8);
+            observed_work.push(work);
         }
+        assert_eq!(observed_work[1], observed_work[2]);
+
+        // These are exact transition/deque/reconstruction counts. The
+        // impossible minimum exits acceptance early and then recovers; the
+        // two maxima that clamp to N take byte-for-byte identical work.
+        assert_eq!(observed_work, [87, 92, 92]);
     }
 
     #[test]
     fn wildcard_heavy_work_scales_with_each_dp_dimension() {
-        for (rows, columns) in [
-            (1, 129),
-            (17, 129),
-            (257, 129),
-            (257, 1),
-            (257, 17),
-            (257, 129),
+        for (rows, columns, expected_work) in [
+            (1, 129, 902),
+            (17, 129, 9_142),
+            (257, 129, 132_742),
+            (257, 1, 774),
+            (257, 17, 17_270),
         ] {
             let rules = (0..columns)
                 .map(|_| rule(0, UpperBound::Unbounded, Preference::Reluctant))
@@ -953,7 +1102,7 @@ mod tests {
             let actual =
                 assign_counted(&rules, &matrix, &costs, &mut work).expect("valid dimensions");
             assert!(actual.accepted);
-            assert!(work <= 13 * (rows + 1) * (columns + 1));
+            assert_eq!(work, expected_work);
         }
     }
 

@@ -1533,9 +1533,9 @@ fn heading_adapter_wildcard_policy_drives_real_validation() {
 }
 
 #[test]
-fn sequence_exhaustion_stops_before_diagnostics_captures_and_children() {
+fn sequence_exhaustion_returns_no_partial_verdict() {
     let loaded = load_schema(
-        "version: 1\noutline:\n  - match: '/(?P<value>.*)/'\n    required: true\n    captures:\n      value: int\n    sections: []\n",
+        "version: 1\nfrontmatter: { required: true }\noutline:\n  - match: '/(?P<value>.*)/'\n    required: true\n    captures:\n      value: int\n    sections: []\n",
     )
     .expect("test schema is valid");
     let plan = ValidationPlan::new(&loaded.schema).expect("test schema prepares");
@@ -1543,6 +1543,9 @@ fn sequence_exhaustion_stops_before_diagnostics_captures_and_children() {
 
     let (exhausted, diagnostics, post_sequence_actions) =
         forced_sequence_exhaustion_state(&loaded.schema, &document, &plan);
+    // Missing frontmatter is emitted before the forced sequence failure. The
+    // zero proves the operational error discarded that already-built prefix,
+    // not merely that sequence-dependent diagnostics were never attempted.
     assert!(exhausted);
     assert_eq!(diagnostics, 0);
     assert_eq!(post_sequence_actions, 0);
