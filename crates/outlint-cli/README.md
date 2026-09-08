@@ -67,6 +67,40 @@ design.md:3:1 [misplaced-section] the section matches a rule but cannot occupy i
 This example shows the current human presentation only. It is not a stable or
 parseable output grammar; use `--format json` for scripts and integrations.
 
+Schemas may also declare an exhaustive ordered `content` sequence for the
+visible direct blocks in a root or heading preamble and, on an outer list
+rule, an `items` sequence for that list's direct syntactic items. Block rules
+match `p`, `list`, or `any`; `one_of` is one non-nesting choice phase with at
+least two block matcher alternatives. Omission means “do not validate this
+scope”; `content: []` and `items: []` instead validate it as empty. Item text
+exists only when the first direct block is a paragraph (tight or loose); a
+no-text item matches only the wildcard, while present-empty text is ordinary
+text (an exact empty matcher can match it).
+
+Ownership is direct-only. Frontmatter, link-reference definitions, and
+complete CommonMark HTML comments surrounded only by CommonMark ASCII
+whitespace are transparent; other visible block kinds participate. Explicit
+content/item ids share and hoist through the structural namespace. Locators
+can move from names to indexed `/p`, `/list`, and `/item` steps, never back to
+names. Provisional item `/text` is schema-resident only immediately after a
+named exact/glob/regex item rule that is statically singular or narrowed by
+`[i]`; it is not accepted after `/item` or a wildcard and creates no
+proposition.
+
+`outlint-disable` immediately before a heading, visible block, or direct item
+filters diagnostics anchored to that node. Absence and too-few findings can be
+disabled only file-wide; `outlint-disable-file` covers the whole document.
+Filtering never changes matching or dependency state.
+
+This surface keeps schema version 1 and envelope version 2. Deferred syntax
+has no semantics: F3 correspondence/selection, F4 paragraph/lead text, F6 link
+definitions, editing and concrete edit paths, task state, matchable
+quote/code/HTML/break/table predicates and GFM tables, nested item/cell
+validation, item captures/order, content/item guards/extras/unordered
+scopes/phases/constraints, meaningful-item predicates, equal/subset value
+constraints and selection objects, sequence contiguity, capture-cardinality
+refinements/optional participation, integer coercion/rounding, and numbering.
+
 Without `--schema`, each input file discovers its schema by walking up:
 `<stem>.outlint.yml` (its file name, extension removed) is preferred over
 `.outlint.yml` in each directory.

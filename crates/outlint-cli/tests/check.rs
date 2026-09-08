@@ -1,6 +1,87 @@
 mod common;
 
 use common::*;
+use std::process::Command;
+
+#[test]
+fn changelog_schema_enforces_kac_k1_through_k8() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new(env!("CARGO_BIN_EXE_outlint"))
+        .args(["check", "CHANGELOG.md", "--format", "json"])
+        .current_dir(&root)
+        .output()
+        .expect("outlint should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "CHANGELOG.md should satisfy its K1-K8 schema:\n{}\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let report = json_output(&output);
+    assert_eq!(report["version"], 2);
+    assert_eq!(report["results"][0]["schema"], "CHANGELOG.outlint.yml");
+    assert_eq!(report["results"][0]["diagnostics"], serde_json::json!([]));
+
+    let schema = root.join("CHANGELOG.outlint.yml");
+    let schema = schema
+        .to_str()
+        .expect("the repository schema path should be UTF-8");
+    let directory = TempDir::new("changelog-kac-k1-k8");
+    let cases = [
+        ("k1-wrong-title.md", "# Changes\n\nIntroduction.\n\n## [1.0.0] - 2026-01-01\n", "not-allowed"),
+        ("k2-missing-introduction.md", "# Changelog\n\n## [1.0.0] - 2026-01-01\n", "missing-block"),
+        ("k3-unreleased-after-release.md", "# Changelog\n\nIntroduction.\n\n## [1.0.0] - 2026-01-01\n\n## [Unreleased]\n", "misplaced-section"),
+        ("k4-wrong-version-heading.md", "# Changelog\n\nIntroduction.\n\n## Version 1.0.0\n", "unexpected-section"),
+        ("k5-versions-not-descending.md", "# Changelog\n\nIntroduction.\n\n## [1.0.0] - 2026-02-01\n\n## [2.0.0] - 2026-01-01\n", "order-violation"),
+        ("k6-dates-not-descending.md", "# Changelog\n\nIntroduction.\n\n## [2.0.0] - 2026-01-01\n\n## [1.0.0] - 2026-02-01\n", "order-violation"),
+        ("k7-unknown-category.md", "# Changelog\n\nIntroduction.\n\n## [1.0.0] - 2026-01-01\n\n### Other\n\n- Entry.\n", "unexpected-section"),
+        ("k8-category-is-not-a-list.md", "# Changelog\n\nIntroduction.\n\n## [1.0.0] - 2026-01-01\n\n### Added\n\nA paragraph.\n", "unexpected-block"),
+    ];
+
+    for (path, markdown, expected_id) in cases {
+        directory.write(path, markdown);
+        let output = run(
+            &directory,
+            &["check", path, "--schema", schema, "--format", "json"],
+        );
+        assert_eq!(output.status.code(), Some(1), "{path} should fail");
+        let report = json_output(&output);
+        let ids = report["results"][0]["diagnostics"]
+            .as_array()
+            .expect("diagnostics should be an array")
+            .iter()
+            .filter_map(|diagnostic| diagnostic["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            ids.contains(&expected_id),
+            "{path} should report {expected_id}, got {ids:?}"
+        );
+    }
+
+    directory.write(
+        "k3-unreleased-omitted.md",
+        "# Changelog\n\nIntroduction.\n\n## [1.0.0] - 2026-01-01\n",
+    );
+    let output = run(
+        &directory,
+        &[
+            "check",
+            "k3-unreleased-omitted.md",
+            "--schema",
+            schema,
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "K3 makes Unreleased optional: {}",
+        stdout(&output)
+    );
+}
 
 #[test]
 fn all_rfc5_ids_are_valid_suppressions() {

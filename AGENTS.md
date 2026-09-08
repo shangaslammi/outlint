@@ -44,6 +44,28 @@ frontmatter, suppressions); `validate` / `PreparedValidator`
 `Document` to `Vec<Diagnostic>` using bounded ordered assignment.
 `matcher.rs` and `case_fold.rs` are private helpers.
 
+RFC 5 extends the parsed tree downward without changing schema version 1 or
+JSON envelope version 2. `Document` and `Section` own visible direct preamble
+blocks; lists own direct syntactic items. Frontmatter, reference definitions,
+and complete CommonMark HTML comments surrounded only by CommonMark ASCII
+whitespace are transparent. Nested blocks/items do not leak into an outer
+scope. Item text exists only when the first direct block is a paragraph; a
+no-text item matches only the wildcard, while present-empty text is ordinary
+text (an exact empty matcher can match it).
+
+Normalized `ContentScope` and `ItemScope` preserve omission versus explicit
+empty declaration. Content choices are non-nesting local alternatives, not
+unordered scopes. Explicit content/item ids share the enclosing structural
+namespace, with hoisting through anonymous structural rules. Locators move
+from names to indexed `/p`, `/list`, and `/item` steps and never back. The
+provisional schema-side item `/text` intrinsic remains isolated to a named
+exact/glob/regex item rule that is statically singular or narrowed by `[i]`;
+it is not a general structural projection or a proposition. Inline
+suppressions apply only to diagnostics
+anchored at the immediately following heading, visible block, or direct item;
+absence/too-few findings need file-wide suppression, and filtering never
+changes semantic dependency state.
+
 All YAML — schema files and frontmatter alike — goes through one
 saphyr-parser event reader. Its input limits (nesting depth, node budget,
 alias-expansion bound) live in `markdown/` and the loader shares them.
@@ -52,13 +74,11 @@ Frontmatter is implemented: the delimited block parses into
 `DocumentFrontmatter` with per-key anchors, and a schema's `frontmatter`
 policy (optional/required/forbidden) may attach an inline self-contained JSON
 Schema or one linked from a file — enforced via the `jsonschema` crate, with
-`json_pointer` and line ranges on the resulting diagnostics. `fm.`
-propositions in constraints are evaluated by the validator's
-`frontmatter_satisfied` against the parsed frontmatter mapping: presence
-of a non-null value for `fm.key`, typed scalar equality for `fm.key=value`
-(both sides resolve through the loader's `parse_frontmatter_scalar`, so
-the YAML core schema types agree), honouring `options.match_case` for
-string comparison.
+`json_pointer` and line ranges on the resulting diagnostics. `fm[...]`
+locators evaluate complete RFC 9535 JSONPath queries over the mapping as typed
+boolean reads or type-preserving equality; `fm.<name>` denotes only a typed
+capture declared by `frontmatter.captures`. The former dynamic `fm.key` and
+`fm.key=value` meanings are not part of the current language.
 
 The CLI has two subcommands: `outlint check <FILE>...` (nearest
 `<stem>.outlint.yml` or `.outlint.yml` discovered per file unless
@@ -92,6 +112,14 @@ Absent by design, do not add speculatively:
   configuration or schema-selection lookup. This does not prohibit the
   documented npm bootstrap from acquiring and caching the released native
   binary before validation begins.
+- RFC 5 deferred syntax has no semantics: F3 correspondence/selection, F4
+  paragraph/lead text, F6 link definitions, editing/concrete edit paths, task
+  state, matchable quote/code/HTML/break/table predicates and GFM tables,
+  nested item/cell validation, item captures/order, content/item
+  guards/extras/unordered scopes/phases/constraints, meaningful-item
+  predicates, equal/subset value selection, sequence contiguity, capture
+  cardinality refinements/optional participation, integer coercion/rounding,
+  and numbering.
 
 `lib.rs` re-exports its modules with globs. Acceptable pre-1.0; revisit
 before stabilizing, and keep the modules themselves private.

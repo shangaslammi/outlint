@@ -517,6 +517,75 @@ fn rfc5_schema_surface_compiles() {
     assert!(loaded.schema.outline().is_empty());
 }
 
+/// Pins RFC 5's complete public model and the validation entry points that
+/// remain unchanged by the preamble extension.
+#[test]
+fn rfc5_complete_public_surface_is_pinned() {
+    use outlint_core::{
+        AtLeastTwo, Block, BlockKind, BlockLocation, BlockMatcher, Cardinality, ContentMatcher,
+        ContentOwner, ContentRule, ContentRuleIndex, ContentRulePath, ContentScope, ItemLocation,
+        ItemRule, ItemRuleIndex, ItemRulePath, ItemScope, ItemText, LeafBlock, ListAddress,
+        ListBlock, ListItem, ListKind, Preamble, UpperBound,
+    };
+
+    fn assert_public_value<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
+    assert_public_value::<Preamble>();
+    assert_public_value::<Block>();
+    assert_public_value::<BlockKind>();
+    assert_public_value::<ListKind>();
+    assert_public_value::<LeafBlock>();
+    assert_public_value::<ListBlock>();
+    assert_public_value::<ListItem>();
+    assert_public_value::<ItemText>();
+    assert_public_value::<BlockLocation>();
+    assert_public_value::<ItemLocation>();
+    assert_public_value::<ContentScope>();
+    assert_public_value::<ItemScope>();
+    assert_public_value::<ContentRule>();
+    assert_public_value::<BlockMatcher>();
+    assert_public_value::<ContentMatcher>();
+    assert_public_value::<ItemRule>();
+    assert_public_value::<ContentOwner>();
+    assert_public_value::<ContentRulePath>();
+    assert_public_value::<ItemRulePath>();
+    assert_public_value::<ContentRuleIndex>();
+    assert_public_value::<ItemRuleIndex>();
+    assert_public_value::<ListAddress>();
+
+    let exact = Cardinality::new(1, UpperBound::Bounded(1)).expect("1..1 is valid");
+    let choices = AtLeastTwo {
+        first: BlockMatcher::Paragraph,
+        second: BlockMatcher::List {
+            list_kind: Some(ListKind::Bullet),
+        },
+        rest: vec![BlockMatcher::Any],
+    };
+    let scope = ContentScope::Declared(vec![ContentRule::OneOf {
+        id: None,
+        cardinality: exact,
+        alternatives: choices.clone(),
+    }]);
+    assert!(matches!(scope, ContentScope::Declared(_)));
+    assert!(matches!(
+        ContentMatcher::OneOf(choices),
+        ContentMatcher::OneOf(_)
+    ));
+
+    let loaded =
+        load_schema("version: 1\ncontent: []\noutline: []\n").expect("RFC 5 schema is valid");
+    let document = parse_markdown("", MarkdownOptions::default());
+    let _: fn(&Schema) -> Result<PreparedValidator, PrepareValidationError> =
+        PreparedValidator::new;
+    let _: fn(
+        &PreparedValidator,
+        &Document,
+    ) -> Result<Vec<Diagnostic>, ValidationOperationalError> = PreparedValidator::validate;
+    let unchanged: fn(&Schema, &Document) -> Result<Vec<Diagnostic>, ValidationError> = validate;
+    assert!(unchanged(&loaded.schema, &document)
+        .expect("validation completes")
+        .is_empty());
+}
+
 /// Pins the typed-value declaration surface a schema without `captures` or
 /// `order` must expose: present, inspectable, and empty. §2.1 makes both
 /// declarations optional, so the absent case is a shape a caller meets on

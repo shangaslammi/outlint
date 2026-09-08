@@ -202,6 +202,37 @@ this backwards is silent: the suite still passes.
 
 ## Coverage
 
+RFC 5 fixtures use direct ownership only: a root or heading preamble retains
+visible direct blocks, and a retained list exposes only direct syntactic
+items. Frontmatter, reference definitions, and complete CommonMark HTML
+comments with only CommonMark ASCII whitespace around them are transparent.
+Item text exists only when the first direct block is a paragraph, tight or
+loose; a no-text item matches only the wildcard, while present-empty text is
+ordinary text (an exact empty matcher can match it). Omitted `content`/`items`
+means unvalidated,
+whereas an explicit empty list rejects every retained node. `one_of` is a
+non-nesting local choice, not unordered assignment.
+
+Explicit content/item ids participate in the structural namespace, with
+anonymous-container hoisting. Locators use indexed `/p`, `/list`, and `/item`
+steps only after name steps. The provisional schema-side item `/text` form is
+limited to a named non-wildcard item rule that is statically singular or
+narrowed by `[i]`; it is neither a general `/item/text` projection nor a
+proposition. Node-local suppressions
+cover the immediately following heading, visible block, or direct item;
+absence/too-few diagnostics are file-wide-only, and filtering follows
+dependency suppression.
+
+The corpus still targets schema version 1 and consumes envelope version 2. It
+does not claim F3 correspondence/selection, F4 paragraph/lead text, F6 link
+definitions, editing, task state, matchable quote/code/HTML/break/table
+predicates or GFM tables, nested item/cell validation, item captures/order,
+content/item guards/extras/unordered scopes or constraints, meaningful-item
+predicates, equal/subset value selection, sequence contiguity, capture
+cardinality refinements, integer coercion, or numbering. Target coverage is
+MADR 16/20 and Keep a Changelog 8/10. Remaining red rows are M5, M12, M19,
+M20, K9, and K10.
+
 | Fixture group | Pins | Specification |
 | --- | --- | --- |
 | `typed-rule-captures` | regex rule captures per type; case-preserving capture source under `match_case: false`; identical-target multiplicity | §2.2, §2.4, §6.2 |

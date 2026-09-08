@@ -23,6 +23,10 @@ where the two disagree, the specification wins.
   matching (exact, glob, regex, `*`), prohibition guards, exhaustive declared
   scopes, and optional `extras: anywhere` filtering.
 - **Cardinality** — `required` and `repeat: "min..max"` per rule, per scope.
+- **Preamble content and list items** — an exhaustive ordered `content`
+  grammar over direct visible blocks (`p`, `list`, `any`, or a non-nesting
+  `one_of` of at least two block matchers), with optional bullet/ordered list
+  kind, and an `items` grammar over a matched list's direct syntactic items.
 - **Cross-section logic** — `one_of`, `any_of`, `at_most_one`,
   `all_or_none`, `requires`, `conflicts`, and `ordered` constraints over
   unified locators: relative or `$.`-absolute name paths, `[i]` positional
@@ -60,6 +64,53 @@ Diagnostics carry stable ids (`missing-section`, `unexpected-section`,
 schema-node addresses. Resolve a diagnostic's `schema_node` through
 `loaded.locations.nodes`, then use the resulting `SourceRange::source` to find
 the source text and label in `loaded.sources.documents`.
+
+## RFC 5 model boundaries
+
+The physical root and every heading own only their direct preamble blocks;
+each retained list owns only its direct items. Root ownership stops at the
+first recognized top-level heading, and a section preamble stops at the first
+subsequent recognized top-level heading in its span. Nested blocks are walked
+for boundaries but not retained.
+Frontmatter, link-reference definitions, and complete CommonMark HTML comments
+surrounded only by CommonMark ASCII whitespace are transparent. All other
+paragraph, list, quote, code, HTML, and thematic-break nodes are visible; pipe
+tables remain paragraphs because Markdown extensions are disabled.
+
+Omission and emptiness are semantic. Omitted `content` or `items` performs no
+assignment and preserves earlier behavior; `content: []` rejects every visible
+direct block, while `items: []` rejects every direct item. `one_of` is a local
+choice inside one ordered phase, cannot nest, has at least two block matcher
+alternatives, and does not retain a winning arm.
+
+Item text exists only when the first direct block is a paragraph, whether
+loose or tight, and uses the heading matcher options for case and inline
+markup. A no-text item matches only the wildcard, while present-empty text is
+ordinary text (an exact empty matcher can match it).
+
+Explicit content and item rule ids share the enclosing section namespace;
+anonymous structural rules are unnameable and their descendant names hoist.
+Locators may leave name steps for zero-based `/p`, `/list`, and `/item`
+structural steps, after which names cannot resume. The provisional
+schema-resident item `/text` rule is intentionally narrow: only immediately
+after a named exact/glob/regex item rule that is statically singular or
+narrowed by `[i]`, and never after structural `/item` or a wildcard item rule.
+These value locators are not new propositions in schema version 1.
+
+Node-local `outlint-disable` applies to the immediately following heading,
+visible block, or direct item and filters only diagnostics anchored there.
+Absence and too-few findings are file-wide-only; `outlint-disable-file` covers
+the document. Filtering never changes assignment, recovery, captures, locator
+binding, or dependency suppression.
+
+Schema version 1 and JSON envelope version 2 remain unchanged. Deferred syntax
+has no semantics: F3 correspondence/selection, F4 paragraph/lead text, F6 link
+definitions, editing and concrete edit paths, task state, matchable
+quote/code/HTML/break/table predicates and GFM tables, nested item/cell
+validation, item captures/order, content/item guards/extras/unordered
+scopes/phases/constraints, meaningful-item predicates, equal/subset value
+constraints and selection objects, sequence contiguity, capture-cardinality
+refinements/optional participation, integer coercion/rounding, and numbering.
 
 ## Usage
 
