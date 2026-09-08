@@ -8,7 +8,7 @@ fn preserves_arbitrary_precision_frontmatter_numbers() {
     let document = parse_markdown(
         "---\nbig: 184467440737095516160\nprecise: 0.123456789012345678901234567890\nquoted: \"184467440737095516160\"\n---\n",
         MarkdownOptions::default(),
-    );
+    ).expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("expected valid numeric frontmatter: {document:?}")
     };
@@ -41,7 +41,8 @@ fn preserves_json_compatible_frontmatter_number_spellings_and_typed_identity() {
             "---\n",
         ),
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("expected valid numeric frontmatter: {document:?}")
     };
@@ -77,7 +78,8 @@ fn explicit_tags_resolve_to_their_declared_types() {
             "---\n",
         ),
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("expected tagged frontmatter")
     };
@@ -92,11 +94,13 @@ fn explicit_tag_on_a_sibling_does_not_round_a_decimal() {
     let plain = parse_markdown(
         "---\nprecise: 0.1234567890123456789012345\n---\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let tagged = parse_markdown(
         "---\nprecise: 0.1234567890123456789012345\ntagged: !!str abc\n---\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping {
         value: plain_value, ..
     } = plain.frontmatter
@@ -126,7 +130,8 @@ fn explicit_tags_preserve_oversized_integers_and_forced_number_types() {
             "---\n",
         ),
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("expected tagged numeric frontmatter: {document:?}")
     };
@@ -180,7 +185,8 @@ fn standard_tags_with_mismatched_values_are_rejected() {
         "bad: !!map [one, two]",
     ] {
         let source = format!("---\nhuge: 184467440737095516160\n{invalid}\n---\n");
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document =
+            parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         assert!(
             matches!(document.frontmatter, DocumentFrontmatter::Invalid { .. }),
             "invalid tag was accepted: {invalid}"
@@ -205,7 +211,8 @@ fn standard_tags_with_conforming_values_are_accepted() {
             "---\n",
         ),
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("expected valid explicitly tagged frontmatter: {document:?}")
     };
@@ -239,7 +246,8 @@ fn huge_and_tiny_exponents_keep_their_spelling() {
             "---\n",
         ),
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("expected exact ranged decimals: {document:?}")
     };
@@ -254,7 +262,8 @@ fn huge_and_tiny_exponents_keep_their_spelling() {
 fn nonfinite_and_malformed_float_tags_are_rejected() {
     for invalid in ["bad: !!float .inf", "bad: !!float 1e", "bad: !!float nope"] {
         let source = format!("---\nhuge: 184467440737095516160\n{invalid}\n---\n");
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document =
+            parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         assert!(
             matches!(document.frontmatter, DocumentFrontmatter::Invalid { .. }),
             "invalid float was accepted: {invalid}"
@@ -267,7 +276,8 @@ fn preserves_yaml_alias_values() {
     let document = parse_markdown(
         "---\nbase: &base 42\ncopy: *base\n---\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("expected aliased frontmatter: {document:?}")
     };
@@ -280,7 +290,8 @@ fn aliases_preserve_exact_numeric_values() {
     let document = parse_markdown(
         "---\nbase: &base 0.1234567890123456789012345\ncopy: *base\n---\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("expected aliased frontmatter: {document:?}")
     };

@@ -100,7 +100,7 @@ impl PreparedValidator {
 /// use outlint_core::{load_schema, parse_markdown, validate, MarkdownOptions};
 ///
 /// let loaded = load_schema("version: 1\ntitle: '*'\nsections: []\n")?;
-/// let document = parse_markdown("# Guide\n", MarkdownOptions::default());
+/// let document = parse_markdown("# Guide\n", MarkdownOptions::default()).expect("Markdown parsing succeeds");
 /// let diagnostics = validate(&loaded.schema, &document)
 ///     .expect("the loaded schema compiles and validation completes");
 ///

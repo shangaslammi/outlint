@@ -27,7 +27,8 @@ fn query_schema(query: &str) -> String {
 /// operational failure that says it has no verdict.
 fn outcome(schema: &str, markdown: &str) -> Result<Vec<&'static str>, String> {
     let loaded = load_schema(schema).expect("test schema is valid");
-    let document = parse_markdown(markdown, MarkdownOptions::default());
+    let document =
+        parse_markdown(markdown, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     match validate(&loaded.schema, &document) {
         Ok(diagnostics) => Ok(diagnostics
             .into_iter()

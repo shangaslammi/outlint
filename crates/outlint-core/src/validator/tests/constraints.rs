@@ -21,7 +21,8 @@ fn fm_query(locator: &str) -> ResolvedFrontmatterQuery {
 /// frontmatter, typed by the real reader, and reports both its §4.6 truth and
 /// the pointers of any nodes it found invalid.
 fn fm_truth(markdown: &str, locator: &str, match_case: bool) -> (Truth, Vec<String>) {
-    let document = parse_markdown(markdown, MarkdownOptions::default());
+    let document =
+        parse_markdown(markdown, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     // The §1.6 JSON root the validator builds once per document, and the
     // query the plan compiles once per schema.
     let root = match &document.frontmatter {
@@ -169,7 +170,8 @@ fn frontmatter_constraints_fire_and_release_through_validation() {
     let firing = parse_markdown(
         "---\nstatus: deprecated\n---\n# Doc\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let diagnostics = validate(&loaded.schema, &firing).expect("schema prepares");
     assert_eq!(diagnostics.len(), 1);
     let diagnostic = &diagnostics[0];
@@ -192,7 +194,8 @@ fn frontmatter_constraints_fire_and_release_through_validation() {
     let inert = parse_markdown(
         "---\nstatus: current\n---\n# Doc\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     assert!(validate(&loaded.schema, &inert)
         .expect("schema prepares")
         .is_empty());
@@ -201,7 +204,8 @@ fn frontmatter_constraints_fire_and_release_through_validation() {
     let satisfied = parse_markdown(
         "---\nstatus: deprecated\n---\n# Doc\n## Migration\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     assert!(validate(&loaded.schema, &satisfied)
         .expect("schema prepares")
         .is_empty());
@@ -227,7 +231,8 @@ fn frontmatter_queries_route_past_a_nested_rule_addressable_as_fm_x() {
     let headers_only = parse_markdown(
         "# Doc\n## Outer\n### FM\n#### X\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     assert!(validate(&loaded.schema, &headers_only)
         .expect("schema prepares")
         .is_empty());
@@ -236,7 +241,8 @@ fn frontmatter_queries_route_past_a_nested_rule_addressable_as_fm_x() {
     let frontmatter_only = parse_markdown(
         "---\nx: 1\n---\n# Doc\n## Outer\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let diagnostics = validate(&loaded.schema, &frontmatter_only).expect("schema prepares");
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].id, DiagnosticId::Requires);

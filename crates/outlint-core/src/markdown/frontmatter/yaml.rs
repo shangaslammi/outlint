@@ -64,7 +64,7 @@ enum ExactYamlNode {
 #[derive(Clone, Debug)]
 struct SpannedYamlNode {
     node: ExactYamlNode,
-    /// One-based body line and character column of the node's first token.
+    /// One-based body line and zero-based character column of the node's first token.
     position: BodyPosition,
     /// The node is an alias's copy, and `position` is the alias site. The
     /// whole copy anchors there: the positions its entries carry belong to the

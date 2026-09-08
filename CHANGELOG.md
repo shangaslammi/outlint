@@ -11,6 +11,15 @@ output shape, and the library API may all change in a minor release. See
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking Rust API change:** `parse_markdown` now returns
+  `Result<Document, MarkdownParseError>`. Internal source-range, event-nesting,
+  builder, and tree failures return an error instead of incomplete document
+  data. The CLI reports these as operational errors (exit 2) without a result
+  for the affected document. CommonMark recovery and invalid-frontmatter
+  diagnostics are unchanged.
+
 ### Added
 
 - **Preamble content and direct items.** Section rules and the top level may

@@ -29,8 +29,8 @@ pub use loader::{
 pub use markdown::{
     parse_markdown, Block, BlockKind, BlockLocation, Document, DocumentFrontmatter,
     FrontmatterAnchor, FrontmatterAnchors, FrontmatterLocation, Heading, HeadingLocation,
-    ItemLocation, ItemText, LeafBlock, ListBlock, ListItem, ListKind, MarkdownOptions, Preamble,
-    Section, SuppressedDiagnostic, Suppressions,
+    ItemLocation, ItemText, LeafBlock, ListBlock, ListItem, ListKind, MarkdownOptions,
+    MarkdownParseError, Preamble, Section, SuppressedDiagnostic, Suppressions,
 };
 pub use schema::{
     AtLeastTwo, BlockMatcher, BoundRuleStep, CanonicalFloat, CanonicalInteger, CaptureName,

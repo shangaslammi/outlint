@@ -6,13 +6,15 @@ use super::NO_MARK;
 
 #[test]
 fn positions_invalid_or_unclosed_frontmatter() {
-    let scalar = parse_markdown("---\nvalue\n---\n# Title\n", MarkdownOptions::default());
+    let scalar = parse_markdown("---\nvalue\n---\n# Title\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Invalid { location, .. } = scalar.frontmatter else {
         panic!("scalar frontmatter must be invalid")
     };
     assert_eq!((location.start_line, location.end_line), (1, 3));
 
-    let unclosed = parse_markdown("---\nkey: value\n", MarkdownOptions::default());
+    let unclosed = parse_markdown("---\nkey: value\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Invalid { location, .. } = unclosed.frontmatter else {
         panic!("unclosed frontmatter must be invalid")
     };
@@ -33,7 +35,8 @@ fn empty_and_comment_only_frontmatter_are_not_mappings() {
         "---\n# comment only\n---\n",
         "---\n\n# comment after a blank line\n\n---\n",
     ] {
-        let document = parse_markdown(source, MarkdownOptions::default());
+        let document =
+            parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let DocumentFrontmatter::Invalid { location, message } = document.frontmatter else {
             panic!("empty YAML content must not become a mapping: {document:?}")
         };
@@ -43,7 +46,8 @@ fn empty_and_comment_only_frontmatter_are_not_mappings() {
     }
 
     for source in ["---\n{}\n---\n", "---\n{ }\n---\n"] {
-        let explicit_mapping = parse_markdown(source, MarkdownOptions::default());
+        let explicit_mapping =
+            parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let DocumentFrontmatter::Mapping { value, .. } = explicit_mapping.frontmatter else {
             panic!("an explicit empty mapping remains valid: {explicit_mapping:?}")
         };
@@ -60,7 +64,8 @@ fn frontmatter_holding_a_second_document_is_invalid() {
         "---\na: 1\n...\nb: 2\n---\n",
         "---\na: 1\n...\nplain scalar\n---\n",
     ] {
-        let document = parse_markdown(source, MarkdownOptions::default());
+        let document =
+            parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
             panic!("a second frontmatter document must be invalid: {document:?}")
         };
@@ -76,14 +81,16 @@ fn frontmatter_holding_a_second_document_is_invalid() {
     let document = parse_markdown(
         "---\na: 1\n...\n%YAML 1.2\n---\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
         panic!("unreadable content after the document must be invalid: {document:?}")
     };
     assert_eq!(message, "frontmatter must be a single YAML document");
 
     // A `...` that ends the only document opens nothing and stays valid.
-    let single = parse_markdown("---\na: 1\n...\n---\n", MarkdownOptions::default());
+    let single = parse_markdown("---\na: 1\n...\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = single.frontmatter else {
         panic!("a terminated single document remains valid: {single:?}")
     };
@@ -102,7 +109,8 @@ fn a_merge_key_is_an_ordinary_frontmatter_entry() {
     let aliased = parse_markdown(
         "---\nbase: &b\n  a: 1\nmerged:\n  <<: *b\n  b: 2\n---\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = aliased.frontmatter else {
         panic!("a merge key parses as an ordinary mapping: {aliased:?}")
     };
@@ -113,7 +121,8 @@ fn a_merge_key_is_an_ordinary_frontmatter_entry() {
 
     // The same holds without an alias: the key keeps its spelling and
     // the entry keeps an anchor of its own.
-    let inline = parse_markdown("---\n<<: {a: 1}\nb: 2\n---\n", MarkdownOptions::default());
+    let inline = parse_markdown("---\n<<: {a: 1}\nb: 2\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, anchors, .. } = inline.frontmatter else {
         panic!("a merge key parses as an ordinary mapping: {inline:?}")
     };
@@ -138,7 +147,8 @@ fn recursive_frontmatter_aliases_terminate() {
         "---\na: &x [[[*x]]]\n---\n",
         "---\na: &x [*y]\nb: &y [*x]\n---\n",
     ] {
-        let document = parse_markdown(source, MarkdownOptions::default());
+        let document =
+            parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         assert!(
             matches!(document.frontmatter, DocumentFrontmatter::Invalid { .. }),
             "recursive alias was accepted: {source:?}"
@@ -146,7 +156,8 @@ fn recursive_frontmatter_aliases_terminate() {
     }
 
     // A backward reference to a completed node still resolves.
-    let document = parse_markdown("---\na: &x [1]\nb: *x\n---\n", MarkdownOptions::default());
+    let document = parse_markdown("---\na: &x [1]\nb: *x\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("a backward alias remains valid: {document:?}")
     };
@@ -184,7 +195,8 @@ fn frontmatter_alias_expansion_is_bounded() {
     for depth in [9, 12, 15] {
         let bomb = alias_bomb_frontmatter(depth);
         let started = std::time::Instant::now();
-        let document = parse_markdown(&bomb, MarkdownOptions::default());
+        let document =
+            parse_markdown(&bomb, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let elapsed = started.elapsed();
         // A failure here means the bomb was accepted, so the panic names
         // the value rather than printing it: it is the very thing the
@@ -213,7 +225,8 @@ fn frontmatter_alias_expansion_is_bounded() {
         reused.push_str(&format!("copy{entry}: *base\n"));
     }
     reused.push_str("---\n# Title\n");
-    let document = parse_markdown(&reused, MarkdownOptions::default());
+    let document =
+        parse_markdown(&reused, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("repeated aliases to one node remain valid: {document:?}")
     };
@@ -249,7 +262,8 @@ fn frontmatter_nesting_is_bounded() {
     let document = parse_markdown(
         &deeply_nested_frontmatter(levels, false),
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, anchors, .. } = document.frontmatter else {
         panic!("nesting within the limit stays valid: {document:?}")
     };
@@ -259,7 +273,8 @@ fn frontmatter_nesting_is_bounded() {
     let document = parse_markdown(
         &deeply_nested_frontmatter(levels, true),
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping {
         value,
         anchors: tagged_anchors,
@@ -276,7 +291,8 @@ fn frontmatter_nesting_is_bounded() {
     for levels in [MAX_YAML_DEPTH, 30_000] {
         for tagged in [false, true] {
             let source = deeply_nested_frontmatter(levels, tagged);
-            let document = parse_markdown(&source, MarkdownOptions::default());
+            let document = parse_markdown(&source, MarkdownOptions::default())
+                .expect("Markdown parsing succeeds");
             let DocumentFrontmatter::Invalid { location, message } = document.frontmatter else {
                 panic!("nesting past the limit must be rejected: {levels} levels, {tagged}")
             };
@@ -319,7 +335,8 @@ fn alias_expanded_nesting_is_bounded() {
     for (lines, levels) in [(70, 127), (2_000, 127), (MAX_YAML_DEPTH, 1)] {
         let source = alias_deepened_frontmatter(lines, levels);
         let started = std::time::Instant::now();
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document =
+            parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let elapsed = started.elapsed();
         let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
             panic!("{lines} lines of {levels} alias-expanded levels were accepted")
@@ -336,7 +353,8 @@ fn alias_expanded_nesting_is_bounded() {
     // included, and the value is still built. The line above rejects the
     // one further level, so these two pin the boundary from both sides.
     let source = alias_deepened_frontmatter(MAX_YAML_DEPTH - 1, 1);
-    let document = parse_markdown(&source, MarkdownOptions::default());
+    let document =
+        parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("alias-expanded nesting that fills the limit is built: {document:?}")
     };
@@ -413,7 +431,8 @@ fn nesting_depth_counts_collections_that_are_open_at_once() {
         wide.push_str(&format!("key{entry}: [1, 2, 3]\n"));
     }
     wide.push_str("---\n");
-    let document = parse_markdown(&wide, MarkdownOptions::default());
+    let document =
+        parse_markdown(&wide, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     assert!(matches!(
         document.frontmatter,
         DocumentFrontmatter::Mapping { .. }
@@ -790,7 +809,8 @@ fn frontmatter_syntax_errors_carry_the_parser_position() {
 /// The mapping a block parses to, whichever of this module's readers
 /// happened to produce it.
 fn expect_frontmatter_mapping(source: &str) -> serde_json::Map<String, serde_json::Value> {
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
         panic!("frontmatter must parse as a mapping: {source:?}")
     };
@@ -799,7 +819,8 @@ fn expect_frontmatter_mapping(source: &str) -> serde_json::Map<String, serde_jso
 
 /// The message a block that does not parse is refused with.
 fn expect_invalid_frontmatter(source: &str) -> String {
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
         panic!("frontmatter must be refused: {source:?}")
     };
@@ -823,7 +844,8 @@ fn frontmatter_drops_one_leading_byte_order_mark() {
     for tag in ["", "!!int "] {
         let marked = format!("---\n\u{feff}version: {tag}1\nx: 2\n---\n");
         let plain = format!("---\nversion: {tag}1\nx: 2\n---\n");
-        let document = parse_markdown(&marked, MarkdownOptions::default());
+        let document =
+            parse_markdown(&marked, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let DocumentFrontmatter::Mapping { value, .. } = document.frontmatter else {
             panic!("a leading mark is dropped: {marked:?}")
         };
@@ -852,7 +874,8 @@ fn frontmatter_drops_one_leading_byte_order_mark() {
     let document = parse_markdown(
         "---\n\u{feff}version: 1\nx: 2\n---\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { anchors, .. } = document.frontmatter else {
         panic!("a marked block still parses")
     };
@@ -871,7 +894,8 @@ fn frontmatter_drops_one_leading_byte_order_mark() {
     // looks like, and it is refused for holding no mapping rather than
     // for a document boundary its author never wrote; a `...` the mark
     // used to hide still ends only the first document.
-    let empty = parse_markdown("---\n\u{feff}\n---\n", MarkdownOptions::default());
+    let empty = parse_markdown("---\n\u{feff}\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Invalid { message, .. } = empty.frontmatter else {
         panic!("a block holding only a mark holds no mapping: {empty:?}")
     };
@@ -918,7 +942,8 @@ fn frontmatter_drops_one_leading_byte_order_mark() {
 
 #[test]
 fn rejects_non_string_frontmatter_mapping_keys() {
-    let document = parse_markdown("---\n1: value\n---\n", MarkdownOptions::default());
+    let document = parse_markdown("---\n1: value\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Invalid { message, .. } = document.frontmatter else {
         panic!("numeric mapping key must be invalid")
     };
@@ -930,7 +955,8 @@ fn duplicate_keys_remain_invalid_beside_a_tag() {
     let document = parse_markdown(
         "---\ntagged: !!str value\nduplicate: one\nduplicate: two\n---\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
 
     assert!(matches!(
         document.frontmatter,

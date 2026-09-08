@@ -143,12 +143,20 @@ fn execute_check(options: CheckOptions) -> u8 {
                 let Some(source) = input.source else {
                     continue;
                 };
-                let document = parse_markdown(
+                let document = match parse_markdown(
                     &source,
                     MarkdownOptions {
                         strip_inline_markup: loaded.schema.options.strip_inline_markup,
                     },
-                );
+                ) {
+                    Ok(document) => document,
+                    Err(error) => {
+                        output
+                            .operational_errors
+                            .push(format!("cannot parse {}: {error}", input.path));
+                        continue;
+                    }
+                };
                 // On an operational failure this document has no verdict, so
                 // no result is recorded and no partial diagnostic set is
                 // exposed. Remaining inputs are still checked.

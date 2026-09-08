@@ -22,7 +22,8 @@ fn validates_required_frontmatter_against_json_schema() {
         }),
     };
 
-    let absent = parse_markdown("# Title\n", MarkdownOptions::default());
+    let absent =
+        parse_markdown("# Title\n", MarkdownOptions::default()).expect("Markdown parsing succeeds");
     assert_eq!(
         validate(&schema, &absent).expect("schema prepares")[0].id,
         DiagnosticId::MissingFrontmatter
@@ -31,7 +32,8 @@ fn validates_required_frontmatter_against_json_schema() {
     let invalid = parse_markdown(
         "---\nstatus: proposed\n---\n# Title\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let diagnostics = validate(&schema, &invalid).expect("schema prepares");
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].id, DiagnosticId::FrontmatterSchema);
@@ -51,7 +53,8 @@ fn validates_required_frontmatter_against_json_schema() {
     let valid = parse_markdown(
         "---\nstatus: final\n---\n# Title\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     assert!(validate(&schema, &valid)
         .expect("schema prepares")
         .is_empty());
@@ -80,7 +83,8 @@ fn frontmatter_schema_messages_quote_document_number_spellings() {
     let document = parse_markdown(
         "---\nwhole: 100.0\nfraction: 1.5\nlower_exponent: 1e2\nupper_exponent: 1E2\n---\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let messages = validate(&schema, &document)
         .expect("schema prepares")
         .into_iter()
@@ -136,7 +140,8 @@ fn reports_invalid_and_forbidden_frontmatter_without_schema_execution() {
         load_schema("version: 1\nfrontmatter: { allow: false }\ntitle: null\nsections: []\n")
             .expect("test schema is valid")
             .schema;
-    let document = parse_markdown("---\n- item\n---\n", MarkdownOptions::default());
+    let document = parse_markdown("---\n- item\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let ids = validate(&schema, &document)
         .expect("schema prepares")
         .into_iter()
@@ -164,7 +169,7 @@ fn optional_forbidden_and_file_suppression_apply_to_json_schema() {
     schema.frontmatter = FrontmatterPolicy::Optional {
         schema: Some(json_schema.clone()),
     };
-    let absent = parse_markdown("", MarkdownOptions::default());
+    let absent = parse_markdown("", MarkdownOptions::default()).expect("Markdown parsing succeeds");
     assert!(validate(&schema, &absent)
         .expect("schema prepares")
         .is_empty());
@@ -172,7 +177,8 @@ fn optional_forbidden_and_file_suppression_apply_to_json_schema() {
     let suppressed = parse_markdown(
         "---\nstatus: draft\n---\n<!-- outlint-disable-file frontmatter-schema -->\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     assert!(validate(&schema, &suppressed)
         .expect("schema prepares")
         .is_empty());
@@ -180,7 +186,8 @@ fn optional_forbidden_and_file_suppression_apply_to_json_schema() {
     schema.frontmatter = FrontmatterPolicy::Forbidden {
         schema: Some(json_schema),
     };
-    let present = parse_markdown("---\nstatus: draft\n---\n", MarkdownOptions::default());
+    let present = parse_markdown("---\nstatus: draft\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let ids = validate(&schema, &present)
         .expect("schema prepares")
         .into_iter()

@@ -63,19 +63,17 @@ fn headings(document: &Document) -> Vec<&Heading> {
 #[test]
 fn frame_stack_checks_nested_typed_closes_and_retains_ranges() {
     let mut frames = FrameStack::default();
-    frames.push(Tag::BlockQuote(None), 2..40);
-    frames.push(Tag::List(Some(1)), 5..35);
-    frames.push(Tag::Item, 8..30);
+    frames.push(Tag::BlockQuote(None), 2..40, false);
+    frames.push(Tag::List(Some(1)), 5..35, false);
+    frames.push(Tag::Item, 8..30, false);
 
-    let item = frames
-        .close(TagEnd::Item)
-        .unwrap_or_else(|()| unreachable!());
+    let item = frames.close(TagEnd::Item, 8..30).expect("balanced frame");
     let list = frames
-        .close(TagEnd::List(true))
-        .unwrap_or_else(|()| unreachable!());
+        .close(TagEnd::List(true), 5..35)
+        .expect("balanced frame");
     let quote = frames
-        .close(TagEnd::BlockQuote(None))
-        .unwrap_or_else(|()| unreachable!());
+        .close(TagEnd::BlockQuote(None), 2..40)
+        .expect("balanced frame");
 
     assert_eq!(item.expected_end, TagEnd::Item);
     assert_eq!(item.range, 8..30);
@@ -89,11 +87,11 @@ fn frame_stack_checks_nested_typed_closes_and_retains_ranges() {
 #[test]
 fn frame_stack_mismatched_close_fails_closed_permanently() {
     let mut frames = FrameStack::default();
-    frames.push(Tag::Paragraph, 4..12);
+    frames.push(Tag::Paragraph, 4..12, false);
 
-    assert!(frames.close(TagEnd::CodeBlock).is_err());
+    assert!(frames.close(TagEnd::CodeBlock, 4..12).is_err());
     assert!(!frames.is_top_level());
-    assert!(frames.close(TagEnd::Paragraph).is_ok());
+    assert!(frames.close(TagEnd::Paragraph, 4..12).is_ok());
     assert!(!frames.is_top_level());
 }
 
@@ -102,7 +100,7 @@ fn frame_stack_checked_empty_close_fails_closed() {
     let mut frames = FrameStack::default();
 
     assert!(frames.is_top_level());
-    assert!(frames.close(TagEnd::Paragraph).is_err());
+    assert!(frames.close(TagEnd::Paragraph, 4..12).is_err());
     assert!(!frames.is_top_level());
 }
 
@@ -119,7 +117,8 @@ fn parses_atx_and_setext_headings_but_not_near_misses() {
         "setext two\n",
         "---\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let actual: Vec<_> = headings(&document)
         .into_iter()
         .map(|heading| (heading.level, heading.text.as_str()))
@@ -148,7 +147,8 @@ fn accepts_only_top_level_physical_heading_lines() {
         "   ## physical atx\n",
         "physical setext\n---\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let actual: Vec<_> = headings(&document)
         .into_iter()
         .map(|heading| heading.text.as_str())
@@ -166,7 +166,8 @@ fn balanced_frames_preserve_heading_records() {
         "Top `two`\n",
         "===\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let found = headings(&document);
 
     assert_eq!(found.len(), 2);
@@ -194,7 +195,8 @@ fn nested_container_headings_remain_ineligible() {
         "```md\n# code\n```\n\n",
         "# top level\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let actual: Vec<_> = headings(&document)
         .into_iter()
         .map(|heading| heading.text.as_str())
@@ -215,7 +217,8 @@ fn setext_and_atx_eligibility_is_unchanged() {
         "    # indented code\n",
         "####### seven hashes\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let actual: Vec<_> = headings(&document)
         .into_iter()
         .map(|heading| (heading.level, heading.text.as_str()))
@@ -239,7 +242,8 @@ fn ignores_headings_in_commonmark_fences() {
         "   ```` language\n## also hidden\n``` not a close\n   ````\n",
         "### visible\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let actual: Vec<_> = headings(&document)
         .into_iter()
         .map(|heading| heading.text.as_str())
@@ -253,7 +257,8 @@ fn applies_atx_closing_hash_rules() {
     let document = parse_markdown(
         "# text ###\n# text###\n# ###\n# text # tail\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let actual: Vec<_> = headings(&document)
         .into_iter()
         .map(|heading| (heading.text.as_str(), heading.source_text.as_str()))
@@ -273,13 +278,15 @@ fn applies_atx_closing_hash_rules() {
 #[test]
 fn strips_inline_markup_and_decodes_commonmark_text() {
     let source = "## **A&amp;B** [link](target) ![alt](image) `code` <i>tag</i> \\*star\\*\n";
-    let stripped = parse_markdown(source, MarkdownOptions::default());
+    let stripped =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let preserved = parse_markdown(
         source,
         MarkdownOptions {
             strip_inline_markup: false,
         },
-    );
+    )
+    .expect("Markdown parsing succeeds");
 
     let stripped_heading = &stripped.sections[0].heading;
     assert_eq!(stripped_heading.text, "A&B link alt code tag *star*");
@@ -299,7 +306,8 @@ fn builds_tree_using_nearest_prior_lower_heading() {
     let document = parse_markdown(
         "# root\n### skipped\n#### child\n## sibling\n# next\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
 
     assert_eq!(document.sections.len(), 2);
     assert_eq!(document.sections[0].children.len(), 2);
@@ -311,7 +319,8 @@ fn builds_tree_using_nearest_prior_lower_heading() {
 #[test]
 fn records_byte_line_column_and_setext_extent() {
     let source = "å\n\n   # atx\r\nsetext\n---\n";
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let found = headings(&document);
 
     assert_eq!(found[0].location.line, 3);
@@ -334,7 +343,8 @@ fn captures_header_and_file_suppressions() {
         "\n",
         "## not suppressed\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let found = headings(&document);
 
     assert!(document.file_suppressions.contains("missing-section"));
@@ -355,7 +365,8 @@ fn finds_file_suppressions_nested_in_raw_html() {
         "</div>\n\n",
         "# heading\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     assert!(document.file_suppressions.contains("missing-section"));
     assert!(document.file_suppressions.contains("requires"));
@@ -370,7 +381,8 @@ fn requires_header_suppression_to_occupy_its_whole_line() {
         "<!-- outlint-disable skipped-level --> suffix\n",
         "# also not suppressed\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     assert!(headings(&document)
         .iter()
@@ -385,7 +397,8 @@ fn bare_cr_delimits_locations_and_suppression_lines() {
         "setext\r",
         "---\r",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let found = headings(&document);
 
     assert_eq!(found.len(), 2);
@@ -445,11 +458,13 @@ fn tight_and_loose_first_paragraphs_have_equal_item_text() {
     let tight = parse_markdown(
         "- **A&amp;B** [link](target)\n- sibling\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let loose = parse_markdown(
         "- **A&amp;B** [link](target)\n\n- sibling\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let tight_text = lists(&tight)[0].items.first.text.as_ref();
     let loose_text = lists(&loose)[0].items.first.text.as_ref();
 
@@ -464,7 +479,8 @@ fn tight_and_loose_first_paragraphs_have_equal_item_text() {
         MarkdownOptions {
             strip_inline_markup: false,
         },
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let retained = lists(&retained)[0]
         .items
         .first
@@ -484,7 +500,7 @@ fn multiline_item_text_drops_container_indentation_without_stripping() {
         MarkdownOptions::default(),
     ] {
         for source in ["- Alpha\n  Beta\n", "- Alpha\nBeta\n"] {
-            let document = parse_markdown(source, options);
+            let document = parse_markdown(source, options).expect("Markdown parsing succeeds");
             let text = lists(&document)[0]
                 .items
                 .first
@@ -505,8 +521,10 @@ fn multiline_loose_item_text_matches_tight_form() {
         },
         MarkdownOptions::default(),
     ] {
-        let tight = parse_markdown("- Alpha\n  Beta\n- sibling\n", options);
-        let loose = parse_markdown("- Alpha\n  Beta\n\n- sibling\n", options);
+        let tight = parse_markdown("- Alpha\n  Beta\n- sibling\n", options)
+            .expect("Markdown parsing succeeds");
+        let loose = parse_markdown("- Alpha\n  Beta\n\n- sibling\n", options)
+            .expect("Markdown parsing succeeds");
         let tight_text = lists(&tight)[0]
             .items
             .first
@@ -533,8 +551,10 @@ fn multiline_item_text_preserves_markup_spelling_without_stripping() {
         MarkdownOptions {
             strip_inline_markup: false,
         },
-    );
-    let stripped = parse_markdown(source, MarkdownOptions::default());
+    )
+    .expect("Markdown parsing succeeds");
+    let stripped =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let retained_text = lists(&retained)[0]
         .items
         .first
@@ -560,8 +580,10 @@ fn multiline_code_span_drops_internal_container_indentation() {
         MarkdownOptions {
             strip_inline_markup: false,
         },
-    );
-    let stripped = parse_markdown(source, MarkdownOptions::default());
+    )
+    .expect("Markdown parsing succeeds");
+    let stripped =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     assert_eq!(
         lists(&retained)[0]
@@ -591,8 +613,10 @@ fn multiline_link_text_drops_internal_container_indentation() {
         MarkdownOptions {
             strip_inline_markup: false,
         },
-    );
-    let stripped = parse_markdown(source, MarkdownOptions::default());
+    )
+    .expect("Markdown parsing succeeds");
+    let stripped =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     assert_eq!(
         lists(&retained)[0]
@@ -622,8 +646,10 @@ fn multiline_inline_html_drops_internal_container_indentation() {
         MarkdownOptions {
             strip_inline_markup: false,
         },
-    );
-    let stripped = parse_markdown(source, MarkdownOptions::default());
+    )
+    .expect("Markdown parsing succeeds");
+    let stripped =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     assert_eq!(
         lists(&retained)[0]
@@ -657,7 +683,7 @@ fn tab_stop_columns_remove_space_and_mixed_prefixes() {
             ),
             (MarkdownOptions::default(), "Alpha Beta"),
         ] {
-            let document = parse_markdown(source, options);
+            let document = parse_markdown(source, options).expect("Markdown parsing succeeds");
             let text = lists(&document)[0]
                 .items
                 .first
@@ -681,7 +707,7 @@ fn tab_stop_columns_tolerate_short_lazy_prefixes() {
         ),
         (MarkdownOptions::default(), "Alpha"),
     ] {
-        let document = parse_markdown(source, options);
+        let document = parse_markdown(source, options).expect("Markdown parsing succeeds");
         let text = lists(&document)[0]
             .items
             .first
@@ -699,7 +725,8 @@ fn ordered_item_continuation_indentation_is_removed() {
         MarkdownOptions {
             strip_inline_markup: false,
         },
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let text = lists(&document)[0]
         .items
         .first
@@ -737,7 +764,7 @@ fn nested_continuation_indentation_in_ordered_items() {
             &diagnostic_text,
             options,
         );
-        assert_eq!(inner_item_text, expected);
+        assert_eq!(inner_item_text.expect("valid inline source"), expected);
     }
 }
 
@@ -753,7 +780,8 @@ fn nonparagraph_first_blocks_produce_no_item_text() {
         "\n  later paragraph\n",
         "- []()\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let list = lists(&document)[0];
     let items: Vec<_> = list.items.iter().collect();
 
@@ -770,7 +798,8 @@ fn nested_items_are_not_direct_items() {
     let document = parse_markdown(
         "- outer one\n  - nested one\n  - nested two\n- outer two\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let list = lists(&document)[0];
     let texts: Vec<_> = list
         .items
@@ -795,7 +824,8 @@ fn adjacent_lists_follow_parser_list_events() {
             "- final\n",
         ),
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let lists = lists(&document);
 
     assert_eq!(lists.len(), 3);
@@ -1022,7 +1052,8 @@ fn malformed_and_deep_edge_forms_keep_prior_headings_and_direct_ownership() {
     ];
 
     for (source, expected) in cases {
-        let document = parse_markdown(source, MarkdownOptions::default());
+        let document =
+            parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let actual: Vec<_> = headings(&document)
             .into_iter()
             .map(|heading| heading.diagnostic_text.as_str())
@@ -1030,7 +1061,8 @@ fn malformed_and_deep_edge_forms_keep_prior_headings_and_direct_ownership() {
         assert_eq!(actual, expected, "{source:?}");
     }
 
-    let nested = parse_markdown(&deep_quote, MarkdownOptions::default());
+    let nested =
+        parse_markdown(&deep_quote, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     assert_eq!(nested.preamble.len(), 1);
     let block = nested
         .preamble
@@ -1062,7 +1094,8 @@ fn ignores_suppression_spelling_near_misses_and_code() {
         "<!-- outlint-disable -->\n",
         "# heading\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     assert!(document.file_suppressions.0.is_empty());
     assert!(document.sections[0].heading.suppressions.0.is_empty());
@@ -1078,7 +1111,8 @@ fn parses_and_masks_yaml_frontmatter_before_heading_scanning() {
         "---\n",
         "# Document title\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     let DocumentFrontmatter::Mapping {
         value, location, ..

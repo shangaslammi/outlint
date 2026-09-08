@@ -38,8 +38,10 @@ Released as 0.1.0; the working tree implements the current specification. The
 pipeline in `outlint-core`: `load_schema` / `load_schema_with_resources`
 (`loader/`) turn schema text into a normalized `Schema` or an
 `InvalidSchema` carrying positioned `SchemaError`s; `parse_markdown`
-(`markdown/`) turns document text into a `Document` (section tree,
-frontmatter, suppressions); `validate` / `PreparedValidator`
+(`markdown/`) returns a complete `Document` (section tree,
+frontmatter, suppressions) or `MarkdownParseError` for an internal parser
+invariant failure; ordinary CommonMark recovery remains successful.
+`validate` / `PreparedValidator`
 (`validator/`, including `validator/sequence.rs`) map a `Schema` plus a
 `Document` to `Vec<Diagnostic>` using bounded ordered assignment.
 `matcher.rs` and `case_fold.rs` are private helpers.

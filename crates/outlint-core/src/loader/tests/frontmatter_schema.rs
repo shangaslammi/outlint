@@ -61,7 +61,8 @@ sections: []
     let document = crate::parse_markdown(
         "---\nstatus: review\n---\n",
         crate::MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let diagnostics =
         crate::validate(&loaded.schema, &document).expect("inline schema compiles again");
     assert_eq!(diagnostics.len(), 1);
@@ -89,7 +90,8 @@ fn inline_frontmatter_schema_accepts_fragment_references_and_cycles() {
     let document = crate::parse_markdown(
         "---\nchild:\n  child: false\n---\n",
         crate::MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let diagnostics =
         crate::validate(&loaded.schema, &document).expect("recursive inline schema compiles");
     assert_eq!(diagnostics.len(), 1);
@@ -111,7 +113,8 @@ fn inline_frontmatter_schema_accepts_fragment_references_and_cycles() {
     let document = crate::parse_markdown(
         "---\nnode:\n  child: false\n---\n",
         crate::MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let diagnostics = crate::validate(&loaded.schema, &document)
         .expect("dynamic fragment reference validates without retrieval");
     assert_eq!(diagnostics.len(), 1);
@@ -185,7 +188,8 @@ fn inline_frontmatter_schema_relative_ids_resolve_from_the_synthetic_base() {
     let document = crate::parse_markdown(
         "---\nstatus: review\n---\n",
         crate::MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     assert_eq!(
         crate::validate(&root_id.schema, &document)
             .expect("root relative id compiles")
@@ -209,7 +213,8 @@ fn inline_frontmatter_schema_relative_ids_resolve_from_the_synthetic_base() {
     let document = crate::parse_markdown(
         "---\nnode:\n  child: false\n---\n",
         crate::MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     assert_eq!(
         crate::validate(&nested_id.schema, &document)
             .expect("nested relative id compiles")
@@ -372,7 +377,8 @@ fn loads_and_resolves_linked_frontmatter_schema_with_local_ref() {
     let document = crate::parse_markdown(
         "---\nstatus: review\n---\n",
         crate::MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let diagnostics =
         crate::validate(&loaded.schema, &document).expect("loader-created validator compiles");
     assert_eq!(diagnostics.len(), 1);
@@ -465,7 +471,8 @@ fn preserves_ref_siblings_and_boolean_targets() {
     let document = crate::parse_markdown(
         "---\ntarget: true\n---\n",
         crate::MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let diagnostics =
         crate::validate(&loaded.schema, &document).expect("loader-created validator compiles");
     assert_eq!(diagnostics.len(), 1, "`$ref` siblings must both apply");
@@ -1025,7 +1032,8 @@ fn linked_json_schema_loads_beside_a_captures_declaration() {
         loaded.locations.nodes[&SchemaNode::FrontmatterSchemaDeclaration].source,
         SourceId(0)
     );
-    let document = crate::parse_markdown("---\ntitle: x\n---\n", crate::MarkdownOptions::default());
+    let document = crate::parse_markdown("---\ntitle: x\n---\n", crate::MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let diagnostics =
         crate::validate(&loaded.schema, &document).expect("the linked schema compiles again");
     assert_eq!(diagnostics.len(), 1);

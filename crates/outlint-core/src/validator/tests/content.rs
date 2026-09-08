@@ -15,7 +15,8 @@ use super::diagnostics;
 
 fn plan_and_document(schema: &str, markdown: &str) -> (crate::Schema, crate::Document) {
     let schema = load_schema(schema).expect("test schema is valid").schema;
-    let document = parse_markdown(markdown, MarkdownOptions::default());
+    let document =
+        parse_markdown(markdown, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     (schema, document)
 }
 
@@ -246,7 +247,8 @@ fn all_three_domains_build_dimension_paired_edges() {
 fn omitted_and_declared_empty_scopes_take_distinct_paths() {
     let omitted = load_schema("version: 1\noutline: []\n").expect("schema is valid");
     let declared = load_schema("version: 1\ncontent: []\noutline: []\n").expect("schema is valid");
-    let document = parse_markdown("Visible paragraph\n", MarkdownOptions::default());
+    let document = parse_markdown("Visible paragraph\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let omitted_plan = ValidationPlan::new(&omitted.schema).expect("schema prepares");
     let declared_plan = ValidationPlan::new(&declared.schema).expect("schema prepares");
 

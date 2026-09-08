@@ -3036,6 +3036,16 @@ Exhaustion of a documented matching work or memory limit under §3.7 is such
 an operational error: it produces no verdict or truncated result for the
 affected document and makes the invocation exit with status 2.
 
+An internal parser failure, such as an invalid source range, inconsistent
+parser-event nesting, or an impossible document-tree state, is also an
+operational error. It MUST NOT produce a partial document, a substituted empty
+document, or a document diagnostic. The affected input has no validation result;
+other inputs continue to be processed, and status 2 takes precedence. Ordinary
+malformed or incomplete Markdown MUST retain its CommonMark interpretation
+(§1.7); invalid YAML frontmatter retains the diagnostic behavior of §1.6.
+A fallible document-parsing API MUST return either the complete document or an
+operational error.
+
 ### 11.6 Side effects and resource retrieval
 
 The CLI validates only. It MUST NOT rewrite Markdown or schema files,

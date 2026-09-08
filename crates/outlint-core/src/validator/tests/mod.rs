@@ -17,7 +17,8 @@ use crate::{load_schema, parse_markdown, MarkdownOptions};
 
 fn ids_and_targets(schema: &str, markdown: &str) -> Vec<(DiagnosticId, DiagnosticTarget)> {
     let loaded = load_schema(schema).expect("test schema is valid");
-    let document = parse_markdown(markdown, MarkdownOptions::default());
+    let document =
+        parse_markdown(markdown, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     validate(&loaded.schema, &document)
         .expect("schema prepares")
         .into_iter()
@@ -38,6 +39,6 @@ fn diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
 /// able to say which input it means.
 fn diagnostics_with(schema: &str, markdown: &str, options: MarkdownOptions) -> Vec<Diagnostic> {
     let loaded = load_schema(schema).expect("test schema is valid");
-    let document = parse_markdown(markdown, options);
+    let document = parse_markdown(markdown, options).expect("Markdown parsing succeeds");
     validate(&loaded.schema, &document).expect("schema prepares")
 }

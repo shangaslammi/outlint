@@ -135,13 +135,13 @@ sections:
     // 2. Compile it once; reuse for any number of documents.
     let validator = PreparedValidator::new(&loaded.schema).expect("schema compiles");
 
-    // 3. Parse Markdown into a section tree.
+    // 3. Parse Markdown; internal parser failures return no partial document.
     let document = parse_markdown(
         "# Widget Redesign\n\n## Usage\n",
         MarkdownOptions {
             strip_inline_markup: loaded.schema.options.strip_inline_markup,
         },
-    );
+    ).expect("Markdown parsing completes");
 
     // 4. Inspect the diagnostics. The target distinguishes a heading that is
     //    really there from a schema matcher that nothing matched.
@@ -248,3 +248,9 @@ Rust 1.86.
 
 Licensed under either of Apache License, Version 2.0 or MIT license at your
 option (`MIT OR Apache-2.0`).
+
+`parse_markdown` returns `Result<Document, MarkdownParseError>`. Malformed or
+incomplete Markdown still follows CommonMark recovery. An error reports an
+internal source, event, or tree invariant failure; callers must propagate it
+rather than validate an empty or partial replacement document. Invalid YAML
+frontmatter remains document data for normal frontmatter diagnostics.

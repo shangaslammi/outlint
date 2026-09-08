@@ -10,6 +10,7 @@ use saphyr_parser::Span;
 
 pub(super) mod yaml;
 
+use super::error::MarkdownParseError as ParseError;
 use super::lines::{text_range, LineIndex};
 use super::model::{
     DocumentFrontmatter, FrontmatterAnchor, FrontmatterAnchors, FrontmatterLocation,
@@ -22,36 +23,41 @@ use super::model::{
 pub(super) fn parse(
     source: &str,
     lines: &LineIndex,
-) -> (DocumentFrontmatter, Option<std::ops::Range<usize>>) {
-    if lines.line_text(source, 1) != Some("---") {
-        return (DocumentFrontmatter::Absent, None);
+) -> Result<(DocumentFrontmatter, Option<std::ops::Range<usize>>), ParseError> {
+    if lines.line_text(source, 1).ok_or(ParseError::RANGE)? != "---" {
+        return Ok((DocumentFrontmatter::Absent, None));
     }
-    let closing_line =
-        (2..=lines.line_count()).find(|line| lines.line_text(source, *line) == Some("---"));
+    let mut closing_line = None;
+    for line in 2..=lines.line_count() {
+        if lines.line_text(source, line).ok_or(ParseError::RANGE)? == "---" {
+            closing_line = Some(line);
+            break;
+        }
+    }
     let Some(closing_line) = closing_line else {
         let location = FrontmatterLocation {
             range: text_range(0, source.len()),
             start_line: 1,
             end_line: lines.line_count() as u64,
         };
-        return (
+        return Ok((
             DocumentFrontmatter::Invalid {
                 location,
                 message: "frontmatter opening delimiter has no closing `---` line".into(),
             },
             Some(0..source.len()),
-        );
+        ));
     };
-    let body_start = lines.line_start(2);
-    let body_end = lines.line_start(closing_line);
-    let block_end = lines.line_terminator_end(closing_line, source.len());
+    let body_start = lines.line_start(2)?;
+    let body_end = lines.line_start(closing_line)?;
+    let block_end = lines.line_terminator_end(closing_line)?;
     let range = 0..block_end;
     let location = FrontmatterLocation {
         range: text_range(range.start, range.end),
         start_line: 1,
         end_line: closing_line as u64,
     };
-    let body = source.get(body_start..body_end).unwrap_or_default();
+    let body = source.get(body_start..body_end).ok_or(ParseError::RANGE)?;
     // A byte-order mark heading the block is removed once, here, where the body
     // is cut out and before the reader below is handed it. YAML gives one no
     // meaning at the head of a stream, but the parser does not drop it either,
@@ -68,15 +74,15 @@ pub(super) fn parse(
         Ok((value, positions)) => DocumentFrontmatter::Mapping {
             value,
             location,
-            anchors: document_frontmatter_anchors(source, lines, &location, positions, mark),
+            anchors: document_frontmatter_anchors(source, lines, &location, positions, mark)?,
         },
         Err(message) => DocumentFrontmatter::Invalid { location, message },
     };
-    (frontmatter, Some(range))
+    Ok((frontmatter, Some(range)))
 }
 
-/// Entry positions as the conversion walk records them: one-based lines
-/// counted from the frontmatter body, and one-based *character* columns.
+/// Entry positions as the parser records them: one-based body lines and
+/// zero-based character columns. Conversion checks arithmetic at the document boundary.
 /// Duplicate mapping keys are rejected upstream, so no pointer occurs twice.
 pub(in crate::markdown) type BodyAnchors = Vec<(String, BodyPosition)>;
 
@@ -89,14 +95,13 @@ pub(in crate::markdown) struct BodyPosition {
 /// Reads a span's start into a body position.
 ///
 /// `saphyr-parser` counts columns from zero — its scanner opens every stream
-/// at column 0 — while every column this module reports is one-based, so the
-/// base is reconciled here and nowhere else. The marker's column counts
-/// characters, not bytes; [`LineCursor`] is what converts one against the
-/// document's own line.
+/// at column 0. Keep that coordinate until the document-anchor conversion
+/// can check the addition to a one-based column. The marker counts characters,
+/// not bytes; [`LineCursor`] converts it against the document's own line.
 fn body_position(span: &Span) -> BodyPosition {
     BodyPosition {
         line: span.start.line(),
-        column: span.start.col() + 1,
+        column: span.start.col(),
     }
 }
 
@@ -107,8 +112,8 @@ fn body_position(span: &Span) -> BodyPosition {
 /// while [`DiagnosticLocation`](crate::DiagnosticLocation) counts bytes, so the
 /// column is re-measured against the document line itself. That re-measurement
 /// doubles as a consistency check: a position that does not fall inside the
-/// block, or names a column the line does not have, is dropped rather than
-/// reported, leaving the block location as the anchor.
+/// block, or names a column the line does not have, fails parsing rather than
+/// exposing partial anchor information.
 ///
 /// Re-measuring each entry from the start of its line would be quadratic in a
 /// block that puts many entries on one line, which a flow sequence does. The
@@ -127,37 +132,43 @@ fn document_frontmatter_anchors(
     location: &FrontmatterLocation,
     mut positions: BodyAnchors,
     mark: usize,
-) -> FrontmatterAnchors {
+) -> Result<FrontmatterAnchors, ParseError> {
     positions.sort_unstable_by_key(|(_, position)| (position.line, position.column));
     let mut anchors = BTreeMap::new();
     let mut cursor = LineCursor::default();
     for (pointer, position) in positions {
-        let Some(line) = position.line.checked_add(1) else {
-            continue;
-        };
+        let line = position.line.checked_add(1).ok_or(ParseError::RANGE)?;
         // Entries lie strictly between the opening and closing delimiters.
         if line < 2 || line as u64 >= location.end_line {
-            continue;
+            return Err(ParseError::RANGE);
         }
         if cursor.line != line {
-            let Some(text) = lines.line_text(source, line) else {
-                continue;
-            };
+            let text = lines.line_text(source, line).ok_or(ParseError::RANGE)?;
             cursor = LineCursor::new(line, text);
         }
         let shift = if position.line == 1 { mark } else { 0 };
-        let Some(column) = cursor.byte_column(position.column + shift) else {
-            continue;
-        };
-        anchors.insert(
-            pointer,
-            FrontmatterAnchor {
-                line: line as u64,
-                column,
-            },
-        );
+        let character_column = position
+            .column
+            .checked_add(1)
+            .and_then(|column| column.checked_add(shift))
+            .ok_or(ParseError::RANGE)?;
+        let column = cursor
+            .byte_column(character_column)
+            .ok_or(ParseError::RANGE)?;
+        if anchors
+            .insert(
+                pointer,
+                FrontmatterAnchor {
+                    line: line as u64,
+                    column,
+                },
+            )
+            .is_some()
+        {
+            return Err(ParseError::RANGE);
+        }
     }
-    FrontmatterAnchors(anchors)
+    Ok(FrontmatterAnchors(anchors))
 }
 
 /// A left-to-right walk of one line that converts one-based character columns
@@ -198,5 +209,58 @@ impl<'a> LineCursor<'a> {
             self.column += 1;
         }
         Some(self.byte as u64 + 1)
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn impossible_yaml_positions_do_not_produce_partial_anchors() {
+        let source = "---\né: 1\n---\n";
+        let lines = LineIndex::new(source);
+        let location = FrontmatterLocation {
+            range: text_range(0, source.len()),
+            start_line: 1,
+            end_line: 3,
+        };
+        for position in [
+            BodyPosition {
+                line: usize::MAX,
+                column: 1,
+            },
+            BodyPosition { line: 2, column: 1 },
+            BodyPosition { line: 0, column: 0 },
+            BodyPosition {
+                line: 1,
+                column: 30,
+            },
+        ] {
+            let positions = vec![
+                ("/valid".into(), BodyPosition { line: 1, column: 0 }),
+                ("/invalid".into(), position),
+            ];
+            assert!(document_frontmatter_anchors(source, &lines, &location, positions, 0).is_err());
+        }
+        assert!(document_frontmatter_anchors(
+            source,
+            &lines,
+            &location,
+            vec![
+                ("/duplicate".into(), BodyPosition { line: 1, column: 0 }),
+                ("/duplicate".into(), BodyPosition { line: 1, column: 0 }),
+            ],
+            0
+        )
+        .is_err());
+        assert!(document_frontmatter_anchors(
+            source,
+            &lines,
+            &location,
+            vec![("/overflow".into(), BodyPosition { line: 1, column: 1 })],
+            usize::MAX
+        )
+        .is_err());
     }
 }

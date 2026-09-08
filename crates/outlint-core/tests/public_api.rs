@@ -51,7 +51,8 @@ fn the_validation_signatures_are_pinned() {
         PreparedValidator::new;
 
     let loaded = load_schema("version: 1\ntitle: '*'\nsections: []\n").expect("schema is valid");
-    let document = parse_markdown("# Guide\n", MarkdownOptions::default());
+    let document =
+        parse_markdown("# Guide\n", MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     let validator = prepare(&loaded.schema).expect("the loaded schema compiles");
     assert!(prepared_validate(&validator, &document)
@@ -292,7 +293,8 @@ fn rfc5_document_model_is_pinned() {
     let document = parse_markdown(
         "root\n\n# Section\n\n- **first**\n-\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     assert_eq!(document.preamble.len(), 1);
     assert_eq!(document.preamble.iter().count(), 1);
     assert!(!document.preamble.is_empty());
@@ -573,7 +575,8 @@ fn rfc5_complete_public_surface_is_pinned() {
 
     let loaded =
         load_schema("version: 1\ncontent: []\noutline: []\n").expect("RFC 5 schema is valid");
-    let document = parse_markdown("", MarkdownOptions::default());
+    let document =
+        parse_markdown("", MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let _: fn(&Schema) -> Result<PreparedValidator, PrepareValidationError> =
         PreparedValidator::new;
     let _: fn(
@@ -921,7 +924,8 @@ fn a_positional_rule_reference_survives_binding_and_validation_intact() {
          match: Beta\nconstraints:\n  - any_of: [\"$.alpha[{position}]\", beta]\n"
     ))
     .expect("schema is valid");
-    let document = parse_markdown("# Guide\n", MarkdownOptions::default());
+    let document =
+        parse_markdown("# Guide\n", MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let reported = validate(&loaded.schema, &document).expect("validation completes");
 
     let diagnostic = reported
@@ -962,7 +966,8 @@ fn a_rule_capture_invalid_value_names_its_header_and_capture_declaration() {
     let document = parse_markdown(
         "# Guide\n## Release 1.0.0+build.7\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let reported = validate(&loaded.schema, &document).expect("validation completes");
 
     assert_eq!(reported.len(), 1);
@@ -1006,7 +1011,8 @@ fn a_frontmatter_missing_value_names_its_block_pointer_and_declaration() {
          type: semver\n      required: true\n",
     )
     .expect("schema is valid");
-    let document = parse_markdown("---\nother: 1\n---\n", MarkdownOptions::default());
+    let document = parse_markdown("---\nother: 1\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let reported = validate(&loaded.schema, &document).expect("validation completes");
 
     assert_eq!(reported.len(), 1);
@@ -1044,7 +1050,8 @@ fn an_order_violation_names_its_entry_and_exactly_its_adjacent_pair() {
          captures:\n      v: int\n    order:\n      - by: v\n",
     )
     .expect("schema is valid");
-    let document = parse_markdown("# Guide\n## V 2\n## V 1\n", MarkdownOptions::default());
+    let document = parse_markdown("# Guide\n## V 2\n## V 1\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let reported = validate(&loaded.schema, &document).expect("validation completes");
 
     assert_eq!(reported.len(), 1);
@@ -1093,7 +1100,8 @@ fn an_invalid_boolean_read_carries_the_query_that_failed() {
     let document = parse_markdown(
         "---\nflag: \"text\"\n---\n## Body\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let reported = validate(&loaded.schema, &document).expect("validation completes");
 
     assert_eq!(reported.len(), 1);
@@ -1125,7 +1133,8 @@ fn a_failed_constraint_carries_its_rule_and_frontmatter_capture_references() {
          type: bool\nconstraints:\n  - any_of: [body, \"fm.released\"]\n",
     )
     .expect("schema is valid");
-    let document = parse_markdown("---\nreleased: false\n---\n", MarkdownOptions::default());
+    let document = parse_markdown("---\nreleased: false\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let reported = validate(&loaded.schema, &document).expect("validation completes");
 
     assert_eq!(reported.len(), 1);
@@ -1152,4 +1161,22 @@ fn a_failed_constraint_carries_its_rule_and_frontmatter_capture_references() {
     assert_eq!(capture.locator(), "fm.released");
     assert_eq!(capture.name().as_str(), "released");
     assert_eq!(capture.type_name(), "bool");
+}
+
+#[test]
+fn markdown_parser_exposes_a_fallible_api_with_a_standard_error() {
+    fn standard_error<T: std::error::Error + Send + Sync + 'static>() {}
+    standard_error::<outlint_core::MarkdownParseError>();
+    let parser: fn(&str, MarkdownOptions) -> Result<Document, outlint_core::MarkdownParseError> =
+        parse_markdown;
+    for source in [
+        "",
+        "# Guide\n",
+        "-\n",
+        "```\nunclosed",
+        "<!-- incomplete",
+        "---\na: [\n---\n",
+    ] {
+        assert!(parser(source, MarkdownOptions::default()).is_ok());
+    }
 }

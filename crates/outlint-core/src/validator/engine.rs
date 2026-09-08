@@ -2403,7 +2403,8 @@ mod invariant_tests {
             "version: 1\ncontent: [{block: p}]\noutline: []\n",
         ] {
             let loaded = load_schema(text).expect("schema");
-            let document = parse_markdown("paragraph\n# Extra\n", MarkdownOptions::default());
+            let document = parse_markdown("paragraph\n# Extra\n", MarkdownOptions::default())
+                .expect("Markdown parsing succeeds");
             let mut plan = ValidationPlan::new(&loaded.schema).expect("plan");
             plan.content = match plan.content {
                 PreparedContentScope::Omitted => PreparedContentScope::Declared(Vec::new()),
@@ -2430,7 +2431,8 @@ mod invariant_tests {
                 "version: 1\ncontent:\n  - block: list\n{items}outline: []\n"
             ))
             .expect("schema");
-            let document = parse_markdown("paragraph\n\n- Entry\n", MarkdownOptions::default());
+            let document = parse_markdown("paragraph\n\n- Entry\n", MarkdownOptions::default())
+                .expect("Markdown parsing succeeds");
             let mut plan = ValidationPlan::new(&loaded.schema).expect("plan");
             let PreparedContentScope::Declared(rules) = &mut plan.content else {
                 panic!("declared")
@@ -2462,7 +2464,7 @@ mod invariant_tests {
             ("version: 1\noutline:\n  - match: Root\n    sections: []\n    forbid_sections: [{match: Denied}]\n", true, false),
         ] {
             let loaded = load_schema(text).expect("schema");
-            let document = parse_markdown("# Root\n## Denied\n", MarkdownOptions::default());
+            let document = parse_markdown("# Root\n## Denied\n", MarkdownOptions::default()).expect("Markdown parsing succeeds");
             let mut plan = ValidationPlan::new(&loaded.schema).expect("plan");
             let guards = if nested { &mut plan.rules[0].guards } else { &mut plan.guards };
             if omitted {
@@ -2478,7 +2480,8 @@ mod invariant_tests {
         ] {
             let loaded = load_schema(text).expect("schema");
             let donor = load_schema("version: 1\noutline: [{match: Donor}]\n").expect("schema");
-            let document = parse_markdown("# Root\n## Denied\n", MarkdownOptions::default());
+            let document = parse_markdown("# Root\n## Denied\n", MarkdownOptions::default())
+                .expect("Markdown parsing succeeds");
             let mut plan = ValidationPlan::new(&loaded.schema).expect("plan");
             plan.rules = ValidationPlan::new(&donor.schema).expect("plan").rules;
             assert!(validate_document(&loaded.schema, &document, &plan).is_err());
@@ -2489,7 +2492,8 @@ mod invariant_tests {
     fn a_non_list_cannot_be_assigned_to_a_list_rule() {
         let loaded =
             load_schema("version: 1\ncontent: [{block: list}]\noutline: []\n").expect("schema");
-        let document = parse_markdown("paragraph\n", MarkdownOptions::default());
+        let document = parse_markdown("paragraph\n", MarkdownOptions::default())
+            .expect("Markdown parsing succeeds");
         let plan = ValidationPlan::new(&loaded.schema).expect("plan");
         let PreparedContentScope::Declared(rules) = &plan.content else {
             panic!("declared")
@@ -2528,7 +2532,8 @@ mod invariant_tests {
     fn cardinality_reporting_rejects_missing_counts_and_excess_nodes() {
         let loaded =
             load_schema("version: 1\ncontent: [{block: list}]\noutline: []\n").expect("schema");
-        let document = parse_markdown("- Entry\n", MarkdownOptions::default());
+        let document = parse_markdown("- Entry\n", MarkdownOptions::default())
+            .expect("Markdown parsing succeeds");
         let DocumentShape::Outline {
             content: ContentScope::Declared(rules),
             ..
@@ -2575,7 +2580,8 @@ mod invariant_tests {
     fn missing_assignment_entries_rules_and_ordinals_are_failures() {
         let loaded =
             load_schema("version: 1\ncontent: [{block: list}]\noutline: []\n").expect("schema");
-        let document = parse_markdown("- Entry\n", MarkdownOptions::default());
+        let document = parse_markdown("- Entry\n", MarkdownOptions::default())
+            .expect("Markdown parsing succeeds");
         let plan = ValidationPlan::new(&loaded.schema).expect("plan");
         let PreparedContentScope::Declared(rules) = &plan.content else {
             panic!("declared")

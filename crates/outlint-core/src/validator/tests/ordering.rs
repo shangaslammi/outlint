@@ -8,7 +8,8 @@ use super::ids_and_targets;
 
 fn ordered_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
     let loaded = load_schema(schema).expect("test schema is valid");
-    let document = parse_markdown(markdown, MarkdownOptions::default());
+    let document =
+        parse_markdown(markdown, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     validate(&loaded.schema, &document)
         .expect("schema prepares")
         .into_iter()
@@ -18,7 +19,8 @@ fn ordered_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
 
 fn misplaced_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
     let loaded = load_schema(schema).expect("test schema is valid");
-    let document = parse_markdown(markdown, MarkdownOptions::default());
+    let document =
+        parse_markdown(markdown, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     validate(&loaded.schema, &document)
         .expect("schema prepares")
         .into_iter()

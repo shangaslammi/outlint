@@ -25,8 +25,10 @@ fn work_is_exact_sum_of_concrete_scope_costs() {
     let left = parse_markdown(
         "- Item\n\nParagraph\n# Heading\n",
         MarkdownOptions::default(),
-    );
-    let right = parse_markdown("- Other\n# Other\n", MarkdownOptions::default());
+    )
+    .expect("Markdown parsing succeeds");
+    let right = parse_markdown("- Other\n# Other\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
 
     fn concrete_work(
         schema: &crate::Schema,
@@ -176,7 +178,8 @@ fn validation_order_follows_section_eight() {
     let document = parse_markdown(
         "- root\n# Parent\n1. item\n## Child\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let plan = ValidationPlan::new(&loaded.schema).expect("schema prepares");
     let (_, _, trace) =
         validation_scope_state(&loaded.schema, &document, &plan).expect("validation completes");
@@ -203,7 +206,8 @@ fn validation_order_follows_section_eight() {
 
     let title_null = load_schema("version: 1\ncontent: []\ntitle: null\nsections: []\n")
         .expect("title-null schema is valid");
-    let title_null_document = parse_markdown("root paragraph\n", MarkdownOptions::default());
+    let title_null_document = parse_markdown("root paragraph\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let title_null_plan = ValidationPlan::new(&title_null.schema).expect("schema prepares");
     let (_, _, title_null_trace) =
         validation_scope_state(&title_null.schema, &title_null_document, &title_null_plan)
@@ -218,7 +222,8 @@ fn validation_order_follows_section_eight() {
 
     let titled = load_schema("version: 1\ntitle: Doc\ncontent: []\nsections: []\n")
         .expect("titled schema is valid");
-    let titled_document = parse_markdown("# Doc\ntitle paragraph\n", MarkdownOptions::default());
+    let titled_document = parse_markdown("# Doc\ntitle paragraph\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let titled_plan = ValidationPlan::new(&titled.schema).expect("schema prepares");
     let (_, _, titled_trace) =
         validation_scope_state(&titled.schema, &titled_document, &titled_plan)
@@ -241,7 +246,8 @@ fn visitor_counts_each_concrete_scope_once() {
     let document = parse_markdown(
         "- Root\n# Parent\n- Item\n## Child\n# Parent\n- Item\n## Child\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let plan = ValidationPlan::new(&loaded.schema).expect("schema prepares");
     let (work, counts, _) =
         validation_scope_state(&loaded.schema, &document, &plan).expect("validation completes");
@@ -267,8 +273,10 @@ fn visitor_counts_each_concrete_scope_once() {
     let titled =
         load_schema("version: 1\ntitle: Doc\nsections: []\n").expect("titled schema is valid");
     let titled_plan = ValidationPlan::new(&titled.schema).expect("schema prepares");
-    let single_title = parse_markdown("# Doc\n", MarkdownOptions::default());
-    let repeated_titles = parse_markdown("# Doc\n# Doc\n", MarkdownOptions::default());
+    let single_title =
+        parse_markdown("# Doc\n", MarkdownOptions::default()).expect("Markdown parsing succeeds");
+    let repeated_titles = parse_markdown("# Doc\n# Doc\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let (single_work, _, _) = validation_scope_state(&titled.schema, &single_title, &titled_plan)
         .expect("validation completes");
     let (repeated_work, _, _) =
@@ -295,7 +303,8 @@ fn diagnostics_retain_normative_document_and_schema_anchors() {
     let loaded =
         load_schema("version: 1\ntitle: null\nsections:\n  - match: Item\n    repeat: 2..2\n")
             .expect("test schema is valid");
-    let document = parse_markdown("## Item\n## Item\n## Item\n", MarkdownOptions::default());
+    let document = parse_markdown("## Item\n## Item\n## Item\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
 
     assert_eq!(diagnostics.len(), 1);
@@ -324,7 +333,8 @@ fn header_paths_carry_the_enclosing_h1() {
     let document = parse_markdown(
         "# Part One\n## Overview\n# Part Two\n## Overview\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let targets = validate(&loaded.schema, &document)
         .expect("schema prepares")
         .into_iter()
@@ -354,7 +364,8 @@ fn header_paths_carry_the_enclosing_h1() {
 
 fn surplus_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
     let loaded = load_schema(schema).expect("test schema is valid");
-    let document = parse_markdown(markdown, MarkdownOptions::default());
+    let document =
+        parse_markdown(markdown, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     validate(&loaded.schema, &document)
         .expect("schema prepares")
         .into_iter()
@@ -364,7 +375,8 @@ fn surplus_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
 
 fn skipped_diagnostics(schema: &str, markdown: &str) -> Vec<Diagnostic> {
     let loaded = load_schema(schema).expect("test schema is valid");
-    let document = parse_markdown(markdown, MarkdownOptions::default());
+    let document =
+        parse_markdown(markdown, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     validate(&loaded.schema, &document)
         .expect("schema prepares")
         .into_iter()
@@ -835,7 +847,8 @@ fn title_null_denies_h1_and_binds_top_level_h2s() {
     let document = parse_markdown(
         "## Overview\n# Surprise\n## Hidden\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].id, DiagnosticId::NotAllowed);
@@ -857,7 +870,8 @@ fn bare_sections_implies_a_required_title() {
     // silently.
     let bare = "version: 1\nsections:\n  - match: Overview\n    required: true\n";
     let loaded = load_schema(bare).expect("test schema is valid");
-    let document = parse_markdown("## Overview\n", MarkdownOptions::default());
+    let document = parse_markdown("## Overview\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
     assert_eq!(diagnostics.len(), 1);
     let diagnostic = diagnostics.first().expect("one diagnostic was asserted");
@@ -976,7 +990,8 @@ fn multi_h1_sugar_constraints_target_the_owning_h1() {
 
     // One `h1`: the legacy voice, the document as target.
     let single = load_schema(schema).expect("test schema is valid");
-    let document = parse_markdown("# One\n## A\n", MarkdownOptions::default());
+    let document = parse_markdown("# One\n## A\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let single_diagnostics = validate(&single.schema, &document).expect("schema prepares");
     assert_eq!(single_diagnostics.len(), 1);
     assert_eq!(single_diagnostics[0].id, DiagnosticId::Requires);
@@ -985,7 +1000,8 @@ fn multi_h1_sugar_constraints_target_the_owning_h1() {
 
     // Two `h1`s, both violating: each violation targets and anchors on
     // its own `h1` header instead of naming the document twice.
-    let document = parse_markdown("# One\n## A\n# Two\n## A\n", MarkdownOptions::default());
+    let document = parse_markdown("# One\n## A\n# Two\n## A\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let diagnostics = validate(&single.schema, &document).expect("schema prepares");
     let requires = diagnostics
         .iter()
@@ -1074,7 +1090,8 @@ fn root_scope_violations_name_the_document_rather_than_a_header() {
         "version: 1\nsections:\n  - id: a\n    match: A\n    required: true\n  - id: b\n    match: B\n    required: true\nconstraints:\n  - all_or_none: [a, b]\n",
     )
     .expect("test schema is valid");
-    let document = parse_markdown("# Part One\n## B\n", MarkdownOptions::default());
+    let document = parse_markdown("# Part One\n## B\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let targets = validate(&loaded.schema, &document)
         .expect("schema prepares")
         .into_iter()
@@ -1100,7 +1117,8 @@ fn root_scope_violations_name_the_document_rather_than_a_header() {
 fn unexpected_section_points_to_the_rule_that_closed_its_scope() {
     let loaded = load_schema("version: 1\nsections:\n  - match: Parent\n    sections: []\n")
         .expect("test schema is valid");
-    let document = parse_markdown("## Parent\n### Surprise\n", MarkdownOptions::default());
+    let document = parse_markdown("## Parent\n### Surprise\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let diagnostics = validate(&loaded.schema, &document).expect("schema prepares");
 
     let diagnostic = diagnostics
@@ -1151,7 +1169,8 @@ fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
     let document = parse_markdown(
         "# Doc\n## A\n## A\n## A\n## A\n## A\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let plan = ValidationPlan::new(&loaded.schema).expect("schema prepares");
     let work =
         validation_work_count(&loaded.schema, &document, &plan).expect("validation completes");
@@ -1231,7 +1250,8 @@ fn adversarial_document(headings: usize) -> String {
 fn measured_work(headings: usize, rules: usize, guards: usize, extras: bool) -> WorkCounter {
     let loaded = load_schema(&adversarial_schema(rules, guards, extras))
         .expect("generated adversarial schema is valid");
-    let document = parse_markdown(&adversarial_document(headings), MarkdownOptions::default());
+    let document = parse_markdown(&adversarial_document(headings), MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let plan = ValidationPlan::new(&loaded.schema).expect("generated schema prepares");
     validation_work_count(&loaded.schema, &document, &plan).expect("validation completes")
 }
@@ -1308,7 +1328,8 @@ fn measured_unordered_work(
 ) -> WorkCounter {
     let loaded = load_schema(&unordered_adversarial_schema(rules, guards, extras))
         .expect("generated unordered schema is valid");
-    let document = parse_markdown(&adversarial_document(headings), MarkdownOptions::default());
+    let document = parse_markdown(&adversarial_document(headings), MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
     let plan = ValidationPlan::new(&loaded.schema).expect("generated unordered schema prepares");
     validation_work_count(&loaded.schema, &document, &plan).expect("validation completes")
 }
@@ -1378,7 +1399,8 @@ fn nested_scope_work_is_the_sum_of_per_scope_bounds() {
     for depth in 1..=5 {
         let (schema_source, markdown) = nested_schema_and_document(depth);
         let loaded = load_schema(&schema_source).expect("nested schema is valid");
-        let document = parse_markdown(&markdown, MarkdownOptions::default());
+        let document = parse_markdown(&markdown, MarkdownOptions::default())
+            .expect("Markdown parsing succeeds");
         let plan = ValidationPlan::new(&loaded.schema).expect("nested schema prepares");
         let work = validation_work_count(&loaded.schema, &document, &plan)
             .expect("nested validation completes");
@@ -1458,7 +1480,7 @@ proptest! {
         }
 
         let loaded = load_schema(&schema).expect("generated schema is valid");
-        let document = parse_markdown(&markdown, MarkdownOptions::default());
+        let document = parse_markdown(&markdown, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let result = validate(&loaded.schema, &document);
         prop_assert!(result.is_ok());
     }
@@ -1538,7 +1560,8 @@ fn sequence_exhaustion_returns_no_partial_verdict() {
     )
     .expect("test schema is valid");
     let plan = ValidationPlan::new(&loaded.schema).expect("test schema prepares");
-    let document = parse_markdown("# not-an-int\n## Child\n", MarkdownOptions::default());
+    let document = parse_markdown("# not-an-int\n## Child\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
 
     let (exhausted, diagnostics, post_sequence_actions) =
         forced_sequence_exhaustion_state(&loaded.schema, &document, &plan);

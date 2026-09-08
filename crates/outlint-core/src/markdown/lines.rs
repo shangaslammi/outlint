@@ -4,6 +4,7 @@
 //! which is the invariant the Markdown scan and the frontmatter anchors both
 //! rest on.
 
+use super::error::MarkdownParseError as ParseError;
 use std::borrow::Cow;
 
 use crate::{ByteOffset, TextRange};
@@ -60,26 +61,26 @@ impl LineIndex {
         self.lines.partition_point(|line| line.start <= offset)
     }
 
-    pub(super) fn line_start(&self, line: usize) -> usize {
+    pub(super) fn line_start(&self, line: usize) -> Result<usize, ParseError> {
         line.checked_sub(1)
             .and_then(|index| self.lines.get(index).map(|line| line.start))
-            .unwrap_or_default()
+            .ok_or(ParseError::RANGE)
     }
 
-    pub(super) fn line_end(&self, line: usize, source_len: usize) -> usize {
+    pub(super) fn line_end(&self, line: usize) -> Result<usize, ParseError> {
         line.checked_sub(1)
             .and_then(|index| self.lines.get(index).map(|line| line.end))
-            .unwrap_or(source_len)
+            .ok_or(ParseError::RANGE)
     }
 
-    pub(super) fn line_terminator_end(&self, line: usize, source_len: usize) -> usize {
+    pub(super) fn line_terminator_end(&self, line: usize) -> Result<usize, ParseError> {
         line.checked_sub(1)
             .and_then(|index| self.lines.get(index).map(|line| line.terminator_end))
-            .unwrap_or(source_len)
+            .ok_or(ParseError::RANGE)
     }
 
     pub(super) fn line_text<'a>(&self, source: &'a str, line: usize) -> Option<&'a str> {
-        let start = self.line_start(line);
+        let start = self.line_start(line).ok()?;
         let end = line
             .checked_sub(1)
             .and_then(|index| self.lines.get(index).map(|line| line.end))?;
@@ -91,11 +92,13 @@ impl LineIndex {
     }
 }
 
-pub(super) fn clamp_range(
+/// Validates bounds, ordering, and both UTF-8 boundaries before using parser offsets.
+pub(super) fn source_range(
+    source: &str,
     range: std::ops::Range<usize>,
-    source_len: usize,
-) -> std::ops::Range<usize> {
-    range.start.min(source_len)..range.end.min(source_len).max(range.start.min(source_len))
+) -> Result<std::ops::Range<usize>, ParseError> {
+    source.get(range.clone()).ok_or(ParseError::RANGE)?;
+    Ok(range)
 }
 
 pub(super) fn text_range(start: usize, end: usize) -> TextRange {
@@ -105,35 +108,33 @@ pub(super) fn text_range(start: usize, end: usize) -> TextRange {
     }
 }
 
-pub(super) fn byte_column(line_start: usize, offset: usize) -> u64 {
+pub(super) fn byte_column(line_start: usize, offset: usize) -> Result<u64, ParseError> {
     offset
         .checked_sub(line_start)
         .and_then(|column| column.checked_add(1))
         .and_then(|column| u64::try_from(column).ok())
-        .unwrap_or(1)
+        .ok_or(ParseError::RANGE)
 }
 
 pub(super) fn without_trailing_blank_lines(
     source: &str,
     range: std::ops::Range<usize>,
     lines: &LineIndex,
-) -> std::ops::Range<usize> {
-    let safe = clamp_range(range, source.len());
+) -> Result<std::ops::Range<usize>, ParseError> {
+    let safe = source_range(source, range)?;
     if safe.is_empty() {
-        return safe;
+        return Ok(safe);
     }
 
     let mut end = safe.end;
     loop {
         let probe = end.checked_sub(1).unwrap_or(safe.start).max(safe.start);
         let line = lines.line_number(probe);
-        let Some(text) = lines.line_text(source, line) else {
-            break;
-        };
+        let text = lines.line_text(source, line).ok_or(ParseError::RANGE)?;
         if !text.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
             break;
         }
-        let line_start = lines.line_start(line);
+        let line_start = lines.line_start(line)?;
         if line_start < safe.start {
             break;
         }
@@ -142,18 +143,22 @@ pub(super) fn without_trailing_blank_lines(
             break;
         }
     }
-    safe.start..end
+    Ok(safe.start..end)
 }
 
-pub(super) fn physical_lines(source: &str) -> Vec<&str> {
+pub(super) fn physical_lines(source: &str) -> Result<Vec<&str>, ParseError> {
     line_ranges(source)
         .into_iter()
         .filter(|line| line.start < source.len())
-        .filter_map(|line| source.get(line.start..line.end))
+        .map(|line| source.get(line.start..line.end).ok_or(ParseError::RANGE))
         .collect()
 }
 
-pub(super) fn mask_source_range(source: &str, range: std::ops::Range<usize>) -> String {
+pub(super) fn mask_source_range(
+    source: &str,
+    range: std::ops::Range<usize>,
+) -> Result<String, ParseError> {
+    let range = source_range(source, range)?;
     let bytes = source
         .bytes()
         .enumerate()
@@ -165,12 +170,7 @@ pub(super) fn mask_source_range(source: &str, range: std::ops::Range<usize>) -> 
             }
         })
         .collect();
-    match String::from_utf8(bytes) {
-        Ok(masked) => masked,
-        // Replacing bytes with ASCII cannot invalidate the original UTF-8,
-        // but retain total behavior if this invariant is ever changed.
-        Err(_) => source.to_owned(),
-    }
+    String::from_utf8(bytes).map_err(|_| ParseError::RANGE)
 }
 
 pub(super) fn normalize_bare_cr(source: &str) -> Cow<'_, str> {
@@ -194,4 +194,41 @@ pub(super) fn normalize_bare_cr(source: &str) -> Cow<'_, str> {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn source_helpers_reject_invalid_slices_and_line_coordinates() {
+        let source = "é\r\n界\r";
+        let lines = LineIndex::new(source);
+        for range in [
+            1..2,
+            0..1,
+            5..7,
+            0..usize::MAX,
+            std::ops::Range { start: 4, end: 2 },
+        ] {
+            assert!(source_range(source, range.clone()).is_err());
+            assert!(mask_source_range(source, range.clone()).is_err());
+            assert!(without_trailing_blank_lines(source, range, &lines).is_err());
+        }
+        for line in [0, 4, usize::MAX] {
+            assert!(lines.line_start(line).is_err());
+            assert!(lines.line_end(line).is_err());
+            assert!(lines.line_terminator_end(line).is_err());
+        }
+        assert!(byte_column(2, 1).is_err());
+        assert!(byte_column(0, usize::MAX).is_err());
+        assert_eq!(
+            physical_lines(source).expect("valid UTF-8 lines"),
+            ["é", "界"]
+        );
+        assert_eq!(
+            mask_source_range(source, 0..2).expect("whole codepoint"),
+            "  \r\n界\r"
+        );
+    }
 }

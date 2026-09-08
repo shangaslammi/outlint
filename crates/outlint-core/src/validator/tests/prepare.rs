@@ -260,7 +260,8 @@ fn preparing_refuses_a_reference_chain_longer_than_the_compiler_can_recurse_over
     // first; it charges the budget itself. Both sides of the boundary are
     // pinned, since a bound that quietly drifted below what it promises
     // would refuse graphs the compiler handles comfortably.
-    let document = parse_markdown("---\nstatus: draft\n---\n", MarkdownOptions::default());
+    let document = parse_markdown("---\nstatus: draft\n---\n", MarkdownOptions::default())
+        .expect("Markdown parsing succeeds");
 
     let mut schema = load_schema("version: 1\ntitle: null\nsections: []\n")
         .expect("test schema is valid")

@@ -60,7 +60,11 @@ fn assert_valid_preamble_ranges(source: &str, blocks: &[Block]) {
         assert!(location.line >= 1);
         assert!(location.column >= 1);
         assert_eq!(
-            lines.line_start(location.line as usize) + location.column as usize - 1,
+            lines
+                .line_start(location.line as usize)
+                .expect("valid line")
+                + location.column as usize
+                - 1,
             location.range.start.0
         );
         if let Some(prior_end) = prior_end {
@@ -91,7 +95,11 @@ fn assert_item_anchor(source: &str, lines: &LineIndex, location: &ItemLocation) 
     assert!(location.line >= 1);
     assert!(location.column >= 1);
     assert_eq!(
-        lines.line_start(location.line as usize) + location.column as usize - 1,
+        lines
+            .line_start(location.line as usize)
+            .expect("valid line")
+            + location.column as usize
+            - 1,
         location.range.start.0
     );
     assert!(source.is_char_boundary(location.range.start.0));
@@ -435,7 +443,7 @@ proptest! {
             source.push_str(&format!("{} {name}-{index}\n\n- item-{index}\n\n", "#".repeat(*level)));
         }
 
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         prop_assert_eq!(document.preamble.len(), root_blocks);
         assert_valid_preamble_ranges(&source, document.preamble.as_slice());
 
@@ -535,7 +543,7 @@ proptest! {
             }
         }
 
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         prop_assert_eq!(heading_projection(&document.sections), expected);
     }
 
@@ -580,7 +588,7 @@ proptest! {
             _ => source.push_str("- item\n  > quote\n    ~~~~\n    unclosed"),
         }
 
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         assert_valid_section_ranges(&source, &document.sections);
         assert_document_block_contract(
             &source,
@@ -608,7 +616,7 @@ proptest! {
             "---\r\nname: 界\r---\n\n<!-- transparent -->\r{}{paragraph}\r\n\r  > quote 界\n\r\n   12. {item}\r\r# 標題\r\nsetext é\r---\r\n",
             " ".repeat(indent),
         );
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let root = document.preamble.as_slice();
         prop_assert_eq!(
             root.iter().map(block_kind).collect::<Vec<_>>(),
@@ -668,7 +676,7 @@ proptest! {
         }
         source.push_str("\nafter\n");
 
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let root = document.preamble.as_slice();
         prop_assert_eq!(
             root.iter().map(block_kind).collect::<Vec<_>>(),
@@ -772,7 +780,7 @@ proptest! {
 
     #[test]
     fn arbitrary_utf8_input_is_total_and_offsets_are_valid(source in any::<String>()) {
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         assert_valid_section_ranges(&source, &document.sections);
         // Anchors are not asserted here: this strategy never emits a
         // newline, so no input of it reaches a parsed mapping.
@@ -791,7 +799,7 @@ proptest! {
     fn frontmatter_anchors_stay_within_their_own_line(
         source in arbitrary_frontmatter_document(),
     ) {
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         if let DocumentFrontmatter::Mapping { location, value, anchors } = &document.frontmatter {
             assert_valid_anchors(&source, location, anchors);
             assert_written_entries_keep_anchors(&source, value, anchors);
@@ -820,7 +828,8 @@ fn arbitrary_frontmatter_documents_reach_textless_entries() {
             .new_tree(&mut runner)
             .expect("the strategy generates a document")
             .current();
-        let document = parse_markdown(&source, MarkdownOptions::default());
+        let document =
+            parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
             continue;
         };

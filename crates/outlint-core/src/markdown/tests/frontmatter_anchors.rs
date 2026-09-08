@@ -26,7 +26,8 @@ fn frontmatter_anchors_locate_entries_by_json_pointer() {
         "---\n",                  // 16
         "# Title\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
@@ -85,7 +86,8 @@ fn frontmatter_anchors_convert_many_entries_on_one_line() {
     }
     line.push(']');
     let source = format!("---\n{line}\n---\n# Title\n");
-    let document = parse_markdown(&source, MarkdownOptions::default());
+    let document =
+        parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
@@ -157,7 +159,8 @@ fn only_empty_block_scalars_take_no_anchor() {
         "---\n",            // 42
         "# Title\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
@@ -294,7 +297,8 @@ fn a_quoted_empty_key_still_opens_its_element() {
         "---\n",                                // 8
         "# Title\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
 
     let DocumentFrontmatter::Mapping { value, anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
@@ -374,7 +378,8 @@ fn first_column_anchors_survive_the_zero_based_parser() {
     let document = parse_markdown(
         "---\na: 1\nb: 2\n---\n# Title\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
     };
@@ -398,7 +403,8 @@ fn tagged_and_aliased_frontmatter_keep_their_anchors() {
     let document = parse_markdown(
         "---\ncount: !!str 5\n---\n# Title\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
     };
@@ -410,7 +416,8 @@ fn tagged_and_aliased_frontmatter_keep_their_anchors() {
     let document = parse_markdown(
         "---\nanchored: &a 1\nalias: *a\n---\n# Title\n",
         MarkdownOptions::default(),
-    );
+    )
+    .expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
     };
@@ -442,7 +449,8 @@ fn alias_expansions_anchor_at_the_alias_site() {
         "---\n",
         "# Title\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
     };
@@ -485,7 +493,8 @@ fn chained_alias_expansions_anchor_at_the_outermost_alias_site() {
         "---\n",
         "# Title\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
     };
@@ -509,7 +518,8 @@ fn chained_alias_expansions_anchor_at_the_outermost_alias_site() {
         "---\n",
         "# Title\n",
     );
-    let document = parse_markdown(source, MarkdownOptions::default());
+    let document =
+        parse_markdown(source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let DocumentFrontmatter::Mapping { anchors, .. } = &document.frontmatter else {
         panic!("expected parsed frontmatter: {document:?}")
     };
