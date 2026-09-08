@@ -981,8 +981,8 @@ impl FrameStack {
             .last()
             .is_some_and(|frame| frame.expected_end == end);
         // A mismatch violates the parser event contract; CommonMark recovery
-        // already emits balanced events for malformed source. See the deferred
-        // fallible-parser decision in docs/rfc5-rust-cleanup.md.
+        // already emits balanced events for malformed source. Propagating this
+        // internal failure requires a fallible public parser API.
         if !matches {
             self.malformed = true;
             return Err(());
