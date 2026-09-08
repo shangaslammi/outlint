@@ -16,3 +16,10 @@ sections:
       - block: list
         items:
           - match: "[Bold](https://example.invalid)"
+  - match: Multiline Markup Retained
+    required: false
+    content:
+      - block: list
+        items:
+          - match: '/^Alpha\nBeta$/'
+            repeat: "1..1"

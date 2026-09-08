@@ -4,9 +4,11 @@ use crate::markdown::{
     ItemText, ListBlock, ListKind, MarkdownOptions, Section,
 };
 use crate::HeaderLevel;
-use pulldown_cmark::{Tag, TagEnd};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-use super::super::body::{is_comment_only_html, scan_preambles, FrameStack};
+use super::super::body::{
+    inline_source_range_matcher_text, is_comment_only_html, scan_preambles, FrameStack,
+};
 
 fn block_kind(block: &Block) -> BlockKind {
     match block {
@@ -471,6 +473,272 @@ fn tight_and_loose_first_paragraphs_have_equal_item_text() {
         .unwrap_or_else(|| unreachable!());
     assert_eq!(retained.text, "**A&B** [link](target)");
     assert_eq!(retained.diagnostic_text, "A&B link");
+}
+
+#[test]
+fn multiline_item_text_drops_container_indentation_without_stripping() {
+    for options in [
+        MarkdownOptions {
+            strip_inline_markup: false,
+        },
+        MarkdownOptions::default(),
+    ] {
+        for source in ["- Alpha\n  Beta\n", "- Alpha\nBeta\n"] {
+            let document = parse_markdown(source, options);
+            let text = lists(&document)[0]
+                .items
+                .first
+                .text
+                .as_ref()
+                .unwrap_or_else(|| unreachable!());
+
+            assert_eq!(text.text, "Alpha\nBeta");
+        }
+    }
+}
+
+#[test]
+fn multiline_loose_item_text_matches_tight_form() {
+    for options in [
+        MarkdownOptions {
+            strip_inline_markup: false,
+        },
+        MarkdownOptions::default(),
+    ] {
+        let tight = parse_markdown("- Alpha\n  Beta\n- sibling\n", options);
+        let loose = parse_markdown("- Alpha\n  Beta\n\n- sibling\n", options);
+        let tight_text = lists(&tight)[0]
+            .items
+            .first
+            .text
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        let loose_text = lists(&loose)[0]
+            .items
+            .first
+            .text
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+
+        assert_eq!(tight_text.text, "Alpha\nBeta");
+        assert_eq!(loose_text.text, tight_text.text);
+    }
+}
+
+#[test]
+fn multiline_item_text_preserves_markup_spelling_without_stripping() {
+    let source = "- *Alpha*\n  **Beta**\n";
+    let retained = parse_markdown(
+        source,
+        MarkdownOptions {
+            strip_inline_markup: false,
+        },
+    );
+    let stripped = parse_markdown(source, MarkdownOptions::default());
+    let retained_text = lists(&retained)[0]
+        .items
+        .first
+        .text
+        .as_ref()
+        .unwrap_or_else(|| unreachable!());
+    let stripped_text = lists(&stripped)[0]
+        .items
+        .first
+        .text
+        .as_ref()
+        .unwrap_or_else(|| unreachable!());
+
+    assert_eq!(retained_text.text, "*Alpha*\n**Beta**");
+    assert_eq!(stripped_text.text, "Alpha\nBeta");
+}
+
+#[test]
+fn multiline_code_span_drops_internal_container_indentation() {
+    let source = "- `Alpha\n  Beta`\n";
+    let retained = parse_markdown(
+        source,
+        MarkdownOptions {
+            strip_inline_markup: false,
+        },
+    );
+    let stripped = parse_markdown(source, MarkdownOptions::default());
+
+    assert_eq!(
+        lists(&retained)[0]
+            .items
+            .first
+            .text
+            .as_ref()
+            .map(|text| text.text.as_str()),
+        Some("`Alpha\nBeta`")
+    );
+    assert_eq!(
+        lists(&stripped)[0]
+            .items
+            .first
+            .text
+            .as_ref()
+            .map(|text| text.text.as_str()),
+        Some("Alpha Beta")
+    );
+}
+
+#[test]
+fn multiline_link_text_drops_internal_container_indentation() {
+    let source = "- [Alpha\n  Beta](target)\n";
+    let retained = parse_markdown(
+        source,
+        MarkdownOptions {
+            strip_inline_markup: false,
+        },
+    );
+    let stripped = parse_markdown(source, MarkdownOptions::default());
+
+    assert_eq!(
+        lists(&retained)[0]
+            .items
+            .first
+            .text
+            .as_ref()
+            .map(|text| text.text.as_str()),
+        Some("[Alpha\nBeta](target)")
+    );
+    assert_eq!(
+        lists(&stripped)[0]
+            .items
+            .first
+            .text
+            .as_ref()
+            .map(|text| text.text.as_str()),
+        Some("Alpha\nBeta")
+    );
+}
+
+#[test]
+fn multiline_inline_html_drops_internal_container_indentation() {
+    let source = "- <span\n  class=x>Alpha</span>\n";
+    let retained = parse_markdown(
+        source,
+        MarkdownOptions {
+            strip_inline_markup: false,
+        },
+    );
+    let stripped = parse_markdown(source, MarkdownOptions::default());
+
+    assert_eq!(
+        lists(&retained)[0]
+            .items
+            .first
+            .text
+            .as_ref()
+            .map(|text| text.text.as_str()),
+        Some("<span\nclass=x>Alpha</span>")
+    );
+    assert_eq!(
+        lists(&stripped)[0]
+            .items
+            .first
+            .text
+            .as_ref()
+            .map(|text| text.text.as_str()),
+        Some("Alpha")
+    );
+}
+
+#[test]
+fn tab_stop_columns_remove_space_and_mixed_prefixes() {
+    for source in ["-\t`Alpha\n    Beta`\n", "-\t`Alpha\n \tBeta`\n"] {
+        for (options, expected) in [
+            (
+                MarkdownOptions {
+                    strip_inline_markup: false,
+                },
+                "`Alpha\nBeta`",
+            ),
+            (MarkdownOptions::default(), "Alpha Beta"),
+        ] {
+            let document = parse_markdown(source, options);
+            let text = lists(&document)[0]
+                .items
+                .first
+                .text
+                .as_ref()
+                .unwrap_or_else(|| unreachable!());
+            assert_eq!(text.text, expected);
+        }
+    }
+}
+
+#[test]
+fn tab_stop_columns_tolerate_short_lazy_prefixes() {
+    let source = "-\t<span\n  class=x>Alpha</span>\n";
+    for (options, expected) in [
+        (
+            MarkdownOptions {
+                strip_inline_markup: false,
+            },
+            "<span\nclass=x>Alpha</span>",
+        ),
+        (MarkdownOptions::default(), "Alpha"),
+    ] {
+        let document = parse_markdown(source, options);
+        let text = lists(&document)[0]
+            .items
+            .first
+            .text
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(text.text, expected);
+    }
+}
+
+#[test]
+fn ordered_item_continuation_indentation_is_removed() {
+    let document = parse_markdown(
+        "1. Alpha\n   Beta\n",
+        MarkdownOptions {
+            strip_inline_markup: false,
+        },
+    );
+    let text = lists(&document)[0]
+        .items
+        .first
+        .text
+        .as_ref()
+        .unwrap_or_else(|| unreachable!());
+
+    assert_eq!(text.text, "Alpha\nBeta");
+}
+
+#[test]
+fn nested_continuation_indentation_in_ordered_items() {
+    let source = "1.\touter\n\t-\t`Alpha\n\t\tBeta`\n";
+    let (diagnostic_text, code_range) = Parser::new(source)
+        .into_offset_iter()
+        .find_map(|(event, range)| match event {
+            Event::Code(text) => Some((text.into_string(), range)),
+            _ => None,
+        })
+        .unwrap_or_else(|| unreachable!());
+
+    for (options, expected) in [
+        (
+            MarkdownOptions {
+                strip_inline_markup: false,
+            },
+            "`Alpha\nBeta`",
+        ),
+        (MarkdownOptions::default(), "Alpha Beta"),
+    ] {
+        let inner_item_text = inline_source_range_matcher_text(
+            source,
+            code_range.clone(),
+            code_range.start,
+            &diagnostic_text,
+            options,
+        );
+        assert_eq!(inner_item_text, expected);
+    }
 }
 
 #[test]

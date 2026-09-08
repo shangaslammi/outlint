@@ -100,7 +100,15 @@ enum ItemFirstChild {
 struct ItemTextBuilder {
     parser_range: std::ops::Range<usize>,
     diagnostic_text: String,
+    source_parts: Vec<InlineSourcePart>,
     explicit_wrapper: bool,
+}
+
+enum InlineSourcePart {
+    Start(std::ops::Range<usize>),
+    End(std::ops::Range<usize>),
+    Text(std::ops::Range<usize>),
+    Break,
 }
 
 /// Scans the CommonMark body for headings and suppression directives.
@@ -253,7 +261,7 @@ fn scan_events(
                     builder.push_visible(&text);
                 }
                 if let Some(list) = active_direct_list.as_mut() {
-                    list.observe_inline(range, Some(&text), frames.direct_item_is_parent());
+                    list.observe_inline_text(range, Some(&text), frames.direct_item_is_parent());
                 }
             }
             Event::Code(text) | Event::InlineMath(text) | Event::DisplayMath(text) => {
@@ -261,7 +269,7 @@ fn scan_events(
                     builder.push_visible(&text);
                 }
                 if let Some(list) = active_direct_list.as_mut() {
-                    list.observe_inline(range, Some(&text), frames.direct_item_is_parent());
+                    list.observe_inline_text(range, Some(&text), frames.direct_item_is_parent());
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -269,7 +277,7 @@ fn scan_events(
                     builder.push_visible("\n");
                 }
                 if let Some(list) = active_direct_list.as_mut() {
-                    list.observe_inline(range, Some("\n"), frames.direct_item_is_parent());
+                    list.observe_inline_break(range, frames.direct_item_is_parent());
                 }
             }
             Event::Html(html) | Event::InlineHtml(html) => {
@@ -282,7 +290,7 @@ fn scan_events(
                     &mut line_suppressions,
                 );
                 if let Some(list) = active_direct_list.as_mut() {
-                    list.observe_inline(range, None, frames.direct_item_is_parent());
+                    list.observe_inline_text(range, None, frames.direct_item_is_parent());
                 }
             }
             Event::Rule if frames.is_top_level() => {
@@ -411,18 +419,20 @@ impl ListBuilder {
         if direct_item_parent {
             match tag {
                 Tag::Paragraph => item.start_explicit_paragraph(range),
-                _ if is_inline_tag(tag) => item.observe_inline(range, None, true),
+                _ if is_inline_tag(tag) => {
+                    item.observe_inline(range.clone(), None, InlineSourcePart::Start(range), true)
+                }
                 _ => item.observe_nonparagraph(),
             }
         } else if is_inline_tag(tag) {
-            item.observe_inline(range, None, false);
+            item.observe_inline(range.clone(), None, InlineSourcePart::Start(range), false);
         }
     }
 
     fn observe_end(&mut self, end: TagEnd, range: std::ops::Range<usize>) {
         if let Some(item) = self.active_item.as_mut() {
             if is_inline_end(end) {
-                item.observe_inline(range, None, false);
+                item.observe_inline(range.clone(), None, InlineSourcePart::End(range), false);
             }
             if end == TagEnd::Paragraph {
                 item.finish_explicit_paragraph();
@@ -430,14 +440,30 @@ impl ListBuilder {
         }
     }
 
-    fn observe_inline(
+    fn observe_inline_text(
         &mut self,
         range: std::ops::Range<usize>,
         visible: Option<&str>,
         direct_item_parent: bool,
     ) {
         if let Some(item) = self.active_item.as_mut() {
-            item.observe_inline(range, visible, direct_item_parent);
+            item.observe_inline(
+                range.clone(),
+                visible,
+                InlineSourcePart::Text(range),
+                direct_item_parent,
+            );
+        }
+    }
+
+    fn observe_inline_break(&mut self, range: std::ops::Range<usize>, direct_item_parent: bool) {
+        if let Some(item) = self.active_item.as_mut() {
+            item.observe_inline(
+                range,
+                Some("\n"),
+                InlineSourcePart::Break,
+                direct_item_parent,
+            );
         }
     }
 
@@ -497,6 +523,7 @@ impl ItemBuilder {
             self.first_child = ItemFirstChild::Paragraph(ItemTextBuilder {
                 parser_range,
                 diagnostic_text: String::new(),
+                source_parts: Vec::new(),
                 explicit_wrapper: true,
             });
         }
@@ -506,12 +533,14 @@ impl ItemBuilder {
         &mut self,
         range: std::ops::Range<usize>,
         visible: Option<&str>,
+        source_part: InlineSourcePart,
         direct_item_parent: bool,
     ) {
         if matches!(self.first_child, ItemFirstChild::Unknown) && direct_item_parent {
             self.first_child = ItemFirstChild::Paragraph(ItemTextBuilder {
                 parser_range: range.clone(),
                 diagnostic_text: String::new(),
+                source_parts: Vec::new(),
                 explicit_wrapper: false,
             });
         }
@@ -523,6 +552,7 @@ impl ItemBuilder {
             if let Some(visible) = visible {
                 text.diagnostic_text.push_str(visible);
             }
+            text.source_parts.push(source_part);
         }
     }
 
@@ -570,7 +600,7 @@ impl ItemBuilder {
             .unwrap_or_default();
         let text = match self.first_child {
             ItemFirstChild::Paragraph(builder) | ItemFirstChild::ParagraphDone(builder) => {
-                Some(builder.finish(source, options))
+                Some(builder.finish(source, lines, options))
             }
             ItemFirstChild::Unknown | ItemFirstChild::NonParagraph => None,
         };
@@ -588,8 +618,13 @@ impl ItemBuilder {
 }
 
 impl ItemTextBuilder {
-    fn finish(self, source: &str, options: MarkdownOptions) -> ItemText {
+    fn finish(self, source: &str, lines: &LineIndex, options: MarkdownOptions) -> ItemText {
         let safe_range = clamp_range(self.parser_range, source.len());
+        let content_line = lines.line_number(safe_range.start);
+        let content_column = source
+            .get(lines.line_start(content_line)..safe_range.start)
+            .map(commonmark_column)
+            .unwrap_or_default();
         let source_text = source
             .get(safe_range)
             .unwrap_or_default()
@@ -598,7 +633,11 @@ impl ItemTextBuilder {
         let text = if options.strip_inline_markup {
             self.diagnostic_text.clone()
         } else {
-            process_inline_text(&source_text)
+            process_inline_text(&inline_source_text(
+                source,
+                &self.source_parts,
+                content_column,
+            ))
         };
         ItemText {
             text,
@@ -606,6 +645,112 @@ impl ItemTextBuilder {
             source_text,
         }
     }
+}
+
+fn inline_source_text(source: &str, parts: &[InlineSourcePart], content_column: usize) -> String {
+    let mut output = String::new();
+    let mut pending_start = None;
+    let mut cursor = None;
+
+    for part in parts {
+        match part {
+            InlineSourcePart::Start(range) => {
+                pending_start.get_or_insert(range.start);
+            }
+            InlineSourcePart::Text(range) => {
+                let start = pending_start.take().unwrap_or(range.start);
+                if let Some(text) = source.get(start..range.end) {
+                    push_without_continuation_prefixes(&mut output, text, content_column);
+                }
+                cursor = Some(range.end);
+            }
+            InlineSourcePart::End(range) => {
+                let start = pending_start.take().or(cursor).unwrap_or(range.start);
+                if let Some(text) = source.get(start..range.end) {
+                    push_without_continuation_prefixes(&mut output, text, content_column);
+                }
+                cursor = Some(range.end);
+            }
+            InlineSourcePart::Break => {
+                output.push('\n');
+                pending_start = None;
+                cursor = None;
+            }
+        }
+    }
+
+    output
+}
+
+fn push_without_continuation_prefixes(output: &mut String, text: &str, content_column: usize) {
+    let mut remaining = text;
+    while let Some(line_end) = remaining.find(['\r', '\n']) {
+        let boundary_end = if remaining.as_bytes().get(line_end) == Some(&b'\r')
+            && remaining.as_bytes().get(line_end + 1) == Some(&b'\n')
+        {
+            line_end + 2
+        } else {
+            line_end + 1
+        };
+        if let Some(line) = remaining.get(..boundary_end) {
+            output.push_str(line);
+        }
+        remaining = remaining.get(boundary_end..).unwrap_or_default();
+        let prefix = continuation_prefix_len(remaining, content_column);
+        remaining = remaining.get(prefix..).unwrap_or_default();
+    }
+    output.push_str(remaining);
+}
+
+fn commonmark_column(text: &str) -> usize {
+    text.chars().fold(0, |column, character| {
+        if character == '\t' {
+            column.saturating_add(4 - column % 4)
+        } else {
+            column.saturating_add(1)
+        }
+    })
+}
+
+fn continuation_prefix_len(line: &str, content_column: usize) -> usize {
+    let mut column = 0usize;
+    let mut bytes = 0usize;
+    for character in line.chars() {
+        if column >= content_column || !matches!(character, ' ' | '\t') {
+            break;
+        }
+        column = if character == '\t' {
+            column.saturating_add(4 - column % 4)
+        } else {
+            column.saturating_add(1)
+        };
+        bytes = bytes.saturating_add(character.len_utf8());
+    }
+    bytes
+}
+
+#[cfg(test)]
+pub(super) fn inline_source_range_matcher_text(
+    source: &str,
+    range: std::ops::Range<usize>,
+    paragraph_start: usize,
+    diagnostic_text: &str,
+    options: MarkdownOptions,
+) -> String {
+    if options.strip_inline_markup {
+        return diagnostic_text.to_owned();
+    }
+    let lines = LineIndex::new(source);
+    let line = lines.line_number(paragraph_start);
+    let content_column = source
+        .get(lines.line_start(line)..paragraph_start)
+        .map(commonmark_column)
+        .unwrap_or_default();
+    process_inline_text(&inline_source_text(
+        source,
+        &[InlineSourcePart::Text(range)],
+        content_column,
+    ))
 }
 
 fn close_owner(root: &mut PreambleBuilder, headings: &mut [HeadingRecord], owner: Owner) {
