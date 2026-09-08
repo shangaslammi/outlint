@@ -51,10 +51,10 @@ pub(super) fn render_json(results: &[ValidationResult]) -> String {
             "diagnostics": diagnostic_count
         }
     });
-    let mut output = String::new();
+    let mut output = Vec::new();
     write_json_value(&envelope, JsonContext::Default, &mut output);
-    output.push('\n');
-    output
+    output.push(b'\n');
+    String::from_utf8(output).expect("JSON serialization emits UTF-8")
 }
 
 #[derive(Clone, Copy)]
@@ -76,17 +76,19 @@ enum JsonContext {
 /// Writes compact JSON while preserving the historical key-sorted encoding
 /// everywhere except the appended RFC 5 objects whose member order §11.3
 /// specifies verbatim.
-fn write_json_value(value: &Value, context: JsonContext, output: &mut String) {
+fn write_json_value(value: &Value, context: JsonContext, output: &mut Vec<u8>) {
     match value {
-        Value::Null => output.push_str("null"),
-        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
-        Value::Number(value) => output.push_str(&value.to_string()),
-        Value::String(value) => output.push_str(&json!(value).to_string()),
+        Value::Null => output.extend_from_slice(b"null"),
+        Value::Bool(value) => output.extend_from_slice(if *value { b"true" } else { b"false" }),
+        Value::Number(value) => serde_json::to_writer(output, value)
+            .expect("writing a JSON number to a byte buffer is infallible"),
+        Value::String(value) => serde_json::to_writer(output, value)
+            .expect("writing a JSON string to a byte buffer is infallible"),
         Value::Array(values) => {
-            output.push('[');
+            output.push(b'[');
             for (index, value) in values.iter().enumerate() {
                 if index != 0 {
-                    output.push(',');
+                    output.push(b',');
                 }
                 let child_context = if matches!(context, JsonContext::ContentMatcher) {
                     JsonContext::BlockMatcher
@@ -95,13 +97,13 @@ fn write_json_value(value: &Value, context: JsonContext, output: &mut String) {
                 };
                 write_json_value(value, child_context, output);
             }
-            output.push(']');
+            output.push(b']');
         }
         Value::Object(object) => write_json_object(object, context, output),
     }
 }
 
-fn write_json_object(object: &Map<String, Value>, context: JsonContext, output: &mut String) {
+fn write_json_object(object: &Map<String, Value>, context: JsonContext, output: &mut Vec<u8>) {
     let context = match context {
         JsonContext::Default => match object.get("kind").and_then(Value::as_str) {
             Some("block") => JsonContext::BlockTarget,
@@ -131,7 +133,7 @@ fn write_json_object(object: &Map<String, Value>, context: JsonContext, output: 
         JsonContext::Default => &[],
     };
 
-    output.push('{');
+    output.push(b'{');
     let mut written = 0_usize;
     if keys.is_empty() {
         for (key, value) in object {
@@ -155,7 +157,7 @@ fn write_json_object(object: &Map<String, Value>, context: JsonContext, output: 
             write_json_member(key, value, child_context, &mut written, output);
         }
     }
-    output.push('}');
+    output.push(b'}');
 }
 
 fn write_json_member(
@@ -163,14 +165,15 @@ fn write_json_member(
     value: &Value,
     context: JsonContext,
     written: &mut usize,
-    output: &mut String,
+    output: &mut Vec<u8>,
 ) {
     if *written != 0 {
-        output.push(',');
+        output.push(b',');
     }
     *written = (*written).saturating_add(1);
-    output.push_str(&json!(key).to_string());
-    output.push(':');
+    serde_json::to_writer(&mut *output, key)
+        .expect("writing a JSON key to a byte buffer is infallible");
+    output.push(b':');
     write_json_value(value, context, output);
 }
 
@@ -451,7 +454,7 @@ mod tests {
 
     use super::{
         diagnostic_json, matcher_json, reference_json, render_json, scalar_json, schema_node_json,
-        target_json,
+        target_json, write_json_value, JsonContext,
     };
     use crate::diagnostics::{
         RenderedBlockMatcher, RenderedContentMatcher, RenderedContentOwner,
@@ -891,6 +894,36 @@ mod tests {
                 ),
             ],
         );
+    }
+
+    #[test]
+    fn shared_buffer_preserves_escaping_and_member_order() {
+        let text = "quote\" slash\\ controls\0\u{1f}\n\r\t 日本語 💚";
+        let value = json!({"kind": "item", "list": {"parent": [text], "index": 2}, "index": 3});
+        let mut output = Vec::new();
+        write_json_value(&value, JsonContext::Default, &mut output);
+        let escaped = serde_json::to_string(text).expect("string");
+        assert_eq!(
+            String::from_utf8(output.clone()).expect("UTF-8"),
+            format!(
+                "{{\"kind\":\"item\",\"list\":{{\"parent\":[{escaped}],\"index\":2}},\"index\":3}}"
+            )
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).expect("JSON"),
+            value
+        );
+        let value =
+            json!({text: text, "position": Value::Number(ABOVE_U64.parse().expect("number"))});
+        output.clear();
+        write_json_value(&value, JsonContext::Default, &mut output);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).expect("JSON"),
+            value
+        );
+        assert!(String::from_utf8(output)
+            .expect("UTF-8")
+            .contains(ABOVE_U64));
     }
 
     fn skeleton(id: &str) -> RenderedDiagnostic {

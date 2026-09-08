@@ -215,7 +215,7 @@ fn all_three_domains_build_dimension_paired_edges() {
     );
     let plan = ValidationPlan::new(&schema).expect("schema prepares");
     let heading =
-        prepare_heading_edges(schema.outline(), 1, &[true]).expect("heading edges prepare");
+        prepare_heading_edges(schema.outline(), 1, vec![true]).expect("heading edges prepare");
     assert_eq!(heading.matches.matches(0, 0), Some(true));
     assert_eq!(heading.matches.matches(1, 0), None);
     assert_eq!(heading.costs.cost(&heading.matches, 0, 0), Some(0));

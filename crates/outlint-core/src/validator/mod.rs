@@ -69,7 +69,8 @@ impl PreparedValidator {
     /// the document's complete diagnostic set, so a caller can never observe a
     /// partial set that reads as a clean document (§11.5).
     ///
-    /// One failure exists today: §4.6 lets an implementation decline to
+    /// Sequence dimension/allocation failures and inconsistent internal plans
+    /// are operational errors. §4.6 also lets an implementation decline to
     /// evaluate an `fm[...]` query whose result it cannot bound, and says
     /// that when it does, "validation has not produced a document verdict".
     /// The limit cannot reach a guaranteed-core query at any document size.

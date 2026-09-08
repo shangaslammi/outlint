@@ -9,14 +9,12 @@ use super::prepare::PreparedMatcher;
 use super::sequence::{EdgeCosts, MatchMatrix, Preference, SequenceExhausted, SequenceRule};
 
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) enum PreparedContentScope {
     Omitted,
     Declared(Vec<PreparedContentRule>),
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) enum PreparedItemScope {
     Omitted,
     Declared(Vec<PreparedItemRule>),
@@ -27,7 +25,6 @@ pub(super) struct PreparedContentRule {
     alternatives: Vec<BlockMatcher>,
     pub(super) cardinality: Cardinality,
     pub(super) preference: Preference,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) items: PreparedItemScope,
 }
 
@@ -132,17 +129,21 @@ pub(super) fn block_kind(block: &Block) -> BlockKind {
     }
 }
 
-/// Exact §3.7 work buckets for a collection of independently prepared scopes.
+/// Test observer for §3.7 work; a zero-sized no-op in production.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ValidationWork {
+    #[cfg(test)]
     pub(super) content_predicates: u64,
+    #[cfg(test)]
     pub(super) choice_reductions: u64,
+    #[cfg(test)]
     pub(super) matcher_bytes: u64,
+    #[cfg(test)]
     pub(super) dp_cells: u64,
 }
 
+#[cfg(test)]
 impl ValidationWork {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn checked_add(self, other: Self) -> Result<Self, SequenceExhausted> {
         Ok(Self {
             content_predicates: self
@@ -164,7 +165,6 @@ impl ValidationWork {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn total(self) -> Result<u64, SequenceExhausted> {
         self.content_predicates
             .checked_add(self.choice_reductions)
@@ -173,7 +173,6 @@ impl ValidationWork {
             .ok_or(SequenceExhausted)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn add_dp(
         &mut self,
         nodes: usize,
@@ -207,10 +206,26 @@ impl ValidationWork {
     }
 }
 
+#[cfg(not(test))]
+impl ValidationWork {
+    #[inline(always)]
+    pub(super) fn checked_add(self, _: Self) -> Result<Self, SequenceExhausted> {
+        Ok(self)
+    }
+    #[inline(always)]
+    pub(super) fn add_dp(&mut self, _: usize, _: usize, _: bool) -> Result<(), SequenceExhausted> {
+        Ok(())
+    }
+    #[inline(always)]
+    pub(super) fn add_matcher_text(&mut self, _: &str) -> Result<(), SequenceExhausted> {
+        Ok(())
+    }
+}
+
 pub(super) fn prepare_heading_edges(
     rules: &[SectionRule],
     rows: usize,
-    cells: &[bool],
+    cells: Vec<bool>,
 ) -> Result<PreparedEdges, SequenceExhausted> {
     let mut sequence_rules = Vec::new();
     sequence_rules
@@ -226,11 +241,6 @@ pub(super) fn prepare_heading_edges(
             },
         });
     }
-    let mut matrix = Vec::new();
-    matrix
-        .try_reserve_exact(cells.len())
-        .map_err(|_| SequenceExhausted)?;
-    matrix.extend_from_slice(cells);
     let mut costs = Vec::new();
     costs
         .try_reserve_exact(cells.len())
@@ -245,18 +255,19 @@ pub(super) fn prepare_heading_edges(
         };
         costs.push(u32::from(matched && wildcard));
     }
-    paired_edges(rows, sequence_rules, matrix, costs)
+    paired_edges(rows, sequence_rules, cells, costs)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn prepare_content_edges(
     blocks: &[Block],
     rules: &[PreparedContentRule],
 ) -> Result<(PreparedEdges, ValidationWork), SequenceExhausted> {
+    #[cfg(test)]
     let alternatives = rules.iter().try_fold(0usize, |sum, rule| {
         sum.checked_add(rule.alternatives.len())
             .ok_or(SequenceExhausted)
     })?;
+    #[cfg(test)]
     let predicate_count = blocks
         .len()
         .checked_mul(alternatives)
@@ -297,14 +308,18 @@ pub(super) fn prepare_content_edges(
     Ok((
         paired_edges(blocks.len(), sequence_rules, matrix, costs)?,
         ValidationWork {
+            #[cfg(test)]
             content_predicates: u64::try_from(predicate_count).map_err(|_| SequenceExhausted)?,
+            #[cfg(test)]
             choice_reductions: u64::try_from(reduction_count).map_err(|_| SequenceExhausted)?,
-            ..ValidationWork::default()
+            #[cfg(test)]
+            matcher_bytes: 0,
+            #[cfg(test)]
+            dp_cells: 0,
         },
     ))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn prepare_item_edges(
     items: &[&ListItem],
     rules: &[PreparedItemRule],

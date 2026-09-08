@@ -1,0 +1,57 @@
+// Standalone measurement shell; compiled against the checkout selected by run.py.
+#![allow(dead_code)]
+pub use outlint_core::{Cardinality, UpperBound};
+#[path = "@ROOT@/crates/outlint-core/src/validator/sequence.rs"] mod sequence;
+#[path = "@ROOT@/crates/outlint-cli/src/diagnostics.rs"] mod diagnostics;
+#[path = "@ROOT@/crates/outlint-cli/src/render/json.rs"] mod json;
+use std::{hint::black_box, time::Instant};
+use outlint_core::{load_schema, parse_markdown, MarkdownOptions, PreparedValidator};
+fn measure(mut f: impl FnMut(), iterations: usize) {
+    let start = Instant::now();
+    for _ in 0..iterations { f(); }
+    println!("{}", start.elapsed().as_nanos() / iterations as u128);
+}
+fn main() {
+    let args: Vec<_> = std::env::args().collect();
+    let mode = &args[1];
+    let n: usize = args[2].parse().unwrap();
+    let r: usize = args[3].parse().unwrap();
+    let iterations: usize = args[4].parse().unwrap();
+    match mode.as_str() {
+        "parse" => {
+            let mut source = String::from("paragraph\n\n");
+            for i in 0..n { source.push_str(&format!("[label {i}]: /target/{i}\n")); }
+            source.push_str("\nparagraph [label 0]\n");
+            measure(|| { black_box(parse_markdown(black_box(&source), MarkdownOptions::default())); }, iterations);
+        }
+        "headings" => {
+            let mut schema = String::from("version: 1\noutline:\n");
+            for _ in 0..r { schema.push_str("  - match: '*'\n    repeat: 0..n\n"); }
+            let schema = load_schema(&schema).unwrap().schema;
+            let validator = PreparedValidator::new(&schema).unwrap();
+            let source = "# Entry\n".repeat(n);
+            let doc = parse_markdown(&source, MarkdownOptions::default());
+            measure(|| { black_box(validator.validate(black_box(&doc)).unwrap()); }, iterations);
+        }
+        "sequence" | "sequence-recovery" => {
+            use sequence::*;
+            let recovery = mode == "sequence-recovery";
+            let rules = vec![SequenceRule { cardinality: Cardinality::new(if recovery { u32::MAX } else { 0 }, UpperBound::Unbounded).unwrap(), preference: Preference::Reluctant }; r];
+            let matrix = MatchMatrix::new(n, r, vec![true; n*r]).unwrap();
+            let costs = EdgeCosts::new_for(&matrix, vec![1; n*r]).unwrap();
+            measure(|| { black_box(assign(&rules, &matrix, &costs).unwrap()); }, iterations);
+        }
+        "json" => {
+            use diagnostics::*;
+            let diagnostics = (0..n).map(|i| RenderedDiagnostic {
+                id: "unexpected-block".into(), message: "quote\" newline\n Unicode 日本語 💚".into(), source_path: "doc.md".into(), line: i as u64 + 1, column: 1,
+                target: Some(RenderedTarget::Block { parent: vec!["A".into()], block: "p".into(), index: i }),
+                schema_node: None, schema_location: None, involved_headers: vec![], references: vec![],
+            }).collect();
+            let results = vec![ValidationResult { kind: ResultKind::Document, path: "doc.md".into(), schema: "schema.yml".into(), diagnostics }];
+            measure(|| { black_box(json::render_json(black_box(&results))); }, iterations);
+        }
+        "sizes" => println!("Option<u64>={} Option<usize>={} bool={} u32={}", std::mem::size_of::<Option<u64>>(), std::mem::size_of::<Option<usize>>(), std::mem::size_of::<bool>(), std::mem::size_of::<u32>()),
+        _ => panic!("unknown mode"),
+    }
+}

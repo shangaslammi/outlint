@@ -99,7 +99,7 @@ pub(super) struct WorkCounter {
     pub(super) guard_matcher_evaluations: usize,
     pub(super) accepting_matcher_evaluations: usize,
     pub(super) extras_classifications: usize,
-    pub(super) extras_matrix_cell_copies: usize,
+    pub(super) extras_matrix_cells_visited: usize,
     pub(super) unordered_rule_inspections: usize,
     pub(super) unordered_assignment_writes: usize,
     pub(super) sequence_operations: usize,
@@ -127,7 +127,7 @@ impl WorkCounter {
         self.guard_matcher_evaluations
             .saturating_add(self.accepting_matcher_evaluations)
             .saturating_add(self.extras_classifications)
-            .saturating_add(self.extras_matrix_cell_copies)
+            .saturating_add(self.extras_matrix_cells_visited)
             .saturating_add(self.unordered_rule_inspections)
             .saturating_add(self.unordered_assignment_writes)
             .saturating_add(self.sequence_operations)
@@ -159,6 +159,7 @@ struct PendingDiagnostic {
 enum RunError {
     Query(QueryLimitExceeded),
     Sequence(super::sequence::SequenceExhausted),
+    InconsistentPlan,
 }
 
 impl From<QueryLimitExceeded> for RunError {
@@ -178,6 +179,9 @@ impl std::fmt::Display for RunError {
         match self {
             Self::Query(error) => error.fmt(formatter),
             Self::Sequence(error) => error.fmt(formatter),
+            Self::InconsistentPlan => {
+                formatter.write_str("internal validation plan or assignment is inconsistent")
+            }
         }
     }
 }
@@ -855,10 +859,7 @@ impl<'a> Validator<'a> {
     /// matrix is built. Once declared, this method prepares and assigns the
     /// concrete sequence exactly once; the resulting success or recovery
     /// assignment is the sole source of rule identity and descendant visits.
-    fn visit_content(
-        &mut self,
-        input: ContentVisitInput<'_, '_>,
-    ) -> Result<(), super::sequence::SequenceExhausted> {
+    fn visit_content(&mut self, input: ContentVisitInput<'_, '_>) -> Result<(), RunError> {
         let ContentVisitInput {
             preamble,
             scope,
@@ -868,12 +869,13 @@ impl<'a> Validator<'a> {
             absence_parent,
             absence_location,
         } = input;
-        let (
-            ContentScope::Declared(schema_rules),
-            super::content::PreparedContentScope::Declared(rules),
-        ) = (scope, prepared)
-        else {
-            return Ok(());
+        let (schema_rules, rules) = match (scope, prepared) {
+            (ContentScope::Omitted, super::content::PreparedContentScope::Omitted) => return Ok(()),
+            (
+                ContentScope::Declared(schema),
+                super::content::PreparedContentScope::Declared(prepared),
+            ) if schema.len() == prepared.len() => (schema, prepared),
+            _ => return Err(RunError::InconsistentPlan),
         };
         #[cfg(test)]
         {
@@ -883,7 +885,7 @@ impl<'a> Validator<'a> {
         }
         #[cfg(test)]
         if self.force_sequence_exhaustion {
-            return Err(super::sequence::SequenceExhausted);
+            return Err(super::sequence::SequenceExhausted.into());
         }
         let (edges, preparation_work) =
             super::content::prepare_content_edges(preamble.as_slice(), rules)?;
@@ -891,21 +893,23 @@ impl<'a> Validator<'a> {
         let assignment = super::sequence::assign(&edges.rules, &edges.matches, &edges.costs)?;
         self.validation_work
             .add_dp(preamble.len(), rules.len(), !assignment.accepted)?;
+        check_assignment(&assignment, preamble.len(), rules.len())?;
         let ordinals = super::content::block_ordinals(preamble.as_slice())?;
         let owner_node = content_owner_node(&owner);
         for (block_index, block) in preamble.iter().enumerate() {
             if assignment
                 .rules
                 .get(block_index)
-                .copied()
-                .flatten()
+                .ok_or(RunError::InconsistentPlan)?
                 .is_some()
             {
                 continue;
             }
             let misplaced = (0..rules.len())
                 .any(|rule_index| edges.matches.matches(block_index, rule_index) == Some(true));
-            let ordinal = ordinals.get(block_index).copied().unwrap_or_default();
+            let ordinal = *ordinals
+                .get(block_index)
+                .ok_or(RunError::InconsistentPlan)?;
             let kind = block_kind_label(super::content::block_kind(block));
             self.emit_block(
                 if misplaced {
@@ -940,7 +944,7 @@ impl<'a> Validator<'a> {
                 concrete_parent,
                 absence_parent,
                 absence_location,
-            });
+            })?;
         }
         self.visit_assigned_lists(AssignedListsInput {
             preamble,
@@ -954,10 +958,8 @@ impl<'a> Validator<'a> {
     }
 
     /// Visits item scopes in physical block order from a final content verdict.
-    fn visit_assigned_lists(
-        &mut self,
-        input: AssignedListsInput<'_, '_>,
-    ) -> Result<(), super::sequence::SequenceExhausted> {
+    /// `visit_content` has already checked the assignment dimensions and counts.
+    fn visit_assigned_lists(&mut self, input: AssignedListsInput<'_, '_>) -> Result<(), RunError> {
         let AssignedListsInput {
             preamble,
             schema_rules,
@@ -967,19 +969,33 @@ impl<'a> Validator<'a> {
             owner,
             parent_path,
         } = input;
+        if rules.len() != schema_rules.len() || ordinals.len() != preamble.len() {
+            return Err(RunError::InconsistentPlan);
+        }
         for (block_index, block) in preamble.iter().enumerate() {
-            let Some(rule_index) = assignment.rules.get(block_index).copied().flatten() else {
+            let Some(rule_index) = *assignment
+                .rules
+                .get(block_index)
+                .ok_or(RunError::InconsistentPlan)?
+            else {
                 continue;
             };
-            let (Block::List(list), Some(rule), Some(schema_rule)) =
-                (block, rules.get(rule_index), schema_rules.get(rule_index))
-            else {
+            let rule = rules.get(rule_index).ok_or(RunError::InconsistentPlan)?;
+            let schema_rule = schema_rules
+                .get(rule_index)
+                .ok_or(RunError::InconsistentPlan)?;
+            let Block::List(list) = block else {
+                if matches!(schema_rule, ContentRule::List { .. }) {
+                    return Err(RunError::InconsistentPlan);
+                }
                 continue;
             };
             let ContentRule::List { items, .. } = schema_rule else {
                 continue;
             };
-            let list_index = ordinals.get(block_index).copied().unwrap_or_default();
+            let list_index = *ordinals
+                .get(block_index)
+                .ok_or(RunError::InconsistentPlan)?;
             let content_path = ContentRulePath {
                 owner: owner.clone(),
                 index: ContentRuleIndex(rule_index),
@@ -1008,11 +1024,14 @@ impl<'a> Validator<'a> {
         address: ListAddress,
         content_path: ContentRulePath,
         _block_index: usize,
-    ) -> Result<(), super::sequence::SequenceExhausted> {
-        let (ItemScope::Declared(schema_rules), super::content::PreparedItemScope::Declared(rules)) =
-            (scope, prepared)
-        else {
-            return Ok(());
+    ) -> Result<(), RunError> {
+        let (schema_rules, rules) = match (scope, prepared) {
+            (ItemScope::Omitted, super::content::PreparedItemScope::Omitted) => return Ok(()),
+            (
+                ItemScope::Declared(schema),
+                super::content::PreparedItemScope::Declared(prepared),
+            ) if schema.len() == prepared.len() => (schema, prepared),
+            _ => return Err(RunError::InconsistentPlan),
         };
         #[cfg(test)]
         {
@@ -1024,7 +1043,7 @@ impl<'a> Validator<'a> {
         }
         #[cfg(test)]
         if self.force_sequence_exhaustion {
-            return Err(super::sequence::SequenceExhausted);
+            return Err(super::sequence::SequenceExhausted.into());
         }
         let items = list.items.iter().collect::<Vec<_>>();
         let (edges, preparation_work) = super::content::prepare_item_edges(&items, rules)?;
@@ -1032,12 +1051,12 @@ impl<'a> Validator<'a> {
         let assignment = super::sequence::assign(&edges.rules, &edges.matches, &edges.costs)?;
         self.validation_work
             .add_dp(items.len(), rules.len(), !assignment.accepted)?;
+        check_assignment(&assignment, items.len(), rules.len())?;
         for (item_index, item) in items.iter().copied().enumerate() {
             if assignment
                 .rules
                 .get(item_index)
-                .copied()
-                .flatten()
+                .ok_or(RunError::InconsistentPlan)?
                 .is_some()
             {
                 continue;
@@ -1076,7 +1095,7 @@ impl<'a> Validator<'a> {
                 },
                 list: &address,
                 list_location,
-            });
+            })?;
         }
         Ok(())
     }
@@ -1084,7 +1103,7 @@ impl<'a> Validator<'a> {
     fn bind_scope<'d>(
         &mut self,
         input: BindScopeInput<'_, 'd>,
-    ) -> Result<BoundScope<'d>, super::sequence::SequenceExhausted> {
+    ) -> Result<BoundScope<'d>, RunError> {
         let BindScopeInput {
             sections,
             scope,
@@ -1101,6 +1120,9 @@ impl<'a> Validator<'a> {
                 .push(VisitEvent::Headings(parent_path.clone()));
         }
         let rules = &scope.rules;
+        if rules.len() != prepared_rules.len() || scope.guards.len() != prepared_guards.len() {
+            return Err(RunError::InconsistentPlan);
+        }
         let allow_skipped = self.schema.options.allow_skipped_levels;
         let mut retained = Vec::new();
         for pathed in sections {
@@ -1122,7 +1144,14 @@ impl<'a> Validator<'a> {
             }
         }
         let columns = rules.len();
+        let cell_count = retained
+            .len()
+            .checked_mul(columns)
+            .ok_or(super::sequence::SequenceExhausted)?;
         let mut matrix = Vec::new();
+        matrix
+            .try_reserve_exact(cell_count)
+            .map_err(|_| super::sequence::SequenceExhausted)?;
         let mut row_eligibility = Vec::with_capacity(retained.len());
         for pathed in &retained {
             let mut eligible = false;
@@ -1141,66 +1170,58 @@ impl<'a> Validator<'a> {
             row_eligibility.push(eligible);
         }
         if scope.extras == ExtrasMode::Anywhere {
-            let mut retained_rows = Vec::with_capacity(row_eligibility.len());
-            for eligible in row_eligibility {
-                #[cfg(test)]
-                {
-                    self.work.extras_classifications =
-                        self.work.extras_classifications.saturating_add(1);
-                }
-                retained_rows.push(eligible);
-            }
+            let retained_rows = row_eligibility;
             let mut row = 0usize;
             retained.retain(|_| {
+                #[cfg(test)]
+                {
+                    self.work.extras_classifications += 1;
+                }
                 let keep = retained_rows.get(row).copied().unwrap_or(false);
                 row = row.saturating_add(1);
                 keep
             });
-            let mut filtered_matrix = Vec::new();
-            for (matrix_row, keep) in matrix.chunks(columns.max(1)).zip(retained_rows) {
-                if keep {
-                    for cell in matrix_row {
-                        #[cfg(test)]
-                        {
-                            self.work.extras_matrix_cell_copies =
-                                self.work.extras_matrix_cell_copies.saturating_add(1);
-                        }
-                        filtered_matrix.push(*cell);
-                    }
+            // Compact retained rows in the existing buffer before transferring ownership.
+            let mut cell = 0;
+            matrix.retain(|_| {
+                let keep = retained_rows
+                    .get(cell / columns.max(1))
+                    .copied()
+                    .unwrap_or(false);
+                cell += 1;
+                #[cfg(test)]
+                {
+                    self.work.extras_matrix_cells_visited += 1;
                 }
-            }
-            matrix = filtered_matrix;
+                keep
+            });
         }
-        let assignment = match scope.mode {
+        if retained.len().checked_mul(columns) != Some(matrix.len()) {
+            return Err(RunError::InconsistentPlan);
+        }
+        let (assignment, matrix) = match scope.mode {
             ScopeMode::Ordered => {
                 #[cfg(test)]
                 if self.force_sequence_exhaustion {
-                    return Err(super::sequence::SequenceExhausted);
+                    return Err(super::sequence::SequenceExhausted.into());
                 }
-                let prepared =
-                    super::content::prepare_heading_edges(rules, retained.len(), &matrix).and_then(
-                        |edges| {
-                            #[cfg(test)]
-                            {
-                                super::sequence::assign_counted(
-                                    &edges.rules,
-                                    &edges.matches,
-                                    &edges.costs,
-                                    &mut self.work.sequence_operations,
-                                )
-                            }
-                            #[cfg(not(test))]
-                            {
-                                super::sequence::assign(&edges.rules, &edges.matches, &edges.costs)
-                            }
-                        },
-                    );
-                let assignment = prepared?;
+                let edges = super::content::prepare_heading_edges(rules, retained.len(), matrix)?;
+                #[cfg(test)]
+                let assignment = super::sequence::assign_counted(
+                    &edges.rules,
+                    &edges.matches,
+                    &edges.costs,
+                    &mut self.work.sequence_operations,
+                )?;
+                #[cfg(not(test))]
+                let assignment =
+                    super::sequence::assign(&edges.rules, &edges.matches, &edges.costs)?;
                 self.validation_work
                     .add_dp(retained.len(), rules.len(), !assignment.accepted)?;
-                assignment
+                (assignment, edges.matches)
             }
             ScopeMode::Unordered => {
+                let matrix = super::sequence::MatchMatrix::new(retained.len(), columns, matrix)?;
                 #[cfg(test)]
                 {
                     self.work.unordered_assignment_writes = self
@@ -1218,14 +1239,7 @@ impl<'a> Validator<'a> {
                             self.work.unordered_rule_inspections =
                                 self.work.unordered_rule_inspections.saturating_add(1);
                         }
-                        matrix
-                            .get(
-                                heading_index
-                                    .saturating_mul(columns)
-                                    .saturating_add(*rule_index),
-                            )
-                            .copied()
-                            .unwrap_or(false)
+                        matrix.matches(heading_index, *rule_index) == Some(true)
                     }) {
                         #[cfg(test)]
                         {
@@ -1238,21 +1252,25 @@ impl<'a> Validator<'a> {
                         }
                     }
                 }
-                super::sequence::Assignment {
-                    rules: assigned,
-                    counts,
-                    accepted: true,
-                    recovery_cost: super::sequence::RecoveryCost {
-                        unassigned: 0,
-                        edge: 0,
+                (
+                    super::sequence::Assignment {
+                        rules: assigned,
+                        counts,
+                        accepted: true,
+                        recovery_cost: super::sequence::RecoveryCost {
+                            unassigned: 0,
+                            edge: 0,
+                        },
                     },
-                }
+                    matrix,
+                )
             }
         };
         #[cfg(test)]
         {
             self.post_sequence_actions = self.post_sequence_actions.saturating_add(1);
         }
+        check_assignment(&assignment, retained.len(), rules.len())?;
         for (heading_index, pathed) in retained.iter().enumerate() {
             if assignment
                 .rules
@@ -1263,11 +1281,8 @@ impl<'a> Validator<'a> {
             {
                 continue;
             }
-            let row_matches = matrix.get(
-                heading_index.saturating_mul(columns)
-                    ..heading_index.saturating_add(1).saturating_mul(columns),
-            );
-            let misplaced = row_matches.is_some_and(|row| row.iter().any(|value| *value));
+            let misplaced =
+                (0..columns).any(|column| matrix.matches(heading_index, column) == Some(true));
             self.emit_present(
                 if misplaced {
                     DiagnosticId::MisplacedSection
@@ -1294,7 +1309,7 @@ impl<'a> Validator<'a> {
                 parent_path,
                 parent_location: parent
                     .map_or_else(root_location, |heading| heading_location(&heading.location)),
-            });
+            })?;
         }
         let mut occurrences = Vec::new();
         for (heading_index, pathed) in retained.iter().enumerate() {
@@ -1378,7 +1393,7 @@ impl<'a> Validator<'a> {
         &mut self,
         guards: &[super::prepare::PreparedMatcher],
         heading: &str,
-    ) -> Result<Option<usize>, super::sequence::SequenceExhausted> {
+    ) -> Result<Option<usize>, RunError> {
         for (index, guard) in guards.iter().enumerate() {
             self.validation_work.add_matcher_text(heading)?;
             #[cfg(test)]
@@ -1403,7 +1418,7 @@ impl<'a> Validator<'a> {
         schema_scope: &ScopePath,
         parent: Option<&'d Heading>,
         parent_path: &HeaderPath,
-    ) -> Result<BoundScope<'d>, super::sequence::SequenceExhausted> {
+    ) -> Result<BoundScope<'d>, RunError> {
         match child_scope {
             ChildScope::Declared(scope) => self.bind_scope(BindScopeInput {
                 sections,
@@ -1414,11 +1429,19 @@ impl<'a> Validator<'a> {
                 parent,
                 parent_path,
             }),
-            ChildScope::Omitted => Ok(BoundScope {
-                occurrences: Vec::new(),
-                singular: Vec::new(),
-            }),
-            ChildScope::GuardsOnly(_) => {
+            ChildScope::Omitted => {
+                if !prepared_rules.is_empty() || !prepared_guards.is_empty() {
+                    return Err(RunError::InconsistentPlan);
+                }
+                Ok(BoundScope {
+                    occurrences: Vec::new(),
+                    singular: Vec::new(),
+                })
+            }
+            ChildScope::GuardsOnly(guards) => {
+                if !prepared_rules.is_empty() || prepared_guards.len() != guards.iter().count() {
+                    return Err(RunError::InconsistentPlan);
+                }
                 for pathed in sections {
                     if let Some(index) =
                         self.first_matching_guard(prepared_guards, &pathed.section.heading.text)?
@@ -1547,7 +1570,10 @@ impl<'a> Validator<'a> {
     /// Emits the shared zero/nonzero-minimum/first-excess taxonomy for every
     /// consuming sequence domain. The final assignment supplies both counts
     /// and concrete occurrences; no matcher is re-run here.
-    fn emit_sequence_cardinality(&mut self, sequence: SequenceCardinality<'_, '_>) {
+    fn emit_sequence_cardinality(
+        &mut self,
+        sequence: SequenceCardinality<'_, '_>,
+    ) -> Result<(), RunError> {
         let (cardinality, rule_index, assignment) = match &sequence {
             SequenceCardinality::Headings {
                 rule,
@@ -1572,7 +1598,7 @@ impl<'a> Validator<'a> {
             .counts
             .get(rule_index)
             .copied()
-            .unwrap_or_default();
+            .ok_or(RunError::InconsistentPlan)?;
         if count < cardinality.min() as usize {
             let diagnostic = match &sequence {
                 SequenceCardinality::Headings {
@@ -1656,10 +1682,10 @@ impl<'a> Validator<'a> {
             self.emit(diagnostic, None, false);
         }
         let UpperBound::Bounded(max) = cardinality.max() else {
-            return;
+            return Ok(());
         };
         if count <= max as usize {
-            return;
+            return Ok(());
         }
         let Some(node_index) = assignment
             .rules
@@ -1670,7 +1696,7 @@ impl<'a> Validator<'a> {
             })
             .nth(max as usize)
         else {
-            return;
+            return Err(RunError::InconsistentPlan);
         };
         match sequence {
             SequenceCardinality::Headings {
@@ -1679,7 +1705,7 @@ impl<'a> Validator<'a> {
                 ..
             } => {
                 let Some(excess) = retained.get(node_index) else {
-                    return;
+                    return Err(RunError::InconsistentPlan);
                 };
                 self.emit(
                     Diagnostic {
@@ -1707,7 +1733,7 @@ impl<'a> Validator<'a> {
                     preamble.as_slice().get(node_index),
                     ordinals.get(node_index),
                 ) else {
-                    return;
+                    return Err(RunError::InconsistentPlan);
                 };
                 self.emit_block(
                     DiagnosticId::TooManyBlocks,
@@ -1729,7 +1755,7 @@ impl<'a> Validator<'a> {
                 ..
             } => {
                 let Some(excess) = items.get(node_index) else {
-                    return;
+                    return Err(RunError::InconsistentPlan);
                 };
                 self.emit_item(
                     DiagnosticId::TooManyItems,
@@ -1744,6 +1770,7 @@ impl<'a> Validator<'a> {
                 );
             }
         }
+        Ok(())
     }
 
     fn validate_constraints<'d>(
@@ -2337,5 +2364,263 @@ fn constraint_id(constraint: &Constraint) -> DiagnosticId {
         Constraint::Requires { .. } => DiagnosticId::Requires,
         Constraint::Conflicts { .. } => DiagnosticId::Conflicts,
         Constraint::Ordered(_) => DiagnosticId::Ordered,
+    }
+}
+
+/// Check the boundary once before interpreting absent assignments as unassigned nodes.
+fn check_assignment(assignment: &Assignment, nodes: usize, rules: usize) -> Result<(), RunError> {
+    if assignment.rules.len() != nodes || assignment.counts.len() != rules {
+        return Err(RunError::InconsistentPlan);
+    }
+    // A linear boundary check keeps counts and node assignments paired without
+    // rescanning every node for every rule (which would add predecessor-like work).
+    let mut counts = Vec::new();
+    counts
+        .try_reserve_exact(rules)
+        .map_err(|_| super::sequence::SequenceExhausted)?;
+    counts.resize(rules, 0usize);
+    for rule in assignment.rules.iter().flatten() {
+        let count = counts.get_mut(*rule).ok_or(RunError::InconsistentPlan)?;
+        *count = count.checked_add(1).ok_or(RunError::InconsistentPlan)?;
+    }
+    if counts != assignment.counts {
+        return Err(RunError::InconsistentPlan);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod invariant_tests {
+    use super::super::content::{PreparedContentScope, PreparedItemScope};
+    use super::*;
+    use crate::{load_schema, parse_markdown, MarkdownOptions};
+
+    #[test]
+    fn inconsistent_content_plans_fail_without_a_partial_verdict() {
+        for text in [
+            "version: 1\noutline: []\n",
+            "version: 1\ncontent: []\noutline: []\n",
+            "version: 1\ncontent: [{block: p}]\noutline: []\n",
+        ] {
+            let loaded = load_schema(text).expect("schema");
+            let document = parse_markdown("paragraph\n# Extra\n", MarkdownOptions::default());
+            let mut plan = ValidationPlan::new(&loaded.schema).expect("plan");
+            plan.content = match plan.content {
+                PreparedContentScope::Omitted => PreparedContentScope::Declared(Vec::new()),
+                PreparedContentScope::Declared(ref rules) if rules.is_empty() => {
+                    PreparedContentScope::Omitted
+                }
+                _ => PreparedContentScope::Declared(Vec::new()),
+            };
+            let mut validator = Validator::new(&loaded.schema, &document);
+            assert!(matches!(
+                validator.run(&plan),
+                Err(RunError::InconsistentPlan)
+            ));
+            assert!(validator.pending_diagnostics.is_empty());
+            assert!(validator.visit_trace.is_empty());
+            assert!(validate_document(&loaded.schema, &document, &plan).is_err());
+        }
+    }
+
+    #[test]
+    fn inconsistent_item_plans_fail_atomically() {
+        for items in ["", "    items: []\n", "    items: [{match: Entry}]\n"] {
+            let loaded = load_schema(&format!(
+                "version: 1\ncontent:\n  - block: list\n{items}outline: []\n"
+            ))
+            .expect("schema");
+            let document = parse_markdown("paragraph\n\n- Entry\n", MarkdownOptions::default());
+            let mut plan = ValidationPlan::new(&loaded.schema).expect("plan");
+            let PreparedContentScope::Declared(rules) = &mut plan.content else {
+                panic!("declared")
+            };
+            rules[0].items = match rules[0].items {
+                PreparedItemScope::Omitted => PreparedItemScope::Declared(Vec::new()),
+                PreparedItemScope::Declared(ref rules) if rules.is_empty() => {
+                    PreparedItemScope::Omitted
+                }
+                _ => PreparedItemScope::Declared(Vec::new()),
+            };
+            let mut validator = Validator::new(&loaded.schema, &document);
+            assert!(matches!(
+                validator.run(&plan),
+                Err(RunError::InconsistentPlan)
+            ));
+            assert!(validator.pending_diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn inconsistent_heading_guard_plans_fail_atomically() {
+        for (text, nested, omitted) in [
+            ("version: 1\noutline: []\nforbid_sections: [{match: Denied}]\n", false, false),
+            ("version: 1\ntitle: '*'\nforbid_sections: [{match: Denied}]\n", false, false),
+            ("version: 1\ntitle: '*'\n", false, true),
+            ("version: 1\noutline:\n  - match: Root\n", true, true),
+            ("version: 1\noutline:\n  - match: Root\n    forbid_sections: [{match: Denied}]\n", true, false),
+            ("version: 1\noutline:\n  - match: Root\n    sections: []\n    forbid_sections: [{match: Denied}]\n", true, false),
+        ] {
+            let loaded = load_schema(text).expect("schema");
+            let document = parse_markdown("# Root\n## Denied\n", MarkdownOptions::default());
+            let mut plan = ValidationPlan::new(&loaded.schema).expect("plan");
+            let guards = if nested { &mut plan.rules[0].guards } else { &mut plan.guards };
+            if omitted {
+                guards.push(super::super::prepare::PreparedMatcher::new(&Matcher::Any, loaded.schema.options.match_case).expect("matcher"));
+            } else { guards.clear(); }
+            let mut validator = Validator::new(&loaded.schema, &document);
+            assert!(matches!(validator.run(&plan), Err(RunError::InconsistentPlan)));
+            assert!(validator.pending_diagnostics.is_empty());
+        }
+        for text in [
+            "version: 1\ntitle: '*'\n",
+            "version: 1\ntitle: '*'\nforbid_sections: [{match: Denied}]\n",
+        ] {
+            let loaded = load_schema(text).expect("schema");
+            let donor = load_schema("version: 1\noutline: [{match: Donor}]\n").expect("schema");
+            let document = parse_markdown("# Root\n## Denied\n", MarkdownOptions::default());
+            let mut plan = ValidationPlan::new(&loaded.schema).expect("plan");
+            plan.rules = ValidationPlan::new(&donor.schema).expect("plan").rules;
+            assert!(validate_document(&loaded.schema, &document, &plan).is_err());
+        }
+    }
+
+    #[test]
+    fn a_non_list_cannot_be_assigned_to_a_list_rule() {
+        let loaded =
+            load_schema("version: 1\ncontent: [{block: list}]\noutline: []\n").expect("schema");
+        let document = parse_markdown("paragraph\n", MarkdownOptions::default());
+        let plan = ValidationPlan::new(&loaded.schema).expect("plan");
+        let PreparedContentScope::Declared(rules) = &plan.content else {
+            panic!("declared")
+        };
+        let DocumentShape::Outline {
+            content: ContentScope::Declared(schema_rules),
+            ..
+        } = &loaded.schema.document
+        else {
+            panic!("declared")
+        };
+        let assignment = Assignment {
+            rules: vec![Some(0)],
+            counts: vec![1],
+            accepted: true,
+            recovery_cost: crate::validator::sequence::RecoveryCost {
+                unassigned: 0,
+                edge: 0,
+            },
+        };
+        let mut validator = Validator::new(&loaded.schema, &document);
+        assert!(validator
+            .visit_assigned_lists(AssignedListsInput {
+                preamble: &document.preamble,
+                schema_rules,
+                rules,
+                assignment: &assignment,
+                ordinals: &[0],
+                owner: ContentOwner::Document,
+                parent_path: &HeaderPath(Vec::new()),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn cardinality_reporting_rejects_missing_counts_and_excess_nodes() {
+        let loaded =
+            load_schema("version: 1\ncontent: [{block: list}]\noutline: []\n").expect("schema");
+        let document = parse_markdown("- Entry\n", MarkdownOptions::default());
+        let DocumentShape::Outline {
+            content: ContentScope::Declared(rules),
+            ..
+        } = &loaded.schema.document
+        else {
+            panic!("declared")
+        };
+        for (assigned, counts, ordinals) in [
+            (vec![Some(0)], vec![], vec![0]),
+            (vec![Some(0)], vec![2], vec![0]),
+            (vec![Some(0), Some(0)], vec![2], vec![0, 1]),
+        ] {
+            let assignment = Assignment {
+                rules: assigned,
+                counts,
+                accepted: false,
+                recovery_cost: crate::validator::sequence::RecoveryCost {
+                    unassigned: 0,
+                    edge: 0,
+                },
+            };
+            let mut validator = Validator::new(&loaded.schema, &document);
+            assert!(validator
+                .emit_sequence_cardinality(SequenceCardinality::Blocks {
+                    rule: &rules[0],
+                    rule_index: 0,
+                    preamble: &document.preamble,
+                    ordinals: &ordinals,
+                    assignment: &assignment,
+                    path: ContentRulePath {
+                        owner: ContentOwner::Document,
+                        index: ContentRuleIndex(0)
+                    },
+                    concrete_parent: &HeaderPath(Vec::new()),
+                    absence_parent: &HeaderPath(Vec::new()),
+                    absence_location: root_location(),
+                })
+                .is_err());
+            assert!(validator.pending_diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn missing_assignment_entries_rules_and_ordinals_are_failures() {
+        let loaded =
+            load_schema("version: 1\ncontent: [{block: list}]\noutline: []\n").expect("schema");
+        let document = parse_markdown("- Entry\n", MarkdownOptions::default());
+        let plan = ValidationPlan::new(&loaded.schema).expect("plan");
+        let PreparedContentScope::Declared(rules) = &plan.content else {
+            panic!("declared")
+        };
+        let schema_rules = match &loaded.schema.document {
+            DocumentShape::Outline { content, .. } => match content {
+                ContentScope::Declared(rules) => rules,
+                _ => panic!("declared"),
+            },
+            _ => panic!("general"),
+        };
+        for (assigned, counts, ordinals, prepared) in [
+            (vec![], vec![0], vec![0], rules.as_slice()),
+            (vec![None], vec![], vec![0], rules.as_slice()),
+            (vec![Some(0)], vec![0], vec![0], rules.as_slice()),
+            (vec![None], vec![1], vec![0], rules.as_slice()),
+            (vec![Some(1)], vec![0], vec![0], rules.as_slice()),
+            (vec![Some(0)], vec![1], vec![], rules.as_slice()),
+            (vec![Some(0)], vec![1], vec![0], &[][..]),
+        ] {
+            let assignment = Assignment {
+                rules: assigned,
+                counts,
+                accepted: false,
+                recovery_cost: crate::validator::sequence::RecoveryCost {
+                    unassigned: 0,
+                    edge: 0,
+                },
+            };
+            let mut validator = Validator::new(&loaded.schema, &document);
+            assert!(
+                check_assignment(&assignment, document.preamble.len(), schema_rules.len()).is_err()
+                    || validator
+                        .visit_assigned_lists(AssignedListsInput {
+                            preamble: &document.preamble,
+                            schema_rules,
+                            rules: prepared,
+                            assignment: &assignment,
+                            ordinals: &ordinals,
+                            owner: ContentOwner::Document,
+                            parent_path: &HeaderPath(Vec::new()),
+                        })
+                        .is_err()
+            );
+            assert!(validator.pending_diagnostics.is_empty());
+        }
     }
 }

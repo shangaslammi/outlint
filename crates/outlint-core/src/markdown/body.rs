@@ -30,6 +30,7 @@ struct ScannedBody {
     headings: Vec<HeadingRecord>,
     file_suppressions: Suppressions,
     root_preamble: Vec<Block>,
+    #[cfg(test)]
     reference_definitions: BTreeMap<String, std::ops::Range<usize>>,
 }
 
@@ -127,10 +128,12 @@ pub(super) fn parse(
         headings,
         file_suppressions,
         root_preamble,
+        #[cfg(test)]
         reference_definitions,
     } = scan_events(source, parser_source, options, line_index);
     let sections = build_section_tree(headings);
     // Definition metadata remains supporting scan information only.
+    #[cfg(test)]
     let _ = reference_definitions;
     ParsedBody {
         preamble: Preamble::from_blocks(root_preamble),
@@ -156,7 +159,9 @@ fn scan_events(
     let mut frames = FrameStack::default();
 
     let parser = Parser::new_ext(parser_source, CommonMarkOptions::empty());
+    #[cfg(test)]
     let mut reference_definitions = BTreeMap::new();
+    #[cfg(test)]
     for (label, definition) in parser.reference_definitions().iter() {
         let normalized = normalize_reference_label(label);
         reference_definitions
@@ -319,6 +324,7 @@ fn scan_events(
         headings,
         file_suppressions,
         root_preamble,
+        #[cfg(test)]
         reference_definitions,
     }
 }
@@ -602,6 +608,8 @@ impl ItemBuilder {
             ItemFirstChild::Paragraph(builder) | ItemFirstChild::ParagraphDone(builder) => {
                 Some(builder.finish(source, lines, options))
             }
+            // §1.8: an empty item or a non-paragraph first child has no text.
+            // This is distinct from a paragraph whose normalized text is empty.
             ItemFirstChild::Unknown | ItemFirstChild::NonParagraph => None,
         };
         Some(ListItem {
@@ -913,6 +921,7 @@ fn is_commonmark_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r')
 }
 
+#[cfg(test)]
 fn normalize_reference_label(label: &str) -> String {
     let mut normalized = String::new();
     for word in label.split_ascii_whitespace() {
@@ -925,7 +934,7 @@ fn normalize_reference_label(label: &str) -> String {
 }
 
 /// One balanced parser container, retaining its matching end kind and span for
-/// the block ownership pass that follows this heading-preserving migration.
+/// the direct block and item ownership checks during the same event scan.
 pub(super) struct Frame {
     pub(super) expected_end: TagEnd,
     pub(super) range: std::ops::Range<usize>,
@@ -971,6 +980,9 @@ impl FrameStack {
             .frames
             .last()
             .is_some_and(|frame| frame.expected_end == end);
+        // A mismatch violates the parser event contract; CommonMark recovery
+        // already emits balanced events for malformed source. See the deferred
+        // fallible-parser decision in docs/rfc5-rust-cleanup.md.
         if !matches {
             self.malformed = true;
             return Err(());

@@ -79,8 +79,7 @@ impl NamedEntry {
         }
     }
 
-    /// Retained for the structural locator binder introduced in stage 3b3.
-    #[allow(dead_code)]
+    /// The cardinality bound used by the structural locator binder.
     pub(super) fn effective_maximum(&self) -> Option<UpperBound> {
         match self {
             Self::Section {

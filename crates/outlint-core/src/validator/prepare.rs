@@ -21,7 +21,6 @@ pub(super) struct ValidationPlan {
     pub(super) title: Option<PreparedMatcher>,
     pub(super) frontmatter: Option<jsonschema::Validator>,
     pub(super) queries: PreparedQueries,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) content: super::content::PreparedContentScope,
     #[cfg(test)]
     pub(super) preparation_count: PreparationCount,
@@ -268,7 +267,6 @@ pub(super) struct PreparedRule {
     pub(super) matcher: PreparedMatcher,
     pub(super) sections: Vec<PreparedRule>,
     pub(super) guards: Vec<PreparedMatcher>,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) content: super::content::PreparedContentScope,
 }
 

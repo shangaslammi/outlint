@@ -63,8 +63,7 @@ fn work_is_exact_sum_of_concrete_scope_costs() {
                 heading_cells.push(rule.matcher.matches(&section.heading.text));
             }
         }
-        let heading_edges =
-            prepare_heading_edges(schema.outline(), retained.len(), &heading_cells)?;
+        let heading_edges = prepare_heading_edges(schema.outline(), retained.len(), heading_cells)?;
         let heading_assignment = assign(
             &heading_edges.rules,
             &heading_edges.matches,
@@ -1159,7 +1158,7 @@ fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
     assert_eq!(work.guard_matcher_evaluations, 5 * 3);
     assert_eq!(work.accepting_matcher_evaluations, 5);
     assert_eq!(work.extras_classifications, 5);
-    assert_eq!(work.extras_matrix_cell_copies, 5);
+    assert_eq!(work.extras_matrix_cells_visited, 5);
     assert_eq!(work.unordered_rule_inspections, 0);
     assert_eq!(work.unordered_assignment_writes, 0);
     assert!(work.sequence_operations > 0);
@@ -1178,7 +1177,7 @@ fn scope_work_is_bounded_for_declared_and_guard_only_scopes() {
             guard_matcher_evaluations: 5 * 3,
             accepting_matcher_evaluations: 0,
             extras_classifications: 0,
-            extras_matrix_cell_copies: 0,
+            extras_matrix_cells_visited: 0,
             unordered_rule_inspections: 0,
             unordered_assignment_writes: 0,
             sequence_operations: 0,
@@ -1250,7 +1249,7 @@ fn adversarial_scope_work_scales_with_h_r_and_g_independently() {
     // §8 bounds ordered assignment by its (H+1)(R+1) tables; §3.3 checks at
     // most H×G guards first. The counted ordered path uses at most 13 DP
     // table/transition/result operations per state. Matrix construction,
-    // extras eligibility, and retained-row copying add at most three more,
+    // extras eligibility, and in-place cell inspection add at most three more,
     // giving the complete bound 16(H+1)(R+1) + H·G.
     for (headings, rules, guards, extras) in [
         (0, 64, 0, false),
