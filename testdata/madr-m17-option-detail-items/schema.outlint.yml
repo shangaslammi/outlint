@@ -1,0 +1,16 @@
+version: 1
+title: "*"
+sections:
+  - match: "Pros and Cons of the Options"
+    sections:
+      - match: "*"
+        repeat: "1..n"
+        content:
+          - block: p
+            required: false
+          - block: list
+            list_kind: bullet
+            items:
+              - match: '/(Good|Neutral|Bad), because .+/'
+                repeat: "1..n"
+        sections: []

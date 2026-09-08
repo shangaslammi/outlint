@@ -1,0 +1,10 @@
+version: 1
+title: "*"
+sections:
+  - match: "Decision Outcome"
+    sections:
+      - match: "Confirmation"
+        content:
+          - block: p
+            repeat: "1..n"
+        sections: []

@@ -1,0 +1,26 @@
+{
+  "pass-with-description.md": [],
+  "pass-without-description.md": [],
+  "fail-description-after-list.md": [
+    {
+      "id": "misplaced-block",
+      "target": { "kind": "block", "parent": ["Choose a datastore", "Pros and Cons of the Options", "PostgreSQL"], "block": "list", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Choose a datastore", "Pros and Cons of the Options", "PostgreSQL"], "matcher": { "block": "list", "list_kind": "bullet" } }
+    }
+  ],
+  "fail-unclassified.md": [
+    {
+      "id": "unexpected-item",
+      "target": { "kind": "item", "list": { "parent": ["Choose a datastore", "Pros and Cons of the Options", "PostgreSQL"], "index": 0 }, "index": 1 }
+    }
+  ],
+  "fail-two-lists.md": [
+    {
+      "id": "too-many-blocks",
+      "target": { "kind": "block", "parent": ["Choose a datastore", "Pros and Cons of the Options", "PostgreSQL"], "block": "list", "index": 1 }
+    }
+  ]
+}

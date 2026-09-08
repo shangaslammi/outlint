@@ -1,0 +1,8 @@
+version: 1
+title: "*"
+sections:
+  - match: "More Information"
+    content:
+      - block: p
+        repeat: "1..n"
+    sections: []

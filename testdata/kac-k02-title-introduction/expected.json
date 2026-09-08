@@ -1,0 +1,19 @@
+{
+  "pass.md": [],
+  "fail-missing-intro.md": [
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": [], "matcher": { "block": "p" } }
+    }
+  ],
+  "fail-list-intro.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Changelog"], "block": "list", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": [], "matcher": { "block": "p" } }
+    }
+  ]
+}
