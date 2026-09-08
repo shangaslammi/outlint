@@ -731,6 +731,48 @@ fn parser_ranges_pin_kind_specific_anchors_and_exclude_trailing_blanks() {
 }
 
 #[test]
+fn malformed_and_deep_edge_forms_keep_prior_headings_and_direct_ownership() {
+    let deep_quote = format!("{}nested\n\n# after deep quote\n", "> ".repeat(256));
+    let cases = [
+        (
+            "---\r\nname: 界\r---\n# before fence\r\n```rust\r\n# swallowed\r\n",
+            vec!["before fence"],
+        ),
+        (
+            "# before comment\n\n<!-- incomplete --\n## swallowed by HTML\n",
+            vec!["before comment"],
+        ),
+        (
+            "999999999999999999999999999999999999. marker\n\n# after marker\n",
+            vec!["after marker"],
+        ),
+        (
+            "short setext\n--\n\nsetext one\r===\r\nsetext two\r\n---\n",
+            vec!["short setext", "setext one", "setext two"],
+        ),
+        (deep_quote.as_str(), vec!["after deep quote"]),
+    ];
+
+    for (source, expected) in cases {
+        let document = parse_markdown(source, MarkdownOptions::default());
+        let actual: Vec<_> = headings(&document)
+            .into_iter()
+            .map(|heading| heading.diagnostic_text.as_str())
+            .collect();
+        assert_eq!(actual, expected, "{source:?}");
+    }
+
+    let nested = parse_markdown(&deep_quote, MarkdownOptions::default());
+    assert_eq!(nested.preamble.len(), 1);
+    let block = nested
+        .preamble
+        .as_slice()
+        .first()
+        .unwrap_or_else(|| unreachable!());
+    assert_eq!(block_kind(block), BlockKind::Quote);
+}
+
+#[test]
 fn line_index_treats_crlf_as_one_ending_and_cr_as_an_ending() {
     let source = "a\r\nb\rc\nd";
     let lines = LineIndex::new(source);

@@ -4,7 +4,7 @@ use crate::markdown::frontmatter::yaml::push_pointer_token;
 use crate::markdown::lines::LineIndex;
 use crate::markdown::{
     parse_markdown, Block, BlockLocation, DocumentFrontmatter, FrontmatterAnchors,
-    FrontmatterLocation, Heading, MarkdownOptions, Section,
+    FrontmatterLocation, Heading, ItemLocation, MarkdownOptions, Section,
 };
 use crate::{HeaderLevel, TextRange};
 
@@ -19,6 +19,17 @@ fn block_location(block: &Block) -> &BlockLocation {
         | Block::Html(block)
         | Block::Break(block) => &block.location,
         Block::List(block) => &block.location,
+    }
+}
+
+fn block_kind(block: &Block) -> crate::markdown::BlockKind {
+    match block {
+        Block::Paragraph(_) => crate::markdown::BlockKind::Paragraph,
+        Block::List(_) => crate::markdown::BlockKind::List,
+        Block::Quote(_) => crate::markdown::BlockKind::Quote,
+        Block::Code(_) => crate::markdown::BlockKind::Code,
+        Block::Html(_) => crate::markdown::BlockKind::Html,
+        Block::Break(_) => crate::markdown::BlockKind::Break,
     }
 }
 
@@ -40,20 +51,77 @@ fn assert_valid_section_ranges(source: &str, sections: &[Section]) {
 }
 
 fn assert_valid_preamble_ranges(source: &str, blocks: &[Block]) {
+    let lines = LineIndex::new(source);
+    let mut prior_end = None;
     for block in blocks {
         let location = block_location(block);
         assert_valid_range(source, location.range);
         assert_valid_range(source, location.line_range);
         assert!(location.line >= 1);
         assert!(location.column >= 1);
+        assert_eq!(
+            lines.line_start(location.line as usize) + location.column as usize - 1,
+            location.range.start.0
+        );
+        if let Some(prior_end) = prior_end {
+            assert!(prior_end <= location.range.start);
+        }
+        prior_end = Some(location.range.end);
+        assert_no_trailing_blank_line(source, location.range);
         if let Block::List(list) = block {
+            assert!(list.items.iter().next().is_some());
+            let mut prior_item_end = None;
             for item in list.items.iter() {
                 assert_valid_range(source, item.location.range);
                 assert_valid_range(source, item.location.line_range);
                 assert!(location.range.start <= item.location.range.start);
                 assert!(item.location.range.end <= location.range.end);
+                assert_item_anchor(source, &lines, &item.location);
+                if let Some(prior_item_end) = prior_item_end {
+                    assert!(prior_item_end <= item.location.range.start);
+                }
+                prior_item_end = Some(item.location.range.end);
+                assert_no_trailing_blank_line(source, item.location.range);
             }
         }
+    }
+}
+
+fn assert_item_anchor(source: &str, lines: &LineIndex, location: &ItemLocation) {
+    assert!(location.line >= 1);
+    assert!(location.column >= 1);
+    assert_eq!(
+        lines.line_start(location.line as usize) + location.column as usize - 1,
+        location.range.start.0
+    );
+    assert!(source.is_char_boundary(location.range.start.0));
+}
+
+/// A parser span may include its terminating line ending, but never a blank
+/// line after the last content line (§1.7).
+fn assert_no_trailing_blank_line(source: &str, range: TextRange) {
+    let text = source
+        .get(range.start.0..range.end.0)
+        .unwrap_or_else(|| unreachable!());
+    let without_terminator = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix(['\r', '\n']))
+        .unwrap_or(text);
+    let final_line = without_terminator
+        .rsplit(['\r', '\n'])
+        .next()
+        .unwrap_or_default();
+    assert!(
+        final_line.bytes().any(|byte| !matches!(byte, b' ' | b'\t')),
+        "range retained a trailing blank line: {range:?}"
+    );
+}
+
+fn assert_document_block_contract(source: &str, sections: &[Section], root: &[Block]) {
+    assert_valid_preamble_ranges(source, root);
+    for section in sections {
+        assert_valid_preamble_ranges(source, section.preamble.as_slice());
+        assert_document_block_contract(source, &section.children, &[]);
     }
 }
 
@@ -469,6 +537,237 @@ proptest! {
 
         let document = parse_markdown(&source, MarkdownOptions::default());
         prop_assert_eq!(heading_projection(&document.sections), expected);
+    }
+
+    #[test]
+    fn malformed_mixed_markdown_never_panics(
+        depth in 1usize..96,
+        malformed in 0u8..4,
+        huge_marker in "[0-9]{20,80}",
+        inline_units in 0usize..256,
+        endings in proptest::collection::vec(0u8..3, 4..24),
+    ) {
+        let ending = |index: usize| match endings.get(index % endings.len()).copied() {
+            Some(0) => "\n",
+            Some(1) => "\r\n",
+            _ => "\r",
+        };
+        let mut source = format!(
+            "---{0}name: 界{1}---{2}{3}# stable{4}{5}",
+            ending(0), ending(1), ending(2), ending(3), ending(4), ending(5),
+        );
+        source.push_str(&"> ".repeat(depth));
+        source.push_str("- nested **é**");
+        source.push_str(ending(6));
+        source.push_str(" \t");
+        source.push_str(ending(7));
+        source.push_str("near setext");
+        source.push_str(ending(8));
+        source.push_str("--");
+        source.push_str(ending(9));
+        source.push_str(ending(10));
+        source.push_str("[A  B]: /first");
+        source.push_str(ending(11));
+        source.push_str("[a b]: /duplicate");
+        source.push_str(ending(12));
+        source.push_str(ending(13));
+        source.push_str(&"é*_`<&amp;".repeat(inline_units));
+        source.push_str(ending(14));
+        match malformed {
+            0 => source.push_str("```rust\r\n# unterminated fence"),
+            1 => source.push_str("<!-- unterminated comment --"),
+            2 => source.push_str(&format!("{huge_marker}. enormous marker\n  > child")),
+            _ => source.push_str("- item\n  > quote\n    ~~~~\n    unclosed"),
+        }
+
+        let document = parse_markdown(&source, MarkdownOptions::default());
+        assert_valid_section_ranges(&source, &document.sections);
+        assert_document_block_contract(
+            &source,
+            &document.sections,
+            document.preamble.as_slice(),
+        );
+        prop_assert_eq!(
+            heading_projection(&document.sections),
+            [
+                (HeaderLevel::H1, "stable".to_owned()),
+                (HeaderLevel::H2, "near setext".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_newlines_and_unicode_preserve_anchor_contract(
+        paragraph_tail in "[a-zé界]{1,24}",
+        item_tail in "[a-zé界]{1,24}",
+        indent in 0usize..4,
+    ) {
+        let paragraph = format!("é{paragraph_tail}");
+        let item = format!("界{item_tail}");
+        let source = format!(
+            "---\r\nname: 界\r---\n\n<!-- transparent -->\r{}{paragraph}\r\n\r  > quote 界\n\r\n   12. {item}\r\r# 標題\r\nsetext é\r---\r\n",
+            " ".repeat(indent),
+        );
+        let document = parse_markdown(&source, MarkdownOptions::default());
+        let root = document.preamble.as_slice();
+        prop_assert_eq!(
+            root.iter().map(block_kind).collect::<Vec<_>>(),
+            [
+                crate::markdown::BlockKind::Paragraph,
+                crate::markdown::BlockKind::Quote,
+                crate::markdown::BlockKind::List,
+            ]
+        );
+        let paragraph_start = source.find(&paragraph).unwrap_or_else(|| unreachable!());
+        let quote_start = source.find("> quote").unwrap_or_else(|| unreachable!());
+        let list_start = source.find("12.").unwrap_or_else(|| unreachable!());
+        let paragraph_bound = paragraph_start + paragraph.len() + "\r\n".len();
+        let quote_bound = quote_start + "> quote 界\n".len();
+        let list_bound = list_start + "12. ".len() + item.len() + "\r".len();
+        for (block, (start, end_bound)) in root.iter().zip([
+            (paragraph_start, paragraph_bound),
+            (quote_start, quote_bound),
+            (list_start, list_bound),
+        ]) {
+            prop_assert_eq!(block_location(block).range.start.0, start);
+            prop_assert!(block_location(block).range.end.0 <= end_bound);
+        }
+        let Block::List(list) = root.last().unwrap_or_else(|| unreachable!()) else {
+            prop_assert!(false, "ordered marker did not form a list");
+            return Ok(());
+        };
+        prop_assert_eq!(list.items.first.location.range.start.0, list_start);
+        prop_assert_eq!(list.items.first.text.as_ref().map(|text| text.diagnostic_text.as_str()), Some(item.as_str()));
+        prop_assert_eq!(
+            heading_projection(&document.sections),
+            [
+                (HeaderLevel::H1, "標題".to_owned()),
+                (HeaderLevel::H2, "setext é".to_owned()),
+            ]
+        );
+        assert_valid_section_ranges(&source, &document.sections);
+        assert_document_block_contract(&source, &document.sections, root);
+    }
+
+    #[test]
+    fn nested_container_ranges_preserve_direct_parentage(
+        depth in 1usize..64,
+        item_count in 1usize..8,
+        malformed_tail in any::<bool>(),
+    ) {
+        let mut source = String::from("before\n\n");
+        let quote_start = source.len();
+        source.push_str(&"> ".repeat(depth));
+        source.push_str("deep quote\n\n");
+        let list_start = source.len();
+        for index in 0..item_count {
+            source.push_str(&format!("- item-{index}\n  > nested-{index}\n"));
+        }
+        if malformed_tail {
+            source.push_str("  <!-- unterminated\n");
+        }
+        source.push_str("\nafter\n");
+
+        let document = parse_markdown(&source, MarkdownOptions::default());
+        let root = document.preamble.as_slice();
+        prop_assert_eq!(
+            root.iter().map(block_kind).collect::<Vec<_>>(),
+            [
+                crate::markdown::BlockKind::Paragraph,
+                crate::markdown::BlockKind::Quote,
+                crate::markdown::BlockKind::List,
+                crate::markdown::BlockKind::Paragraph,
+            ]
+        );
+        let [_, quote, list, _] = root else {
+            prop_assert!(false, "expected four direct root blocks");
+            return Ok(());
+        };
+        prop_assert_eq!(block_location(quote).range.start.0, quote_start);
+        prop_assert_eq!(block_location(list).range.start.0, list_start);
+        let Block::List(list) = list else {
+            prop_assert!(false, "direct list lost its event identity");
+            return Ok(());
+        };
+        prop_assert_eq!(list.items.iter().count(), item_count);
+        for (index, item) in list.items.iter().enumerate() {
+            prop_assert_eq!(
+                item.text.as_ref().map(|text| text.diagnostic_text.clone()),
+                Some(format!("item-{index}")),
+            );
+        }
+        assert_document_block_contract(&source, &document.sections, root);
+    }
+
+    #[test]
+    fn transparency_never_merges_event_defined_siblings(
+        neighborhoods in 1usize..8,
+        comment_body in "[a-z é界]{0,24}",
+        comment_case in 0u8..10,
+    ) {
+        // pulldown-cmark 0.13.4 scanners.rs:1448-1468 implements the
+        // CommonMark 0.31.2 rule by scanning only for the closing `-->`.
+        let (comment, visible_kind) = match comment_case {
+            0 => (format!("<!-- {comment_body} -->"), None),
+            1 => ("<!-->".to_owned(), None),
+            2 => ("<!--->".to_owned(), None),
+            3 => ("<!-- <tag> > -->".to_owned(), None),
+            4 => ("<!-- a -- b -->".to_owned(), None),
+            5 => ("<!-- -> x -->".to_owned(), None),
+            6 => ("<!---> trailing".to_owned(), Some(crate::markdown::BlockKind::Html)),
+            7 => ("<!-- ok -->suffix".to_owned(), Some(crate::markdown::BlockKind::Html)),
+            8 => ("<!-- first --><hr><!-- second -->".to_owned(), Some(crate::markdown::BlockKind::Html)),
+            _ => ("<!- unclosed".to_owned(), Some(crate::markdown::BlockKind::Paragraph)),
+        };
+        let mut source = String::new();
+        let mut expected_starts = Vec::new();
+        let mut expected_kinds = Vec::new();
+        for index in 0..neighborhoods {
+            expected_starts.push(source.len());
+            expected_kinds.push(crate::markdown::BlockKind::Paragraph);
+            source.push_str(&format!("visible-{index}\n\n"));
+            if let Some(kind) = visible_kind {
+                expected_starts.push(source.len());
+                expected_kinds.push(kind);
+            }
+            source.push_str(&comment);
+            source.push_str("\n\n");
+            source.push_str("[A  B]: /first\n[a b]: /duplicate\n\n");
+            expected_starts.push(source.len());
+            expected_kinds.push(crate::markdown::BlockKind::Html);
+            source.push_str(&format!("<div>html-{index}</div>\n\n"));
+            expected_starts.push(source.len());
+            expected_kinds.push(crate::markdown::BlockKind::Quote);
+            source.push_str("> quoted-before\n>\n> [Q  A]: /quote\n> [q a]: /duplicate\n>\n> quoted-after\n\n");
+            expected_starts.push(source.len());
+            expected_kinds.push(crate::markdown::BlockKind::List);
+            source.push_str("- listed-before\n\n  [I  A]: /item\n  [i a]: /duplicate\n\n  listed-after\n\n");
+        }
+        let list_start = source.len();
+        expected_starts.push(list_start);
+        expected_kinds.push(crate::markdown::BlockKind::List);
+        source.push_str("1. **tight**\n");
+
+        let scanned = scan_preambles(&source, MarkdownOptions::default());
+        prop_assert_eq!(
+            scanned.root.iter().map(block_kind).collect::<Vec<_>>(),
+            expected_kinds
+        );
+        prop_assert_eq!(
+            scanned.root.iter().map(|block| block_location(block).range.start.0).collect::<Vec<_>>(),
+            expected_starts
+        );
+        prop_assert_eq!(scanned.reference_definitions.len(), 3);
+        let Block::List(list) = scanned.root.last().unwrap_or_else(|| unreachable!()) else {
+            prop_assert!(false, "tight list was not retained");
+            return Ok(());
+        };
+        prop_assert_eq!(list.location.range.start.0, list_start);
+        prop_assert_eq!(
+            list.items.first.text.as_ref().map(|text| text.diagnostic_text.as_str()),
+            Some("tight")
+        );
+        assert_valid_preamble_ranges(&source, &scanned.root);
     }
 
     #[test]
