@@ -104,7 +104,7 @@ fn malformed_schema_error_ranges_match_the_committed_baseline() {
 }
 
 #[test]
-fn rfc5_rejection_ranges_are_exact() {
+fn preamble_items_rejection_ranges_are_exact() {
     let source = "version: 1\ncontent:\n  - one_of:\n      - block: list\n        list_kind: any\n      - block: list\noutline: []\n";
     let invalid = load_schema(source).expect_err("normalized alternatives are duplicates");
     assert_eq!(invalid.errors.iter().count(), 1);
@@ -212,47 +212,47 @@ fn successful_content_and_item_rule_ranges_cover_every_owner() {
 /// empty collection — so the recorded slice is read against exactly one error.
 const MALFORMED_SCHEMAS: &[(&str, &str)] = &[
     (
-        "rfc5-document-content-null",
+        "preamble-items-document-content-null",
         "version: 1\ncontent: null\noutline: []\n",
     ),
     (
-        "rfc5-section-content-null",
+        "preamble-items-section-content-null",
         "version: 1\noutline:\n  - match: A\n    content: null\n",
     ),
     (
-        "rfc5-one-of-non-mapping-alternative",
+        "preamble-items-one-of-non-mapping-alternative",
         "version: 1\ncontent:\n  - one_of:\n      - block: p\n      - nope\noutline: []\n",
     ),
     (
-        "rfc5-content-not-a-sequence",
+        "preamble-items-content-not-a-sequence",
         "version: 1\ncontent: nope\noutline: []\n",
     ),
     (
-        "rfc5-content-entry-not-a-mapping",
+        "preamble-items-content-entry-not-a-mapping",
         "version: 1\ncontent:\n  - nope\noutline: []\n",
     ),
     (
-        "rfc5-content-outer-neither",
+        "preamble-items-content-outer-neither",
         "version: 1\ncontent:\n  - id: ignored\noutline: []\n",
     ),
     (
-        "rfc5-content-outer-both-and-unknown",
+        "preamble-items-content-outer-both-and-unknown",
         "version: 1\ncontent:\n  - one_of: []\n    deferred: false\n    block: p\n    items: nope\noutline: []\n",
     ),
     (
-        "rfc5-content-inapplicable-and-malformed-members",
+        "preamble-items-content-inapplicable-and-malformed-members",
         "version: 1\ncontent:\n  - block: p\n    list_kind: bullet\n    items: nope\n  - block: list\n    list_kind: nope\n    required: true\n    repeat: 2..1\noutline: []\n",
     ),
     (
-        "rfc5-choice-alternatives-and-duplicate",
+        "preamble-items-choice-alternatives-and-duplicate",
         "version: 1\ncontent:\n  - one_of:\n      - block: list\n        list_kind: any\n      - block: list\n      - one_of: []\noutline: []\n",
     ),
     (
-        "rfc5-items-container-and-entry",
+        "preamble-items-items-container-and-entry",
         "version: 1\ncontent:\n  - block: list\n    items: nope\n  - block: list\n    items:\n      - nope\noutline: []\n",
     ),
     (
-        "rfc5-item-shape-matcher-and-cardinality",
+        "preamble-items-item-shape-matcher-and-cardinality",
         "version: 1\ncontent:\n  - block: list\n    items:\n      - id: BAD\n        match: 7\n        required: nope\n        repeat: 3\n        content: deferred\n      - match: '/[bad/'\n      - match: '*'\noutline: []\n",
     ),
     (

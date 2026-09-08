@@ -74,7 +74,7 @@ enum JsonContext {
 }
 
 /// Writes compact JSON while preserving the historical key-sorted encoding
-/// everywhere except the appended RFC 5 objects whose member order §11.3
+/// everywhere except the preamble block and item objects whose member order §11.3
 /// specifies verbatim.
 fn write_json_value(value: &Value, context: JsonContext, output: &mut Vec<u8>) {
     match value {

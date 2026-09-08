@@ -93,7 +93,7 @@ disabled only file-wide; `outlint-disable-file` covers the whole document.
 Filtering never changes matching or dependency state.
 
 This surface keeps schema version 1 and envelope version 2. Deferred syntax
-has no semantics: F3 correspondence/selection, F4 paragraph/lead text, F6 link
+has no semantics: correspondence/selection, paragraph/lead text, link
 definitions, editing and concrete edit paths, task state, matchable
 quote/code/HTML/break/table predicates and GFM tables, nested item/cell
 validation, item captures/order, content/item guards/extras/unordered

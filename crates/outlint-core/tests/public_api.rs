@@ -134,7 +134,7 @@ fn public_display_implementations_are_concise_and_stable() {
 }
 
 #[test]
-fn rfc5_diagnostic_surface_is_pinned() {
+fn preamble_items_diagnostic_surface_is_pinned() {
     use outlint_core::{
         BlockKind, BlockMatcher, ContentMatcher, ContentOwner, ContentRuleIndex, ContentRulePath,
         DiagnosticTarget, ItemRuleIndex, ItemRulePath, ListAddress, SchemaNode,
@@ -272,7 +272,7 @@ fn semantic_options_default_to_the_specification_values() {
 }
 
 #[test]
-fn rfc5_document_model_is_pinned() {
+fn preamble_items_document_model_is_pinned() {
     use outlint_core::{
         Block, BlockKind, BlockLocation, ItemLocation, ItemText, LeafBlock, ListBlock, ListItem,
         ListKind, NonEmpty, Preamble, Suppressions,
@@ -457,7 +457,7 @@ fn current_schema_public_model_and_vocabulary_are_pinned() {
 }
 
 #[test]
-fn rfc5_schema_surface_compiles() {
+fn preamble_items_schema_surface_compiles() {
     use outlint_core::{
         AtLeastTwo, BlockMatcher, Cardinality, ContentMatcher, ContentRule, ContentScope, ItemRule,
         ItemScope, ListKind, Matcher, UpperBound,
@@ -511,7 +511,7 @@ fn rfc5_schema_surface_compiles() {
     assert!(matches!(missing, ContentMatcher::OneOf(_)));
 
     let loaded = load_schema("version: 1\ntitle: Guide\nsections: []\n")
-        .expect("a pre-RFC-5 schema remains valid");
+        .expect("a schema without content or item rules remains valid");
     let outlint_core::DocumentShape::Title(title) = &loaded.schema.document else {
         panic!("expected title sugar")
     };
@@ -519,10 +519,10 @@ fn rfc5_schema_surface_compiles() {
     assert!(loaded.schema.outline().is_empty());
 }
 
-/// Pins RFC 5's complete public model and the validation entry points that
+/// Pins the public preamble and list-item model and the validation entry points that
 /// remain unchanged by the preamble extension.
 #[test]
-fn rfc5_complete_public_surface_is_pinned() {
+fn preamble_items_complete_public_surface_is_pinned() {
     use outlint_core::{
         AtLeastTwo, Block, BlockKind, BlockLocation, BlockMatcher, Cardinality, ContentMatcher,
         ContentOwner, ContentRule, ContentRuleIndex, ContentRulePath, ContentScope, ItemLocation,
@@ -573,8 +573,8 @@ fn rfc5_complete_public_surface_is_pinned() {
         ContentMatcher::OneOf(_)
     ));
 
-    let loaded =
-        load_schema("version: 1\ncontent: []\noutline: []\n").expect("RFC 5 schema is valid");
+    let loaded = load_schema("version: 1\ncontent: []\noutline: []\n")
+        .expect("content and item schema is valid");
     let document =
         parse_markdown("", MarkdownOptions::default()).expect("Markdown parsing succeeds");
     let _: fn(&Schema) -> Result<PreparedValidator, PrepareValidationError> =

@@ -46,9 +46,9 @@ invariant failure; ordinary CommonMark recovery remains successful.
 `Document` to `Vec<Diagnostic>` using bounded ordered assignment.
 `matcher.rs` and `case_fold.rs` are private helpers.
 
-RFC 5 extends the parsed tree downward without changing schema version 1 or
-JSON envelope version 2. `Document` and `Section` own visible direct preamble
-blocks; lists own direct syntactic items. Frontmatter, reference definitions,
+Preamble blocks and direct list items extend the parsed tree without changing
+schema version 1 or JSON envelope version 2. `Document` and `Section` own
+visible direct preamble blocks; lists own direct syntactic items. Frontmatter, reference definitions,
 and complete CommonMark HTML comments surrounded only by CommonMark ASCII
 whitespace are transparent. Nested blocks/items do not leak into an outer
 scope. Item text exists only when the first direct block is a paragraph; a
@@ -114,8 +114,8 @@ Absent by design, do not add speculatively:
   configuration or schema-selection lookup. This does not prohibit the
   documented npm bootstrap from acquiring and caching the released native
   binary before validation begins.
-- RFC 5 deferred syntax has no semantics: F3 correspondence/selection, F4
-  paragraph/lead text, F6 link definitions, editing/concrete edit paths, task
+- Unsupported syntax has no semantics: correspondence/selection,
+  paragraph/lead text, link definitions, editing/concrete edit paths, task
   state, matchable quote/code/HTML/break/table predicates and GFM tables,
   nested item/cell validation, item captures/order, content/item
   guards/extras/unordered scopes/phases/constraints, meaningful-item

@@ -3,8 +3,8 @@ mod common;
 use common::*;
 
 #[test]
-fn rfc5_targets_serialize_in_normative_member_order() {
-    let directory = TempDir::new("rfc5-target-json");
+fn preamble_items_targets_serialize_in_normative_member_order() {
+    let directory = TempDir::new("preamble-items-target-json");
     directory.write(
         "schema.yml",
         concat!(
@@ -72,8 +72,8 @@ fn rfc5_targets_serialize_in_normative_member_order() {
 }
 
 #[test]
-fn rfc5_human_messages_escape_user_text() {
-    let directory = TempDir::new("rfc5-human-escape");
+fn preamble_items_human_messages_escape_user_text() {
+    let directory = TempDir::new("preamble-items-human-escape");
     directory.write(
         "schema.yml",
         "version: 1\ntitle: '*'\ncontent: []\nsections: []\n",

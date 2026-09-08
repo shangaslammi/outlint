@@ -12,7 +12,7 @@ use common::*;
 
 #[test]
 fn envelope_version_remains_two() {
-    let directory = TempDir::new("rfc5-envelope-version");
+    let directory = TempDir::new("preamble-items-envelope-version");
     directory.write("schema.yml", "version: 1\noutline: []\n");
     directory.write("doc.md", "");
     let output = run(
@@ -30,8 +30,8 @@ fn envelope_version_remains_two() {
 }
 
 #[test]
-fn rfc5_optional_members_are_omitted_not_null() {
-    let directory = TempDir::new("rfc5-optional-members");
+fn preamble_items_optional_members_are_omitted_not_null() {
+    let directory = TempDir::new("preamble-items-optional-members");
     directory.write(
         "schema.yml",
         "version: 1\ncontent:\n  - block: list\n    list_kind: any\noutline: []\n",
@@ -58,7 +58,7 @@ fn rfc5_optional_members_are_omitted_not_null() {
 }
 
 #[test]
-fn rfc5_total_order_covers_every_new_variant() {
+fn preamble_items_total_order_covers_every_new_variant() {
     use rendered_diagnostics::{
         sort_diagnostics, RenderedBlockMatcher, RenderedContentMatcher, RenderedDiagnostic,
         RenderedListAddress, RenderedTarget,

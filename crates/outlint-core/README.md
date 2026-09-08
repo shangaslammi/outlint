@@ -65,7 +65,7 @@ schema-node addresses. Resolve a diagnostic's `schema_node` through
 `loaded.locations.nodes`, then use the resulting `SourceRange::source` to find
 the source text and label in `loaded.sources.documents`.
 
-## RFC 5 model boundaries
+## Preamble and list-item model boundaries
 
 The physical root and every heading own only their direct preamble blocks;
 each retained list owns only its direct items. Root ownership stops at the
@@ -104,7 +104,7 @@ the document. Filtering never changes assignment, recovery, captures, locator
 binding, or dependency suppression.
 
 Schema version 1 and JSON envelope version 2 remain unchanged. Deferred syntax
-has no semantics: F3 correspondence/selection, F4 paragraph/lead text, F6 link
+has no semantics: correspondence/selection, paragraph/lead text, link
 definitions, editing and concrete edit paths, task state, matchable
 quote/code/HTML/break/table predicates and GFM tables, nested item/cell
 validation, item captures/order, content/item guards/extras/unordered

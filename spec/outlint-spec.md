@@ -1674,8 +1674,8 @@ Using any of those words where §2 does not admit it remains an unknown-key or
 invalid-shape error; reservation does not activate syntax. `linkdefs` is only
 the reserved locator root of §4.1. The following features remain deferred and
 their names do not activate schema syntax: item-text correspondence and
-selection constraints (`F3`); paragraph-text and first-line/lead matching
-(`F4`); link-reference-definition validation (`F6`); structured editing and
+selection constraints; paragraph-text and first-line/lead matching;
+link-reference-definition validation; structured editing and
 concrete document edit paths; task items and checked state; matchable
 `quote`/`code`/`html`/`break`/`table` predicates and GFM table parsing; nested
 item and cell validation; item captures and `order`; content/item guards,

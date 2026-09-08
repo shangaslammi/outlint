@@ -228,7 +228,7 @@ fn ordered_suppresses_when_any_of_its_locator_descents_is_suppressed() {
 }
 
 #[test]
-fn rfc5_suppression_filters_only_final_diagnostics() {
+fn preamble_items_suppression_filters_only_final_diagnostics() {
     let schema =
         "version: 1\ncontent:\n  - block: list\n    repeat: 0..1\n    items: []\noutline: []\n";
     let markdown = "<!-- outlint-disable-file too-many-blocks -->\n\n- first\n\n- second\n";

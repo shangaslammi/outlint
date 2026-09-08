@@ -334,8 +334,8 @@ does not alter assignment, recovery, capture evaluation, locator binding, or
 dependency suppression.
 
 This release keeps schema `version: 1` and JSON envelope version `2`. Deferred
-syntax has no semantics: F3 item-text correspondence/selection; F4 paragraph
-text and first-line/lead matching; F6 link-definition validation; structured
+syntax has no semantics: item-text correspondence/selection; paragraph
+text and first-line/lead matching; link-definition validation; structured
 editing and concrete edit paths; task-item checked state; matchable
 quote/code/HTML/break/table predicates and GFM tables; nested item and cell
 validation; item captures/order; content/item guards, extras, unordered
@@ -495,16 +495,6 @@ including the complete `--help` surface.
 outlint is at version 0.1.0. The normative specification may lead the staged
 implementation on integration branches; the released implementation and its
 shared conformance corpus are kept aligned before release.
-
-| Target | Covered | Remaining red rows |
-| --- | ---: | --- |
-| MADR | 16/20 | M5 (cross-document), M12 (F4), M19 (F3), M20 (F3+F4) |
-| Keep a Changelog | 8/10 | K9 (F6), K10 (F3+F6) |
-
-The newly covered rows are M9, M10, M11, M14, M15, M17, M18, K2, and K8,
-with evidence in the correspondingly named `testdata/madr-*` and
-`testdata/kac-*` fixture directories. The remaining rows above are not
-claimed by this release.
 
 This is a 0.x release: expect breaking changes to the schema language, the
 diagnostic set, the JSON shape, and the library API before 1.0. Where an

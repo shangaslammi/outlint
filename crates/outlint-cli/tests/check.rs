@@ -84,8 +84,8 @@ fn changelog_schema_enforces_kac_k1_through_k8() {
 }
 
 #[test]
-fn all_rfc5_ids_are_valid_suppressions() {
-    let directory = TempDir::new("rfc5-suppressions");
+fn all_preamble_items_ids_are_valid_suppressions() {
+    let directory = TempDir::new("preamble-items-suppressions");
     let cases = [
         (
             "unexpected-block",

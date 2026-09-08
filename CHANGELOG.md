@@ -39,12 +39,6 @@ output shape, and the library API may all change in a minor release. See
   not general `/item/text` traversal. Omitted `content` and `items` change no
   verdict. Schema `version` stays 1 and the
   envelope stays 2 (spec §§1, 2, 3, 4, 6, 8, 10, 11.3–11.4).
-  This completes the structural target rows M9, M10, M11, M14, M15, M17,
-  M18, K2, and K8, reaching MADR 16/20 and Keep a Changelog 8/10. Remaining
-  red rows are M5, M12, M19, M20, K9, and K10. Deferred are F3
-  correspondence/selection, F4 paragraph/lead text, F6 link definitions,
-  editing and concrete edit paths, tasks, tables and item/cell validation,
-  item captures/order, and content/item guards, extras, and unordered phases.
 - **Incompatible schema-language revision.** Schema files keep `version: 1`;
   the schema language changed incompatibly in this release. Before release
   1.0, such changes are tracked by the release version and this changelog

@@ -848,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn rfc5_total_order_covers_every_new_variant() {
+    fn preamble_items_total_order_covers_every_new_variant() {
         let block = |value: &str, list_kind: Option<&str>| RenderedBlockMatcher {
             block: value.into(),
             list_kind: list_kind.map(ToOwned::to_owned),

@@ -28,11 +28,11 @@ fn omitted_content_does_not_change_preparation() {
 }
 
 #[test]
-fn rfc5_matchers_prepare_once_per_schema() {
+fn preamble_items_matchers_prepare_once_per_schema() {
     let loaded = load_schema(
         "version: 1\ncontent:\n  - one_of: [{block: p}, {block: any}]\n  - block: list\n    items:\n      - match: Exact\n      - match: '/item.*/'\n        required: false\noutline:\n  - match: Parent\n    content:\n      - block: list\n        items:\n          - match: 'child*'\n            required: false\n    sections:\n      - match: Child\n",
     )
-    .expect("RFC 5 schema is valid");
+    .expect("content and item schema is valid");
     let prepared = PreparedValidator::new(&loaded.schema).expect("schema prepares once");
 
     assert_eq!(

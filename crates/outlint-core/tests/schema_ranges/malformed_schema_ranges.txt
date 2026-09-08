@@ -1,40 +1,40 @@
-case rfc5-document-content-null
+case preamble-items-document-content-null
   source "version: 1\ncontent: null\noutline: []\n"
   verdict invalid
   error invalid-content-rule 0:20..24 "null" "content must be a sequence and cannot be null"
 
-case rfc5-section-content-null
+case preamble-items-section-content-null
   source "version: 1\noutline:\n  - match: A\n    content: null\n"
   verdict invalid
   error invalid-content-rule 0:46..50 "null" "content must be a sequence and cannot be null"
 
-case rfc5-one-of-non-mapping-alternative
+case preamble-items-one-of-non-mapping-alternative
   source "version: 1\ncontent:\n  - one_of:\n      - block: p\n      - nope\noutline: []\n"
   verdict invalid
   error invalid-content-rule 0:57..61 "nope" "each `one_of` alternative must be a mapping"
 
-case rfc5-content-not-a-sequence
+case preamble-items-content-not-a-sequence
   source "version: 1\ncontent: nope\noutline: []\n"
   verdict invalid
   error invalid-content-rule 0:20..24 "nope" "content must be a sequence and cannot be null"
 
-case rfc5-content-entry-not-a-mapping
+case preamble-items-content-entry-not-a-mapping
   source "version: 1\ncontent:\n  - nope\noutline: []\n"
   verdict invalid
   error invalid-content-rule 0:24..28 "nope" "each content entry must be a mapping"
 
-case rfc5-content-outer-neither
+case preamble-items-content-outer-neither
   source "version: 1\ncontent:\n  - id: ignored\noutline: []\n"
   verdict invalid
   error invalid-content-rule 0:24..36 "id: ignored\n" "content rule must declare exactly one of `block` and `one_of`"
 
-case rfc5-content-outer-both-and-unknown
+case preamble-items-content-outer-both-and-unknown
   source "version: 1\ncontent:\n  - one_of: []\n    deferred: false\n    block: p\n    items: nope\noutline: []\n"
   verdict invalid
   error invalid-document-shape 0:39..47 "deferred" "unknown field `deferred`"
   error invalid-content-rule 0:24..30 "one_of" "content rule cannot declare both `block` and `one_of`"
 
-case rfc5-content-inapplicable-and-malformed-members
+case preamble-items-content-inapplicable-and-malformed-members
   source "version: 1\ncontent:\n  - block: p\n    list_kind: bullet\n    items: nope\n  - block: list\n    list_kind: nope\n    required: true\n    repeat: 2..1\noutline: []\n"
   verdict invalid
   error invalid-content-rule 0:37..46 "list_kind" "`list_kind` is only applicable to `block: list`"
@@ -42,20 +42,20 @@ case rfc5-content-inapplicable-and-malformed-members
   error conflicting-cardinality 0:138..142 "2..1" "required and repeat cannot both be declared"
   error invalid-content-rule 0:102..106 "nope" "`list_kind` must be one of `bullet`, `ordered`, or `any`"
 
-case rfc5-choice-alternatives-and-duplicate
+case preamble-items-choice-alternatives-and-duplicate
   source "version: 1\ncontent:\n  - one_of:\n      - block: list\n        list_kind: any\n      - block: list\n      - one_of: []\noutline: []\n"
   verdict invalid
   error invalid-content-rule 0:83..101 "block: list\n      " "duplicate normalized `one_of` alternative"
     related 0:40..81 "block: list\n        list_kind: any\n      " "first equivalent alternative declared here"
   error invalid-content-rule 0:103..114 "one_of: []\n" "each `one_of` alternative must declare exactly one `block`"
 
-case rfc5-items-container-and-entry
+case preamble-items-items-container-and-entry
   source "version: 1\ncontent:\n  - block: list\n    items: nope\n  - block: list\n    items:\n      - nope\noutline: []\n"
   verdict invalid
   error invalid-content-rule 0:47..51 "nope" "`items` must be a sequence and cannot be null"
   error invalid-content-rule 0:87..91 "nope" "each item rule must be a mapping"
 
-case rfc5-item-shape-matcher-and-cardinality
+case preamble-items-item-shape-matcher-and-cardinality
   source "version: 1\ncontent:\n  - block: list\n    items:\n      - id: BAD\n        match: 7\n        required: nope\n        repeat: 3\n        content: deferred\n      - match: '/[bad/'\n      - match: '*'\noutline: []\n"
   verdict invalid
   error invalid-document-shape 0:129..136 "content" "unknown field `content`"
