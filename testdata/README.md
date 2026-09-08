@@ -238,3 +238,4 @@ this backwards is silent: the suite still passes.
 | `madr-m17-option-detail-items` | MADR option details position an optional paragraph before exactly one bullet list whose direct items have explicit one-plus classified cardinality | §1.8, §2.2, §2.5, §3.9, §6.1–§6.2 |
 | `madr-m18-more-information-content` | MADR More Information requires one or more paragraphs and no child headings | §2.5, §3.9, §6.1–§6.2 |
 | `kac-k02-title-introduction` | Keep a Changelog requires one or more introduction paragraphs under its title while retaining the release-heading grammar | §1.1, §2, §2.5, §3.9, §6.1–§6.2 |
+| `kac-k08-category-list` | Every present Keep a Changelog category owns exactly one syntactic bullet list and no child headings, independently in each release scope | §1.7–§1.8, §2.5, §3.9, §6.1–§6.2 |

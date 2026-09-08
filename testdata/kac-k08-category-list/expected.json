@@ -1,0 +1,35 @@
+{
+  "pass.md": [],
+  "fail-paragraph.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Changelog", "[2.1.0] - 2026-09-07", "Changed"], "block": "p", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Changelog", "[2.1.0] - 2026-09-07", "Changed"], "matcher": { "block": "list", "list_kind": "bullet" } }
+    }
+  ],
+  "fail-two-lists.md": [
+    {
+      "id": "too-many-blocks",
+      "target": { "kind": "block", "parent": ["Changelog", "[2.1.0] - 2026-09-07", "Fixed"], "block": "list", "index": 1 }
+    }
+  ],
+  "fail-ordered.md": [
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Changelog", "[2.1.0] - 2026-09-07", "Removed"], "block": "list", "index": 0 }
+    },
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Changelog", "[2.1.0] - 2026-09-07", "Removed"], "matcher": { "block": "list", "list_kind": "bullet" } }
+    }
+  ],
+  "fail-empty.md": [
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Changelog", "[2.1.0] - 2026-09-07", "Security"], "matcher": { "block": "list", "list_kind": "bullet" } }
+    }
+  ]
+}
