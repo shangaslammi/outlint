@@ -3,6 +3,6 @@ title: "*"
 sections:
   - match: "More Information"
     content:
-      - block: p
+      - one_of: [{block: p}, {block: list}]
         repeat: "1..n"
     sections: []

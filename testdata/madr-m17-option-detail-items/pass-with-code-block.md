@@ -4,8 +4,11 @@
 
 ### PostgreSQL
 
+PostgreSQL is the team's established production database.
+
+```sql
+SELECT version();
+```
+
 - Good, because it is mature
-
-<!-- This transparent block keeps the two lists syntactically distinct. -->
-
 - Neutral, because operations are familiar

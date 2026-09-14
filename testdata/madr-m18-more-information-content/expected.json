@@ -1,19 +1,21 @@
 {
   "pass.md": [],
-  "fail-list.md": [
-    {
-      "id": "unexpected-block",
-      "target": { "kind": "block", "parent": ["Choose a datastore", "More Information"], "block": "list", "index": 0 }
-    },
-    {
-      "id": "missing-block",
-      "target": { "kind": "missing_block", "parent": ["Choose a datastore", "More Information"], "matcher": { "block": "p" } }
-    }
-  ],
+  "pass-list.md": [],
+  "pass-mixed.md": [],
   "fail-empty.md": [
     {
       "id": "missing-block",
-      "target": { "kind": "missing_block", "parent": ["Choose a datastore", "More Information"], "matcher": { "block": "p" } }
+      "target": { "kind": "missing_block", "parent": ["Choose a datastore", "More Information"], "matcher": { "one_of": [ { "block": "p" }, { "block": "list" } ] } }
+    }
+  ],
+  "fail-code.md": [
+    {
+      "id": "missing-block",
+      "target": { "kind": "missing_block", "parent": ["Choose a datastore", "More Information"], "matcher": { "one_of": [ { "block": "p" }, { "block": "list" } ] } }
+    },
+    {
+      "id": "unexpected-block",
+      "target": { "kind": "block", "parent": ["Choose a datastore", "More Information"], "block": "code", "index": 0 }
     }
   ]
 }

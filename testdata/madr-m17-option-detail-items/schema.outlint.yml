@@ -6,8 +6,8 @@ sections:
       - match: "*"
         repeat: "1..n"
         content:
-          - block: p
-            required: false
+          - block: any
+            repeat: "0..n"
           - block: list
             list_kind: bullet
             items:
