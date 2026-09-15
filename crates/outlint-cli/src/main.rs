@@ -9,6 +9,8 @@ mod args;
 mod diagnostics;
 mod render;
 mod schema_loading;
+#[cfg(feature = "search")]
+mod search;
 
 fn main() -> ExitCode {
     let code = match collect_args() {

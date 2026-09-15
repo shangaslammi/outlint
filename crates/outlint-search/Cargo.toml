@@ -1,0 +1,16 @@
+[package]
+name = "outlint-search"
+description = "Full-text search over Markdown documents by outline (library)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+ignore = "0.4"
+outlint-core = { path = "../outlint-core", version = "0.1.0" }
+pulldown-cmark = { version = "0.13", default-features = false }
+tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer"] }

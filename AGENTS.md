@@ -92,7 +92,7 @@ JSON output is the full diagnostic shape; the conformance corpus's
 `expected.json` records only portable `{id, target}` entries. The two
 diverge deliberately — do not "align" them.
 
-MSRV is declared: `rust-version = "1.86"` in `[workspace.package]`, with
+MSRV is declared: `rust-version = "1.88"` in `[workspace.package]`, with
 a pinned CI job running `cargo test --workspace --locked` on it.
 
 Test surface: unit tests sit next to the code in `loader/`, `markdown/`, and
@@ -253,7 +253,7 @@ Run:
 
 CI (`.github/workflows/ci.yml`) runs the tests on stable across Linux, macOS,
 and Windows, fmt and clippy on Linux, the doc build with
-`RUSTDOCFLAGS="-D warnings"`, and the full test suite on the 1.86 MSRV. Cargo
+`RUSTDOCFLAGS="-D warnings"`, and the full test suite on the 1.88 MSRV. Cargo
 commands that resolve dependencies use `--locked`; `cargo fmt` runs as shown
 above because it does not resolve them. CI additionally runs `cargo deny check`
 against the committed `deny.toml` (advisories, licenses, bans, sources) — run

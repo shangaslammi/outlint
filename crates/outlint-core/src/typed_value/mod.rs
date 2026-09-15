@@ -433,7 +433,7 @@ fn days_in_month(year: u16, month: u8) -> Option<u8> {
 /// The proleptic-Gregorian leap rule, applied to every year in range rather
 /// than only to years the Gregorian calendar was historically in force for.
 fn is_leap_year(year: u16) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 /// A SemVer version admitted by §2.4, which is to say one whose build

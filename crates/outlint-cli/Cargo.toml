@@ -21,3 +21,7 @@ path = "src/main.rs"
 [dependencies]
 outlint-core = { path = "../outlint-core", version = "0.1.0" }
 serde_json = "1"
+outlint-search = { path = "../outlint-search", version = "0.1.0", optional = true }
+
+[features]
+search = ["dep:outlint-search"]
