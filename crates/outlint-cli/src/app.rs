@@ -42,14 +42,11 @@ pub(crate) fn run(args: &[String]) -> u8 {
             }
         }
         #[cfg(feature = "search")]
-        [command, words @ ..] if command == "search" => {
-            let words = words.join(" ");
-            if words.trim().is_empty() {
-                usage_error("missing search words", "outlint --help")
-            } else {
-                crate::search::execute_search(&words)
-            }
-        }
+        [command, rest @ ..] if command == "search" => match crate::args::parse_search_args(rest) {
+            Ok(ParseOutcome::Help) => write_help(crate::args::SEARCH_HELP),
+            Ok(ParseOutcome::Run(options)) => crate::search::execute_search(&options),
+            Err(message) => usage_error(&message, "outlint search --help"),
+        },
         _ => usage_error("invalid or missing command", "outlint --help"),
     }
 }

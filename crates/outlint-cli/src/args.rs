@@ -39,6 +39,20 @@ Options:\n\
 \n\
 Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.\n";
 
+#[cfg(feature = "search")]
+pub(crate) const SEARCH_HELP: &str = "Usage: outlint search [options] <WORD>...\n\
+\n\
+Search the Markdown files under the search root (the current directory unless\n\
+--root is given) and print the best-matching blocks. The index lives under\n\
+.outlint/search/ in the enclosing Git repository, or in the search root when\n\
+there is none.\n\
+\n\
+Options:\n\
+      --root <DIR>            Search the files under DIR instead\n\
+  -h, --help                  Show help\n\
+\n\
+Exit codes: 0 hits printed, 1 no hits, 2 usage or operational error.\n";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
     Human,
@@ -65,6 +79,15 @@ pub(crate) struct SchemaOptions {
     pub(crate) schemas: Vec<String>,
     pub(crate) format: OutputFormat,
     pub(crate) color: ColorChoice,
+}
+
+#[cfg(feature = "search")]
+#[derive(Debug)]
+pub(crate) struct SearchOptions {
+    /// The search root as given, relative to the current directory.
+    pub(crate) root: Option<String>,
+    /// The search words joined by single spaces; never blank.
+    pub(crate) words: String,
 }
 
 pub(crate) enum ParseOutcome<T> {
@@ -156,6 +179,38 @@ pub(crate) fn parse_schema_args(args: &[String]) -> Result<ParseOutcome<SchemaOp
     }))
 }
 
+#[cfg(feature = "search")]
+pub(crate) fn parse_search_args(args: &[String]) -> Result<ParseOutcome<SearchOptions>, String> {
+    let mut words = Vec::new();
+    let mut root = None;
+    let mut positional_only = false;
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        if positional_only {
+            words.push(argument.clone());
+        } else {
+            match argument.as_str() {
+                "--" => positional_only = true,
+                "--help" | "-h" => return Ok(ParseOutcome::Help),
+                "--root" => {
+                    let value = option_value(args, &mut index, argument)?;
+                    set_once(&mut root, value, "--root")?;
+                }
+                value if value.starts_with('-') => {
+                    return Err(format!("unknown option '{value}'"));
+                }
+                _ => words.push(argument.clone()),
+            }
+        }
+        index += 1;
+    }
+    let words = words.join(" ");
+    if words.trim().is_empty() {
+        return Err("missing search words".to_owned());
+    }
+    Ok(ParseOutcome::Run(SearchOptions { root, words }))
+}
+
 fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<String, String> {
     *index += 1;
     args.get(*index)
@@ -203,5 +258,34 @@ mod tests {
         assert!(parse_check_args(&args).is_err());
         let args = vec!["-".to_owned(), "--schema".to_owned(), "s.yml".to_owned()];
         assert!(matches!(parse_check_args(&args), Ok(ParseOutcome::Run(_))));
+    }
+
+    #[cfg(feature = "search")]
+    #[test]
+    fn search_takes_root_anywhere_and_joins_the_words() {
+        use super::parse_search_args;
+        let parse = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            match parse_search_args(&args) {
+                Ok(ParseOutcome::Run(options)) => Ok((options.root, options.words)),
+                Ok(ParseOutcome::Help) => Ok((None, "help".to_owned())),
+                Err(message) => Err(message),
+            }
+        };
+        assert_eq!(
+            parse(&["--root", "docs", "rollback", "plan"]),
+            Ok((Some("docs".to_owned()), "rollback plan".to_owned()))
+        );
+        assert_eq!(
+            parse(&["rollback", "--root", "docs", "plan"]),
+            Ok((Some("docs".to_owned()), "rollback plan".to_owned()))
+        );
+        assert_eq!(
+            parse(&["--", "--root", "x"]),
+            Ok((None, "--root x".to_owned()))
+        );
+        assert!(parse(&["--root", "docs"]).is_err());
+        assert!(parse(&["--root"]).is_err());
+        assert!(parse(&["-x", "word"]).is_err());
     }
 }

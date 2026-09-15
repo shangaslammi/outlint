@@ -1,16 +1,17 @@
 //! The `search` subcommand (behind the `search` feature): refreshes the
-//! workspace index under `.outlint/search/`, runs the query, and prints the
-//! best-matching blocks.
+//! repository index under `.outlint/search/` for the files below the search
+//! root, runs the query there, and prints the best-matching blocks.
 
 use std::env;
 
-use outlint_search::{render_hits, walk_markdown, workspace_root, Store};
+use outlint_search::{render_hits, walk_markdown, Scope, Store};
 
-use crate::{write_stderr, write_stdout};
+use crate::{args::SearchOptions, write_stderr, write_stdout};
 
-/// Exit 0 with at least one hit, 1 with none, 2 on an operational error.
-pub(crate) fn execute_search(words: &str) -> u8 {
-    let rendered = match search(words) {
+/// Exit 0 with at least one hit, 1 with none, 2 on a usage or operational
+/// error.
+pub(crate) fn execute_search(options: &SearchOptions) -> u8 {
+    let rendered = match search(options) {
         Ok(rendered) => rendered,
         Err(message) => {
             write_stderr(&format!("outlint: {message}\n"));
@@ -24,15 +25,25 @@ pub(crate) fn execute_search(words: &str) -> u8 {
     }
 }
 
-fn search(words: &str) -> Result<String, String> {
+fn search(options: &SearchOptions) -> Result<String, String> {
     let current_dir = env::current_dir()
         .map_err(|error| format!("cannot determine the current directory: {error}"))?;
-    let root = workspace_root(&current_dir);
-    let store = Store::open(&root)?;
-    let (files, notes) = walk_markdown(&root);
+    let search_root = match &options.root {
+        Some(root) => {
+            let path = current_dir.join(root);
+            if !path.is_dir() {
+                return Err(format!("--root '{root}' is not a directory"));
+            }
+            path
+        }
+        None => current_dir,
+    };
+    let scope = Scope::locate(&search_root)?;
+    let store = Store::open(&scope)?;
+    let (files, notes) = walk_markdown(&scope);
     write_notes(&notes);
     write_notes(&store.refresh(&files)?);
-    let hits = store.search(words)?;
+    let hits = store.search(&options.words)?;
     Ok(render_hits(&hits))
 }
 

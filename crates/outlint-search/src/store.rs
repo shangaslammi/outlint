@@ -1,4 +1,4 @@
-//! The filesystem shell: workspace discovery, the Markdown walk, and the
+//! The filesystem shell: search-scope discovery, the Markdown walk, and the
 //! on-disk tantivy index with its refresh and search operations.
 
 use std::{
@@ -32,7 +32,7 @@ const INDEX_MARKER: &str = "outlint-index.json";
 /// refresh compares against the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkedFile {
-    /// Path relative to the workspace root, with forward slashes.
+    /// Path relative to the repository root, with forward slashes.
     pub path: String,
     /// Modification time in seconds since the Unix epoch (`0` when unknown).
     pub mtime: u64,
@@ -40,25 +40,70 @@ pub struct WalkedFile {
     pub size: u64,
 }
 
-/// The nearest ancestor of `start` (inclusive) containing `.git`, else
-/// `start` itself.
-pub fn workspace_root(start: &Path) -> PathBuf {
-    start
-        .ancestors()
-        .find(|directory| directory.join(".git").exists())
-        .unwrap_or(start)
-        .to_path_buf()
+/// Where a search runs: the repository whose `.outlint/search/` holds the
+/// index, and the directory inside it — the search root — whose files are
+/// walked and matched. Indexed paths are relative to the repository, so one
+/// index serves every search root under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    repo: PathBuf,
+    search_root: PathBuf,
+    /// The search root relative to `repo` with a trailing `/`, or empty when
+    /// the two coincide; an indexed path lies under the search root exactly
+    /// when it starts with this.
+    prefix: String,
 }
 
-/// Lists the Markdown files under `root`, respecting ignore files and skipping
-/// hidden entries, symlinks, and oversized files.
+impl Scope {
+    /// Resolves `search_root` and finds its repository: the nearest ancestor
+    /// (inclusive) containing a `.git` entry, or the search root itself when
+    /// there is none. The search root is canonicalized first, so a symlinked
+    /// or `..`-containing directory is scoped by where it really lives.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `search_root` cannot be canonicalized.
+    pub fn locate(search_root: &Path) -> Result<Self, String> {
+        let search_root = search_root
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve {}: {error}", search_root.display()))?;
+        let repo = search_root
+            .ancestors()
+            .find(|directory| directory.join(".git").exists())
+            .unwrap_or(&search_root)
+            .to_path_buf();
+        let prefix = search_root
+            .strip_prefix(&repo)
+            .ok()
+            .filter(|relative| !relative.as_os_str().is_empty())
+            .map(|relative| format!("{}/", slash_path(relative)))
+            .unwrap_or_default();
+        Ok(Self {
+            repo,
+            search_root,
+            prefix,
+        })
+    }
+}
+
+/// A relative path as forward-slash-separated components.
+fn slash_path(relative: &Path) -> String {
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Lists the Markdown files under the scope's search root, respecting ignore
+/// files and skipping hidden entries, symlinks, and oversized files.
 ///
 /// Returns the files sorted by path plus one note per entry that could not be
 /// examined.
-pub fn walk_markdown(root: &Path) -> (Vec<WalkedFile>, Vec<String>) {
+pub fn walk_markdown(scope: &Scope) -> (Vec<WalkedFile>, Vec<String>) {
     let mut files = Vec::new();
     let mut notes = Vec::new();
-    let walker = WalkBuilder::new(root)
+    let walker = WalkBuilder::new(&scope.search_root)
         .hidden(true)
         .follow_links(false)
         .filter_entry(|entry| entry.file_name() != ".outlint")
@@ -91,7 +136,7 @@ pub fn walk_markdown(root: &Path) -> (Vec<WalkedFile>, Vec<String>) {
         if metadata.len() > MAX_FILE_SIZE {
             continue;
         }
-        let Ok(relative) = entry.path().strip_prefix(root) else {
+        let Ok(relative) = entry.path().strip_prefix(&scope.repo) else {
             continue;
         };
         let mtime = metadata
@@ -100,11 +145,7 @@ pub fn walk_markdown(root: &Path) -> (Vec<WalkedFile>, Vec<String>) {
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |elapsed| elapsed.as_secs());
         files.push(WalkedFile {
-            path: relative
-                .components()
-                .map(|component| component.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/"),
+            path: slash_path(relative),
             mtime,
             size: metadata.len(),
         });
@@ -113,15 +154,16 @@ pub fn walk_markdown(root: &Path) -> (Vec<WalkedFile>, Vec<String>) {
     (files, notes)
 }
 
-/// An opened on-disk search index for one workspace.
+/// An opened on-disk search index, scoped to one search root inside its
+/// repository.
 pub struct Store {
-    root: PathBuf,
+    scope: Scope,
     index: Index,
     fields: Fields,
 }
 
 impl Store {
-    /// Opens the index under `<root>/.outlint/search/`, creating it — and the
+    /// Opens the index under `<repo>/.outlint/search/`, creating it — and the
     /// `.outlint/.gitignore` that keeps it out of version control — when
     /// missing, and rebuilding it when its format marker or its files are
     /// unusable.
@@ -129,8 +171,8 @@ impl Store {
     /// # Errors
     ///
     /// Returns a message when the directory or the index cannot be created.
-    pub fn open(root: &Path) -> Result<Self, String> {
-        let outlint_dir = root.join(".outlint");
+    pub fn open(scope: &Scope) -> Result<Self, String> {
+        let outlint_dir = scope.repo.join(".outlint");
         fs::create_dir_all(&outlint_dir)
             .map_err(|error| format!("cannot create {}: {error}", outlint_dir.display()))?;
         let gitignore = outlint_dir.join(".gitignore");
@@ -148,7 +190,7 @@ impl Store {
             if let Ok(index) = Index::open_in_dir(&directory) {
                 if let Ok(fields) = Fields::of(&index.schema()) {
                     return Ok(Self {
-                        root: root.to_path_buf(),
+                        scope: scope.clone(),
                         index,
                         fields,
                     });
@@ -167,15 +209,17 @@ impl Store {
         fs::write(&marker, expected_marker)
             .map_err(|error| format!("cannot write {}: {error}", marker.display()))?;
         Ok(Self {
-            root: root.to_path_buf(),
+            scope: scope.clone(),
             index,
             fields,
         })
     }
 
-    /// Brings the index in line with `files`: files whose `(mtime, size)`
-    /// changed or are new are re-indexed, files no longer present are removed,
-    /// unchanged files are untouched.
+    /// Brings the index in line with `files`, the walk of the search root:
+    /// files whose `(mtime, size)` changed or are new are re-indexed, indexed
+    /// files under the search root that were not walked are removed, unchanged
+    /// files are untouched. Indexed files outside the search root are never
+    /// touched, so searches from different roots share the index safely.
     ///
     /// Returns notes for the caller to print: files skipped because they are
     /// not UTF-8 or do not parse, or the fact that another process holds the
@@ -191,7 +235,10 @@ impl Store {
             .iter()
             .filter(|file| known.get(&file.path) != Some(&(file.mtime, file.size)))
             .collect();
-        let removed: Vec<&String> = known.keys().filter(|path| !walked.contains(path)).collect();
+        let removed: Vec<&String> = known
+            .keys()
+            .filter(|path| path.starts_with(&self.scope.prefix) && !walked.contains(path))
+            .collect();
         if stale.is_empty() && removed.is_empty() {
             return Ok(Vec::new());
         }
@@ -213,7 +260,7 @@ impl Store {
         }
         for file in stale {
             writer.delete_term(Term::from_field_text(self.fields.path, &file.path));
-            let source = match fs::read(self.root.join(&file.path)) {
+            let source = match fs::read(self.scope.repo.join(&file.path)) {
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(source) => source,
                     Err(_) => {
@@ -262,15 +309,16 @@ impl Store {
         Ok(notes)
     }
 
-    /// Returns up to ten best-scoring units for `words`, ordered by score,
-    /// path, and document path.
+    /// Returns up to ten best-scoring units for `words` under the search
+    /// root, ordered by score, path, and document path, with paths made
+    /// relative to the search root.
     ///
     /// # Errors
     ///
     /// Returns a message when the index cannot be read.
     pub fn search(&self, words: &str) -> Result<Vec<Hit>, String> {
         let searcher = self.reader()?.searcher();
-        let query = build_query(&self.index, &self.fields, words);
+        let query = build_query(&self.index, &self.fields, words, &self.scope.prefix);
         let top = searcher
             .search(&*query, &TopDocs::with_limit(HIT_LIMIT).order_by_score())
             .map_err(|error| format!("cannot search: {error}"))?;
@@ -287,8 +335,12 @@ impl Store {
                     .to_owned()
             };
             let number = |field| document.get_first(field).and_then(|value| value.as_u64());
+            let mut path = text(self.fields.path);
+            if path.starts_with(&self.scope.prefix) {
+                path.drain(..self.scope.prefix.len());
+            }
             hits.push(Hit {
-                path: text(self.fields.path),
+                path,
                 mdpath: text(self.fields.mdpath),
                 bytes: number(self.fields.bytes).unwrap_or(0),
                 section_bytes: number(self.fields.section_bytes),

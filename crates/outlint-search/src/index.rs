@@ -1,11 +1,13 @@
 //! The tantivy schema and query construction shared by the store.
 
+use std::ops::Bound;
+
 use tantivy::{
-    query::{BooleanQuery, BoostQuery, Occur, Query, QueryParser},
+    query::{BooleanQuery, BoostQuery, Occur, Query, QueryParser, RangeQuery},
     schema::{
         Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, STORED, STRING,
     },
-    Index,
+    Index, Term,
 };
 
 /// Bumped whenever the schema or the unit derivation changes incompatibly;
@@ -90,13 +92,20 @@ pub(crate) fn build_schema() -> (Schema, Fields) {
 /// Score multiplier for a heading chain that contains every query word.
 const CONTEXT_BOOST: f32 = 2.0;
 
-/// Builds the query for `words`: a hit must match every word on its own
-/// `body` text, and a `context` (heading chain) that also contains every
-/// word only raises the score — it can never satisfy the query by itself.
+/// Builds the query for `words` within `prefix`: a hit must match every word
+/// on its own `body` text, and a `context` (heading chain) that also contains
+/// every word only raises the score — it can never satisfy the query by
+/// itself. A non-empty `prefix` (a repository-relative directory ending in
+/// `/`) additionally restricts hits to paths under it.
 /// Both parses are lenient: unparseable fragments are dropped rather than
 /// reported, and when no body term survives, the body parse is returned
 /// unchanged.
-pub(crate) fn build_query(index: &Index, fields: &Fields, words: &str) -> Box<dyn Query> {
+pub(crate) fn build_query(
+    index: &Index,
+    fields: &Fields,
+    words: &str,
+    prefix: &str,
+) -> Box<dyn Query> {
     let parse = |field: Field| {
         let mut parser = QueryParser::for_index(index, vec![field]);
         parser.set_conjunction_by_default();
@@ -110,10 +119,25 @@ pub(crate) fn build_query(index: &Index, fields: &Fields, words: &str) -> Box<dy
         return body;
     }
     let context = BoostQuery::new(parse(fields.context), CONTEXT_BOOST);
-    Box::new(BooleanQuery::new(vec![
-        (Occur::Must, body),
-        (Occur::Should, Box::new(context)),
-    ]))
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> =
+        vec![(Occur::Must, body), (Occur::Should, Box::new(context))];
+    if let Some(under_prefix) = path_prefix_query(fields.path, prefix) {
+        clauses.push((Occur::Must, Box::new(under_prefix)));
+    }
+    Box::new(BooleanQuery::new(clauses))
+}
+
+/// Matches exactly the paths that start with `prefix`, or nothing to filter
+/// when `prefix` is empty. Paths are raw terms ordered bytewise, and `prefix`
+/// ends in `/`, so they are the terms from `prefix` inclusive up to the same
+/// string with its final `/` bumped to the next character `0`, exclusive —
+/// `docs/` therefore covers `docs/a.md` but not `docs-old/x.md` or `docs0`.
+fn path_prefix_query(path: Field, prefix: &str) -> Option<RangeQuery> {
+    let stem = prefix.strip_suffix('/')?;
+    Some(RangeQuery::new(
+        Bound::Included(Term::from_field_text(path, prefix)),
+        Bound::Excluded(Term::from_field_text(path, &format!("{stem}0"))),
+    ))
 }
 
 #[cfg(test)]
@@ -155,7 +179,7 @@ mod tests {
         writer.commit().expect("commit");
 
         let searcher = index.reader().expect("reader").searcher();
-        let query = build_query(&index, &fields, "rate limiting");
+        let query = build_query(&index, &fields, "rate limiting", "");
         let top = searcher
             .search(&*query, &TopDocs::with_limit(10).order_by_score())
             .expect("search");
@@ -172,5 +196,52 @@ mod tests {
             .collect();
         assert_eq!(paths, ["both", "body-only"]);
         assert!(top[0].0 > top[1].0, "context match must raise the score");
+    }
+
+    #[test]
+    fn prefix_restricts_hits_to_paths_under_the_directory() {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("writer");
+        for path in [
+            "docs/a.md",
+            "docs/sub/c.md",
+            "docs-old/x.md",
+            "docs0",
+            "other/b.md",
+        ] {
+            writer
+                .add_document(doc!(
+                    fields.path => path,
+                    fields.context => "Intro",
+                    fields.body => "Kumquat cultivation.",
+                ))
+                .expect("add");
+        }
+        writer.commit().expect("commit");
+
+        let searcher = index.reader().expect("reader").searcher();
+        let paths_for = |prefix: &str| {
+            let query = build_query(&index, &fields, "kumquat", prefix);
+            let top = searcher
+                .search(&*query, &TopDocs::with_limit(10).order_by_score())
+                .expect("search");
+            let mut paths: Vec<String> = top
+                .iter()
+                .map(|(_, address)| {
+                    let document: TantivyDocument = searcher.doc(*address).expect("doc");
+                    document
+                        .get_first(fields.path)
+                        .and_then(|value| value.as_str())
+                        .expect("path")
+                        .to_owned()
+                })
+                .collect();
+            paths.sort();
+            paths
+        };
+        assert_eq!(paths_for("docs/"), ["docs/a.md", "docs/sub/c.md"]);
+        assert_eq!(paths_for("docs/sub/"), ["docs/sub/c.md"]);
+        assert_eq!(paths_for("").len(), 5);
     }
 }

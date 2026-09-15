@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 /// One matching index unit, as loaded back from the index.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
-    /// Workspace-relative file path with forward slashes.
+    /// File path relative to the search root, with forward slashes.
     pub path: String,
     /// Rendered document path of the unit inside the file.
     pub mdpath: String,
