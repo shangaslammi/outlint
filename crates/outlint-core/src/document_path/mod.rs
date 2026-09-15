@@ -68,7 +68,7 @@ use std::fmt;
 
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
-use crate::{Block, ByteOffset, Document, ListItem, Preamble, Section};
+use crate::{Block, ByteOffset, Document, ListItem, Preamble, Section, TextRange};
 
 #[cfg(test)]
 mod tests;
@@ -423,6 +423,56 @@ pub enum DocumentNode<'d> {
     Block(&'d Block),
     /// A direct list item, addressed by a path ending in an `item` step.
     Item(&'d ListItem),
+}
+
+impl DocumentNode<'_> {
+    /// The half-open byte range of the node's full content, or `None` for the
+    /// root.
+    ///
+    /// A block or item spans its parser-reported range. A section runs from
+    /// the start of its heading to the furthest end among its heading, its own
+    /// preamble blocks, and its descendant sections. That is a pure tree
+    /// computation, so a section's extent excludes trailing blank lines before
+    /// the next heading. The root's extent is the whole source, which the node
+    /// does not know; a caller that needs it uses the source length.
+    pub fn extent(&self) -> Option<TextRange> {
+        match self {
+            Self::Root(_) => None,
+            Self::Section(section) => Some(section_extent(section)),
+            Self::Block(block) => Some(block_range(block)),
+            Self::Item(item) => Some(item.location.range),
+        }
+    }
+}
+
+fn section_extent(section: &Section) -> TextRange {
+    let heading = section.heading.location.range;
+    let end = section
+        .preamble
+        .iter()
+        .map(|block| block_range(block).end)
+        .chain(
+            section
+                .children
+                .iter()
+                .map(|child| section_extent(child).end),
+        )
+        .fold(heading.end, ByteOffset::max);
+    TextRange {
+        start: heading.start,
+        end,
+    }
+}
+
+fn block_range(block: &Block) -> TextRange {
+    match block {
+        Block::Paragraph(leaf)
+        | Block::Quote(leaf)
+        | Block::Code(leaf)
+        | Block::Html(leaf)
+        | Block::Break(leaf) => leaf.location.range,
+        Block::List(list) => list.location.range,
+    }
 }
 
 /// A spelling that is not a document path.

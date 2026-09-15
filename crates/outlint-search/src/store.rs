@@ -235,17 +235,21 @@ impl Store {
             };
             let fields = &self.fields;
             for unit in units {
+                let mut document = doc!(
+                    fields.path => file.path.as_str(),
+                    fields.mdpath => unit.mdpath,
+                    fields.bytes => unit.bytes,
+                    fields.context => unit.context,
+                    fields.body => unit.body_text,
+                    fields.raw => unit.raw,
+                    fields.mtime => file.mtime,
+                    fields.size => file.size,
+                );
+                if let Some(section_bytes) = unit.section_bytes {
+                    document.add_u64(fields.section_bytes, section_bytes);
+                }
                 writer
-                    .add_document(doc!(
-                        fields.path => file.path.as_str(),
-                        fields.mdpath => unit.mdpath,
-                        fields.line => unit.line,
-                        fields.context => unit.context,
-                        fields.body => unit.body_text,
-                        fields.raw => unit.raw,
-                        fields.mtime => file.mtime,
-                        fields.size => file.size,
-                    ))
+                    .add_document(document)
                     .map_err(|error| format!("cannot index {}: {error}", file.path))?;
             }
         }
@@ -259,7 +263,7 @@ impl Store {
     }
 
     /// Returns up to ten best-scoring units for `words`, ordered by score,
-    /// path, and line.
+    /// path, and document path.
     ///
     /// # Errors
     ///
@@ -282,13 +286,12 @@ impl Store {
                     .unwrap_or("")
                     .to_owned()
             };
+            let number = |field| document.get_first(field).and_then(|value| value.as_u64());
             hits.push(Hit {
                 path: text(self.fields.path),
                 mdpath: text(self.fields.mdpath),
-                line: document
-                    .get_first(self.fields.line)
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0),
+                bytes: number(self.fields.bytes).unwrap_or(0),
+                section_bytes: number(self.fields.section_bytes),
                 score,
                 raw: text(self.fields.raw),
             });

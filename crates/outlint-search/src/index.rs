@@ -10,12 +10,13 @@ use tantivy::{
 
 /// Bumped whenever the schema or the unit derivation changes incompatibly;
 /// the store rebuilds an index recorded under another version.
-pub(crate) const INDEX_FORMAT_VERSION: u32 = 1;
+pub(crate) const INDEX_FORMAT_VERSION: u32 = 2;
 
 /// Field names, so the schema and the fast-field readers agree.
 pub(crate) const PATH: &str = "path";
 pub(crate) const MDPATH: &str = "mdpath";
-pub(crate) const LINE: &str = "line";
+pub(crate) const BYTES: &str = "bytes";
+pub(crate) const SECTION_BYTES: &str = "section_bytes";
 pub(crate) const CONTEXT: &str = "context";
 pub(crate) const BODY: &str = "body";
 pub(crate) const RAW: &str = "raw";
@@ -27,7 +28,8 @@ pub(crate) const SIZE: &str = "size";
 pub(crate) struct Fields {
     pub(crate) path: Field,
     pub(crate) mdpath: Field,
-    pub(crate) line: Field,
+    pub(crate) bytes: Field,
+    pub(crate) section_bytes: Field,
     pub(crate) context: Field,
     pub(crate) body: Field,
     pub(crate) raw: Field,
@@ -46,7 +48,8 @@ impl Fields {
         Ok(Self {
             path: field(PATH)?,
             mdpath: field(MDPATH)?,
-            line: field(LINE)?,
+            bytes: field(BYTES)?,
+            section_bytes: field(SECTION_BYTES)?,
             context: field(CONTEXT)?,
             body: field(BODY)?,
             raw: field(RAW)?,
@@ -61,7 +64,8 @@ impl Fields {
 /// `path` is a fast field so a refresh can enumerate indexed files without
 /// loading stored documents; `mtime` and `size` are fast fields for the same
 /// reason. `context` and `body` are stemmed English text and never stored;
-/// `raw` is stored and never indexed.
+/// `raw`, `bytes`, and `section_bytes` are stored and never indexed, and
+/// `section_bytes` is absent on section and root units.
 pub(crate) fn build_schema() -> (Schema, Fields) {
     let stemmed = TextOptions::default().set_indexing_options(
         TextFieldIndexing::default()
@@ -72,7 +76,8 @@ pub(crate) fn build_schema() -> (Schema, Fields) {
     let fields = Fields {
         path: builder.add_text_field(PATH, STRING | STORED | FAST),
         mdpath: builder.add_text_field(MDPATH, STRING | STORED),
-        line: builder.add_u64_field(LINE, STORED),
+        bytes: builder.add_u64_field(BYTES, STORED),
+        section_bytes: builder.add_u64_field(SECTION_BYTES, STORED),
         context: builder.add_text_field(CONTEXT, stemmed.clone()),
         body: builder.add_text_field(BODY, stemmed),
         raw: builder.add_text_field(RAW, STORED),

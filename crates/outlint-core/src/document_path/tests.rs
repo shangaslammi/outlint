@@ -256,6 +256,46 @@ fn unanswerable_steps_are_unresolved_after_the_deepest_reached_node() {
 }
 
 #[test]
+fn section_extents_span_their_subtrees_and_blocks_their_ranges() {
+    let document = document();
+    let extent = |spelling: &str| {
+        resolve(&document, spelling)
+            .unwrap_or_else(|error| panic!("{spelling}: {error}"))
+            .extent()
+    };
+    let range_of = |spelling: &str| range(resolve(&document, spelling).expect(spelling));
+
+    assert_eq!(extent("$"), None);
+    // A parent section reaches past its last descendant's heading to that
+    // descendant's last block.
+    let guide = extent("$.guide").expect("section extent");
+    assert_eq!(
+        Some(guide.start),
+        range_of("$.guide").map(|range| range.start)
+    );
+    assert!(range_of("$.guide.setup").is_some_and(|heading| heading.end < guide.end));
+    assert_eq!(
+        Some(guide.end),
+        range_of("$.guide.setup/p[1]").map(|range| range.end)
+    );
+    // A leaf section ends at its last own block, not at the next heading.
+    let question = extent("$.guide.faq.question[0]").expect("section extent");
+    assert_eq!(
+        Some(question.end),
+        range_of("$.guide.faq.question[0]/p[0]").map(|range| range.end)
+    );
+    assert!(range_of("$.guide.faq.question[1]").is_some_and(|next| question.end < next.start));
+    assert_eq!(
+        extent("$.guide.setup/list[0]"),
+        range_of("$.guide.setup/list[0]")
+    );
+    assert_eq!(
+        extent("$.guide.setup/list[0]/item[2]"),
+        range_of("$.guide.setup/list[0]/item[2]")
+    );
+}
+
+#[test]
 fn shared_sibling_slugs_are_indexed_in_document_order() {
     let document = parse_markdown("# A\n# B\n# A\n# C\n# A\n", MarkdownOptions::default())
         .expect("the fixture parses");

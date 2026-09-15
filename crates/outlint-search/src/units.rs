@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use outlint_core::{
-    document_paths, parse_markdown, Block, Document, DocumentFrontmatter, DocumentNode,
-    DocumentPath, MarkdownOptions, MarkdownParseError, TextRange,
+    document_paths, parse_markdown, Document, DocumentFrontmatter, DocumentNode, DocumentPath,
+    MarkdownOptions, MarkdownParseError, TextRange,
 };
 use pulldown_cmark::{Event, Options, Parser};
 
@@ -17,8 +17,12 @@ use pulldown_cmark::{Event, Options, Parser};
 pub struct IndexUnit {
     /// Rendered [`DocumentPath`] of the node.
     pub mdpath: String,
-    /// One-based line of the heading or block anchor; `1` for the root.
-    pub line: u64,
+    /// Length in bytes of the node's full extent: the whole source for the
+    /// root, the heading through the last descendant block for a section.
+    pub bytes: u64,
+    /// Extent length of the enclosing section for a block unit; `None` for
+    /// section and root units and for blocks of the root preamble.
+    pub section_bytes: Option<u64>,
     /// File stem followed by the enclosing heading texts, ` / `-separated.
     pub context: String,
     /// The visible text of the node.
@@ -50,42 +54,59 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
     let stem = file_stem(relative_path);
     let mut headings: HashMap<DocumentPath, String> = HashMap::new();
     let mut units = Vec::new();
+    // Blocks follow their section in document order, so the last section
+    // seen owns every block until the next section step.
+    let mut enclosing_section: Option<u64> = None;
     for (path, node) in document_paths(document) {
-        let (line, body_text, raw, is_section) = match node {
+        let (body_text, raw, bytes, section_bytes, is_section) = match node {
             DocumentNode::Root(document) => {
                 let Some((body_text, raw)) = root_unit(source, document) else {
                     continue;
                 };
-                (1, body_text, raw, false)
+                (body_text, raw, source.len() as u64, None, false)
             }
             DocumentNode::Section(section) => {
                 let heading = &section.heading;
                 headings.insert(path.clone(), heading.diagnostic_text.clone());
+                let bytes = node.extent().map_or(0, byte_length);
+                enclosing_section = Some(bytes);
                 (
-                    heading.location.line,
                     heading.diagnostic_text.clone(),
                     slice(source, heading.location.range).to_owned(),
+                    bytes,
+                    None,
                     true,
                 )
             }
-            DocumentNode::Block(block) => {
-                let Some((line, range)) = block_anchor(block) else {
+            DocumentNode::Block(_) => {
+                let Some(range) = node.extent() else {
                     continue;
                 };
                 let raw = slice(source, range);
-                (line, visible_text(raw), raw.to_owned(), false)
+                (
+                    visible_text(raw),
+                    raw.to_owned(),
+                    byte_length(range),
+                    enclosing_section,
+                    false,
+                )
             }
             _ => continue,
         };
         units.push(IndexUnit {
             mdpath: path.to_string(),
-            line,
+            bytes,
+            section_bytes,
             context: context_of(stem, &path, &headings, is_section),
             body_text,
             raw,
         });
     }
     units
+}
+
+fn byte_length(range: TextRange) -> u64 {
+    range.end.0.saturating_sub(range.start.0) as u64
 }
 
 /// Body text and raw slice of the root unit, or `None` when the root has
@@ -121,19 +142,6 @@ fn frontmatter_scalars(frontmatter: &DocumentFrontmatter) -> String {
         }
     }
     text
-}
-
-fn block_anchor(block: &Block) -> Option<(u64, TextRange)> {
-    let location = match block {
-        Block::Paragraph(leaf)
-        | Block::Quote(leaf)
-        | Block::Code(leaf)
-        | Block::Html(leaf)
-        | Block::Break(leaf) => leaf.location,
-        Block::List(list) => list.location,
-        _ => return None,
-    };
-    Some((location.line, location.range))
 }
 
 /// The heading trail above `path`: the file stem, then every enclosing
@@ -224,18 +232,27 @@ mod tests {
         let root = &units[0];
         assert_eq!(root.body_text, "ops release Rollout");
         assert_eq!(root.context, "Deploy");
-        assert_eq!(root.line, 1);
+        assert_eq!(root.bytes, FIXTURE.len() as u64);
+        assert_eq!(root.section_bytes, None);
         assert_eq!(root.raw, "---\ntitle: Rollout\ntags: [ops, release]\n---\n");
 
+        // Both sections run to the end of the file: the last block is theirs.
+        let rollback_bytes = (FIXTURE.len() - FIXTURE.find("## Rollback").unwrap()) as u64;
+        assert_eq!(
+            units[1].bytes,
+            (FIXTURE.len() - FIXTURE.find("# Deployment").unwrap()) as u64
+        );
         let heading = &units[2];
         assert_eq!(heading.body_text, "Rollback plan");
         assert_eq!(heading.context, "Deploy / Deployment");
-        assert_eq!(heading.line, 8);
+        assert_eq!(heading.bytes, rollback_bytes);
+        assert_eq!(heading.section_bytes, None);
         assert_eq!(heading.raw, "## Rollback plan\n");
 
         let paragraph = &units[3];
         assert_eq!(paragraph.context, "Deploy / Deployment / Rollback plan");
-        assert_eq!(paragraph.line, 10);
+        assert_eq!(paragraph.bytes, paragraph.raw.len() as u64);
+        assert_eq!(paragraph.section_bytes, Some(rollback_bytes));
         assert_eq!(paragraph.body_text, "Restore the previous release now.");
         assert!(!paragraph.body_text.contains("example.test"));
         assert!(!paragraph.body_text.contains("secret"));
@@ -249,7 +266,8 @@ mod tests {
 
         let list = &units[4];
         assert_eq!(list.body_text, "first step second step");
-        assert_eq!(list.line, 12);
+        assert_eq!(list.bytes, list.raw.len() as u64);
+        assert_eq!(list.section_bytes, Some(rollback_bytes));
         assert_eq!(list.raw, "- first step\n- second step\n");
     }
 
