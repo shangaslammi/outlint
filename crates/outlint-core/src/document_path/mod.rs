@@ -63,6 +63,7 @@
 //! $/p[0]                              the first paragraph before any heading
 //! ```
 
+use std::collections::HashMap;
 use std::fmt;
 
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
@@ -104,6 +105,11 @@ impl HeadingSlug {
     /// Returns the slug text.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Consumes the slug, yielding its text without copying it.
+    pub(crate) fn into_string(self) -> String {
+        self.0
     }
 }
 
@@ -168,12 +174,15 @@ pub enum SectionStep {
 
 /// The kind named by a block step.
 ///
-/// The variants are the keywords of the path grammar. Only the first six
-/// correspond to variants of [`Block`]; `Item` selects a list item, and the
-/// table kinds are reserved for a table model that is not yet exposed.
+/// The variants are the keywords of the path grammar. `Paragraph`, `List`,
+/// `Quote`, `Code`, `Html`, and `Break` correspond to the variants of
+/// [`Block`]; `Item` selects a list item, and the table kinds are reserved
+/// for a table model that is not yet exposed. The enum is non-exhaustive
+/// because the reserved kinds may change when that model lands.
 ///
 /// This API is provisional and may change in a minor release before 1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum BlockPathKind {
     /// `p`: a paragraph.
     Paragraph,
@@ -335,9 +344,12 @@ impl DocumentPath {
     /// without an index matches several siblings, and
     /// [`DocumentPathError::Unresolved`] when a step matches nothing: an
     /// unknown slug, an out-of-range index, a block kind absent from the
-    /// preamble, or a step the model cannot answer (any table kind, and any
-    /// block step after an `item` step). Both carry the number of steps that
-    /// resolved before the failure.
+    /// preamble, or a step the model cannot answer: any table kind, any block
+    /// step after an `item` step, and any second or later block step other
+    /// than an `item` step directly after a `list` step, because the model
+    /// exposes no block below another block (`$/p[0]/p[1]` and
+    /// `$/list[0]/list[0]` parse but never resolve). Both carry the number of
+    /// steps that resolved before the failure.
     pub fn resolve<'d>(
         &self,
         document: &'d Document,
@@ -467,7 +479,7 @@ impl fmt::Display for DocumentPathError {
             Self::Unresolved { resolved_steps } => write!(
                 formatter,
                 "document path step {} matches no node",
-                resolved_steps + 1
+                resolved_steps.saturating_add(1)
             ),
             Self::Ambiguous {
                 resolved_steps,
@@ -475,7 +487,7 @@ impl fmt::Display for DocumentPathError {
             } => write!(
                 formatter,
                 "document path step {} matches {candidates} sibling sections; add an index",
-                resolved_steps + 1
+                resolved_steps.saturating_add(1)
             ),
         }
     }
@@ -494,9 +506,8 @@ impl std::error::Error for DocumentPathError {}
 ///
 /// This API is provisional and may change in a minor release before 1.0.
 pub fn document_paths(document: &Document) -> Vec<(DocumentPath, DocumentNode<'_>)> {
-    let mut paths = Vec::new();
+    let mut paths = vec![(DocumentPath::root(), DocumentNode::Root(document))];
     let root = DocumentPath::root();
-    paths.push((root.clone(), DocumentNode::Root(document)));
     push_preamble(&root, &document.preamble, &mut paths);
     push_sections(&root, &document.sections, &mut paths);
     paths
@@ -511,22 +522,19 @@ fn push_sections<'d>(
         .iter()
         .map(|section| heading_slug(&section.heading.text))
         .collect();
+    // Count each slug once up front so that emitting a step costs a hash
+    // lookup rather than a rescan of the sibling list.
+    let mut tallies: HashMap<&HeadingSlug, SlugTally> = HashMap::new();
+    for slug in slugs.iter().flatten() {
+        tallies.entry(slug).or_default().total += 1;
+    }
     for ((position, section), slug) in siblings.iter().enumerate().zip(&slugs) {
         let step = match slug {
             None => SectionStep::Position(position),
             Some(slug) => {
-                let shares = |other: &Option<HeadingSlug>| other.as_ref() == Some(slug);
-                let index = if slugs.iter().filter(|other| shares(other)).count() > 1 {
-                    Some(
-                        slugs
-                            .iter()
-                            .take(position)
-                            .filter(|other| shares(other))
-                            .count(),
-                    )
-                } else {
-                    None
-                };
+                let tally = tallies.entry(slug).or_default();
+                let index = (tally.total > 1).then_some(tally.emitted);
+                tally.emitted += 1;
                 SectionStep::Named {
                     slug: slug.clone(),
                     index,
@@ -539,6 +547,14 @@ fn push_sections<'d>(
         push_preamble(&path, &section.preamble, paths);
         push_sections(&path, &section.children, paths);
     }
+}
+
+/// How often a slug occurs among one sibling list, and how many of those
+/// occurrences have already been emitted while walking that list.
+#[derive(Default)]
+struct SlugTally {
+    total: usize,
+    emitted: usize,
 }
 
 fn push_preamble<'d>(
@@ -735,8 +751,11 @@ impl<'a> Parser<'a> {
         }
         match self.peek_char() {
             None => Ok(path),
+            Some(character) if path.blocks.is_empty() => Err(self.error(format!(
+                "unexpected {character:?}; expected `.`, `/`, or the end of the path"
+            ))),
             Some(character) => Err(self.error(format!(
-                "unexpected `{character}`; expected `.`, `/`, or the end of the path"
+                "unexpected {character:?}; expected `/` or the end of the path"
             ))),
         }
     }
@@ -745,21 +764,39 @@ impl<'a> Parser<'a> {
         if self.eat(b'[') {
             return self.index().map(SectionStep::Position);
         }
-        let start = self.position;
-        let text = self
-            .take_while(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
-        let Some(slug) = HeadingSlug::parse(text) else {
-            return Err(self.error_at(
-                start,
-                "expected a heading slug (`[a-z0-9]+(-[a-z0-9]+)*`) or a `[index]` position",
-            ));
-        };
+        let slug = self.slug()?;
         let index = if self.eat(b'[') {
             Some(self.index()?)
         } else {
             None
         };
         Ok(SectionStep::Named { slug, index })
+    }
+
+    /// Parses a slug one run at a time so that the error offset points at the
+    /// byte that broke the form: a `-` without a following letter or digit
+    /// fails after the `-`, not at the start of the segment.
+    fn slug(&mut self) -> Result<HeadingSlug, DocumentPathSyntaxError> {
+        let start = self.position;
+        if self.slug_run().is_empty() {
+            return Err(self.error(
+                "expected a heading slug (`[a-z0-9]+(-[a-z0-9]+)*`) or a `[index]` position",
+            ));
+        }
+        while self.eat(b'-') {
+            if self.slug_run().is_empty() {
+                return Err(self.error("expected a letter or digit after `-` in a heading slug"));
+            }
+        }
+        // Each run is non-empty and the runs are joined by single hyphens,
+        // which is exactly the slug form.
+        let text = self.source.get(start..self.position).unwrap_or_default();
+        Ok(HeadingSlug(text.to_owned()))
+    }
+
+    /// Consumes one `[a-z0-9]*` run.
+    fn slug_run(&mut self) -> &'a str {
+        self.take_while(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
     }
 
     fn block_step(

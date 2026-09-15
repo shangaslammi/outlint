@@ -131,6 +131,8 @@ fn rejects_malformed_spellings_at_the_offending_byte() {
         ("$.setup.", 8),
         ("$.setup/list[0]/item[0]/item[0]", 24),
         ("$.-setup", 2),
+        ("$.a--b", 4),
+        ("$.a-", 4),
     ] {
         let error = DocumentPath::parse(spelling).expect_err(spelling);
         assert_eq!(error.offset, ByteOffset(offset), "{spelling}: {error}");
@@ -251,6 +253,17 @@ fn unanswerable_steps_are_unresolved_after_the_deepest_reached_node() {
             "{spelling}"
         );
     }
+}
+
+#[test]
+fn shared_sibling_slugs_are_indexed_in_document_order() {
+    let document = parse_markdown("# A\n# B\n# A\n# C\n# A\n", MarkdownOptions::default())
+        .expect("the fixture parses");
+    let spellings: Vec<String> = document_paths(&document)
+        .iter()
+        .map(|(path, _)| path.to_string())
+        .collect();
+    assert_eq!(spellings, ["$", "$.a[0]", "$.b", "$.a[1]", "$.c", "$.a[2]"]);
 }
 
 #[test]

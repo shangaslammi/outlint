@@ -865,7 +865,7 @@ impl Loader {
         let Matcher::Exact(text) = matcher? else {
             return None;
         };
-        let generated = heading_slug(&text.0).map(|slug| RuleId(slug.as_str().to_owned()));
+        let generated = heading_slug(&text.0).map(|slug| RuleId(slug.into_string()));
         let reserved = generated
             .as_ref()
             .filter(|_| scope.0.is_empty())
