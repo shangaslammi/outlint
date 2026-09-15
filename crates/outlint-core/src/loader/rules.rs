@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
-use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
+use crate::document_path::heading_slug;
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::regex_capture;
 use crate::typed_value::ValueType;
@@ -865,7 +865,7 @@ impl Loader {
         let Matcher::Exact(text) = matcher? else {
             return None;
         };
-        let generated = auto_id(&text.0).map(RuleId);
+        let generated = heading_slug(&text.0).map(|slug| RuleId(slug.as_str().to_owned()));
         let reserved = generated
             .as_ref()
             .filter(|_| scope.0.is_empty())
@@ -1099,27 +1099,6 @@ pub(super) fn is_slug(value: &str) -> bool {
         }
     }
     !value.is_empty() && !previous_hyphen
-}
-
-pub(super) fn auto_id(value: &str) -> Option<String> {
-    let mut result = String::new();
-    let mut separator_pending = false;
-    for character in value.nfkd().flat_map(char::to_lowercase) {
-        if character.is_ascii_lowercase() || character.is_ascii_digit() {
-            if separator_pending && !result.is_empty() {
-                result.push('-');
-            }
-            result.push(character);
-            separator_pending = false;
-        } else if is_combining_mark(character) {
-            // NFKD splits letters such as `ä` into an ASCII base followed by
-            // a combining mark. The mark modifies that base; it is not a word
-            // boundary and therefore must not introduce a slug separator.
-        } else {
-            separator_pending = true;
-        }
-    }
-    (!result.is_empty()).then_some(result)
 }
 
 pub(super) fn regex_body(source: &str) -> Option<String> {

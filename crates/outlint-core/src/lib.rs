@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 
 mod case_fold;
+mod document_path;
 mod load_result;
 mod loader;
 mod locator;
@@ -13,6 +14,10 @@ mod typed_value;
 mod validator;
 mod yaml;
 
+pub use document_path::{
+    document_paths, heading_slug, BlockPathKind, BlockStep, DocumentNode, DocumentPath,
+    DocumentPathError, DocumentPathSyntaxError, HeadingSlug, SectionStep,
+};
 pub use load_result::{
     ByteOffset, CapturePath, ConstraintIndex, ConstraintPath, ContentOwner, ContentRuleIndex,
     ContentRulePath, GuardIndex, GuardPath, InvalidSchema, ItemRuleIndex, ItemRulePath,

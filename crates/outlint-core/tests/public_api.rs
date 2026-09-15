@@ -35,6 +35,8 @@ fn public_errors_implement_the_standard_error_trait() {
     assert_error::<PrepareValidationError>();
     assert_error::<ValidationOperationalError>();
     assert_error::<ValidationError>();
+    assert_error::<outlint_core::DocumentPathSyntaxError>();
+    assert_error::<outlint_core::DocumentPathError>();
 }
 
 /// Pins the two validation signatures. If either result type changes, these
