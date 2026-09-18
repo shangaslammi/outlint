@@ -15,8 +15,11 @@ pub struct Hit {
     pub section_bytes: Option<u64>,
     /// The engine's relevance score; higher is better.
     pub score: f32,
-    /// The unit's source slice.
-    pub raw: String,
+    /// An excerpt of the unit's text, at most a few lines' worth, chosen
+    /// around the query words when they occur in it and otherwise taken
+    /// from its start, with `…` marking a cut; empty when the unit has no
+    /// text to excerpt, such as a section holding only subsections.
+    pub snippet: String,
 }
 
 /// Orders hits by descending score, then path, then document path, so output
@@ -34,8 +37,9 @@ pub(crate) fn sort_hits(hits: &mut [Hit]) {
 
 /// Renders hits in the given order: a `<path> <mdpath> <size>` header — with
 /// ` (section <size>)` appended for a block, so the reader can judge how much
-/// context surrounds it — the source slice indented by two spaces, then a
-/// blank line.
+/// context surrounds it — one snippet line indented by two spaces, omitted
+/// when the snippet is empty, then a blank line. The full content is
+/// `outlint read`'s job.
 pub fn render_hits(hits: &[Hit]) -> String {
     let mut output = String::new();
     for hit in hits {
@@ -49,9 +53,9 @@ pub fn render_hits(hits: &[Hit]) -> String {
             output.push_str(&format!(" (section {})", format_bytes(section_bytes)));
         }
         output.push('\n');
-        for line in hit.raw.lines() {
+        if !hit.snippet.is_empty() {
             output.push_str("  ");
-            output.push_str(line);
+            output.push_str(&hit.snippet);
             output.push('\n');
         }
         output.push('\n');
@@ -86,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn render_hits_formats_header_indented_source_and_blank_line() {
+    fn render_hits_formats_header_indented_snippet_and_blank_line() {
         let hits = [
             Hit {
                 path: "docs/a.md".into(),
@@ -94,20 +98,30 @@ mod tests {
                 bytes: 412,
                 section_bytes: Some(3_140),
                 score: 2.0,
-                raw: "First line.\nSecond line.\n".into(),
+                snippet: "Run the setup script, then…".into(),
             },
             Hit {
                 path: "b.md".into(),
-                mdpath: "$.intro".into(),
-                bytes: 8,
+                mdpath: "$.decision-outcome".into(),
+                bytes: 900,
                 section_bytes: None,
                 score: 1.0,
-                raw: "# Intro\n".into(),
+                snippet: "Chosen option: \"Section after outcome\", because it keeps…".into(),
+            },
+            Hit {
+                path: "b.md".into(),
+                mdpath: "$.options".into(),
+                bytes: 300,
+                section_bytes: None,
+                score: 0.5,
+                snippet: String::new(),
             },
         ];
         assert_eq!(
             render_hits(&hits),
-            "docs/a.md $.setup/p[0] 412B (section 3.1kB)\n  First line.\n  Second line.\n\nb.md $.intro 8B\n  # Intro\n\n"
+            "docs/a.md $.setup/p[0] 412B (section 3.1kB)\n  Run the setup script, then…\n\n\
+             b.md $.decision-outcome 900B\n  Chosen option: \"Section after outcome\", because it keeps…\n\n\
+             b.md $.options 300B\n\n"
         );
     }
 
@@ -119,7 +133,7 @@ mod tests {
             bytes: 0,
             section_bytes: None,
             score,
-            raw: String::new(),
+            snippet: String::new(),
         };
         let mut hits = vec![
             hit("b.md", "$.a", 1.0),

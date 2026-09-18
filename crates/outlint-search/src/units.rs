@@ -4,15 +4,17 @@ use std::collections::HashMap;
 
 use outlint_core::{
     document_paths, merged_title, parse_markdown, Document, DocumentFrontmatter, DocumentNode,
-    DocumentPath, MarkdownOptions, MarkdownParseError, TextRange,
+    DocumentPath, MarkdownOptions, MarkdownParseError, Section, TextRange,
 };
 use pulldown_cmark::{Event, Options, Parser};
 
 /// One searchable node of a Markdown document.
 ///
-/// `body_text` is what gets tokenized; `raw` is the exact source slice shown
-/// to the user, so the two may differ (visible text drops link targets and
-/// HTML, the raw slice keeps them).
+/// `body_text` is what gets tokenized and scored; `snippet_text` is what a
+/// hit shows a fragment of. Both are visible text — link targets, HTML, and
+/// comments never reach either — but they differ for a section, whose body
+/// is its heading and whose snippet is its own content, and for the root,
+/// whose body includes the merged title and whose snippet does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexUnit {
     /// Rendered [`DocumentPath`] of the node.
@@ -32,10 +34,17 @@ pub struct IndexUnit {
     /// enclosing heading texts. For `a.md` containing `# Only\n\nBody.\n`
     /// the root's context is `a` and the paragraph's is `a / Only`.
     pub context: String,
-    /// The visible text of the node.
+    /// The visible text of the node: the heading text of a section, the
+    /// block's text for a block, the title text followed by the frontmatter
+    /// scalars for the root.
     pub body_text: String,
-    /// The node's source slice.
-    pub raw: String,
+    /// The text a hit is excerpted from, whitespace-collapsed: for a block
+    /// its own visible text; for a section the visible text of its own
+    /// preamble blocks — those directly under its heading, not its child
+    /// sections' — so the hit shows what the section says rather than repeat
+    /// its heading; for the root the frontmatter scalars. Empty when the
+    /// node has no such text, such as a section holding only subsections.
+    pub snippet_text: String,
 }
 
 /// Splits `source` (the contents of `relative_path`) into index units.
@@ -71,9 +80,9 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
     // seen owns every block until the next section step.
     let mut enclosing_section: Option<u64> = None;
     for (path, node) in document_paths(document) {
-        let (body_text, raw, bytes, section_bytes, is_section) = match node {
+        let (body_text, bytes, section_bytes, snippet_text, is_section) = match node {
             DocumentNode::Root(document) => {
-                let Some((body_text, raw)) = root_unit(source, document) else {
+                let Some((body_text, snippet_text)) = root_unit(document) else {
                     continue;
                 };
                 units.push(IndexUnit {
@@ -82,7 +91,7 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                     section_bytes: None,
                     context: stem.to_owned(),
                     body_text,
-                    raw,
+                    snippet_text,
                 });
                 continue;
             }
@@ -93,9 +102,9 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                 enclosing_section = Some(bytes);
                 (
                     heading.diagnostic_text.clone(),
-                    slice(source, heading.location.range).to_owned(),
                     bytes,
                     None,
+                    own_text(source, section),
                     true,
                 )
             }
@@ -103,12 +112,12 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                 let Some(range) = node.extent() else {
                     continue;
                 };
-                let raw = slice(source, range);
+                let text = block_text(source, range);
                 (
-                    visible_text(raw),
-                    raw.to_owned(),
+                    text.clone(),
                     byte_length(range),
                     enclosing_section,
+                    text,
                     false,
                 )
             }
@@ -120,44 +129,58 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
             section_bytes,
             context: context_of(&base_context, &path, &headings, is_section),
             body_text,
-            raw,
+            snippet_text,
         });
     }
     units
+}
+
+/// The whitespace-collapsed visible text of the block at `range`.
+fn block_text(source: &str, range: TextRange) -> String {
+    collapse_whitespace(&visible_text(slice(source, range)))
+}
+
+/// The visible text of a section's own preamble blocks, space-joined. Child
+/// sections are left out: their text belongs to their own units.
+fn own_text(source: &str, section: &Section) -> String {
+    let mut text = String::new();
+    for block in section.preamble.iter() {
+        if let Some(range) = DocumentNode::Block(block).extent() {
+            push_word(&mut text, &block_text(source, range));
+        }
+    }
+    text
+}
+
+/// Joins the whitespace-separated words of `text` with single spaces.
+pub(crate) fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn byte_length(range: TextRange) -> u64 {
     range.end.0.saturating_sub(range.start.0) as u64
 }
 
-/// Body text and raw slice of the root unit, or `None` when the root has
+/// Body and snippet text of the root unit, or `None` when the root has
 /// nothing of its own to index — preamble blocks are units in their own
 /// right, so only a merged title or a frontmatter mapping gives the root one.
 ///
-/// The body is the title text followed by the frontmatter's scalar values.
-/// The raw slice runs from the start of the frontmatter block (or of the
-/// title heading when there is no mapping) to the end of the title heading
-/// (or of the frontmatter block when there is no title), so the hit shows
-/// everything its text was drawn from; a root preamble block lying between
-/// the two appears in it as well but is indexed as its own unit.
-fn root_unit(source: &str, document: &Document) -> Option<(String, String)> {
-    let frontmatter = match &document.frontmatter {
-        DocumentFrontmatter::Mapping { location, .. } => Some(location.range),
-        _ => None,
-    };
+/// The body is the title text followed by the frontmatter's scalar values;
+/// the snippet is the scalar values alone, the title being what a hit's
+/// context already names.
+fn root_unit(document: &Document) -> Option<(String, String)> {
+    let has_frontmatter = matches!(document.frontmatter, DocumentFrontmatter::Mapping { .. });
     let title = merged_title(document);
-    let heading = title.map(|title| title.heading.location.range);
-    let start = frontmatter.or(heading)?.start;
-    let end = heading.or(frontmatter)?.end;
+    if !has_frontmatter && title.is_none() {
+        return None;
+    }
+    let scalars = frontmatter_scalars(&document.frontmatter);
     let mut body_text = String::new();
     if let Some(title) = title {
         push_word(&mut body_text, &title.heading.diagnostic_text);
     }
-    push_word(&mut body_text, &frontmatter_scalars(&document.frontmatter));
-    Some((
-        body_text,
-        slice(source, TextRange { start, end }).to_owned(),
-    ))
+    push_word(&mut body_text, &scalars);
+    Some((body_text, scalars))
 }
 
 /// Space-joins every scalar value of a frontmatter mapping, in the mapping's
@@ -274,10 +297,7 @@ mod tests {
         assert_eq!(root.context, "Deploy");
         assert_eq!(root.bytes, FIXTURE.len() as u64);
         assert_eq!(root.section_bytes, None);
-        assert_eq!(
-            root.raw,
-            "---\ntitle: Rollout\ntags: [ops, release]\n---\n\n# Deployment\n"
-        );
+        assert_eq!(root.snippet_text, "ops release Rollout");
 
         // The section runs to the end of the file: the last block is its own.
         let rollback_bytes = (FIXTURE.len() - FIXTURE.find("## Rollback").unwrap()) as u64;
@@ -286,28 +306,51 @@ mod tests {
         assert_eq!(heading.context, "Deploy / Deployment");
         assert_eq!(heading.bytes, rollback_bytes);
         assert_eq!(heading.section_bytes, None);
-        assert_eq!(heading.raw, "## Rollback plan\n");
+        assert_eq!(
+            heading.snippet_text,
+            "Restore the previous release now. first step second step"
+        );
 
         let paragraph = &units[2];
         assert_eq!(paragraph.context, "Deploy / Deployment / Rollback plan");
-        assert_eq!(paragraph.bytes, paragraph.raw.len() as u64);
-        assert_eq!(paragraph.section_bytes, Some(rollback_bytes));
-        assert_eq!(paragraph.body_text, "Restore the previous release now.");
-        assert!(!paragraph.body_text.contains("example.test"));
-        assert!(!paragraph.body_text.contains("secret"));
-        assert_eq!(
-            paragraph.raw,
-            "Restore the [previous release](https://example.test/rel) now. <!-- secret note -->\n"
-        );
         let start = FIXTURE.find("Restore").unwrap();
         let end = FIXTURE.find("\n- ").unwrap();
-        assert_eq!(&FIXTURE[start..end], paragraph.raw);
+        assert_eq!(paragraph.bytes, (end - start) as u64);
+        assert_eq!(paragraph.section_bytes, Some(rollback_bytes));
+        assert_eq!(paragraph.body_text, "Restore the previous release now.");
+        assert_eq!(paragraph.snippet_text, paragraph.body_text);
+        assert!(!paragraph.body_text.contains("example.test"));
+        assert!(!paragraph.body_text.contains("secret"));
 
         let list = &units[3];
         assert_eq!(list.body_text, "first step second step");
-        assert_eq!(list.bytes, list.raw.len() as u64);
+        assert_eq!(list.snippet_text, "first step second step");
+        assert_eq!(list.bytes, "- first step\n- second step\n".len() as u64);
         assert_eq!(list.section_bytes, Some(rollback_bytes));
-        assert_eq!(list.raw, "- first step\n- second step\n");
+    }
+
+    #[test]
+    fn section_snippet_text_is_its_own_blocks_only() {
+        let source = "# Title\n\nRoot text.\n\n## Parent\n\nParent  text\nwraps.\n\n```\ncode\n  block\n```\n\n### Child\n\nChild text.\n\n## Empty\n\n### Grandchild\n\nDeep text.\n";
+        let units = index_units("a.md", source).expect("parses");
+        let snippet_of = |mdpath: &str| {
+            units
+                .iter()
+                .find(|unit| unit.mdpath == mdpath)
+                .map(|unit| unit.snippet_text.as_str())
+                .expect("unit exists")
+        };
+        // The root has a title, hence a unit, but no frontmatter to excerpt.
+        assert_eq!(snippet_of("$"), "");
+        // Own blocks only, with whitespace collapsed across lines and blocks.
+        assert_eq!(snippet_of("$.parent"), "Parent text wraps. code block");
+        assert_eq!(snippet_of("$.parent.child"), "Child text.");
+        // A section whose only content is a child section has none.
+        assert_eq!(snippet_of("$.empty"), "");
+        assert_eq!(snippet_of("$.empty.grandchild"), "Deep text.");
+        // A block's is its own text.
+        assert_eq!(snippet_of("$/p[0]"), "Root text.");
+        assert_eq!(snippet_of("$.parent/p[0]"), "Parent text wraps.");
     }
 
     #[test]
@@ -322,8 +365,8 @@ mod tests {
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].mdpath, "$");
         assert_eq!(units[0].body_text, "Only");
+        assert_eq!(units[0].snippet_text, "");
         assert_eq!(units[0].context, "a");
-        assert_eq!(units[0].raw, "# Only\n");
         // A preamble is indexed as its blocks, not as an empty root unit.
         let units = index_units("a.md", "Preamble only.\n").expect("parses");
         let mdpaths: Vec<&str> = units.iter().map(|unit| unit.mdpath.as_str()).collect();

@@ -5,23 +5,24 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{self, Read},
+    ops::Range,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
 use ignore::WalkBuilder;
 use tantivy::{
-    collector::TopDocs, directory::error::LockError, doc, schema::Value, DocId, Index, IndexReader,
-    ReloadPolicy, SegmentReader, TantivyDocument, TantivyError, Term,
+    collector::TopDocs, directory::error::LockError, doc, schema::Value, snippet::SnippetGenerator,
+    DocId, Index, IndexReader, ReloadPolicy, SegmentReader, TantivyDocument, TantivyError, Term,
 };
 
 use crate::{
     index::{
-        build_query, build_schema, Fields, INDEX_FORMAT_VERSION, KIND_TOMBSTONE, KIND_UNIT, MTIME,
-        PATH, SIZE,
+        build_query, build_schema, snippet_query, Fields, INDEX_FORMAT_VERSION, KIND_TOMBSTONE,
+        KIND_UNIT, MTIME, PATH, SIZE,
     },
     render::{sort_hits, Hit},
-    units::{index_units, IndexUnit},
+    units::{collapse_whitespace, index_units, IndexUnit},
 };
 
 /// Markdown files larger than this are walked but not indexed: the refresh
@@ -31,6 +32,8 @@ const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
 const WRITER_HEAP_BYTES: usize = 50_000_000;
 /// Hits returned per search.
 const HIT_LIMIT: usize = 10;
+/// Upper bound on a hit's snippet, in characters, before the ellipsis.
+const SNIPPET_CHARS: usize = 160;
 const INDEX_MARKER: &str = "outlint-index.json";
 
 /// One Markdown file found by [`walk_markdown`], with the change signature the
@@ -358,7 +361,7 @@ impl Store {
                     fields.bytes => unit.bytes,
                     fields.context => unit.context,
                     fields.body => unit.body_text,
-                    fields.raw => unit.raw,
+                    fields.snippet => unit.snippet_text,
                     fields.mtime => file.mtime,
                     fields.size => file.size,
                     fields.kind => KIND_UNIT,
@@ -382,7 +385,8 @@ impl Store {
 
     /// Returns up to ten best-scoring units for `words` under the search
     /// root, ordered by score, path, and document path, with paths made
-    /// relative to the search root.
+    /// relative to the search root and each hit carrying a snippet of its
+    /// text chosen around the query words.
     ///
     /// # Errors
     ///
@@ -393,6 +397,10 @@ impl Store {
         let top = searcher
             .search(&*query, &TopDocs::with_limit(HIT_LIMIT).order_by_score())
             .map_err(|error| format!("cannot search: {error}"))?;
+        let highlight = snippet_query(&self.index, &self.fields, words);
+        let mut generator = SnippetGenerator::create(&searcher, &*highlight, self.fields.snippet)
+            .map_err(|error| format!("cannot prepare snippets: {error}"))?;
+        generator.set_max_num_chars(SNIPPET_CHARS);
         let mut hits = Vec::with_capacity(top.len());
         for (score, address) in top {
             let document: TantivyDocument = searcher
@@ -425,7 +433,7 @@ impl Store {
                 bytes: number(self.fields.bytes).unwrap_or(0),
                 section_bytes: number(self.fields.section_bytes),
                 score,
-                raw: text(self.fields.raw),
+                snippet: snippet_of(&generator, &document, &text(self.fields.snippet)),
             });
         }
         sort_hits(&mut hits);
@@ -450,6 +458,67 @@ impl Store {
                 .map_err(|error| format!("cannot read search index: {error}"))?;
         }
         Ok(known)
+    }
+}
+
+/// The excerpt of `text` — the hit's stored snippet text — shown under its
+/// header: the generator's fragment around the query words when any of them
+/// occurs in the text, else the leading words that fit [`SNIPPET_CHARS`].
+/// (The fallback is not tantivy's: its generator yields an empty snippet when
+/// no term matches.) The fragment is widened over punctuation stuck to its
+/// ends, which the generator's token bounds leave out, so `release` becomes
+/// `release.`; whitespace is collapsed, since the generator keeps newlines;
+/// and `…` marks a fragment that stops short of the end of the text.
+fn snippet_of(generator: &SnippetGenerator, document: &TantivyDocument, text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let snippet = generator.snippet_from_doc(document);
+    let fragment = snippet.fragment();
+    let range = match text.find(fragment) {
+        Some(start) if !fragment.is_empty() => widen(text, start..start + fragment.len()),
+        _ => 0..leading_fragment(text, SNIPPET_CHARS).len(),
+    };
+    let mut excerpt = collapse_whitespace(&text[range.clone()]);
+    if range.end < text.len() {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+/// `range` extended at both ends over the characters that are neither
+/// whitespace nor alphanumeric, so a fragment cut at token bounds keeps the
+/// quote before its first word and the period after its last.
+fn widen(text: &str, range: Range<usize>) -> Range<usize> {
+    let sticks = |character: &char| !character.is_whitespace() && !character.is_alphanumeric();
+    let before: usize = text[..range.start]
+        .chars()
+        .rev()
+        .take_while(sticks)
+        .map(char::len_utf8)
+        .sum();
+    let after: usize = text[range.end..]
+        .chars()
+        .take_while(sticks)
+        .map(char::len_utf8)
+        .sum();
+    range.start - before..range.end + after
+}
+
+/// The whole of `text` when it has at most `max_chars` characters, else its
+/// longest prefix within that bound that ends on a word boundary — or the
+/// bare prefix when the first word alone exceeds it.
+fn leading_fragment(text: &str, max_chars: usize) -> &str {
+    let Some((end, next)) = text.char_indices().nth(max_chars) else {
+        return text;
+    };
+    let head = &text[..end];
+    if next.is_whitespace() {
+        return head.trim_end();
+    }
+    match head.rfind(char::is_whitespace) {
+        Some(space) if space > 0 => head[..space].trim_end(),
+        _ => head,
     }
 }
 
@@ -533,4 +602,89 @@ fn read_capped(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
     file.take(MAX_FILE_SIZE + 1).read_to_end(&mut bytes)?;
     Ok((bytes.len() as u64 <= MAX_FILE_SIZE).then_some(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use tantivy::{collector::TopDocs, doc, Index};
+
+    use super::*;
+
+    /// Indexes one unit whose snippet text is `text` and excerpts it for
+    /// `words`, the way [`Store::search`] does.
+    fn excerpt(text: &str, words: &str) -> String {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("writer");
+        writer
+            .add_document(doc!(
+                fields.path => "a.md",
+                fields.mdpath => "$/p[0]",
+                fields.context => "a",
+                fields.body => text,
+                fields.snippet => text,
+                fields.kind => KIND_UNIT,
+            ))
+            .expect("add");
+        writer.commit().expect("commit");
+        let searcher = index.reader().expect("reader").searcher();
+        let highlight = snippet_query(&index, &fields, words);
+        let mut generator =
+            SnippetGenerator::create(&searcher, &*highlight, fields.snippet).expect("generator");
+        generator.set_max_num_chars(SNIPPET_CHARS);
+        let query = build_query(&index, &fields, "*", "");
+        let top = searcher
+            .search(&*query, &TopDocs::with_limit(1).order_by_score())
+            .expect("search");
+        let document: TantivyDocument = searcher.doc(top[0].1).expect("doc");
+        let stored = document
+            .get_first(fields.snippet)
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        snippet_of(&generator, &document, stored)
+    }
+
+    #[test]
+    fn snippet_centres_on_query_words_and_marks_a_cut() {
+        let filler = "Nothing to see here. ".repeat(12);
+        let text = format!("{filler}The kumquat orchard thrives. {filler}");
+        let excerpt = excerpt(&text, "kumquats");
+        assert!(excerpt.contains("kumquat orchard"), "{excerpt}");
+        assert!(excerpt.ends_with('…'), "{excerpt}");
+        assert!(excerpt.chars().count() <= SNIPPET_CHARS + 1, "{excerpt}");
+        assert!(!excerpt.contains("  "), "{excerpt}");
+    }
+
+    #[test]
+    fn snippet_keeps_the_punctuation_around_the_fragment() {
+        assert_eq!(excerpt("Loquats.", "loquats"), "Loquats.");
+        assert_eq!(
+            excerpt("Say \"kumquat\" twice. Then stop.", "kumquat"),
+            "Say \"kumquat\" twice. Then stop."
+        );
+        assert_eq!(
+            widen("a \"b\" c", 3..4),
+            2..5,
+            "widening stops at whitespace"
+        );
+    }
+
+    #[test]
+    fn snippet_falls_back_to_the_leading_words() {
+        assert_eq!(excerpt("Short and sweet.", "loquat"), "Short and sweet.");
+        let text = "word ".repeat(40);
+        let leading = excerpt(text.trim(), "loquat");
+        assert!(leading.ends_with("word…"), "{leading}");
+        assert!(leading.chars().count() <= SNIPPET_CHARS + 1, "{leading}");
+        assert_eq!(excerpt("", "loquat"), "");
+    }
+
+    #[test]
+    fn leading_fragment_cuts_on_a_word_boundary() {
+        assert_eq!(leading_fragment("one two three", 20), "one two three");
+        assert_eq!(leading_fragment("one two three", 8), "one two");
+        assert_eq!(leading_fragment("one two three", 7), "one two");
+        assert_eq!(leading_fragment("supercalifragilistic", 5), "super");
+        assert_eq!(leading_fragment("ééé ààà", 5), "ééé");
+    }
 }

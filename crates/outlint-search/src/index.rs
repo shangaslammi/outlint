@@ -12,7 +12,7 @@ use tantivy::{
 
 /// Bumped whenever the schema or the unit derivation changes incompatibly;
 /// the store rebuilds an index recorded under another version.
-pub(crate) const INDEX_FORMAT_VERSION: u32 = 5;
+pub(crate) const INDEX_FORMAT_VERSION: u32 = 6;
 
 /// Field names, so the schema and the fast-field readers agree.
 pub(crate) const PATH: &str = "path";
@@ -21,7 +21,7 @@ pub(crate) const BYTES: &str = "bytes";
 pub(crate) const SECTION_BYTES: &str = "section_bytes";
 pub(crate) const CONTEXT: &str = "context";
 pub(crate) const BODY: &str = "body";
-pub(crate) const RAW: &str = "raw";
+pub(crate) const SNIPPET: &str = "snippet";
 pub(crate) const MTIME: &str = "mtime";
 pub(crate) const SIZE: &str = "size";
 pub(crate) const KIND: &str = "kind";
@@ -42,7 +42,7 @@ pub(crate) struct Fields {
     pub(crate) section_bytes: Field,
     pub(crate) context: Field,
     pub(crate) body: Field,
-    pub(crate) raw: Field,
+    pub(crate) snippet: Field,
     pub(crate) mtime: Field,
     pub(crate) size: Field,
     pub(crate) kind: Field,
@@ -63,7 +63,7 @@ impl Fields {
             section_bytes: field(SECTION_BYTES)?,
             context: field(CONTEXT)?,
             body: field(BODY)?,
-            raw: field(RAW)?,
+            snippet: field(SNIPPET)?,
             mtime: field(MTIME)?,
             size: field(SIZE)?,
             kind: field(KIND)?,
@@ -75,8 +75,11 @@ impl Fields {
 ///
 /// `path` is a fast field so a refresh can enumerate indexed files without
 /// loading stored documents; `mtime` and `size` are fast fields for the same
-/// reason. `context` and `body` are stemmed English text and never stored;
-/// `raw`, `bytes`, and `section_bytes` are stored and never indexed, and
+/// reason. `context`, `body`, and `snippet` are stemmed English text; the
+/// first two are never stored, while `snippet` is stored as well, since a hit
+/// is excerpted from it, and indexed only so the snippet generator can
+/// tokenize it the way the query terms were — it takes no part in scoring.
+/// `bytes` and `section_bytes` are stored and never indexed, and
 /// `section_bytes` is absent on section and root units. `kind` is indexed
 /// and never stored: it is [`KIND_UNIT`] or [`KIND_TOMBSTONE`], and every
 /// query requires the former so a tombstone can never take a hit's place.
@@ -93,8 +96,8 @@ pub(crate) fn build_schema() -> (Schema, Fields) {
         bytes: builder.add_u64_field(BYTES, STORED),
         section_bytes: builder.add_u64_field(SECTION_BYTES, STORED),
         context: builder.add_text_field(CONTEXT, stemmed.clone()),
-        body: builder.add_text_field(BODY, stemmed),
-        raw: builder.add_text_field(RAW, STORED),
+        body: builder.add_text_field(BODY, stemmed.clone()),
+        snippet: builder.add_text_field(SNIPPET, stemmed.set_stored()),
         mtime: builder.add_u64_field(MTIME, FAST),
         size: builder.add_u64_field(SIZE, FAST),
         kind: builder.add_text_field(KIND, STRING),
@@ -145,6 +148,17 @@ pub(crate) fn build_query(
         clauses.push((Occur::Must, Box::new(under_prefix)));
     }
     Box::new(BooleanQuery::new(clauses))
+}
+
+/// Builds the query whose terms choose what a hit's snippet centres on:
+/// `words` parsed leniently against `snippet` alone, any word sufficing. It
+/// is never run against the index — [`build_query`] decides the hits — so
+/// disjunction is right: a fragment holding any query word beats the
+/// leading fragment.
+pub(crate) fn snippet_query(index: &Index, fields: &Fields, words: &str) -> Box<dyn Query> {
+    let parser = QueryParser::for_index(index, vec![fields.snippet]);
+    let (query, _errors) = parser.parse_query_lenient(words);
+    query
 }
 
 /// Matches exactly the paths that start with `prefix`, or nothing to filter
@@ -217,6 +231,23 @@ mod tests {
             .collect();
         assert_eq!(paths, ["both", "body-only"]);
         assert!(top[0].0 > top[1].0, "context match must raise the score");
+    }
+
+    #[test]
+    fn snippet_query_terms_are_on_the_snippet_field_only() {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let query = snippet_query(&index, &fields, "rate limiting");
+        let mut terms = Vec::new();
+        query.query_terms(&mut |term, _| {
+            assert_eq!(term.field(), fields.snippet);
+            terms.push(term.value().as_str().unwrap_or("").to_owned());
+        });
+        terms.sort();
+        assert_eq!(terms, ["limit", "rate"]);
+        // The search query never touches the snippet field.
+        let query = build_query(&index, &fields, "rate limiting", "");
+        query.query_terms(&mut |term, _| assert_ne!(term.field(), fields.snippet));
     }
 
     #[test]

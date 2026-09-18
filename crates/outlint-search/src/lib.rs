@@ -5,8 +5,9 @@
 //! for the document root when it has a frontmatter mapping or a title (a sole
 //! H1, which document paths merge into the root) — and each unit is stored as
 //! one tantivy document addressed by its
-//! [`outlint_core::DocumentPath`]. Searching returns the best-scoring units
-//! with their source slices.
+//! [`outlint_core::DocumentPath`]. Searching returns the best-scoring units,
+//! each with a snippet of its text chosen around the query words; reading
+//! the full content is `outlint read`'s job.
 //!
 //! The split follows the workspace convention: [`index_units`] and
 //! [`render_hits`] are pure functions over text; [`Store`] and the walk are

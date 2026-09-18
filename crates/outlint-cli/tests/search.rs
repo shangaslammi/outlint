@@ -28,8 +28,20 @@ fn search_indexes_refreshes_and_forgets_workspace_markdown() {
         first_line,
         "docs/alpha.md $.deployment/p[0] 49B (section 64B)"
     );
-    assert!(stdout(&output).contains("  The rollback plan restores"));
+    // A block hit is its header and one snippet line holding the match.
+    assert!(stdout(&output).contains(
+        "docs/alpha.md $.deployment/p[0] 49B (section 64B)\n  The rollback plan restores the previous release.\n\n"
+    ));
     assert!(directory.path().join(".outlint/.gitignore").is_file());
+
+    // A word found only in a heading hits the section, whose snippet is its
+    // own first paragraph rather than the heading again.
+    let output = run(&directory, &["search", "deployment"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains(
+        "docs/alpha.md $.deployment 64B\n  The rollback plan restores the previous release.\n\n"
+    ));
+    assert!(!stdout(&output).contains("  ## Deployment"));
 
     // A rewrite with a different size is picked up on the next invocation.
     directory.write(
@@ -39,8 +51,14 @@ fn search_indexes_refreshes_and_forgets_workspace_markdown() {
     let output = run(&directory, &["search", "rollback", "plan"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("docs/alpha.md $.operations.rollback-plan 62B\n"));
+    assert!(text.contains(
+        "docs/alpha.md $.operations.rollback-plan 62B\n  Restore the previous release, then verify.\n\n"
+    ));
     assert!(!text.contains("restores the previous release"));
+    // A section with no content of its own prints no snippet line.
+    let output = run(&directory, &["search", "operations"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("docs/alpha.md $.operations 77B\n\n"));
 
     // A deleted file disappears from the index; no hits is exit 1.
     fs::remove_file(directory.path().join("beta.md")).expect("fixture removable");
@@ -112,5 +130,5 @@ fn search_notices_a_same_size_rewrite_within_one_second() {
     set_modified("note.md", base + Duration::from_millis(100));
     let output = run(&directory, &["search", "loquats"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    assert!(stdout(&output).contains("  Loquats."));
+    assert!(stdout(&output).contains("  Loquats.\n"));
 }
