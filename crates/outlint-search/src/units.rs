@@ -18,13 +18,19 @@ pub struct IndexUnit {
     /// Rendered [`DocumentPath`] of the node.
     pub mdpath: String,
     /// Length in bytes of the node's full extent: the whole source for the
-    /// root, the heading through the last descendant block for a section.
+    /// root, the heading through the last descendant block for a section,
+    /// the block itself for a block.
     pub bytes: u64,
     /// Extent length of the enclosing section for a block unit; `None` for
-    /// section and root units and for blocks of the root preamble.
+    /// section and root units and for every block addressed directly under
+    /// `$` — the root preamble and, when a sole H1 is merged into the root,
+    /// that title's own blocks, which have no enclosing section either.
     pub section_bytes: Option<u64>,
-    /// File stem, then the document title when a sole H1 is merged into the
-    /// root, then the enclosing heading texts, ` / `-separated.
+    /// The ` / `-separated heading trail above the node. The root unit's
+    /// context is the file stem alone; every other unit's is the stem, then
+    /// the title text when a sole H1 is merged into the root, then the
+    /// enclosing heading texts. For `a.md` containing `# Only\n\nBody.\n`
+    /// the root's context is `a` and the paragraph's is `a / Only`.
     pub context: String,
     /// The visible text of the node.
     pub body_text: String,
