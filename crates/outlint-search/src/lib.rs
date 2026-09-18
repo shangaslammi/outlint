@@ -2,8 +2,9 @@
 //!
 //! A prototype: every Markdown file under a search root is split into *index
 //! units* — one per section heading, one per visible preamble block, and one
-//! for the document root when it has a frontmatter mapping — and each unit is
-//! stored as one tantivy document addressed by its
+//! for the document root when it has a frontmatter mapping or a title (a sole
+//! H1, which document paths merge into the root) — and each unit is stored as
+//! one tantivy document addressed by its
 //! [`outlint_core::DocumentPath`]. Searching returns the best-scoring units
 //! with their source slices.
 //!

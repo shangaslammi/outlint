@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use outlint_core::{
-    document_paths, parse_markdown, Document, DocumentFrontmatter, DocumentNode, DocumentPath,
-    MarkdownOptions, MarkdownParseError, TextRange,
+    document_paths, merged_title, parse_markdown, Document, DocumentFrontmatter, DocumentNode,
+    DocumentPath, MarkdownOptions, MarkdownParseError, TextRange,
 };
 use pulldown_cmark::{Event, Options, Parser};
 
@@ -23,7 +23,8 @@ pub struct IndexUnit {
     /// Extent length of the enclosing section for a block unit; `None` for
     /// section and root units and for blocks of the root preamble.
     pub section_bytes: Option<u64>,
-    /// File stem followed by the enclosing heading texts, ` / `-separated.
+    /// File stem, then the document title when a sole H1 is merged into the
+    /// root, then the enclosing heading texts, ` / `-separated.
     pub context: String,
     /// The visible text of the node.
     pub body_text: String,
@@ -34,9 +35,9 @@ pub struct IndexUnit {
 /// Splits `source` (the contents of `relative_path`) into index units.
 ///
 /// Sections contribute their heading text, blocks their visible text, and the
-/// root — only when it has a frontmatter mapping — the scalar values of that
-/// frontmatter. List items are not separate units because their text is
-/// already part of the list block.
+/// root — only when it has a merged title or a frontmatter mapping — the title
+/// text followed by the scalar values of that frontmatter. List items are not
+/// separate units because their text is already part of the list block.
 ///
 /// # Errors
 ///
@@ -52,6 +53,12 @@ pub fn index_units(
 
 fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<IndexUnit> {
     let stem = file_stem(relative_path);
+    // The merged title is not a node, so every other unit carries it in its
+    // context the way a section's descendants carry that section's heading.
+    let base_context = match merged_title(document) {
+        Some(title) => format!("{stem} / {}", title.heading.diagnostic_text),
+        None => stem.to_owned(),
+    };
     let mut headings: HashMap<DocumentPath, String> = HashMap::new();
     let mut units = Vec::new();
     // Blocks follow their section in document order, so the last section
@@ -63,7 +70,15 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                 let Some((body_text, raw)) = root_unit(source, document) else {
                     continue;
                 };
-                (body_text, raw, source.len() as u64, None, false)
+                units.push(IndexUnit {
+                    mdpath: path.to_string(),
+                    bytes: source.len() as u64,
+                    section_bytes: None,
+                    context: stem.to_owned(),
+                    body_text,
+                    raw,
+                });
+                continue;
             }
             DocumentNode::Section(section) => {
                 let heading = &section.heading;
@@ -97,7 +112,7 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
             mdpath: path.to_string(),
             bytes,
             section_bytes,
-            context: context_of(stem, &path, &headings, is_section),
+            context: context_of(&base_context, &path, &headings, is_section),
             body_text,
             raw,
         });
@@ -111,15 +126,32 @@ fn byte_length(range: TextRange) -> u64 {
 
 /// Body text and raw slice of the root unit, or `None` when the root has
 /// nothing of its own to index — preamble blocks are units in their own
-/// right, so only a frontmatter mapping gives the root one.
+/// right, so only a merged title or a frontmatter mapping gives the root one.
+///
+/// The body is the title text followed by the frontmatter's scalar values.
+/// The raw slice runs from the start of the frontmatter block (or of the
+/// title heading when there is no mapping) to the end of the title heading
+/// (or of the frontmatter block when there is no title), so the hit shows
+/// everything its text was drawn from; a root preamble block lying between
+/// the two appears in it as well but is indexed as its own unit.
 fn root_unit(source: &str, document: &Document) -> Option<(String, String)> {
-    match &document.frontmatter {
-        DocumentFrontmatter::Mapping { location, .. } => Some((
-            frontmatter_scalars(&document.frontmatter),
-            slice(source, location.range).to_owned(),
-        )),
+    let frontmatter = match &document.frontmatter {
+        DocumentFrontmatter::Mapping { location, .. } => Some(location.range),
         _ => None,
+    };
+    let title = merged_title(document);
+    let heading = title.map(|title| title.heading.location.range);
+    let start = frontmatter.or(heading)?.start;
+    let end = heading.or(frontmatter)?.end;
+    let mut body_text = String::new();
+    if let Some(title) = title {
+        push_word(&mut body_text, &title.heading.diagnostic_text);
     }
+    push_word(&mut body_text, &frontmatter_scalars(&document.frontmatter));
+    Some((
+        body_text,
+        slice(source, TextRange { start, end }).to_owned(),
+    ))
 }
 
 /// Space-joins every scalar value of a frontmatter mapping, in the mapping's
@@ -144,10 +176,11 @@ fn frontmatter_scalars(frontmatter: &DocumentFrontmatter) -> String {
     text
 }
 
-/// The heading trail above `path`: the file stem, then every enclosing
-/// heading's text. A section's own heading is its body, not its context.
+/// The heading trail above `path`: `base` (the file stem and any merged
+/// title), then every enclosing heading's text. A section's own heading is
+/// its body, not its context.
 fn context_of(
-    stem: &str,
+    base: &str,
     path: &DocumentPath,
     headings: &HashMap<DocumentPath, String>,
     is_section: bool,
@@ -158,7 +191,7 @@ fn context_of(
     } else {
         steps.len()
     };
-    let mut context = stem.to_owned();
+    let mut context = base.to_owned();
     let mut prefix = DocumentPath::root();
     for step in steps.iter().take(ancestors) {
         let Some(next) = prefix.with_section(step.clone()) else {
@@ -228,24 +261,29 @@ mod tests {
             ]
         );
 
+        // The sole H1 is merged into the root: it is the root unit's text
+        // and part of every other unit's context.
         let root = &units[0];
-        assert_eq!(root.body_text, "ops release Rollout");
+        assert_eq!(root.body_text, "Deployment ops release Rollout");
         assert_eq!(root.context, "Deploy");
         assert_eq!(root.bytes, FIXTURE.len() as u64);
         assert_eq!(root.section_bytes, None);
-        assert_eq!(root.raw, "---\ntitle: Rollout\ntags: [ops, release]\n---\n");
+        assert_eq!(
+            root.raw,
+            "---\ntitle: Rollout\ntags: [ops, release]\n---\n\n# Deployment\n"
+        );
 
         // The section runs to the end of the file: the last block is its own.
         let rollback_bytes = (FIXTURE.len() - FIXTURE.find("## Rollback").unwrap()) as u64;
         let heading = &units[1];
         assert_eq!(heading.body_text, "Rollback plan");
-        assert_eq!(heading.context, "Deploy");
+        assert_eq!(heading.context, "Deploy / Deployment");
         assert_eq!(heading.bytes, rollback_bytes);
         assert_eq!(heading.section_bytes, None);
         assert_eq!(heading.raw, "## Rollback plan\n");
 
         let paragraph = &units[2];
-        assert_eq!(paragraph.context, "Deploy / Rollback plan");
+        assert_eq!(paragraph.context, "Deploy / Deployment / Rollback plan");
         assert_eq!(paragraph.bytes, paragraph.raw.len() as u64);
         assert_eq!(paragraph.section_bytes, Some(rollback_bytes));
         assert_eq!(paragraph.body_text, "Restore the previous release now.");
@@ -267,11 +305,19 @@ mod tests {
     }
 
     #[test]
-    fn plain_document_without_frontmatter_has_no_root_unit() {
+    fn root_unit_needs_a_title_or_frontmatter() {
+        // An H2 as the only top-level section is not merged into the root.
         let units = index_units("a.md", "## Only\n").expect("parses");
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].mdpath, "$.only");
         assert_eq!(units[0].context, "a");
+        // A merged title alone gives the root a unit spanning the heading.
+        let units = index_units("a.md", "# Only\n").expect("parses");
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].mdpath, "$");
+        assert_eq!(units[0].body_text, "Only");
+        assert_eq!(units[0].context, "a");
+        assert_eq!(units[0].raw, "# Only\n");
         // A preamble is indexed as its blocks, not as an empty root unit.
         let units = index_units("a.md", "Preamble only.\n").expect("parses");
         let mdpaths: Vec<&str> = units.iter().map(|unit| unit.mdpath.as_str()).collect();

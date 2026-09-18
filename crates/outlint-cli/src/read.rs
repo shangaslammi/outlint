@@ -5,8 +5,9 @@
 use std::path::Path;
 
 use outlint_core::{
-    document_paths, parse_markdown, Block, Document, DocumentNode, DocumentPath, DocumentPathError,
-    DocumentPathSyntaxError, ListItem, MarkdownOptions, Section, SectionStep, TextRange,
+    document_paths, merged_title, parse_markdown, Block, Document, DocumentNode, DocumentPath,
+    DocumentPathError, DocumentPathSyntaxError, ListItem, MarkdownOptions, Section, SectionStep,
+    TextRange,
 };
 
 use crate::{args::ReadOptions, schema_loading::read_utf8_file, write_stderr, write_stdout};
@@ -97,6 +98,11 @@ pub(crate) fn parse_path(argument: &str) -> Result<DocumentPath, ReadError> {
 /// joined by one blank line in the source's line ending, and the output is
 /// guaranteed to end with a newline: a line ending of the source's kind is
 /// appended when the addressed source lacks one.
+///
+/// The root's own extent runs from the start of the file to the first
+/// section below it; with a merged title (see [`merged_title`]) that is the
+/// title's first child, so depth `0` covers the frontmatter, the root
+/// preamble, and the title heading with its own blocks.
 pub(crate) fn render_content(
     source: &str,
     document: &Document,
@@ -106,14 +112,20 @@ pub(crate) fn render_content(
     let node = resolve_node(document, path)?;
     let mut slices = Vec::new();
     match (node, depth) {
-        (DocumentNode::Root(_), Some(depth)) if depth < forest_height(&document.sections) => {
-            let first_section = document.sections.first().map_or(source.len(), |section| {
-                section.heading.location.range.start.0
-            });
-            slices.push(source.get(..first_section).unwrap_or_default());
-            if let Some(remaining) = depth.checked_sub(1) {
-                for section in &document.sections {
-                    section_slices(source, section, remaining, &mut slices);
+        (DocumentNode::Root(document), Some(depth)) => {
+            let children =
+                merged_title(document).map_or(&document.sections, |title| &title.children);
+            if depth >= forest_height(children) {
+                slices.push(source);
+            } else {
+                let first_child = children.first().map_or(source.len(), |section| {
+                    section.heading.location.range.start.0
+                });
+                slices.push(source.get(..first_child).unwrap_or_default());
+                if let Some(remaining) = depth.checked_sub(1) {
+                    for child in children {
+                        section_slices(source, child, remaining, &mut slices);
+                    }
                 }
             }
         }
@@ -327,7 +339,10 @@ fn node_size(source: &str, node: DocumentNode<'_>) -> u64 {
 
 fn node_label(file_label: &str, source: &str, node: DocumentNode<'_>) -> String {
     match node {
-        DocumentNode::Root(_) => file_label.to_owned(),
+        DocumentNode::Root(document) => merged_title(document).map_or_else(
+            || file_label.to_owned(),
+            |title| title.heading.diagnostic_text.clone(),
+        ),
         DocumentNode::Section(section) => section.heading.diagnostic_text.clone(),
         DocumentNode::Block(block) => match block {
             Block::Paragraph(leaf) => {
@@ -486,19 +501,28 @@ pub(crate) fn render_error(
             let mut output = format!(
                 "outlint: ambiguous document path {path} in {file}: {candidates} sections match '{slug}'\n"
             );
-            // The candidates are the enumerated children of the resolved
-            // prefix whose section step carries the failing slug, so they are
-            // spelled canonically (`question[0]`, never `question[0][0]`).
+            // The candidates are the enumerated sections below the resolved
+            // prefix whose own section step carries the failing slug — its
+            // children for a `.` step, its whole subtree for a `..` step — so
+            // they are spelled canonically (`question[0]`, never
+            // `question[0][0]`, and never with `..`).
+            let (failing, descendant) = match path.sections().get(*resolved_steps) {
+                Some(SectionStep::Named { slug, .. }) => (Some(slug), false),
+                Some(SectionStep::Descendant { slug, .. }) => (Some(slug), true),
+                _ => (None, false),
+            };
             for (candidate, _) in &entries {
                 let Some((SectionStep::Named { slug: last, .. }, parent)) =
                     candidate.sections().split_last()
                 else {
                     continue;
                 };
-                if candidate.blocks().is_empty()
-                    && parent == deepest.sections()
-                    && last.as_str() == slug
-                {
+                let below_deepest = if descendant {
+                    parent.starts_with(deepest.sections())
+                } else {
+                    parent == deepest.sections()
+                };
+                if candidate.blocks().is_empty() && below_deepest && Some(last) == failing {
                     output.push_str(&format!("{candidate}\n"));
                 }
             }
@@ -575,10 +599,17 @@ mod tests {
             content("$.faq", Some(1)).as_deref(),
             Ok("## FAQ\n\n### Question\n\nWhy?\n\n### Question\n\nHow?\n")
         );
+        // The merged title's own extent belongs to the root's depth 0; its
+        // children are the root's depth 1.
+        assert_eq!(
+            content("$", Some(0)).as_deref(),
+            Ok("---\ntitle: Guide\n---\n\nRoot preamble paragraph.\n\n# Guide\n\nGuide intro.\n\n")
+        );
         let one = content("$", Some(1)).expect("resolves");
-        assert!(one.starts_with("---\ntitle: Guide\n---\n\nRoot preamble paragraph.\n\n# Guide\n"));
-        assert!(one.ends_with("# Guide\n\nGuide intro.\n"));
-        assert!(!one.contains("## Setup"));
+        assert!(one.starts_with("---\ntitle: Guide\n---\n\nRoot preamble paragraph.\n\n# Guide\n\nGuide intro.\n\n## Setup\n"));
+        assert!(one.ends_with("```\n\n## FAQ\n"));
+        assert!(!one.contains("### Question"));
+        assert_eq!(content("$", Some(2)).as_deref(), Ok(FIXTURE));
     }
 
     #[test]
@@ -587,11 +618,15 @@ mod tests {
             content("$.setup/list[0]/item[1]", None).map(|text| text.trim_end().to_owned()),
             Ok("- second item".to_owned())
         );
-        assert_eq!(
-            content("$", Some(0)).as_deref(),
-            Ok("---\ntitle: Guide\n---\n\nRoot preamble paragraph.\n\n")
-        );
         assert_eq!(content("$", None).as_deref(), Ok(FIXTURE));
+        // Without a merged title the root's depth 0 stops at the first
+        // top-level heading.
+        const TWO: &str = "Intro.\n\n# One\n\n# Two\n";
+        let document = parse_markdown(TWO, MarkdownOptions::default()).expect("fixture parses");
+        assert_eq!(
+            render_content(TWO, &document, &path("$"), Some(0)).as_deref(),
+            Ok("Intro.\n\n")
+        );
     }
 
     #[test]
@@ -639,7 +674,7 @@ mod tests {
         assert_eq!(
             render_error(&error, "guide.md", FIXTURE, &document()),
             "outlint: cannot resolve $.setp in guide.md: setp not found under $\n\
-             $        229B  guide.md\n\
+             $        229B  Guide\n\
              $.setup  109B  Setup\n\
              $.faq    47B  FAQ\n"
         );
@@ -657,12 +692,31 @@ mod tests {
     }
 
     #[test]
+    fn descendant_steps_report_matches_across_the_subtree() {
+        let ambiguous = content("$..question", None).expect_err("is ambiguous");
+        assert_eq!(
+            render_error(&ambiguous, "guide.md", FIXTURE, &document()),
+            "outlint: ambiguous document path $..question in guide.md: 2 sections match '..question'\n\
+             $.faq.question[0]\n\
+             $.faq.question[1]\n"
+        );
+        assert_eq!(
+            content("$..question[1]", None).as_deref(),
+            Ok("### Question\n\nHow?\n")
+        );
+        let unresolved = content("$.setup..question", None).expect_err("does not resolve");
+        assert!(render_error(&unresolved, "guide.md", FIXTURE, &document()).starts_with(
+            "outlint: cannot resolve $.setup..question in guide.md: ..question not found under $.setup\n"
+        ));
+    }
+
+    #[test]
     fn crlf_source_joins_cut_extents_with_its_own_line_ending() {
         const CRLF: &str =
             "# Guide\r\n\r\nIntro.\r\n\r\n## Setup\r\n\r\nBody.\r\n\r\n### Deep\r\n\r\nDeep body.";
         let document = parse_markdown(CRLF, MarkdownOptions::default()).expect("fixture parses");
         assert_eq!(
-            render_content(CRLF, &document, &path("$"), Some(2)).as_deref(),
+            render_content(CRLF, &document, &path("$"), Some(1)).as_deref(),
             Ok("# Guide\r\n\r\nIntro.\r\n\r\n## Setup\r\n\r\nBody.\r\n")
         );
         assert_eq!(
