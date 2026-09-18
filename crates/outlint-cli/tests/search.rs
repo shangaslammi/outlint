@@ -26,7 +26,7 @@ fn search_indexes_refreshes_and_forgets_workspace_markdown() {
     let first_line = stdout(&output).lines().next().unwrap_or("");
     assert_eq!(
         first_line,
-        "docs/alpha.md $.alpha.deployment/p[0] 49B (section 64B)"
+        "docs/alpha.md $.deployment/p[0] 49B (section 64B)"
     );
     assert!(stdout(&output).contains("  The rollback plan restores"));
     assert!(directory.path().join(".outlint/.gitignore").is_file());
@@ -39,7 +39,7 @@ fn search_indexes_refreshes_and_forgets_workspace_markdown() {
     let output = run(&directory, &["search", "rollback", "plan"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("docs/alpha.md $.alpha.operations.rollback-plan 62B\n"));
+    assert!(text.contains("docs/alpha.md $.operations.rollback-plan 62B\n"));
     assert!(!text.contains("restores the previous release"));
 
     // A deleted file disappears from the index; no hits is exit 1.

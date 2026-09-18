@@ -222,10 +222,9 @@ mod tests {
             mdpaths,
             [
                 "$",
-                "$.deployment",
-                "$.deployment.rollback-plan",
-                "$.deployment.rollback-plan/p[0]",
-                "$.deployment.rollback-plan/list[0]",
+                "$.rollback-plan",
+                "$.rollback-plan/p[0]",
+                "$.rollback-plan/list[0]",
             ]
         );
 
@@ -236,21 +235,17 @@ mod tests {
         assert_eq!(root.section_bytes, None);
         assert_eq!(root.raw, "---\ntitle: Rollout\ntags: [ops, release]\n---\n");
 
-        // Both sections run to the end of the file: the last block is theirs.
+        // The section runs to the end of the file: the last block is its own.
         let rollback_bytes = (FIXTURE.len() - FIXTURE.find("## Rollback").unwrap()) as u64;
-        assert_eq!(
-            units[1].bytes,
-            (FIXTURE.len() - FIXTURE.find("# Deployment").unwrap()) as u64
-        );
-        let heading = &units[2];
+        let heading = &units[1];
         assert_eq!(heading.body_text, "Rollback plan");
-        assert_eq!(heading.context, "Deploy / Deployment");
+        assert_eq!(heading.context, "Deploy");
         assert_eq!(heading.bytes, rollback_bytes);
         assert_eq!(heading.section_bytes, None);
         assert_eq!(heading.raw, "## Rollback plan\n");
 
-        let paragraph = &units[3];
-        assert_eq!(paragraph.context, "Deploy / Deployment / Rollback plan");
+        let paragraph = &units[2];
+        assert_eq!(paragraph.context, "Deploy / Rollback plan");
         assert_eq!(paragraph.bytes, paragraph.raw.len() as u64);
         assert_eq!(paragraph.section_bytes, Some(rollback_bytes));
         assert_eq!(paragraph.body_text, "Restore the previous release now.");
@@ -264,7 +259,7 @@ mod tests {
         let end = FIXTURE.find("\n- ").unwrap();
         assert_eq!(&FIXTURE[start..end], paragraph.raw);
 
-        let list = &units[4];
+        let list = &units[3];
         assert_eq!(list.body_text, "first step second step");
         assert_eq!(list.bytes, list.raw.len() as u64);
         assert_eq!(list.section_bytes, Some(rollback_bytes));
@@ -273,7 +268,7 @@ mod tests {
 
     #[test]
     fn plain_document_without_frontmatter_has_no_root_unit() {
-        let units = index_units("a.md", "# Only\n").expect("parses");
+        let units = index_units("a.md", "## Only\n").expect("parses");
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].mdpath, "$.only");
         assert_eq!(units[0].context, "a");

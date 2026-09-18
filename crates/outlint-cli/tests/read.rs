@@ -11,7 +11,7 @@ fn read_prints_nodes_lists_trees_and_reports_path_errors() {
     let directory = TempDir::new("read");
     directory.write("guide.md", FIXTURE);
 
-    let output = run(&directory, &["read", "guide.md", "$.guide.setup"]);
+    let output = run(&directory, &["read", "guide.md", "$.setup"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     assert_eq!(
         stdout(&output),
@@ -26,7 +26,7 @@ fn read_prints_nodes_lists_trees_and_reports_path_errors() {
         stdout(&output)
     );
 
-    let output = run(&directory, &["read", "guide.md", ".guide.setp"]);
+    let output = run(&directory, &["read", "guide.md", ".setp"]);
     assert_eq!(output.status.code(), Some(1), "stdout: {}", stdout(&output));
     assert_eq!(stdout(&output), "");
     assert!(stderr(&output).contains("cannot resolve"));

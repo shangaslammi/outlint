@@ -2,10 +2,10 @@
 //! enumeration.
 
 use super::{
-    document_paths, heading_slug, BlockPathKind, BlockStep, DocumentNode, DocumentPath,
-    DocumentPathError, HeadingSlug, SectionStep,
+    document_paths, heading_slug, merged_title, BlockPathKind, BlockStep, DocumentNode,
+    DocumentPath, DocumentPathError, HeadingSlug, SectionStep,
 };
-use crate::{parse_markdown, Block, ByteOffset, Document, MarkdownOptions, TextRange};
+use crate::{parse_markdown, Block, ByteOffset, Document, HeaderLevel, MarkdownOptions, TextRange};
 
 const SOURCE: &str = "\
 Intro paragraph.
@@ -87,6 +87,8 @@ fn every_segment_form_round_trips_through_its_canonical_spelling() {
         "$.setup/list[0]/item[3]",
         "$/p[0]",
         "$.api/table[0]/row[2]/cell[1]",
+        "$..a",
+        "$.a..b[1]/p[0]",
     ] {
         let path = parse(spelling);
         assert_eq!(path.to_string(), spelling);
@@ -133,6 +135,9 @@ fn rejects_malformed_spellings_at_the_offending_byte() {
         ("$.-setup", 2),
         ("$.a--b", 4),
         ("$.a-", 4),
+        ("$..[0]", 3),
+        ("$..", 3),
+        ("$...a", 3),
     ] {
         let error = DocumentPath::parse(spelling).expect_err(spelling);
         assert_eq!(error.offset, ByteOffset(offset), "{spelling}: {error}");
@@ -163,20 +168,20 @@ fn builders_keep_item_steps_behind_list_steps() {
 fn duplicate_sibling_slugs_need_an_index() {
     let document = document();
     assert_eq!(
-        resolve(&document, "$.guide.faq.question"),
+        resolve(&document, "$.faq.question"),
         Err(DocumentPathError::Ambiguous {
-            resolved_steps: 2,
+            resolved_steps: 1,
             candidates: 2
         })
     );
-    let Ok(DocumentNode::Section(second)) = resolve(&document, "$.guide.faq.question[1]") else {
+    let Ok(DocumentNode::Section(second)) = resolve(&document, "$.faq.question[1]") else {
         panic!("`question[1]` selects the second duplicate")
     };
     assert_eq!(second.heading.text, "Question");
     assert!(second.preamble.len() == 1);
     assert_eq!(
         range(DocumentNode::Section(second)),
-        range(resolve(&document, "$.guide.faq.[1]").expect("positional step resolves"))
+        range(resolve(&document, "$.faq.[1]").expect("positional step resolves"))
     );
 }
 
@@ -184,27 +189,27 @@ fn duplicate_sibling_slugs_need_an_index() {
 fn slugless_headings_resolve_only_positionally() {
     let document = document();
     assert_eq!(heading_slug("🎉"), None);
-    let Ok(DocumentNode::Section(party)) = resolve(&document, "$.guide.faq.[2]") else {
+    let Ok(DocumentNode::Section(party)) = resolve(&document, "$.faq.[2]") else {
         panic!("the emoji heading is the third FAQ child")
     };
     assert_eq!(party.heading.text, "🎉");
     assert_eq!(
-        resolve(&document, "$.guide.faq.[3]"),
-        Err(DocumentPathError::Unresolved { resolved_steps: 2 })
+        resolve(&document, "$.faq.[3]"),
+        Err(DocumentPathError::Unresolved { resolved_steps: 1 })
     );
 }
 
 #[test]
 fn block_ordinals_count_per_kind_and_items_follow_lists() {
     let document = document();
-    let setup = match resolve(&document, "$.guide.setup") {
+    let setup = match resolve(&document, "$.setup") {
         Ok(DocumentNode::Section(section)) => section,
         other => panic!("setup section: {other:?}"),
     };
     let blocks = setup.preamble.as_slice();
     assert_eq!(blocks.len(), 3);
 
-    let Ok(DocumentNode::Block(second_paragraph)) = resolve(&document, "$.guide.setup/p[1]") else {
+    let Ok(DocumentNode::Block(second_paragraph)) = resolve(&document, "$.setup/p[1]") else {
         panic!("`p[1]` skips the interleaved list")
     };
     assert_eq!(
@@ -214,7 +219,7 @@ fn block_ordinals_count_per_kind_and_items_follow_lists() {
             .map(|block| range(DocumentNode::Block(block)).expect("block range"))
     );
 
-    let Ok(DocumentNode::Item(third)) = resolve(&document, "$.guide.setup/list[0]/item[2]") else {
+    let Ok(DocumentNode::Item(third)) = resolve(&document, "$.setup/list[0]/item[2]") else {
         panic!("`item[2]` is the third item")
     };
     assert_eq!(
@@ -240,12 +245,14 @@ fn block_ordinals_count_per_kind_and_items_follow_lists() {
 fn unanswerable_steps_are_unresolved_after_the_deepest_reached_node() {
     let document = document();
     for (spelling, resolved_steps) in [
-        ("$.guide.setup/table[0]", 2),
-        ("$.guide.setup/p[2]", 2),
-        ("$.guide.setup/list[0]/item[3]", 3),
-        ("$.guide.setup/list[0]/item[0]/p[0]", 4),
-        ("$.guide.missing", 1),
-        ("$.[1]", 0),
+        ("$.setup/table[0]", 1),
+        ("$.setup/p[2]", 1),
+        ("$.setup/list[0]/item[3]", 2),
+        ("$.setup/list[0]/item[0]/p[0]", 3),
+        ("$.faq.missing", 1),
+        ("$.[2]", 0),
+        // The merged H1 has no address of its own.
+        ("$.guide.setup", 0),
     ] {
         assert_eq!(
             resolve(&document, spelling),
@@ -268,30 +275,109 @@ fn section_extents_span_their_subtrees_and_blocks_their_ranges() {
     assert_eq!(extent("$"), None);
     // A parent section reaches past its last descendant's heading to that
     // descendant's last block.
-    let guide = extent("$.guide").expect("section extent");
+    let faq = extent("$.faq").expect("section extent");
+    assert_eq!(Some(faq.start), range_of("$.faq").map(|range| range.start));
+    assert!(range_of("$.faq.[2]").is_some_and(|heading| heading.end < faq.end));
     assert_eq!(
-        Some(guide.start),
-        range_of("$.guide").map(|range| range.start)
-    );
-    assert!(range_of("$.guide.setup").is_some_and(|heading| heading.end < guide.end));
-    assert_eq!(
-        Some(guide.end),
-        range_of("$.guide.setup/p[1]").map(|range| range.end)
+        Some(faq.end),
+        range_of("$.faq.[2]/p[0]").map(|range| range.end)
     );
     // A leaf section ends at its last own block, not at the next heading.
-    let question = extent("$.guide.faq.question[0]").expect("section extent");
+    let question = extent("$.faq.question[0]").expect("section extent");
     assert_eq!(
         Some(question.end),
-        range_of("$.guide.faq.question[0]/p[0]").map(|range| range.end)
+        range_of("$.faq.question[0]/p[0]").map(|range| range.end)
     );
-    assert!(range_of("$.guide.faq.question[1]").is_some_and(|next| question.end < next.start));
+    assert!(range_of("$.faq.question[1]").is_some_and(|next| question.end < next.start));
+    assert_eq!(extent("$.setup/list[0]"), range_of("$.setup/list[0]"));
     assert_eq!(
-        extent("$.guide.setup/list[0]"),
-        range_of("$.guide.setup/list[0]")
+        extent("$.setup/list[0]/item[2]"),
+        range_of("$.setup/list[0]/item[2]")
+    );
+}
+
+const TITLED: &str = "\
+---
+title: Titled
+---
+
+Root paragraph.
+
+# Title
+
+Title paragraph.
+
+## A
+
+## B
+";
+
+#[test]
+fn a_sole_h1_is_merged_into_the_root() {
+    let document = parse_markdown(TITLED, MarkdownOptions::default()).expect("the fixture parses");
+    let spellings: Vec<String> = document_paths(&document)
+        .iter()
+        .map(|(path, _)| path.to_string())
+        .collect();
+    assert_eq!(spellings, ["$", "$/p[0]", "$/p[1]", "$.a", "$.b"]);
+    assert_eq!(
+        merged_title(&document).map(|title| title.heading.text.as_str()),
+        Some("Title")
+    );
+    // The title's own blocks continue the root's per-kind ordinals.
+    let Ok(DocumentNode::Block(Block::Paragraph(second))) = resolve(&document, "$/p[1]") else {
+        panic!("`p[1]` is the paragraph after the title")
+    };
+    assert_eq!(
+        TITLED.get(second.location.range.start.0..second.location.range.end.0),
+        Some("Title paragraph.\n")
     );
     assert_eq!(
-        extent("$.guide.setup/list[0]/item[2]"),
-        range_of("$.guide.setup/list[0]/item[2]")
+        resolve(&document, "$.title.a"),
+        Err(DocumentPathError::Unresolved { resolved_steps: 0 })
+    );
+    assert!(matches!(resolve(&document, "$"), Ok(DocumentNode::Root(_))));
+
+    // Several top-level sections, or a sole one below H1, are not merged.
+    for (source, path) in [
+        ("# First\n\n## A\n\n# Second\n", "$.first.a"),
+        ("## Only\n\n### A\n", "$.only.a"),
+    ] {
+        let document = parse_markdown(source, MarkdownOptions::default()).expect("parses");
+        assert_eq!(merged_title(&document), None, "{source:?}");
+        assert!(
+            matches!(resolve(&document, path), Ok(DocumentNode::Section(_))),
+            "{source:?}: {path}"
+        );
+    }
+}
+
+#[test]
+fn descendant_steps_search_the_current_subtree() {
+    const NESTED: &str = "# Doc\n\n## Question\n\n### Question\n\n## B\n\n### Deep\n";
+    let document = parse_markdown(NESTED, MarkdownOptions::default()).expect("parses");
+    let heading = |spelling: &str| match resolve(&document, spelling) {
+        Ok(DocumentNode::Section(section)) => Ok(section.heading.level),
+        Ok(other) => panic!("{spelling}: {other:?}"),
+        Err(error) => Err(error),
+    };
+    // Unique anywhere below the root.
+    assert_eq!(heading("$..deep"), Ok(HeaderLevel::H3));
+    // Two matches at different depths: ambiguous without an index, positional
+    // in document order with one.
+    assert_eq!(
+        heading("$..question"),
+        Err(DocumentPathError::Ambiguous {
+            resolved_steps: 0,
+            candidates: 2
+        })
+    );
+    assert_eq!(heading("$..question[1]"), Ok(HeaderLevel::H3));
+    assert_eq!(heading("$.question..question"), Ok(HeaderLevel::H3));
+    // Scoped to the subtree of the node reached so far.
+    assert_eq!(
+        heading("$.b..question"),
+        Err(DocumentPathError::Unresolved { resolved_steps: 1 })
     );
 }
 
@@ -319,21 +405,20 @@ fn enumerated_paths_render_reparse_and_resolve_to_their_nodes() {
             "$/list[0]",
             "$/list[0]/item[0]",
             "$/list[0]/item[1]",
-            "$.guide",
-            "$.guide.faq",
-            "$.guide.faq.question[0]",
-            "$.guide.faq.question[0]/p[0]",
-            "$.guide.faq.question[1]",
-            "$.guide.faq.question[1]/p[0]",
-            "$.guide.faq.[2]",
-            "$.guide.faq.[2]/p[0]",
-            "$.guide.setup",
-            "$.guide.setup/p[0]",
-            "$.guide.setup/list[0]",
-            "$.guide.setup/list[0]/item[0]",
-            "$.guide.setup/list[0]/item[1]",
-            "$.guide.setup/list[0]/item[2]",
-            "$.guide.setup/p[1]",
+            "$.faq",
+            "$.faq.question[0]",
+            "$.faq.question[0]/p[0]",
+            "$.faq.question[1]",
+            "$.faq.question[1]/p[0]",
+            "$.faq.[2]",
+            "$.faq.[2]/p[0]",
+            "$.setup",
+            "$.setup/p[0]",
+            "$.setup/list[0]",
+            "$.setup/list[0]/item[0]",
+            "$.setup/list[0]/item[1]",
+            "$.setup/list[0]/item[2]",
+            "$.setup/p[1]",
         ]
     );
     for ((path, node), spelling) in paths.iter().zip(&spellings) {

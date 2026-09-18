@@ -436,6 +436,11 @@ fn step_text(path: &DocumentPath, index: usize) -> (String, bool) {
                 index: Some(index),
             } => format!("{slug}[{index}]"),
             SectionStep::Position(index) => format!("[{index}]"),
+            SectionStep::Descendant { slug, index: None } => format!("..{slug}"),
+            SectionStep::Descendant {
+                slug,
+                index: Some(index),
+            } => format!("..{slug}[{index}]"),
         };
         return (text, false);
     }
@@ -559,26 +564,27 @@ mod tests {
 
     #[test]
     fn section_content_is_the_source_slice() {
-        assert_eq!(content("$.guide.setup", None).as_deref(), Ok(SETUP));
-        assert_eq!(content(".guide.setup", Some(9)).as_deref(), Ok(SETUP));
+        assert_eq!(content("$.setup", None).as_deref(), Ok(SETUP));
+        assert_eq!(content(".setup", Some(9)).as_deref(), Ok(SETUP));
     }
 
     #[test]
     fn depth_cuts_the_subtree_to_own_extents() {
+        assert_eq!(content("$.faq", Some(0)).as_deref(), Ok("## FAQ\n"));
         assert_eq!(
-            content("$.guide", Some(0)).as_deref(),
-            Ok("# Guide\n\nGuide intro.\n")
+            content("$.faq", Some(1)).as_deref(),
+            Ok("## FAQ\n\n### Question\n\nWhy?\n\n### Question\n\nHow?\n")
         );
-        let one = content("$.guide", Some(1)).expect("resolves");
-        assert!(one.starts_with("# Guide\n\nGuide intro.\n\n## Setup\n"));
-        assert!(one.ends_with("```\n\n## FAQ\n"));
-        assert!(!one.contains("### Question"));
+        let one = content("$", Some(1)).expect("resolves");
+        assert!(one.starts_with("---\ntitle: Guide\n---\n\nRoot preamble paragraph.\n\n# Guide\n"));
+        assert!(one.ends_with("# Guide\n\nGuide intro.\n"));
+        assert!(!one.contains("## Setup"));
     }
 
     #[test]
     fn items_and_root_preamble_are_addressable() {
         assert_eq!(
-            content("$.guide.setup/list[0]/item[1]", None).map(|text| text.trim_end().to_owned()),
+            content("$.setup/list[0]/item[1]", None).map(|text| text.trim_end().to_owned()),
             Ok("- second item".to_owned())
         );
         assert_eq!(
@@ -590,21 +596,18 @@ mod tests {
 
     #[test]
     fn tree_lists_sections_to_the_requested_depth() {
-        assert_eq!(tree_paths("$", Some(1), false), ["$", "$.guide"]);
+        assert_eq!(tree_paths("$", Some(1), false), ["$", "$.setup", "$.faq"]);
         assert_eq!(
             tree_paths("$", Some(2), false),
-            ["$", "$.guide", "$.guide.setup", "$.guide.faq"]
-        );
-        assert_eq!(
-            tree_paths("$.[0]", None, false),
             [
-                "$.guide",
-                "$.guide.setup",
-                "$.guide.faq",
-                "$.guide.faq.question[0]",
-                "$.guide.faq.question[1]"
+                "$",
+                "$.setup",
+                "$.faq",
+                "$.faq.question[0]",
+                "$.faq.question[1]"
             ]
         );
+        assert_eq!(tree_paths("$.[0]", None, false), ["$.setup"]);
     }
 
     #[test]
@@ -613,43 +616,43 @@ mod tests {
             "guide.md",
             FIXTURE,
             &document(),
-            &path("$.guide.setup"),
+            &path("$.setup"),
             None,
             true,
         )
         .expect("resolves");
         assert_eq!(
             listing,
-            "$.guide.setup                  109B  Setup\n\
-             $.guide.setup/p[0]             24B  p: Install the tool first.\n\
-             $.guide.setup/list[0]          40B  list (3 items)\n\
-             $.guide.setup/list[0]/item[0]  13B  item: first item\n\
-             $.guide.setup/list[0]/item[1]  14B  item: second item\n\
-             $.guide.setup/list[0]/item[2]  13B  item: third item\n\
-             $.guide.setup/code[0]          33B  code\n"
+            "$.setup                  109B  Setup\n\
+             $.setup/p[0]             24B  p: Install the tool first.\n\
+             $.setup/list[0]          40B  list (3 items)\n\
+             $.setup/list[0]/item[0]  13B  item: first item\n\
+             $.setup/list[0]/item[1]  14B  item: second item\n\
+             $.setup/list[0]/item[2]  13B  item: third item\n\
+             $.setup/code[0]          33B  code\n"
         );
     }
 
     #[test]
     fn unresolved_step_lists_the_deepest_resolved_node() {
-        let error = content("$.guide.setp", None).expect_err("does not resolve");
+        let error = content("$.setp", None).expect_err("does not resolve");
         assert_eq!(
             render_error(&error, "guide.md", FIXTURE, &document()),
-            "outlint: cannot resolve $.guide.setp in guide.md: setp not found under $.guide\n\
-             $.guide        181B  Guide\n\
-             $.guide.setup  109B  Setup\n\
-             $.guide.faq    47B  FAQ\n"
+            "outlint: cannot resolve $.setp in guide.md: setp not found under $\n\
+             $        229B  guide.md\n\
+             $.setup  109B  Setup\n\
+             $.faq    47B  FAQ\n"
         );
     }
 
     #[test]
     fn ambiguous_step_lists_the_candidates() {
-        let error = content("$.guide.faq.question", None).expect_err("is ambiguous");
+        let error = content("$.faq.question", None).expect_err("is ambiguous");
         assert_eq!(
             render_error(&error, "guide.md", FIXTURE, &document()),
-            "outlint: ambiguous document path $.guide.faq.question in guide.md: 2 sections match 'question'\n\
-             $.guide.faq.question[0]\n\
-             $.guide.faq.question[1]\n"
+            "outlint: ambiguous document path $.faq.question in guide.md: 2 sections match 'question'\n\
+             $.faq.question[0]\n\
+             $.faq.question[1]\n"
         );
     }
 
@@ -659,18 +662,19 @@ mod tests {
             "# Guide\r\n\r\nIntro.\r\n\r\n## Setup\r\n\r\nBody.\r\n\r\n### Deep\r\n\r\nDeep body.";
         let document = parse_markdown(CRLF, MarkdownOptions::default()).expect("fixture parses");
         assert_eq!(
-            render_content(CRLF, &document, &path("$.guide"), Some(1)).as_deref(),
+            render_content(CRLF, &document, &path("$"), Some(2)).as_deref(),
             Ok("# Guide\r\n\r\nIntro.\r\n\r\n## Setup\r\n\r\nBody.\r\n")
         );
         assert_eq!(
-            render_content(CRLF, &document, &path("$.guide.setup.deep"), None).as_deref(),
+            render_content(CRLF, &document, &path("$.setup.deep"), None).as_deref(),
             Ok("### Deep\r\n\r\nDeep body.\r\n")
         );
     }
 
     #[test]
     fn error_paths_are_spelled_canonically() {
-        const DUPLICATES: &str = "# Setup\n\n## Question\n\nWhy?\n\n## Question\n\nHow?\n";
+        // An H2 as the only top-level section is not merged into the root.
+        const DUPLICATES: &str = "## Setup\n\n### Question\n\nWhy?\n\n### Question\n\nHow?\n";
         let document =
             parse_markdown(DUPLICATES, MarkdownOptions::default()).expect("fixture parses");
         let ambiguous = render_content(DUPLICATES, &document, &path("$.setup[0].question"), None)

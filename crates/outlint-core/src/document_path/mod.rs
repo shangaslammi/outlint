@@ -14,9 +14,9 @@
 //! # Grammar
 //!
 //! ```text
-//! doc-path     = "$" *( "." section-seg ) [ "/" block-seg *( "/" block-seg ) ]
-//! section-seg  = slug [ "[" index "]" ]
-//!              / "[" index "]"
+//! doc-path     = "$" *( section-step ) [ "/" block-seg *( "/" block-seg ) ]
+//! section-step = "." ( slug [ "[" index "]" ] / "[" index "]" )
+//!              / ".." slug [ "[" index "]" ]
 //! block-seg    = kind [ "[" index "]" ]
 //! kind         = "p" | "list" | "item" | "table" | "row" | "cell" | "col"
 //!              | "code" | "quote" | "html" | "break"
@@ -25,18 +25,27 @@
 //! ```
 //!
 //! Every path starts at the root, `$`. Each `.` descends into a child section
-//! of the node reached so far, and a final run of `/` steps descends into the
-//! preamble blocks of that section (or of the root when no section step
-//! precedes them).
+//! of the node reached so far, each `..` into a section anywhere below it, and
+//! a final run of `/` steps descends into the preamble blocks of the node
+//! reached (or of the root when no section step precedes them).
 //!
-//! A section step is either *named* or *positional*. A named step `slug`
-//! selects the sibling whose heading slugs to `slug`; when several siblings
-//! share the slug the step is ambiguous and `slug[i]` must pick the `i`-th of
-//! them in document order. A positional step `[i]` selects the `i`-th sibling
-//! section regardless of its heading, which is the only way to reach a heading
-//! whose slug is empty (for example one consisting solely of punctuation or
-//! emoji). Slugs are derived from [`Heading::text`](crate::Heading::text) by
+//! A `.` step is either *named* or *positional*. A named step `slug` selects
+//! the sibling whose heading slugs to `slug`; when several siblings share the
+//! slug the step is ambiguous and `slug[i]` must pick the `i`-th of them in
+//! document order. A positional step `[i]` selects the `i`-th sibling section
+//! regardless of its heading, which is the only way to reach a heading whose
+//! slug is empty (for example one consisting solely of punctuation or emoji).
+//! Slugs are derived from [`Heading::text`](crate::Heading::text) by
 //! [`heading_slug`].
+//!
+//! A *descendant* step `..slug` selects, among every section below the node
+//! reached so far — at any depth, in document order, excluding that node
+//! itself — the one whose heading slugs to `slug`; `..slug[i]` picks the
+//! `i`-th such section and a bare `..slug` requires the match to be unique.
+//! There is no positional descendant step. `..` is an input convenience for
+//! addressing a well-known heading without spelling its ancestors: the
+//! canonical spelling of a node, which [`document_paths`] produces and
+//! [`Display`](std::fmt::Display) preserves, only ever uses `.` steps.
 //!
 //! A block step `kind[i]` selects the `i`-th block *of that kind* among the
 //! parent's direct preamble blocks, so `p[1]` is the second paragraph even
@@ -51,6 +60,19 @@
 //! never resolve. Likewise, no block step can follow an `item` step because
 //! item contents are not exposed by the model.
 //!
+//! # A sole H1 is the document root
+//!
+//! When a document has exactly one top-level section and its heading is an
+//! H1, that heading names the document rather than opening a section inside
+//! it, mirroring the `title` slot of a schema. The section is therefore merged
+//! into the root: `$` still resolves to the root, the merged heading has no
+//! address of its own, its child sections are addressed as `$.child`, and the
+//! per-kind ordinals of `$/kind[i]` run over the root's preamble blocks
+//! followed by the merged heading's own blocks. [`merged_title`] returns the
+//! merged section so a consumer can still obtain the title text. Documents
+//! with zero or several top-level sections, or whose sole top-level section is
+//! not an H1, are addressed as parsed.
+//!
 //! # Examples
 //!
 //! ```text
@@ -61,6 +83,8 @@
 //! $.setup/p[0]                        the first paragraph under "Setup"
 //! $.setup/list[0]/item[3]             the fourth item of the first list under "Setup"
 //! $/p[0]                              the first paragraph before any heading
+//! $..rollback-plan                    the only "Rollback plan" heading, wherever it sits
+//! $.faq..question[1]/p[0]             a paragraph under the second `question` below "FAQ"
 //! ```
 
 use std::collections::HashMap;
@@ -68,7 +92,7 @@ use std::fmt;
 
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
-use crate::{Block, ByteOffset, Document, ListItem, Preamble, Section, TextRange};
+use crate::{Block, ByteOffset, Document, HeaderLevel, ListItem, Section, TextRange};
 
 #[cfg(test)]
 mod tests;
@@ -152,12 +176,21 @@ pub fn heading_slug(text: &str) -> Option<HeadingSlug> {
     (!result.is_empty()).then_some(HeadingSlug(result))
 }
 
-/// One `.` step of a document path, selecting a child section.
+/// One section step of a document path: a `.` step selecting a child section
+/// or a `..` step selecting a descendant section.
+///
+/// A descendant step is a separate variant rather than a flag on [`Named`]
+/// so that the positional form the grammar lacks, `..[i]`, cannot be built.
+/// Descendant steps are accepted on input only; [`document_paths`] never
+/// emits one.
 ///
 /// This API is provisional and may change in a minor release before 1.0.
+///
+/// [`Named`]: Self::Named
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SectionStep {
-    /// The sibling section whose heading slugs to `slug`.
+    /// `.slug` or `.slug[i]`: the sibling section whose heading slugs to
+    /// `slug`.
     ///
     /// Without an index the step resolves only when exactly one sibling has
     /// that slug; with `index`, it selects the `index`-th such sibling in
@@ -168,8 +201,22 @@ pub enum SectionStep {
         /// Zero-based position among the siblings sharing the slug.
         index: Option<usize>,
     },
-    /// The `index`-th sibling section in document order, regardless of slug.
+    /// `.[i]`: the `index`-th sibling section in document order, regardless
+    /// of slug.
     Position(usize),
+    /// `..slug` or `..slug[i]`: the section anywhere below the current node
+    /// whose heading slugs to `slug`.
+    ///
+    /// Candidates are every section of the current node's subtree except the
+    /// node itself, in document order. Without an index the step resolves only
+    /// when exactly one candidate has that slug; with `index`, it selects the
+    /// `index`-th such candidate.
+    Descendant {
+        /// Slug the heading must produce under [`heading_slug`].
+        slug: HeadingSlug,
+        /// Zero-based position among the descendants sharing the slug.
+        index: Option<usize>,
+    },
 }
 
 /// The kind named by a block step.
@@ -340,8 +387,8 @@ impl DocumentPath {
     ///
     /// # Errors
     ///
-    /// Returns [`DocumentPathError::Ambiguous`] when a named section step
-    /// without an index matches several siblings, and
+    /// Returns [`DocumentPathError::Ambiguous`] when a named or descendant
+    /// section step without an index matches several sections, and
     /// [`DocumentPathError::Unresolved`] when a step matches nothing: an
     /// unknown slug, an out-of-range index, a block kind absent from the
     /// preamble, or a step the model cannot answer: any table kind, any block
@@ -350,12 +397,15 @@ impl DocumentPath {
     /// exposes no block below another block (`$/p[0]/p[1]` and
     /// `$/list[0]/list[0]` parse but never resolve). Both carry the number of
     /// steps that resolved before the failure.
+    ///
+    /// A merged title (see [`merged_title`]) is not a node: `$.title.child`
+    /// is unresolved at its first step and `$.child` reaches the section.
     pub fn resolve<'d>(
         &self,
         document: &'d Document,
     ) -> Result<DocumentNode<'d>, DocumentPathError> {
         let mut resolved_steps = 0;
-        let mut parent = Parent::Root(document);
+        let mut parent = Parent::root(document);
         for step in &self.sections {
             let section = select_section(parent.children(), step)
                 .map_err(|failure| failure.after(resolved_steps))?;
@@ -389,17 +439,23 @@ impl std::str::FromStr for DocumentPath {
 
 impl fmt::Display for DocumentPath {
     /// Writes the canonical spelling: every block index explicit, no other
-    /// whitespace or decoration.
+    /// whitespace or decoration. A descendant step is written back as `..`,
+    /// so a parsed path round-trips; only paths from [`document_paths`] are
+    /// canonical spellings of a node.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("$")?;
         for step in &self.sections {
-            match step {
-                SectionStep::Named { slug, index: None } => write!(formatter, ".{slug}")?,
-                SectionStep::Named {
-                    slug,
-                    index: Some(index),
-                } => write!(formatter, ".{slug}[{index}]")?,
-                SectionStep::Position(index) => write!(formatter, ".[{index}]")?,
+            let (separator, slug, index) = match step {
+                SectionStep::Named { slug, index } => (".", Some(slug), *index),
+                SectionStep::Position(index) => (".", None, Some(*index)),
+                SectionStep::Descendant { slug, index } => ("..", Some(slug), *index),
+            };
+            formatter.write_str(separator)?;
+            if let Some(slug) = slug {
+                write!(formatter, "{slug}")?;
+            }
+            if let Some(index) = index {
+                write!(formatter, "[{index}]")?;
             }
         }
         for step in &self.blocks {
@@ -513,12 +569,13 @@ pub enum DocumentPathError {
         /// Number of leading steps that resolved.
         resolved_steps: usize,
     },
-    /// The named section step after `resolved_steps` matched several
-    /// siblings and carried no index to choose between them.
+    /// The named or descendant section step after `resolved_steps` matched
+    /// several sections and carried no index to choose between them.
     Ambiguous {
         /// Number of leading steps that resolved.
         resolved_steps: usize,
-        /// Number of sibling sections sharing the slug.
+        /// Number of sections sharing the slug: siblings for a `.` step,
+        /// descendants for a `..` step.
         candidates: usize,
     },
 }
@@ -536,7 +593,7 @@ impl fmt::Display for DocumentPathError {
                 candidates,
             } => write!(
                 formatter,
-                "document path step {} matches {candidates} sibling sections; add an index",
+                "document path step {} matches {candidates} sections; add an index",
                 resolved_steps.saturating_add(1)
             ),
         }
@@ -545,21 +602,44 @@ impl fmt::Display for DocumentPathError {
 
 impl std::error::Error for DocumentPathError {}
 
+/// The sole top-level section of `document` when it is an H1, which document
+/// paths merge into the root.
+///
+/// A titled document's H1 names the document rather than opening a section
+/// inside it — the same reading a schema's `title` slot gives it — so its
+/// children are addressed directly under `$` and the heading itself has no
+/// path. Returns `None` for a document with zero or several top-level
+/// sections, or whose only top-level section is deeper than H1; those are
+/// addressed as parsed. Consumers that need the title text (a label for `$`,
+/// a search context) take it from the returned section.
+///
+/// This API is provisional and may change in a minor release before 1.0.
+pub fn merged_title(document: &Document) -> Option<&Section> {
+    match document.sections.as_slice() {
+        [only] if only.heading.level == HeaderLevel::H1 => Some(only),
+        _ => None,
+    }
+}
+
 /// Enumerates every addressable node of `document` with its canonical path.
 ///
 /// Nodes come in document order: the root, then for each preamble its direct
 /// blocks and the direct items of each direct list, then each section
 /// recursively. A section step is spelled `slug` when no sibling shares the
 /// slug, `slug[i]` when siblings share it, and positionally `[i]` when the
-/// heading has no slug. Every returned path resolves back to the node it is
-/// paired with.
+/// heading has no slug; descendant steps are never produced. A merged title
+/// (see [`merged_title`]) is not enumerated: its own blocks follow the root's
+/// preamble blocks under `$` with their per-kind ordinals continuing, and its
+/// children follow as `$.child`. Every returned path resolves back to the
+/// node it is paired with.
 ///
 /// This API is provisional and may change in a minor release before 1.0.
 pub fn document_paths(document: &Document) -> Vec<(DocumentPath, DocumentNode<'_>)> {
     let mut paths = vec![(DocumentPath::root(), DocumentNode::Root(document))];
     let root = DocumentPath::root();
-    push_preamble(&root, &document.preamble, &mut paths);
-    push_sections(&root, &document.sections, &mut paths);
+    let parent = Parent::root(document);
+    push_preamble(&root, parent.preamble(), &mut paths);
+    push_sections(&root, parent.children(), &mut paths);
     paths
 }
 
@@ -594,7 +674,7 @@ fn push_sections<'d>(
         let mut path = parent.clone();
         path.sections.push(step);
         paths.push((path.clone(), DocumentNode::Section(section)));
-        push_preamble(&path, &section.preamble, paths);
+        push_preamble(&path, section.preamble.iter(), paths);
         push_sections(&path, &section.children, paths);
     }
 }
@@ -607,18 +687,19 @@ struct SlugTally {
     emitted: usize,
 }
 
+/// Emits `blocks`, the direct blocks addressed under `parent` in document
+/// order, numbering each per kind as it goes.
 fn push_preamble<'d>(
     parent: &DocumentPath,
-    preamble: &'d Preamble,
+    blocks: impl Iterator<Item = &'d Block>,
     paths: &mut Vec<(DocumentPath, DocumentNode<'d>)>,
 ) {
-    for (position, block) in preamble.iter().enumerate() {
+    let mut ordinals: HashMap<BlockPathKind, usize> = HashMap::new();
+    for block in blocks {
         let kind = BlockPathKind::of(block);
-        let index = preamble
-            .iter()
-            .take(position)
-            .filter(|earlier| BlockPathKind::of(earlier) == kind)
-            .count();
+        let ordinal = ordinals.entry(kind).or_default();
+        let index = *ordinal;
+        *ordinal += 1;
         let mut path = parent.clone();
         path.blocks.push(BlockStep { kind, index });
         paths.push((path.clone(), DocumentNode::Block(block)));
@@ -638,28 +719,50 @@ fn push_preamble<'d>(
 
 /// The node whose child sections and preamble the next step is applied to.
 enum Parent<'d> {
-    Root(&'d Document),
+    /// The root, together with the H1 merged into it when there is one.
+    Root {
+        document: &'d Document,
+        title: Option<&'d Section>,
+    },
     Section(&'d Section),
 }
 
 impl<'d> Parent<'d> {
+    fn root(document: &'d Document) -> Self {
+        Self::Root {
+            document,
+            title: merged_title(document),
+        }
+    }
+
+    /// The sections a `.` step chooses among: a merged title's children stand
+    /// in for the top-level sections.
     fn children(&self) -> &'d [Section] {
         match self {
-            Self::Root(document) => &document.sections,
+            Self::Root {
+                title: Some(title), ..
+            } => &title.children,
+            Self::Root { document, .. } => &document.sections,
             Self::Section(section) => &section.children,
         }
     }
 
-    fn preamble(&self) -> &'d Preamble {
-        match self {
-            Self::Root(document) => &document.preamble,
-            Self::Section(section) => &section.preamble,
-        }
+    /// The direct blocks a `/` step counts over: the root's own preamble
+    /// followed by a merged title's blocks, in document order.
+    fn preamble(&self) -> impl Iterator<Item = &'d Block> {
+        let (own, merged) = match self {
+            Self::Root { document, title } => (
+                document.preamble.as_slice(),
+                title.map_or(&[][..], |title| title.preamble.as_slice()),
+            ),
+            Self::Section(section) => (section.preamble.as_slice(), &[][..]),
+        };
+        own.iter().chain(merged)
     }
 
     fn node(&self) -> DocumentNode<'d> {
         match self {
-            Self::Root(document) => DocumentNode::Root(document),
+            Self::Root { document, .. } => DocumentNode::Root(document),
             Self::Section(section) => DocumentNode::Section(section),
         }
     }
@@ -683,34 +786,52 @@ impl SectionFailure {
     }
 }
 
+/// Applies one section step to `children`, the direct child sections of the
+/// current node; a descendant step searches their whole subtrees.
 fn select_section<'d>(
-    siblings: &'d [Section],
+    children: &'d [Section],
     step: &SectionStep,
 ) -> Result<&'d Section, SectionFailure> {
     match step {
-        SectionStep::Position(index) => siblings.get(*index).ok_or(SectionFailure::Unresolved),
-        SectionStep::Named { slug, index } => {
-            let slugged =
-                |section: &&'d Section| heading_slug(&section.heading.text).as_ref() == Some(slug);
-            match index {
-                Some(index) => siblings
-                    .iter()
-                    .filter(slugged)
-                    .nth(*index)
-                    .ok_or(SectionFailure::Unresolved),
-                None => {
-                    let mut matching = siblings.iter().filter(slugged);
-                    let first = matching.next().ok_or(SectionFailure::Unresolved)?;
-                    match matching.count() {
-                        0 => Ok(first),
-                        more => Err(SectionFailure::Ambiguous {
-                            candidates: more + 1,
-                        }),
-                    }
-                }
+        SectionStep::Position(index) => children.get(*index).ok_or(SectionFailure::Unresolved),
+        SectionStep::Named { slug, index } => select_slugged(children.iter(), slug, *index),
+        SectionStep::Descendant { slug, index } => {
+            select_slugged(descendants(children), slug, *index)
+        }
+    }
+}
+
+/// Picks the `index`-th candidate slugging to `slug`, or the only one when
+/// no index is given.
+fn select_slugged<'d>(
+    candidates: impl Iterator<Item = &'d Section>,
+    slug: &HeadingSlug,
+    index: Option<usize>,
+) -> Result<&'d Section, SectionFailure> {
+    let mut matching =
+        candidates.filter(|section| heading_slug(&section.heading.text).as_ref() == Some(slug));
+    match index {
+        Some(index) => matching.nth(index).ok_or(SectionFailure::Unresolved),
+        None => {
+            let first = matching.next().ok_or(SectionFailure::Unresolved)?;
+            match matching.count() {
+                0 => Ok(first),
+                more => Err(SectionFailure::Ambiguous {
+                    candidates: more + 1,
+                }),
             }
         }
     }
+}
+
+/// Every section in the subtrees of `sections`, in document order.
+fn descendants(sections: &[Section]) -> impl Iterator<Item = &Section> {
+    let mut pending: Vec<&Section> = sections.iter().rev().collect();
+    std::iter::from_fn(move || {
+        let next = pending.pop()?;
+        pending.extend(next.children.iter().rev());
+        Some(next)
+    })
 }
 
 /// A node reached by at least one block step.
@@ -729,13 +850,16 @@ impl<'d> BlockNode<'d> {
     }
 }
 
-/// Applies the first block step, which always selects a preamble block.
-fn select_block(preamble: &Preamble, step: BlockStep) -> Option<BlockNode<'_>> {
+/// Applies the first block step, which always selects one of the parent's
+/// direct blocks.
+fn select_block<'d>(
+    blocks: impl Iterator<Item = &'d Block>,
+    step: BlockStep,
+) -> Option<BlockNode<'d>> {
     if !is_preamble_kind(step.kind) {
         return None;
     }
-    preamble
-        .iter()
+    blocks
         .filter(|block| BlockPathKind::of(block) == step.kind)
         .nth(step.index)
         .map(BlockNode::Block)
@@ -810,28 +934,42 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses the step after a consumed `.`: a second `.` makes it a
+    /// descendant step, which has no positional form.
     fn section_step(&mut self) -> Result<SectionStep, DocumentPathSyntaxError> {
+        if self.eat(b'.') {
+            let slug = self.slug(
+                "expected a heading slug (`[a-z0-9]+(-[a-z0-9]+)*`) after `..`; \
+                 a descendant step has no `[index]` position form",
+            )?;
+            let index = self.optional_index()?;
+            return Ok(SectionStep::Descendant { slug, index });
+        }
         if self.eat(b'[') {
             return self.index().map(SectionStep::Position);
         }
-        let slug = self.slug()?;
-        let index = if self.eat(b'[') {
-            Some(self.index()?)
-        } else {
-            None
-        };
+        let slug = self
+            .slug("expected a heading slug (`[a-z0-9]+(-[a-z0-9]+)*`) or a `[index]` position")?;
+        let index = self.optional_index()?;
         Ok(SectionStep::Named { slug, index })
+    }
+
+    fn optional_index(&mut self) -> Result<Option<usize>, DocumentPathSyntaxError> {
+        if self.eat(b'[') {
+            self.index().map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Parses a slug one run at a time so that the error offset points at the
     /// byte that broke the form: a `-` without a following letter or digit
-    /// fails after the `-`, not at the start of the segment.
-    fn slug(&mut self) -> Result<HeadingSlug, DocumentPathSyntaxError> {
+    /// fails after the `-`, not at the start of the segment. `missing` is the
+    /// message when no slug starts here.
+    fn slug(&mut self, missing: &str) -> Result<HeadingSlug, DocumentPathSyntaxError> {
         let start = self.position;
         if self.slug_run().is_empty() {
-            return Err(self.error(
-                "expected a heading slug (`[a-z0-9]+(-[a-z0-9]+)*`) or a `[index]` position",
-            ));
+            return Err(self.error(missing));
         }
         while self.eat(b'-') {
             if self.slug_run().is_empty() {
