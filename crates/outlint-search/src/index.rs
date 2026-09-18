@@ -3,7 +3,7 @@
 use std::ops::Bound;
 
 use tantivy::{
-    query::{BooleanQuery, BoostQuery, Occur, Query, QueryParser, RangeQuery},
+    query::{BooleanQuery, BoostQuery, Occur, Query, QueryParser, RangeQuery, TermQuery},
     schema::{
         Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, STORED, STRING,
     },
@@ -12,7 +12,7 @@ use tantivy::{
 
 /// Bumped whenever the schema or the unit derivation changes incompatibly;
 /// the store rebuilds an index recorded under another version.
-pub(crate) const INDEX_FORMAT_VERSION: u32 = 3;
+pub(crate) const INDEX_FORMAT_VERSION: u32 = 4;
 
 /// Field names, so the schema and the fast-field readers agree.
 pub(crate) const PATH: &str = "path";
@@ -24,6 +24,14 @@ pub(crate) const BODY: &str = "body";
 pub(crate) const RAW: &str = "raw";
 pub(crate) const MTIME: &str = "mtime";
 pub(crate) const SIZE: &str = "size";
+pub(crate) const KIND: &str = "kind";
+
+/// `kind` value of a document that holds one index unit and can be a hit.
+pub(crate) const KIND_UNIT: &str = "unit";
+/// `kind` value of a tombstone: a document carrying only a file's change
+/// signature, written for a walked file that yields no units so the file is
+/// not re-read on every refresh. Every query excludes tombstones.
+pub(crate) const KIND_TOMBSTONE: &str = "tombstone";
 
 /// Handles of every schema field.
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +45,7 @@ pub(crate) struct Fields {
     pub(crate) raw: Field,
     pub(crate) mtime: Field,
     pub(crate) size: Field,
+    pub(crate) kind: Field,
 }
 
 impl Fields {
@@ -57,6 +66,7 @@ impl Fields {
             raw: field(RAW)?,
             mtime: field(MTIME)?,
             size: field(SIZE)?,
+            kind: field(KIND)?,
         })
     }
 }
@@ -67,7 +77,9 @@ impl Fields {
 /// loading stored documents; `mtime` and `size` are fast fields for the same
 /// reason. `context` and `body` are stemmed English text and never stored;
 /// `raw`, `bytes`, and `section_bytes` are stored and never indexed, and
-/// `section_bytes` is absent on section and root units.
+/// `section_bytes` is absent on section and root units. `kind` is indexed
+/// and never stored: it is [`KIND_UNIT`] or [`KIND_TOMBSTONE`], and every
+/// query requires the former so a tombstone can never take a hit's place.
 pub(crate) fn build_schema() -> (Schema, Fields) {
     let stemmed = TextOptions::default().set_indexing_options(
         TextFieldIndexing::default()
@@ -85,6 +97,7 @@ pub(crate) fn build_schema() -> (Schema, Fields) {
         raw: builder.add_text_field(RAW, STORED),
         mtime: builder.add_u64_field(MTIME, FAST),
         size: builder.add_u64_field(SIZE, FAST),
+        kind: builder.add_text_field(KIND, STRING),
     };
     (builder.build(), fields)
 }
@@ -92,14 +105,17 @@ pub(crate) fn build_schema() -> (Schema, Fields) {
 /// Score multiplier for a heading chain that contains every query word.
 const CONTEXT_BOOST: f32 = 2.0;
 
-/// Builds the query for `words` within `prefix`: a hit must match every word
-/// on its own `body` text, and a `context` (heading chain) that also contains
-/// every word only raises the score — it can never satisfy the query by
-/// itself. A non-empty `prefix` (a repository-relative directory ending in
-/// `/`) additionally restricts hits to paths under it.
+/// Builds the query for `words` within `prefix`: a hit must be a unit (never
+/// a tombstone) and must match every word on its own `body` text, and a
+/// `context` (heading chain) that also contains every word only raises the
+/// score — it can never satisfy the query by itself. A non-empty `prefix` (a
+/// repository-relative directory ending in `/`) additionally restricts hits
+/// to paths under it.
 /// Both parses are lenient: unparseable fragments are dropped rather than
 /// reported. When no body term survives (`*`, say), the context clause is
-/// omitted, but the prefix restriction still applies.
+/// omitted, but the unit and prefix restrictions still apply, so tombstones
+/// are excluded in the query itself rather than after the top hits are
+/// taken, where they could crowd real hits out of the limit.
 pub(crate) fn build_query(
     index: &Index,
     fields: &Fields,
@@ -115,16 +131,17 @@ pub(crate) fn build_query(
     let body = parse(fields.body);
     let mut has_terms = false;
     body.query_terms(&mut |_, _| has_terms = true);
-    let under_prefix = path_prefix_query(fields.path, prefix);
-    if !has_terms && under_prefix.is_none() {
-        return body;
-    }
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, body)];
+    let is_unit = TermQuery::new(
+        Term::from_field_text(fields.kind, KIND_UNIT),
+        IndexRecordOption::Basic,
+    );
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> =
+        vec![(Occur::Must, body), (Occur::Must, Box::new(is_unit))];
     if has_terms {
         let context = BoostQuery::new(parse(fields.context), CONTEXT_BOOST);
         clauses.push((Occur::Should, Box::new(context)));
     }
-    if let Some(under_prefix) = under_prefix {
+    if let Some(under_prefix) = path_prefix_query(fields.path, prefix) {
         clauses.push((Occur::Must, Box::new(under_prefix)));
     }
     Box::new(BooleanQuery::new(clauses))
@@ -176,6 +193,7 @@ mod tests {
                     fields.path => path,
                     fields.context => context,
                     fields.body => body,
+                    fields.kind => KIND_UNIT,
                 ))
                 .expect("add");
         }
@@ -218,9 +236,20 @@ mod tests {
                     fields.path => path,
                     fields.context => "Intro",
                     fields.body => "Kumquat cultivation.",
+                    fields.kind => KIND_UNIT,
                 ))
                 .expect("add");
         }
+        // A tombstone under the prefix: a signature with no text and no
+        // `mdpath`, which must never surface, not even for a term-less query.
+        writer
+            .add_document(doc!(
+                fields.path => "docs/empty.md",
+                fields.mtime => 1_u64,
+                fields.size => 0_u64,
+                fields.kind => KIND_TOMBSTONE,
+            ))
+            .expect("add tombstone");
         writer.commit().expect("commit");
 
         let searcher = index.reader().expect("reader").searcher();
@@ -249,8 +278,59 @@ mod tests {
         );
         assert_eq!(paths_for("kumquat", "docs/sub/"), ["docs/sub/c.md"]);
         assert_eq!(paths_for("kumquat", "").len(), 5);
-        // A term-less query still stays under the prefix.
+        // A term-less query still stays under the prefix and never returns
+        // the tombstone.
         assert_eq!(paths_for("*", "docs/"), ["docs/a.md", "docs/sub/c.md"]);
         assert_eq!(paths_for("*", "").len(), 5);
+        assert!(paths_for("*", "")
+            .iter()
+            .all(|path| path != "docs/empty.md"));
+    }
+
+    #[test]
+    fn tombstones_never_crowd_out_hits() {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("writer");
+        // More tombstones than the hit limit, all sorting before the one
+        // real unit, so an after-the-fact filter would leave no hits.
+        for number in 0..10 {
+            writer
+                .add_document(doc!(
+                    fields.path => format!("{number:02}.md"),
+                    fields.mtime => 1_u64,
+                    fields.size => 0_u64,
+                    fields.kind => KIND_TOMBSTONE,
+                ))
+                .expect("add tombstone");
+        }
+        writer
+            .add_document(doc!(
+                fields.path => "z.md",
+                fields.mdpath => "/",
+                fields.context => "Intro",
+                fields.body => "Kumquat cultivation.",
+                fields.kind => KIND_UNIT,
+            ))
+            .expect("add");
+        writer.commit().expect("commit");
+
+        let searcher = index.reader().expect("reader").searcher();
+        let query = build_query(&index, &fields, "*", "");
+        let top = searcher
+            .search(&*query, &TopDocs::with_limit(10).order_by_score())
+            .expect("search");
+        let paths: Vec<String> = top
+            .iter()
+            .map(|(_, address)| {
+                let document: TantivyDocument = searcher.doc(*address).expect("doc");
+                document
+                    .get_first(fields.path)
+                    .and_then(|value| value.as_str())
+                    .expect("path")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(paths, ["z.md"]);
     }
 }

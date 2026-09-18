@@ -16,12 +16,16 @@ use tantivy::{
 };
 
 use crate::{
-    index::{build_query, build_schema, Fields, INDEX_FORMAT_VERSION, MTIME, PATH, SIZE},
+    index::{
+        build_query, build_schema, Fields, INDEX_FORMAT_VERSION, KIND_TOMBSTONE, KIND_UNIT, MTIME,
+        PATH, SIZE,
+    },
     render::{sort_hits, Hit},
     units::{index_units, IndexUnit},
 };
 
-/// Markdown files larger than this are not indexed.
+/// Markdown files larger than this are walked but not indexed: the refresh
+/// notes them once and records a tombstone in place of their units.
 const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
 /// Memory budget handed to the tantivy writer.
 const WRITER_HEAP_BYTES: usize = 50_000_000;
@@ -129,8 +133,9 @@ fn is_markdown_extension(extension: &str) -> bool {
 }
 
 /// Lists the Markdown files under the scope's search root, respecting ignore
-/// files and skipping hidden entries, symlinks, oversized files, and files
-/// whose name is not valid UTF-8.
+/// files and skipping hidden entries, symlinks, and files whose name is not
+/// valid UTF-8. Oversized files are listed like any other, so the refresh
+/// can note them and stop re-examining them.
 pub fn walk_markdown(scope: &Scope) -> Walk {
     let mut files = Vec::new();
     let mut notes = Vec::new();
@@ -167,9 +172,6 @@ pub fn walk_markdown(scope: &Scope) -> Walk {
                 continue;
             }
         };
-        if metadata.len() > MAX_FILE_SIZE {
-            continue;
-        }
         let Ok(relative) = entry.path().strip_prefix(&scope.repo) else {
             continue;
         };
@@ -269,13 +271,19 @@ impl Store {
     /// are untouched. Indexed files outside the search root are never
     /// touched, so searches from different roots share the index safely.
     ///
-    /// A walked file that yields no units (not UTF-8, unparseable, grown past
-    /// the size cap, or simply empty) is recorded as a tombstone carrying only
-    /// its signature, so it is not re-read on every run.
+    /// A walked file that yields no units for a reason fixed by its content
+    /// (not UTF-8, unparseable, over the size cap, or simply empty) is
+    /// recorded as a tombstone carrying only its signature, so it is not
+    /// re-read on every run. A file that cannot be read at all (permission
+    /// denied, an I/O error) is noted and left out of the index instead: its
+    /// signature does not change when the cause goes away, so a tombstone
+    /// would never be retried, whereas an unindexed file is retried on the
+    /// next run.
     ///
     /// Returns notes for the caller to print: files skipped because they are
-    /// not UTF-8 or do not parse, or the fact that another process holds the
-    /// writer lock, in which case the index is left as it is.
+    /// not UTF-8, do not parse, are over the size cap, or cannot be read, or
+    /// the fact that another process holds the writer lock, in which case the
+    /// index is left as it is.
     ///
     /// # Errors
     ///
@@ -318,10 +326,14 @@ impl Store {
         for file in stale {
             writer.delete_term(Term::from_field_text(self.fields.path, &file.path));
             let units = match load_units(&self.scope.repo, file) {
-                Ok(units) => units,
-                Err(note) => {
+                Load::Units(units) => units,
+                Load::Skipped(note) => {
                     notes.push(note);
                     Vec::new()
+                }
+                Load::Unreadable(note) => {
+                    notes.push(note);
+                    continue;
                 }
             };
             let fields = &self.fields;
@@ -334,6 +346,7 @@ impl Store {
                         fields.path => file.path.as_str(),
                         fields.mtime => file.mtime,
                         fields.size => file.size,
+                        fields.kind => KIND_TOMBSTONE,
                     ))
                     .map_err(|error| format!("cannot index {}: {error}", file.path))?;
                 continue;
@@ -348,6 +361,7 @@ impl Store {
                     fields.raw => unit.raw,
                     fields.mtime => file.mtime,
                     fields.size => file.size,
+                    fields.kind => KIND_UNIT,
                 );
                 if let Some(section_bytes) = unit.section_bytes {
                     document.add_u64(fields.section_bytes, section_bytes);
@@ -396,8 +410,9 @@ impl Store {
                 .get_first(self.fields.mdpath)
                 .and_then(|value| value.as_str())
             else {
-                // A tombstone for a file without units matches only a
-                // term-less query; it is never a hit.
+                // Unreachable: the query requires `kind:unit`, and every unit
+                // carries an `mdpath`. Kept so that a malformed document is
+                // dropped rather than rendered with an empty address.
                 continue;
             };
             let mut path = text(self.fields.path);
@@ -468,23 +483,43 @@ fn collect_segment_files(
     Ok(())
 }
 
+/// The outcome of [`load_units`]: the two failure cases are kept apart
+/// because only one of them is worth remembering under the file's signature.
+enum Load {
+    /// The file was read and split; the list may be empty.
+    Units(Vec<IndexUnit>),
+    /// The file was read but cannot be indexed for a reason determined by
+    /// its content — over the size cap, not UTF-8, or unparseable — which
+    /// cannot change without changing its `(mtime, size)` signature. The
+    /// note explains why; a tombstone records the signature.
+    Skipped(String),
+    /// The file could not be opened or read. The cause (permissions, a
+    /// device error) can go away without touching the signature, so nothing
+    /// is recorded and the file is retried on the next refresh.
+    Unreadable(String),
+}
+
 /// Reads and splits one walked file into units, or explains in one note why
 /// it cannot be indexed.
-fn load_units(repo: &Path, file: &WalkedFile) -> Result<Vec<IndexUnit>, String> {
+fn load_units(repo: &Path, file: &WalkedFile) -> Load {
     let bytes = match read_capped(&repo.join(&file.path)) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
-            return Err(format!(
+            return Load::Skipped(format!(
                 "skipping {}: larger than {} MiB",
                 file.path,
                 MAX_FILE_SIZE >> 20
             ))
         }
-        Err(error) => return Err(format!("skipping {}: {error}", file.path)),
+        Err(error) => return Load::Unreadable(format!("skipping {}: {error}", file.path)),
     };
-    let source =
-        String::from_utf8(bytes).map_err(|_| format!("skipping {}: not valid UTF-8", file.path))?;
-    index_units(&file.path, &source).map_err(|error| format!("skipping {}: {error}", file.path))
+    let Ok(source) = String::from_utf8(bytes) else {
+        return Load::Skipped(format!("skipping {}: not valid UTF-8", file.path));
+    };
+    match index_units(&file.path, &source) {
+        Ok(units) => Load::Units(units),
+        Err(error) => Load::Skipped(format!("skipping {}: {error}", file.path)),
+    }
 }
 
 /// Reads a whole file of at most [`MAX_FILE_SIZE`] bytes, or `None` when it
