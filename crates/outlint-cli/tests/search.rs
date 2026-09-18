@@ -3,7 +3,10 @@
 mod common;
 
 use common::*;
-use std::fs;
+use std::{
+    fs,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 #[test]
 fn search_indexes_refreshes_and_forgets_workspace_markdown() {
@@ -83,4 +86,31 @@ fn search_scopes_to_the_search_root_and_shares_the_repository_index() {
     let output = run(&directory, &["search", "--root", "missing", "kumquat"]);
     assert_eq!(output.status.code(), Some(2), "stdout: {}", stdout(&output));
     assert!(stderr(&output).contains("--root 'missing' is not a directory"));
+}
+
+#[test]
+fn search_notices_a_same_size_rewrite_within_one_second() {
+    let directory = TempDir::new("search-mtime");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    let set_modified = |relative: &str, time: SystemTime| {
+        fs::File::options()
+            .write(true)
+            .open(directory.path().join(relative))
+            .expect("fixture opens for writing")
+            .set_modified(time)
+            .expect("fixture mtime is settable");
+    };
+    let base = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+    directory.write("note.md", "# Note\n\nKumquat.\n");
+    set_modified("note.md", base);
+    let output = run(&directory, &["search", "kumquat"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    // Same length, same second, different content: still picked up.
+    directory.write("note.md", "# Note\n\nLoquats.\n");
+    set_modified("note.md", base + Duration::from_millis(100));
+    let output = run(&directory, &["search", "loquats"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("  Loquats."));
 }

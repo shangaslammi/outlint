@@ -1,10 +1,23 @@
 //! Help text and hand-written command-line argument parsing.
 
+#[cfg(not(feature = "search"))]
 pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
 \n\
 Commands:\n\
   check          Validate Markdown documents\n\
   schema check   Validate Outlint schema files\n\
+\n\
+Options:\n\
+  -h, --help     Show help\n\
+  -V, --version  Show version\n";
+
+#[cfg(feature = "search")]
+pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
+\n\
+Commands:\n\
+  check          Validate Markdown documents\n\
+  schema check   Validate Outlint schema files\n\
+  search         Search Markdown blocks by keyword\n\
 \n\
 Options:\n\
   -h, --help     Show help\n\

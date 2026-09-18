@@ -4,6 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -17,7 +18,7 @@ use tantivy::{
 use crate::{
     index::{build_query, build_schema, Fields, INDEX_FORMAT_VERSION, MTIME, PATH, SIZE},
     render::{sort_hits, Hit},
-    units::index_units,
+    units::{index_units, IndexUnit},
 };
 
 /// Markdown files larger than this are not indexed.
@@ -34,10 +35,24 @@ const INDEX_MARKER: &str = "outlint-index.json";
 pub struct WalkedFile {
     /// Path relative to the repository root, with forward slashes.
     pub path: String,
-    /// Modification time in seconds since the Unix epoch (`0` when unknown).
+    /// Modification time in nanoseconds since the Unix epoch: `0` when unknown
+    /// or before the epoch, saturated at `u64::MAX` beyond its range.
     pub mtime: u64,
     /// File size in bytes.
     pub size: u64,
+}
+
+/// The outcome of [`walk_markdown`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Walk {
+    /// The Markdown files found, sorted by path.
+    pub files: Vec<WalkedFile>,
+    /// One note per entry that could not be examined or was skipped.
+    pub notes: Vec<String>,
+    /// Whether every entry under the search root was examined. When `false`,
+    /// a file absent from `files` may still exist, so a refresh must not
+    /// treat indexed files it did not see as deleted.
+    pub complete: bool,
 }
 
 /// Where a search runs: the repository whose `.outlint/search/` holds the
@@ -62,7 +77,8 @@ impl Scope {
     ///
     /// # Errors
     ///
-    /// Returns a message when `search_root` cannot be canonicalized.
+    /// Returns a message when `search_root` cannot be canonicalized or its
+    /// path inside the repository is not valid UTF-8.
     pub fn locate(search_root: &Path) -> Result<Self, String> {
         let search_root = search_root
             .canonicalize()
@@ -72,12 +88,22 @@ impl Scope {
             .find(|directory| directory.join(".git").exists())
             .unwrap_or(&search_root)
             .to_path_buf();
-        let prefix = search_root
+        let prefix = match search_root
             .strip_prefix(&repo)
             .ok()
             .filter(|relative| !relative.as_os_str().is_empty())
-            .map(|relative| format!("{}/", slash_path(relative)))
-            .unwrap_or_default();
+        {
+            Some(relative) => match slash_path(relative) {
+                Some(relative) => format!("{relative}/"),
+                None => {
+                    return Err(format!(
+                        "search root {} is not valid UTF-8",
+                        search_root.display()
+                    ))
+                }
+            },
+            None => String::new(),
+        };
         Ok(Self {
             repo,
             search_root,
@@ -86,23 +112,29 @@ impl Scope {
     }
 }
 
-/// A relative path as forward-slash-separated components.
-fn slash_path(relative: &Path) -> String {
+/// A relative path as forward-slash-separated components, or `None` when a
+/// component is not valid UTF-8 — such a path is never lossily converted
+/// into an index key, because the key could then name a different file.
+fn slash_path(relative: &Path) -> Option<String> {
     relative
         .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
+}
+
+/// Whether a file extension marks a Markdown file, ignoring ASCII case.
+fn is_markdown_extension(extension: &str) -> bool {
+    extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
 }
 
 /// Lists the Markdown files under the scope's search root, respecting ignore
-/// files and skipping hidden entries, symlinks, and oversized files.
-///
-/// Returns the files sorted by path plus one note per entry that could not be
-/// examined.
-pub fn walk_markdown(scope: &Scope) -> (Vec<WalkedFile>, Vec<String>) {
+/// files and skipping hidden entries, symlinks, oversized files, and files
+/// whose name is not valid UTF-8.
+pub fn walk_markdown(scope: &Scope) -> Walk {
     let mut files = Vec::new();
     let mut notes = Vec::new();
+    let mut complete = true;
     let walker = WalkBuilder::new(&scope.search_root)
         .hidden(true)
         .follow_links(false)
@@ -113,6 +145,7 @@ pub fn walk_markdown(scope: &Scope) -> (Vec<WalkedFile>, Vec<String>) {
             Ok(entry) => entry,
             Err(error) => {
                 notes.push(format!("cannot walk: {error}"));
+                complete = false;
                 continue;
             }
         };
@@ -123,13 +156,14 @@ pub fn walk_markdown(scope: &Scope) -> (Vec<WalkedFile>, Vec<String>) {
             .path()
             .extension()
             .and_then(|extension| extension.to_str());
-        if !matches!(extension, Some("md" | "markdown")) {
+        if !extension.is_some_and(is_markdown_extension) {
             continue;
         }
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(error) => {
                 notes.push(format!("cannot stat {}: {error}", entry.path().display()));
+                complete = false;
                 continue;
             }
         };
@@ -139,19 +173,32 @@ pub fn walk_markdown(scope: &Scope) -> (Vec<WalkedFile>, Vec<String>) {
         let Ok(relative) = entry.path().strip_prefix(&scope.repo) else {
             continue;
         };
+        let Some(path) = slash_path(relative) else {
+            notes.push(format!(
+                "skipping {}: file name is not valid UTF-8",
+                entry.path().display()
+            ));
+            continue;
+        };
         let mtime = metadata
             .modified()
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |elapsed| elapsed.as_secs());
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+            });
         files.push(WalkedFile {
-            path: slash_path(relative),
+            path,
             mtime,
             size: metadata.len(),
         });
     }
     files.sort_by(|left, right| left.path.cmp(&right.path));
-    (files, notes)
+    Walk {
+        files,
+        notes,
+        complete,
+    }
 }
 
 /// An opened on-disk search index, scoped to one search root inside its
@@ -215,11 +262,16 @@ impl Store {
         })
     }
 
-    /// Brings the index in line with `files`, the walk of the search root:
+    /// Brings the index in line with `walk`, the walk of the search root:
     /// files whose `(mtime, size)` changed or are new are re-indexed, indexed
-    /// files under the search root that were not walked are removed, unchanged
-    /// files are untouched. Indexed files outside the search root are never
+    /// files under the search root that were not walked are removed — unless
+    /// the walk was incomplete, when nothing is removed — and unchanged files
+    /// are untouched. Indexed files outside the search root are never
     /// touched, so searches from different roots share the index safely.
+    ///
+    /// A walked file that yields no units (not UTF-8, unparseable, grown past
+    /// the size cap, or simply empty) is recorded as a tombstone carrying only
+    /// its signature, so it is not re-read on every run.
     ///
     /// Returns notes for the caller to print: files skipped because they are
     /// not UTF-8 or do not parse, or the fact that another process holds the
@@ -228,17 +280,22 @@ impl Store {
     /// # Errors
     ///
     /// Returns a message when the index cannot be read or written.
-    pub fn refresh(&self, files: &[WalkedFile]) -> Result<Vec<String>, String> {
+    pub fn refresh(&self, walk: &Walk) -> Result<Vec<String>, String> {
         let known = self.indexed_files()?;
-        let walked: HashSet<&String> = files.iter().map(|file| &file.path).collect();
-        let stale: Vec<&WalkedFile> = files
+        let walked: HashSet<&String> = walk.files.iter().map(|file| &file.path).collect();
+        let stale: Vec<&WalkedFile> = walk
+            .files
             .iter()
             .filter(|file| known.get(&file.path) != Some(&(file.mtime, file.size)))
             .collect();
-        let removed: Vec<&String> = known
-            .keys()
-            .filter(|path| path.starts_with(&self.scope.prefix) && !walked.contains(path))
-            .collect();
+        let removed: Vec<&String> = if walk.complete {
+            known
+                .keys()
+                .filter(|path| path.starts_with(&self.scope.prefix) && !walked.contains(path))
+                .collect()
+        } else {
+            Vec::new()
+        };
         if stale.is_empty() && removed.is_empty() {
             return Ok(Vec::new());
         }
@@ -260,27 +317,27 @@ impl Store {
         }
         for file in stale {
             writer.delete_term(Term::from_field_text(self.fields.path, &file.path));
-            let source = match fs::read(self.scope.repo.join(&file.path)) {
-                Ok(bytes) => match String::from_utf8(bytes) {
-                    Ok(source) => source,
-                    Err(_) => {
-                        notes.push(format!("skipping {}: not valid UTF-8", file.path));
-                        continue;
-                    }
-                },
-                Err(error) => {
-                    notes.push(format!("skipping {}: {error}", file.path));
-                    continue;
-                }
-            };
-            let units = match index_units(&file.path, &source) {
+            let units = match load_units(&self.scope.repo, file) {
                 Ok(units) => units,
-                Err(error) => {
-                    notes.push(format!("skipping {}: {error}", file.path));
-                    continue;
+                Err(note) => {
+                    notes.push(note);
+                    Vec::new()
                 }
             };
             let fields = &self.fields;
+            if units.is_empty() {
+                // A tombstone: the signature alone, with no `mdpath` and no
+                // indexed text, so the file counts as up to date next time
+                // and can never be a hit.
+                writer
+                    .add_document(doc!(
+                        fields.path => file.path.as_str(),
+                        fields.mtime => file.mtime,
+                        fields.size => file.size,
+                    ))
+                    .map_err(|error| format!("cannot index {}: {error}", file.path))?;
+                continue;
+            }
             for unit in units {
                 let mut document = doc!(
                     fields.path => file.path.as_str(),
@@ -335,13 +392,21 @@ impl Store {
                     .to_owned()
             };
             let number = |field| document.get_first(field).and_then(|value| value.as_u64());
+            let Some(mdpath) = document
+                .get_first(self.fields.mdpath)
+                .and_then(|value| value.as_str())
+            else {
+                // A tombstone for a file without units matches only a
+                // term-less query; it is never a hit.
+                continue;
+            };
             let mut path = text(self.fields.path);
             if path.starts_with(&self.scope.prefix) {
                 path.drain(..self.scope.prefix.len());
             }
             hits.push(Hit {
                 path,
-                mdpath: text(self.fields.mdpath),
+                mdpath: mdpath.to_owned(),
                 bytes: number(self.fields.bytes).unwrap_or(0),
                 section_bytes: number(self.fields.section_bytes),
                 score,
@@ -396,7 +461,41 @@ fn collect_segment_files(
         let (Some(mtime), Some(size)) = (mtimes.first(doc), sizes.first(doc)) else {
             continue;
         };
-        known.entry(path.clone()).or_insert((mtime, size));
+        if !known.contains_key(path.as_str()) {
+            known.insert(path.clone(), (mtime, size));
+        }
     }
     Ok(())
+}
+
+/// Reads and splits one walked file into units, or explains in one note why
+/// it cannot be indexed.
+fn load_units(repo: &Path, file: &WalkedFile) -> Result<Vec<IndexUnit>, String> {
+    let bytes = match read_capped(&repo.join(&file.path)) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            return Err(format!(
+                "skipping {}: larger than {} MiB",
+                file.path,
+                MAX_FILE_SIZE >> 20
+            ))
+        }
+        Err(error) => return Err(format!("skipping {}: {error}", file.path)),
+    };
+    let source =
+        String::from_utf8(bytes).map_err(|_| format!("skipping {}: not valid UTF-8", file.path))?;
+    index_units(&file.path, &source).map_err(|error| format!("skipping {}: {error}", file.path))
+}
+
+/// Reads a whole file of at most [`MAX_FILE_SIZE`] bytes, or `None` when it
+/// is larger. The cap is checked on the open handle and enforced on the bytes
+/// actually read, because the file may have grown since the walk measured it.
+fn read_capped(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_FILE_SIZE {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_SIZE + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= MAX_FILE_SIZE).then_some(bytes))
 }

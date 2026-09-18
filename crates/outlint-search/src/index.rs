@@ -12,7 +12,7 @@ use tantivy::{
 
 /// Bumped whenever the schema or the unit derivation changes incompatibly;
 /// the store rebuilds an index recorded under another version.
-pub(crate) const INDEX_FORMAT_VERSION: u32 = 2;
+pub(crate) const INDEX_FORMAT_VERSION: u32 = 3;
 
 /// Field names, so the schema and the fast-field readers agree.
 pub(crate) const PATH: &str = "path";
@@ -98,8 +98,8 @@ const CONTEXT_BOOST: f32 = 2.0;
 /// itself. A non-empty `prefix` (a repository-relative directory ending in
 /// `/`) additionally restricts hits to paths under it.
 /// Both parses are lenient: unparseable fragments are dropped rather than
-/// reported, and when no body term survives, the body parse is returned
-/// unchanged.
+/// reported. When no body term survives (`*`, say), the context clause is
+/// omitted, but the prefix restriction still applies.
 pub(crate) fn build_query(
     index: &Index,
     fields: &Fields,
@@ -115,13 +115,16 @@ pub(crate) fn build_query(
     let body = parse(fields.body);
     let mut has_terms = false;
     body.query_terms(&mut |_, _| has_terms = true);
-    if !has_terms {
+    let under_prefix = path_prefix_query(fields.path, prefix);
+    if !has_terms && under_prefix.is_none() {
         return body;
     }
-    let context = BoostQuery::new(parse(fields.context), CONTEXT_BOOST);
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> =
-        vec![(Occur::Must, body), (Occur::Should, Box::new(context))];
-    if let Some(under_prefix) = path_prefix_query(fields.path, prefix) {
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, body)];
+    if has_terms {
+        let context = BoostQuery::new(parse(fields.context), CONTEXT_BOOST);
+        clauses.push((Occur::Should, Box::new(context)));
+    }
+    if let Some(under_prefix) = under_prefix {
         clauses.push((Occur::Must, Box::new(under_prefix)));
     }
     Box::new(BooleanQuery::new(clauses))
@@ -221,8 +224,8 @@ mod tests {
         writer.commit().expect("commit");
 
         let searcher = index.reader().expect("reader").searcher();
-        let paths_for = |prefix: &str| {
-            let query = build_query(&index, &fields, "kumquat", prefix);
+        let paths_for = |words: &str, prefix: &str| {
+            let query = build_query(&index, &fields, words, prefix);
             let top = searcher
                 .search(&*query, &TopDocs::with_limit(10).order_by_score())
                 .expect("search");
@@ -240,8 +243,14 @@ mod tests {
             paths.sort();
             paths
         };
-        assert_eq!(paths_for("docs/"), ["docs/a.md", "docs/sub/c.md"]);
-        assert_eq!(paths_for("docs/sub/"), ["docs/sub/c.md"]);
-        assert_eq!(paths_for("").len(), 5);
+        assert_eq!(
+            paths_for("kumquat", "docs/"),
+            ["docs/a.md", "docs/sub/c.md"]
+        );
+        assert_eq!(paths_for("kumquat", "docs/sub/"), ["docs/sub/c.md"]);
+        assert_eq!(paths_for("kumquat", "").len(), 5);
+        // A term-less query still stays under the prefix.
+        assert_eq!(paths_for("*", "docs/"), ["docs/a.md", "docs/sub/c.md"]);
+        assert_eq!(paths_for("*", "").len(), 5);
     }
 }

@@ -34,9 +34,9 @@ pub struct IndexUnit {
 /// Splits `source` (the contents of `relative_path`) into index units.
 ///
 /// Sections contribute their heading text, blocks their visible text, and the
-/// root — only when it has a frontmatter mapping or a preamble — the scalar
-/// values of its frontmatter. List items are not separate units because their
-/// text is already part of the list block.
+/// root — only when it has a frontmatter mapping — the scalar values of that
+/// frontmatter. List items are not separate units because their text is
+/// already part of the list block.
 ///
 /// # Errors
 ///
@@ -110,14 +110,14 @@ fn byte_length(range: TextRange) -> u64 {
 }
 
 /// Body text and raw slice of the root unit, or `None` when the root has
-/// nothing of its own to index.
+/// nothing of its own to index — preamble blocks are units in their own
+/// right, so only a frontmatter mapping gives the root one.
 fn root_unit(source: &str, document: &Document) -> Option<(String, String)> {
     match &document.frontmatter {
         DocumentFrontmatter::Mapping { location, .. } => Some((
             frontmatter_scalars(&document.frontmatter),
             slice(source, location.range).to_owned(),
         )),
-        _ if !document.preamble.is_empty() => Some((String::new(), String::new())),
         _ => None,
     }
 }
@@ -272,10 +272,14 @@ mod tests {
     }
 
     #[test]
-    fn plain_document_without_frontmatter_or_preamble_has_no_root_unit() {
+    fn plain_document_without_frontmatter_has_no_root_unit() {
         let units = index_units("a.md", "# Only\n").expect("parses");
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].mdpath, "$.only");
         assert_eq!(units[0].context, "a");
+        // A preamble is indexed as its blocks, not as an empty root unit.
+        let units = index_units("a.md", "Preamble only.\n").expect("parses");
+        let mdpaths: Vec<&str> = units.iter().map(|unit| unit.mdpath.as_str()).collect();
+        assert_eq!(mdpaths, ["$/p[0]"]);
     }
 }

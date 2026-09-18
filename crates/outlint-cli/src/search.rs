@@ -40,9 +40,9 @@ fn search(options: &SearchOptions) -> Result<String, String> {
     };
     let scope = Scope::locate(&search_root)?;
     let store = Store::open(&scope)?;
-    let (files, notes) = walk_markdown(&scope);
-    write_notes(&notes);
-    write_notes(&store.refresh(&files)?);
+    let walk = walk_markdown(&scope);
+    write_notes(&walk.notes);
+    write_notes(&store.refresh(&walk)?);
     let hits = store.search(&options.words)?;
     Ok(render_hits(&hits))
 }
