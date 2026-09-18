@@ -6,8 +6,7 @@ use std::path::Path;
 
 use outlint_core::{
     document_paths, parse_markdown, Block, Document, DocumentNode, DocumentPath, DocumentPathError,
-    DocumentPathSyntaxError, HeadingSlug, ListItem, MarkdownOptions, Section, SectionStep,
-    TextRange,
+    DocumentPathSyntaxError, ListItem, MarkdownOptions, Section, SectionStep, TextRange,
 };
 
 use crate::{args::ReadOptions, schema_loading::read_utf8_file, write_stderr, write_stdout};
@@ -94,7 +93,10 @@ pub(crate) fn parse_path(argument: &str) -> Result<DocumentPath, ReadError> {
 }
 
 /// The verbatim source of the addressed node, limited to `depth` levels of
-/// descendant sections when given, ending in exactly one newline.
+/// descendant sections when given. Own extents that `depth` cuts apart are
+/// joined by one blank line in the source's line ending, and the output is
+/// guaranteed to end with a newline: a line ending of the source's kind is
+/// appended when the addressed source lacks one.
 pub(crate) fn render_content(
     source: &str,
     document: &Document,
@@ -120,7 +122,7 @@ pub(crate) fn render_content(
         }
         _ => slices.push(extent_slice(source, node)),
     }
-    Ok(join_slices(&slices))
+    Ok(join_slices(&slices, line_ending(source)))
 }
 
 /// Appends the section at `depth`: its full extent when the subtree fits,
@@ -161,23 +163,48 @@ fn forest_height(sections: &[Section]) -> usize {
         .unwrap_or(0)
 }
 
-/// Joins non-empty slices with a single blank line; the last slice stays
-/// verbatim apart from a newline appended when it lacks one.
-fn join_slices(slices: &[&str]) -> String {
+/// Joins non-empty slices with a single blank line spelled in `ending`; the
+/// last slice stays verbatim apart from `ending` appended when it lacks a
+/// newline. The output is the verbatim source except that it is guaranteed to
+/// end with a newline.
+fn join_slices(slices: &[&str], ending: &str) -> String {
     let mut output = String::new();
     let mut slices = slices.iter().filter(|slice| !slice.is_empty()).peekable();
     while let Some(slice) = slices.next() {
         if slices.peek().is_some() {
-            output.push_str(slice.trim_end_matches('\n'));
-            output.push_str("\n\n");
+            output.push_str(trim_line_endings(slice));
+            output.push_str(ending);
+            output.push_str(ending);
         } else {
             output.push_str(slice);
         }
     }
     if !output.is_empty() && !output.ends_with('\n') {
-        output.push('\n');
+        output.push_str(ending);
     }
     output
+}
+
+/// The line ending `source` uses: `\r\n` when its first `\n` is preceded by
+/// `\r`, else `\n` (also for a source without any newline).
+fn line_ending(source: &str) -> &'static str {
+    match source.find('\n') {
+        Some(index) if source.get(..index).is_some_and(|head| head.ends_with('\r')) => "\r\n",
+        _ => "\n",
+    }
+}
+
+/// Strips every complete trailing line ending, of either kind, from `text`.
+fn trim_line_endings(mut text: &str) -> &str {
+    loop {
+        match text
+            .strip_suffix("\r\n")
+            .or_else(|| text.strip_suffix('\n'))
+        {
+            Some(rest) => text = rest,
+            None => return text,
+        }
+    }
 }
 
 /// One line per node under the addressed one, in document order:
@@ -196,10 +223,7 @@ pub(crate) fn render_tree(
     let entries = document_paths(document);
     // The argument may spell the node non-canonically (`$.[0]`, `setup[0]`);
     // the listing is keyed on the canonical path of the resolved node.
-    let base = entries
-        .iter()
-        .find(|(_, node)| same_node(*node, target))
-        .map_or_else(|| path.clone(), |(canonical, _)| canonical.clone());
+    let base = canonical_path(&entries, target).map_or_else(|| path.clone(), Clone::clone);
     let rows: Vec<(String, String, String)> = entries
         .iter()
         .filter(|(candidate, _)| listed(&base, candidate, depth, blocks))
@@ -252,6 +276,36 @@ fn listed(
         return false;
     }
     blocks || candidate.blocks().is_empty()
+}
+
+/// The canonical spelling of `target` among `entries` (from
+/// [`document_paths`]); `None` for a node the enumeration does not list.
+fn canonical_path<'e>(
+    entries: &'e [(DocumentPath, DocumentNode<'_>)],
+    target: DocumentNode<'_>,
+) -> Option<&'e DocumentPath> {
+    entries
+        .iter()
+        .find(|(_, node)| same_node(*node, target))
+        .map(|(canonical, _)| canonical)
+}
+
+/// The canonical spelling of the node the first `steps` steps of `path`
+/// resolve to. The user's spelling may name it non-canonically (`setup[0]`
+/// for a unique `setup`), and every message names the node as the listing
+/// does. Falls back to the truncated spelling when it does not resolve.
+fn canonical_prefix(
+    entries: &[(DocumentPath, DocumentNode<'_>)],
+    document: &Document,
+    path: &DocumentPath,
+    steps: usize,
+) -> DocumentPath {
+    let prefix = truncate(path, steps);
+    prefix
+        .resolve(document)
+        .ok()
+        .and_then(|target| canonical_path(entries, target))
+        .map_or(prefix, Clone::clone)
 }
 
 fn same_node(left: DocumentNode<'_>, right: DocumentNode<'_>) -> bool {
@@ -409,7 +463,8 @@ pub(crate) fn render_error(
             path,
             resolved_steps,
         } => {
-            let deepest = truncate(path, *resolved_steps);
+            let entries = document_paths(document);
+            let deepest = canonical_prefix(&entries, document, path, *resolved_steps);
             let (step, block_step) = step_text(path, *resolved_steps);
             let listing = render_tree(file, source, document, &deepest, Some(1), block_step)
                 .unwrap_or_default();
@@ -420,19 +475,25 @@ pub(crate) fn render_error(
             resolved_steps,
             candidates,
         } => {
-            let deepest = truncate(path, *resolved_steps);
+            let entries = document_paths(document);
+            let deepest = canonical_prefix(&entries, document, path, *resolved_steps);
             let (slug, _) = step_text(path, *resolved_steps);
             let mut output = format!(
                 "outlint: ambiguous document path {path} in {file}: {candidates} sections match '{slug}'\n"
             );
-            let steps = HeadingSlug::parse(&slug).into_iter().flat_map(|slug| {
-                (0..*candidates).map(move |index| SectionStep::Named {
-                    slug: slug.clone(),
-                    index: Some(index),
-                })
-            });
-            for step in steps {
-                if let Some(candidate) = deepest.clone().with_section(step) {
+            // The candidates are the enumerated children of the resolved
+            // prefix whose section step carries the failing slug, so they are
+            // spelled canonically (`question[0]`, never `question[0][0]`).
+            for (candidate, _) in &entries {
+                let Some((SectionStep::Named { slug: last, .. }, parent)) =
+                    candidate.sections().split_last()
+                else {
+                    continue;
+                };
+                if candidate.blocks().is_empty()
+                    && parent == deepest.sections()
+                    && last.as_str() == slug
+                {
                     output.push_str(&format!("{candidate}\n"));
                 }
             }
@@ -589,6 +650,44 @@ mod tests {
             "outlint: ambiguous document path $.guide.faq.question in guide.md: 2 sections match 'question'\n\
              $.guide.faq.question[0]\n\
              $.guide.faq.question[1]\n"
+        );
+    }
+
+    #[test]
+    fn crlf_source_joins_cut_extents_with_its_own_line_ending() {
+        const CRLF: &str =
+            "# Guide\r\n\r\nIntro.\r\n\r\n## Setup\r\n\r\nBody.\r\n\r\n### Deep\r\n\r\nDeep body.";
+        let document = parse_markdown(CRLF, MarkdownOptions::default()).expect("fixture parses");
+        assert_eq!(
+            render_content(CRLF, &document, &path("$.guide"), Some(1)).as_deref(),
+            Ok("# Guide\r\n\r\nIntro.\r\n\r\n## Setup\r\n\r\nBody.\r\n")
+        );
+        assert_eq!(
+            render_content(CRLF, &document, &path("$.guide.setup.deep"), None).as_deref(),
+            Ok("### Deep\r\n\r\nDeep body.\r\n")
+        );
+    }
+
+    #[test]
+    fn error_paths_are_spelled_canonically() {
+        const DUPLICATES: &str = "# Setup\n\n## Question\n\nWhy?\n\n## Question\n\nHow?\n";
+        let document =
+            parse_markdown(DUPLICATES, MarkdownOptions::default()).expect("fixture parses");
+        let ambiguous = render_content(DUPLICATES, &document, &path("$.setup[0].question"), None)
+            .expect_err("is ambiguous");
+        assert_eq!(
+            render_error(&ambiguous, "setup.md", DUPLICATES, &document),
+            "outlint: ambiguous document path $.setup[0].question in setup.md: 2 sections match 'question'\n\
+             $.setup.question[0]\n\
+             $.setup.question[1]\n"
+        );
+        let unresolved = render_content(DUPLICATES, &document, &path("$.setup[0].missing"), None)
+            .expect_err("does not resolve");
+        assert!(
+            render_error(&unresolved, "setup.md", DUPLICATES, &document).starts_with(
+                "outlint: cannot resolve $.setup[0].missing in setup.md: missing not found under $.setup\n\
+                 $.setup  "
+            )
         );
     }
 
