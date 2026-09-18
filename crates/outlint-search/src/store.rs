@@ -486,20 +486,29 @@ fn snippet_of(generator: &SnippetGenerator, document: &TantivyDocument, text: &s
     excerpt
 }
 
-/// `range` extended at both ends over the characters that are neither
-/// whitespace nor alphanumeric, so a fragment cut at token bounds keeps the
-/// quote before its first word and the period after its last.
+/// How many characters [`widen`] may add at each end of a fragment: enough
+/// for a closing quote and a period, and a bound that keeps a long run of
+/// symbols (which the tokenizer skips, so they never end a fragment) from
+/// stretching the excerpt past [`SNIPPET_CHARS`].
+const WIDEN_CHARS: usize = 3;
+
+/// `range` extended at both ends over up to [`WIDEN_CHARS`] characters that
+/// are neither whitespace nor alphanumeric, so a fragment cut at token bounds
+/// keeps the quote before its first word and the period after its last. Both
+/// ends stay on character boundaries.
 fn widen(text: &str, range: Range<usize>) -> Range<usize> {
     let sticks = |character: &char| !character.is_whitespace() && !character.is_alphanumeric();
     let before: usize = text[..range.start]
         .chars()
         .rev()
         .take_while(sticks)
+        .take(WIDEN_CHARS)
         .map(char::len_utf8)
         .sum();
     let after: usize = text[range.end..]
         .chars()
         .take_while(sticks)
+        .take(WIDEN_CHARS)
         .map(char::len_utf8)
         .sum();
     range.start - before..range.end + after
@@ -667,6 +676,18 @@ mod tests {
             2..5,
             "widening stops at whitespace"
         );
+    }
+
+    #[test]
+    fn snippet_widening_is_bounded() {
+        let text = format!("needle{}", "\u{1F600}".repeat(10_000));
+        let bounded = excerpt(&text, "needle");
+        assert!(bounded.starts_with("needle"), "{bounded}");
+        assert!(bounded.ends_with('…'), "{bounded}");
+        assert!(bounded.chars().count() <= SNIPPET_CHARS + 1, "{bounded}");
+        assert_eq!(excerpt("Tag the release.", "release"), "Tag the release.");
+        assert_eq!(widen("x!!!", 0..1), 0..4, "three characters fit the cap");
+        assert_eq!(widen("!!!!x!!!!", 4..5), 1..8, "widening stops at the cap");
     }
 
     #[test]
