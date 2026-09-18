@@ -7,6 +7,8 @@ use std::{
 mod app;
 mod args;
 mod diagnostics;
+#[cfg(feature = "read")]
+mod read;
 mod render;
 mod schema_loading;
 #[cfg(feature = "search")]

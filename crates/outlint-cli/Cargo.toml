@@ -25,3 +25,5 @@ outlint-search = { path = "../outlint-search", version = "0.1.0", optional = tru
 
 [features]
 search = ["dep:outlint-search"]
+read = []
+full = ["search", "read"]

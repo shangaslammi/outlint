@@ -47,6 +47,12 @@ pub(crate) fn run(args: &[String]) -> u8 {
             Ok(ParseOutcome::Run(options)) => crate::search::execute_search(&options),
             Err(message) => usage_error(&message, "outlint search --help"),
         },
+        #[cfg(feature = "read")]
+        [command, rest @ ..] if command == "read" => match crate::args::parse_read_args(rest) {
+            Ok(ParseOutcome::Help) => write_help(crate::args::READ_HELP),
+            Ok(ParseOutcome::Run(options)) => crate::read::execute_read(&options),
+            Err(message) => usage_error(&message, "outlint read --help"),
+        },
         _ => usage_error("invalid or missing command", "outlint --help"),
     }
 }

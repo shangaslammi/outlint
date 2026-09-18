@@ -1,6 +1,6 @@
 //! Help text and hand-written command-line argument parsing.
 
-#[cfg(not(feature = "search"))]
+#[cfg(not(any(feature = "search", feature = "read")))]
 pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
 \n\
 Commands:\n\
@@ -11,13 +11,38 @@ Options:\n\
   -h, --help     Show help\n\
   -V, --version  Show version\n";
 
-#[cfg(feature = "search")]
+#[cfg(all(feature = "search", not(feature = "read")))]
 pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
 \n\
 Commands:\n\
   check          Validate Markdown documents\n\
   schema check   Validate Outlint schema files\n\
   search         Search Markdown blocks by keyword\n\
+\n\
+Options:\n\
+  -h, --help     Show help\n\
+  -V, --version  Show version\n";
+
+#[cfg(all(feature = "read", not(feature = "search")))]
+pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
+\n\
+Commands:\n\
+  check          Validate Markdown documents\n\
+  schema check   Validate Outlint schema files\n\
+  read           Print a Markdown node by document path\n\
+\n\
+Options:\n\
+  -h, --help     Show help\n\
+  -V, --version  Show version\n";
+
+#[cfg(all(feature = "search", feature = "read"))]
+pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
+\n\
+Commands:\n\
+  check          Validate Markdown documents\n\
+  schema check   Validate Outlint schema files\n\
+  search         Search Markdown blocks by keyword\n\
+  read           Print a Markdown node by document path\n\
 \n\
 Options:\n\
   -h, --help     Show help\n\
@@ -66,6 +91,22 @@ Options:\n\
 \n\
 Exit codes: 0 hits printed, 1 no hits, 2 usage or operational error.\n";
 
+#[cfg(feature = "read")]
+pub(crate) const READ_HELP: &str = "Usage: outlint read [options] <FILE> [MDPATH]\n\
+\n\
+Print the node of a Markdown file addressed by a document path (default: $,\n\
+the whole file), or list the structure under it. A path not starting with $\n\
+gets one prepended, so .a.b and /p[0] work unquoted.\n\
+\n\
+Options:\n\
+      --tree                  List the paths under the node instead\n\
+      --blocks                With --tree, also list blocks and list items\n\
+      --depth <N>             Include N levels of subsections (default: all)\n\
+  -h, --help                  Show help\n\
+\n\
+Exit codes: 0 printed, 1 path syntax or resolution error, 2 usage or\n\
+operational error.\n";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
     Human,
@@ -101,6 +142,21 @@ pub(crate) struct SearchOptions {
     pub(crate) root: Option<String>,
     /// The search words joined by single spaces; never blank.
     pub(crate) words: String,
+}
+
+#[cfg(feature = "read")]
+#[derive(Debug)]
+pub(crate) struct ReadOptions {
+    /// The Markdown file as given.
+    pub(crate) file: String,
+    /// The document path argument as given; `$` when omitted.
+    pub(crate) path: Option<String>,
+    /// List the structure under the node instead of printing its content.
+    pub(crate) tree: bool,
+    /// In tree mode, also list blocks and list items.
+    pub(crate) blocks: bool,
+    /// Levels of descendant sections to include; unlimited when `None`.
+    pub(crate) depth: Option<usize>,
 }
 
 pub(crate) enum ParseOutcome<T> {
@@ -224,6 +280,62 @@ pub(crate) fn parse_search_args(args: &[String]) -> Result<ParseOutcome<SearchOp
     Ok(ParseOutcome::Run(SearchOptions { root, words }))
 }
 
+#[cfg(feature = "read")]
+pub(crate) fn parse_read_args(args: &[String]) -> Result<ParseOutcome<ReadOptions>, String> {
+    let mut positionals = Vec::new();
+    let mut tree = false;
+    let mut blocks = false;
+    let mut depth = None;
+    let mut positional_only = false;
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        if positional_only {
+            positionals.push(argument.clone());
+        } else {
+            match argument.as_str() {
+                "--" => positional_only = true,
+                "--help" | "-h" => return Ok(ParseOutcome::Help),
+                "--tree" => tree = true,
+                "--blocks" => blocks = true,
+                "--depth" => {
+                    let value = option_value(args, &mut index, argument)?;
+                    set_once(&mut depth, value, "--depth")?;
+                }
+                value if value.starts_with('-') => {
+                    return Err(format!("unknown option '{value}'"));
+                }
+                _ => positionals.push(argument.clone()),
+            }
+        }
+        index += 1;
+    }
+    let depth = depth
+        .map(|value| {
+            value.parse::<usize>().map_err(|_| {
+                format!("invalid --depth value '{value}' (expected a non-negative integer)")
+            })
+        })
+        .transpose()?;
+    if blocks && !tree {
+        return Err("--blocks requires --tree".to_owned());
+    }
+    let mut positionals = positionals.into_iter();
+    let Some(file) = positionals.next() else {
+        return Err("a Markdown input is required".to_owned());
+    };
+    let path = positionals.next();
+    if let Some(extra) = positionals.next() {
+        return Err(format!("unexpected argument '{extra}'"));
+    }
+    Ok(ParseOutcome::Run(ReadOptions {
+        file,
+        path,
+        tree,
+        blocks,
+        depth,
+    }))
+}
+
 fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<String, String> {
     *index += 1;
     args.get(*index)
@@ -300,5 +412,42 @@ mod tests {
         assert!(parse(&["--root", "docs"]).is_err());
         assert!(parse(&["--root"]).is_err());
         assert!(parse(&["-x", "word"]).is_err());
+    }
+    #[cfg(feature = "read")]
+    #[test]
+    fn read_takes_a_file_an_optional_path_and_tree_options() {
+        use super::parse_read_args;
+        let parse = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            match parse_read_args(&args) {
+                Ok(ParseOutcome::Run(options)) => Ok((
+                    options.file,
+                    options.path,
+                    options.tree,
+                    options.blocks,
+                    options.depth,
+                )),
+                Ok(ParseOutcome::Help) => Ok((String::new(), None, false, false, None)),
+                Err(message) => Err(message),
+            }
+        };
+        assert_eq!(
+            parse(&["--tree", "--depth", "2", "--blocks", "a.md", ".x"]),
+            Ok((
+                "a.md".to_owned(),
+                Some(".x".to_owned()),
+                true,
+                true,
+                Some(2)
+            ))
+        );
+        assert_eq!(
+            parse(&["a.md"]),
+            Ok(("a.md".to_owned(), None, false, false, None))
+        );
+        assert!(parse(&["--blocks", "a.md"]).is_err());
+        assert!(parse(&["--depth", "-1", "a.md"]).is_err());
+        assert!(parse(&["a.md", "$", "extra"]).is_err());
+        assert!(parse(&[]).is_err());
     }
 }
