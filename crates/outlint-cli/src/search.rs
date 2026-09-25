@@ -149,10 +149,10 @@ mod tests {
         assert_eq!(
             output_path(
                 Path::new("/repo"),
-                Path::new("/repo/design-docs/search"),
-                "read-spec.md"
+                Path::new("/repo/docs/guides"),
+                "setup.md"
             ),
-            Some("design-docs/search/read-spec.md".into())
+            Some("docs/guides/setup.md".into())
         );
         assert_eq!(
             output_path(Path::new("/repo"), Path::new("/repo"), "spec/a.md"),

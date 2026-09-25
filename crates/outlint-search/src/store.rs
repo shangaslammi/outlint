@@ -429,8 +429,11 @@ impl Store {
             let Some(hit) = hit_from_document(&self.fields, &generator, &document, score) else {
                 continue;
             };
-            let narrower =
-                self.best_matching_item(&searcher, &generator, words, &hit.path, &hit.mdpath)?;
+            let narrower = if is_list_path(&hit.mdpath) {
+                self.best_matching_item(&searcher, &generator, words, &hit.path, &hit.mdpath)?
+            } else {
+                None
+            };
             candidates.push(CandidateHit { hit, narrower });
         }
         let mut hits = select_smallest_hits(candidates, HIT_LIMIT);
@@ -442,9 +445,9 @@ impl Store {
         Ok(hits)
     }
 
-    /// Finds the best item under `mdpath` in `path` that satisfies the whole
-    /// query. For non-list candidates the exact parent restriction simply
-    /// matches nothing, avoiding a separate stored node-kind field.
+    /// Finds the best item of the list at `mdpath` in `path` that satisfies
+    /// the whole query. Only called for list candidates: for any other node
+    /// the parent restriction would match nothing, at the cost of a query.
     fn best_matching_item(
         &self,
         searcher: &Searcher,
@@ -557,6 +560,15 @@ fn hit_from_document(
     })
 }
 
+/// Whether a rendered document path addresses a list block. Section slugs
+/// never contain `/`, so the last `/` step of a canonical path is its block
+/// or item step, and only a list's is spelled `list[i]`.
+fn is_list_path(mdpath: &str) -> bool {
+    mdpath
+        .rsplit_once('/')
+        .is_some_and(|(_, step)| step.starts_with("list["))
+}
+
 /// User-spelled terms of a plain keyword query. Being conservative is
 /// intentional: a generic no-hits note is more useful than incorrect counts
 /// when tantivy could interpret punctuation or an uppercase operator as
@@ -640,6 +652,11 @@ fn leading_fragment(text: &str, max_chars: usize) -> &str {
     }
 }
 
+/// Records the signature of every file with a live document in `segment`.
+/// All documents of one file in a segment were written together and share
+/// its signature, so only the first document per path ordinal is decoded:
+/// a file contributes dozens of units, and decoding the path of each one
+/// dominated a refresh that found nothing to do.
 fn collect_segment_files(
     segment: &SegmentReader,
     known: &mut HashMap<String, (u64, u64)>,
@@ -650,12 +667,21 @@ fn collect_segment_files(
     };
     let mtimes = fast_fields.u64(MTIME)?;
     let sizes = fast_fields.u64(SIZE)?;
+    let mut seen = vec![false; paths.num_terms()];
     let mut path = String::new();
     for doc in segment.doc_ids_alive() {
         let doc: DocId = doc;
         let Some(ord) = paths.term_ords(doc).next() else {
             continue;
         };
+        match usize::try_from(ord)
+            .ok()
+            .and_then(|index| seen.get_mut(index))
+        {
+            Some(true) => continue,
+            Some(slot) => *slot = true,
+            None => {}
+        }
         path.clear();
         if !paths.ord_to_str(ord, &mut path)? {
             continue;
@@ -727,6 +753,58 @@ mod tests {
     use tantivy::{collector::TopDocs, doc, Index};
 
     use super::*;
+
+    #[test]
+    fn is_list_path_matches_only_a_final_list_step() {
+        assert!(is_list_path("$/list[0]"));
+        assert!(is_list_path("$.a.b/list[3]"));
+        assert!(!is_list_path("$.a/list[0]/item[1]"));
+        assert!(!is_list_path("$.list[0]"));
+        assert!(!is_list_path("$.list"));
+        assert!(!is_list_path("$.a/p[0]"));
+    }
+
+    #[test]
+    fn collect_segment_files_reports_each_file_once_with_its_signature() {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("writer");
+        for (path, mtime, size, units) in [("a.md", 10_u64, 100_u64, 3), ("b.md", 20, 200, 2)] {
+            for unit in 0..units {
+                writer
+                    .add_document(doc!(
+                        fields.path => path,
+                        fields.mdpath => format!("$/p[{unit}]"),
+                        fields.mtime => mtime,
+                        fields.size => size,
+                        fields.kind => KIND_UNIT,
+                    ))
+                    .expect("add");
+            }
+        }
+        writer
+            .add_document(doc!(
+                fields.path => "c.md",
+                fields.mtime => 30_u64,
+                fields.size => 0_u64,
+                fields.kind => KIND_TOMBSTONE,
+            ))
+            .expect("add");
+        writer.commit().expect("commit");
+        let searcher = index.reader().expect("reader").searcher();
+        let mut known = HashMap::new();
+        for segment in searcher.segment_readers() {
+            collect_segment_files(segment, &mut known).expect("collect");
+        }
+        assert_eq!(
+            known,
+            HashMap::from([
+                ("a.md".to_owned(), (10, 100)),
+                ("b.md".to_owned(), (20, 200)),
+                ("c.md".to_owned(), (30, 0)),
+            ])
+        );
+    }
 
     /// Indexes one unit whose snippet text is `text` and excerpts it for
     /// `words`, the way [`Store::search`] does.
