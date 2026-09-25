@@ -115,7 +115,14 @@ Exit codes: 0 printed, 1 path syntax or resolution error, 2 usage or\n\
 operational error.\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutputFormat {
+pub(crate) enum ValidationFormat {
+    Human,
+    Json,
+}
+
+#[cfg(any(feature = "search", feature = "read"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentFormat {
     Human,
     Json,
     Compact,
@@ -143,14 +150,14 @@ pub(crate) enum ColorChoice {
 pub(crate) struct CheckOptions {
     pub(crate) files: Vec<String>,
     pub(crate) schema: Option<String>,
-    pub(crate) format: OutputFormat,
+    pub(crate) format: ValidationFormat,
     pub(crate) color: ColorChoice,
 }
 
 #[derive(Debug)]
 pub(crate) struct SchemaOptions {
     pub(crate) schemas: Vec<String>,
-    pub(crate) format: OutputFormat,
+    pub(crate) format: ValidationFormat,
     pub(crate) color: ColorChoice,
 }
 
@@ -162,7 +169,7 @@ pub(crate) struct SearchOptions {
     /// The search words joined by single spaces; never blank.
     pub(crate) words: String,
     /// Presentation selected explicitly or by `OUTLINT_FORMAT`.
-    pub(crate) format: OutputFormat,
+    pub(crate) format: AgentFormat,
 }
 
 #[cfg(feature = "read")]
@@ -179,7 +186,7 @@ pub(crate) struct ReadOptions {
     /// Levels of descendant sections to include; unlimited when `None`.
     pub(crate) depth: Option<usize>,
     /// Presentation selected explicitly or by `OUTLINT_FORMAT`.
-    pub(crate) format: OutputFormat,
+    pub(crate) format: AgentFormat,
 }
 
 pub(crate) enum ParseOutcome<T> {
@@ -190,7 +197,7 @@ pub(crate) enum ParseOutcome<T> {
 pub(crate) fn parse_check_args(args: &[String]) -> Result<ParseOutcome<CheckOptions>, String> {
     let mut files = Vec::new();
     let mut schema = None;
-    let mut format = OutputFormat::Human;
+    let mut format = ValidationFormat::Human;
     let mut color = ColorChoice::Auto;
     let mut positional_only = false;
     let mut index = 0;
@@ -206,11 +213,7 @@ pub(crate) fn parse_check_args(args: &[String]) -> Result<ParseOutcome<CheckOpti
                     set_once(&mut schema, value, "--schema")?;
                 }
                 "--format" => {
-                    format = parse_format(
-                        option_value(args, &mut index, argument)?,
-                        AcceptedFormats::Validation,
-                        "--format",
-                    )?;
+                    format = parse_validation_format(option_value(args, &mut index, argument)?)?;
                 }
                 "--color" => {
                     color = parse_color(option_value(args, &mut index, argument)?)?;
@@ -240,7 +243,7 @@ pub(crate) fn parse_check_args(args: &[String]) -> Result<ParseOutcome<CheckOpti
 
 pub(crate) fn parse_schema_args(args: &[String]) -> Result<ParseOutcome<SchemaOptions>, String> {
     let mut schemas = Vec::new();
-    let mut format = OutputFormat::Human;
+    let mut format = ValidationFormat::Human;
     let mut color = ColorChoice::Auto;
     let mut positional_only = false;
     let mut index = 0;
@@ -252,11 +255,7 @@ pub(crate) fn parse_schema_args(args: &[String]) -> Result<ParseOutcome<SchemaOp
                 "--" => positional_only = true,
                 "--help" | "-h" => return Ok(ParseOutcome::Help),
                 "--format" => {
-                    format = parse_format(
-                        option_value(args, &mut index, argument)?,
-                        AcceptedFormats::Validation,
-                        "--format",
-                    )?;
+                    format = parse_validation_format(option_value(args, &mut index, argument)?)?;
                 }
                 "--color" => {
                     color = parse_color(option_value(args, &mut index, argument)?)?;
@@ -301,9 +300,8 @@ pub(crate) fn parse_search_args(
                     set_once(&mut root, value, "--root")?;
                 }
                 "--format" => {
-                    format = Some(parse_format(
+                    format = Some(parse_agent_format(
                         option_value(args, &mut index, argument)?,
-                        AcceptedFormats::Agent,
                         "--format",
                     )?);
                 }
@@ -356,9 +354,8 @@ pub(crate) fn parse_read_args(
                     set_once(&mut depth, value, "--depth")?;
                 }
                 "--format" => {
-                    format = Some(parse_format(
+                    format = Some(parse_agent_format(
                         option_value(args, &mut index, argument)?,
-                        AcceptedFormats::Agent,
                         "--format",
                     )?);
                 }
@@ -418,48 +415,34 @@ fn set_once(slot: &mut Option<String>, value: String, option: &str) -> Result<()
     }
 }
 
-#[derive(Clone, Copy)]
-enum AcceptedFormats {
-    Validation,
-    #[cfg(any(feature = "search", feature = "read"))]
-    Agent,
-}
-
-fn parse_format(
-    value: String,
-    accepted: AcceptedFormats,
-    source: &str,
-) -> Result<OutputFormat, String> {
+fn parse_validation_format(value: String) -> Result<ValidationFormat, String> {
     match value.as_str() {
-        "human" => Ok(OutputFormat::Human),
-        "json" => Ok(OutputFormat::Json),
-        "compact"
-            if cfg!(any(feature = "search", feature = "read"))
-                && !matches!(accepted, AcceptedFormats::Validation) =>
-        {
-            Ok(OutputFormat::Compact)
-        }
-        _ => {
-            let expected = match accepted {
-                AcceptedFormats::Validation => "human or json",
-                #[cfg(any(feature = "search", feature = "read"))]
-                AcceptedFormats::Agent => "human, json, or compact",
-            };
-            Err(format!(
-                "invalid {source} value '{value}' (expected {expected})"
-            ))
-        }
+        "human" => Ok(ValidationFormat::Human),
+        "json" => Ok(ValidationFormat::Json),
+        _ => Err(format!(
+            "invalid --format value '{value}' (expected human or json)"
+        )),
     }
 }
 
 #[cfg(any(feature = "search", feature = "read"))]
-fn parse_environment_format(environment: &EnvironmentFormat) -> Result<OutputFormat, String> {
+fn parse_agent_format(value: String, source: &str) -> Result<AgentFormat, String> {
+    match value.as_str() {
+        "human" => Ok(AgentFormat::Human),
+        "json" => Ok(AgentFormat::Json),
+        "compact" => Ok(AgentFormat::Compact),
+        _ => Err(format!(
+            "invalid {source} value '{value}' (expected human, json, or compact)"
+        )),
+    }
+}
+
+#[cfg(any(feature = "search", feature = "read"))]
+fn parse_environment_format(environment: &EnvironmentFormat) -> Result<AgentFormat, String> {
     match environment {
-        EnvironmentFormat::Unset => Ok(OutputFormat::Human),
-        EnvironmentFormat::Value(value) if value.is_empty() => Ok(OutputFormat::Human),
-        EnvironmentFormat::Value(value) => {
-            parse_format(value.clone(), AcceptedFormats::Agent, "OUTLINT_FORMAT")
-        }
+        EnvironmentFormat::Unset => Ok(AgentFormat::Human),
+        EnvironmentFormat::Value(value) if value.is_empty() => Ok(AgentFormat::Human),
+        EnvironmentFormat::Value(value) => parse_agent_format(value.clone(), "OUTLINT_FORMAT"),
         EnvironmentFormat::NonUnicode => {
             Err("invalid OUTLINT_FORMAT value (expected human, json, or compact)".to_owned())
         }
@@ -532,28 +515,28 @@ mod tests {
     #[cfg(feature = "search")]
     #[test]
     fn agent_formats_use_the_environment_only_as_a_default() {
-        use super::{parse_search_args, OutputFormat};
+        use super::{parse_search_args, AgentFormat};
 
         let args = vec!["word".to_owned()];
         let environment = EnvironmentFormat::Value("compact".to_owned());
         let Ok(ParseOutcome::Run(options)) = parse_search_args(&args, &environment) else {
             panic!("environment format should parse");
         };
-        assert_eq!(options.format, OutputFormat::Compact);
+        assert_eq!(options.format, AgentFormat::Compact);
 
         let args = vec!["--format".to_owned(), "human".to_owned(), "word".to_owned()];
         let environment = EnvironmentFormat::Value("bogus".to_owned());
         let Ok(ParseOutcome::Run(options)) = parse_search_args(&args, &environment) else {
             panic!("explicit format should override the environment");
         };
-        assert_eq!(options.format, OutputFormat::Human);
+        assert_eq!(options.format, AgentFormat::Human);
 
         let environment = EnvironmentFormat::Value(String::new());
         let Ok(ParseOutcome::Run(options)) = parse_search_args(&["word".to_owned()], &environment)
         else {
             panic!("empty environment value should be unset");
         };
-        assert_eq!(options.format, OutputFormat::Human);
+        assert_eq!(options.format, AgentFormat::Human);
 
         let environment = EnvironmentFormat::Value("bogus".to_owned());
         match parse_search_args(&["word".to_owned()], &environment) {

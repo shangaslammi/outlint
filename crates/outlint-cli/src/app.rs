@@ -9,8 +9,8 @@ use outlint_core::{
 
 use crate::{
     args::{
-        parse_check_args, parse_schema_args, CheckOptions, ColorChoice, OutputFormat, ParseOutcome,
-        SchemaOptions, CHECK_HELP, SCHEMA_HELP, TOP_HELP,
+        parse_check_args, parse_schema_args, CheckOptions, ColorChoice, ParseOutcome,
+        SchemaOptions, ValidationFormat, CHECK_HELP, SCHEMA_HELP, TOP_HELP,
     },
     diagnostics::{
         render_document_diagnostic, render_schema_errors, sort_diagnostics, InvocationOutput,
@@ -297,7 +297,7 @@ fn prepare_validator(loaded: &LoadedSchema, display: &str) -> Result<PreparedVal
         .map_err(|error| format!("cannot prepare schema '{}': {}", display, error.message))
 }
 
-fn finish_invocation(output: InvocationOutput, format: OutputFormat, color: ColorChoice) -> u8 {
+fn finish_invocation(output: InvocationOutput, format: ValidationFormat, color: ColorChoice) -> u8 {
     for error in &output.operational_errors {
         write_stderr(&format!("outlint: {error}\n"));
     }

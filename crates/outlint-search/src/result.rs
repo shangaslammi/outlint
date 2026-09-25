@@ -2,6 +2,26 @@
 
 use std::cmp::Ordering;
 
+/// A relevance score known not to be NaN or infinite.
+///
+/// Search results use this wrapper so every score can be ordered and emitted
+/// as a JSON number without a renderer-side fallback.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub struct FiniteScore(f32);
+
+impl FiniteScore {
+    /// Accepts only finite engine scores.
+    pub fn new(value: f32) -> Option<Self> {
+        value.is_finite().then_some(Self(value))
+    }
+
+    /// Returns the finite floating-point value.
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
 /// One matching index unit, as loaded back from the index.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
@@ -14,7 +34,7 @@ pub struct Hit {
     /// Extent length of the enclosing section, for a block or item unit.
     pub section_bytes: Option<u64>,
     /// The engine's relevance score; higher is better.
-    pub score: f32,
+    pub score: FiniteScore,
     /// An excerpt of the unit's text, at most a few lines' worth, chosen
     /// around the query words when they occur in it and otherwise taken
     /// from its start, with `…` marking a cut; empty when the unit has no
@@ -45,7 +65,8 @@ pub(crate) fn sort_hits(hits: &mut [Hit]) {
     hits.sort_by(|left, right| {
         right
             .score
-            .partial_cmp(&left.score)
+            .get()
+            .partial_cmp(&left.score.get())
             .unwrap_or(Ordering::Equal)
             .then_with(|| left.path.cmp(&right.path))
             .then_with(|| left.mdpath.cmp(&right.mdpath))
@@ -86,9 +107,17 @@ mod tests {
             mdpath: mdpath.into(),
             bytes: 0,
             section_bytes: None,
-            score,
+            score: FiniteScore::new(score).expect("fixture score is finite"),
             snippet: String::new(),
         }
+    }
+
+    #[test]
+    fn finite_score_rejects_every_non_finite_value() {
+        assert_eq!(FiniteScore::new(f32::NAN), None);
+        assert_eq!(FiniteScore::new(f32::INFINITY), None);
+        assert_eq!(FiniteScore::new(f32::NEG_INFINITY), None);
+        assert_eq!(FiniteScore::new(-0.0).map(FiniteScore::get), Some(-0.0));
     }
 
     #[test]

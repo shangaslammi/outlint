@@ -11,8 +11,8 @@ use outlint_core::{
 };
 
 use crate::{
-    args::{OutputFormat, ReadOptions},
-    render,
+    args::{AgentFormat, ReadOptions},
+    render::{self, escape_compact},
     schema_loading::read_utf8_file,
     write_stderr, write_stdout,
 };
@@ -22,12 +22,15 @@ use crate::{
 pub(crate) fn execute_read(options: &ReadOptions) -> u8 {
     let source = match read_utf8_file(Path::new(&options.file), "Markdown input") {
         Ok(source) => source,
-        Err(message) => return operational_error(&message),
+        Err(message) => return operational_error(&message, options.format),
     };
     let document = match parse_markdown(&source, MarkdownOptions::default()) {
         Ok(document) => document,
         Err(error) => {
-            return operational_error(&format!("cannot parse {}: {error}", options.file));
+            return operational_error(
+                &format!("cannot parse {}: {error}", options.file),
+                options.format,
+            );
         }
     };
     let result = parse_path(options.path.as_deref().unwrap_or("$")).and_then(|path| {
@@ -51,7 +54,7 @@ pub(crate) fn execute_read(options: &ReadOptions) -> u8 {
         Err(error) => {
             let failure = describe_error(&error, &options.file, &source, &document);
             let rendered = render::read::error(&failure, options.format);
-            if options.format == OutputFormat::Json {
+            if options.format == AgentFormat::Json {
                 if write_stdout(&rendered) == 2 {
                     2
                 } else {
@@ -65,7 +68,11 @@ pub(crate) fn execute_read(options: &ReadOptions) -> u8 {
     }
 }
 
-fn operational_error(message: &str) -> u8 {
+fn operational_error(message: &str, format: AgentFormat) -> u8 {
+    let message = match format {
+        AgentFormat::Compact => escape_compact(message),
+        AgentFormat::Human | AgentFormat::Json => message.to_owned(),
+    };
     write_stderr(&format!("outlint: {message}\n"));
     2
 }
@@ -485,7 +492,7 @@ fn tree_node(
             },
         },
         DocumentNode::Block(block) => match block {
-            Block::Paragraph(leaf) => preview_node(
+            Block::Paragraph(leaf) => text_preview_node(
                 path,
                 "p",
                 bytes,
@@ -501,31 +508,46 @@ fn tree_node(
                     data: TreeNodeData::List { items },
                 }
             }
-            Block::Code(_) => preview_node(path, "code", bytes, String::new()),
-            Block::Quote(_) => preview_node(path, "quote", bytes, String::new()),
-            Block::Html(_) => preview_node(path, "html", bytes, String::new()),
-            Block::Break(_) => preview_node(path, "break", bytes, String::new()),
-            _ => preview_node(path, "block", bytes, String::new()),
+            Block::Code(_) => kind_only_node(path, "code", bytes),
+            Block::Quote(_) => kind_only_node(path, "quote", bytes),
+            Block::Html(_) => kind_only_node(path, "html", bytes),
+            Block::Break(_) => kind_only_node(path, "break", bytes),
+            _ => kind_only_node(path, "block", bytes),
         },
         DocumentNode::Item(item) => {
-            preview_node(path, "item", bytes, preview(item_text(source, item)))
+            text_preview_node(path, "item", bytes, preview(item_text(source, item)))
         }
-        _ => preview_node(path, "block", bytes, String::new()),
+        _ => TreeNode {
+            mdpath: path.to_string(),
+            kind: "block".to_owned(),
+            bytes,
+            label: String::new(),
+            data: TreeNodeData::Preview {
+                preview: String::new(),
+            },
+        },
     }
 }
 
-fn preview_node(path: &DocumentPath, kind: &str, bytes: u64, preview: String) -> TreeNode {
-    let label = if preview.is_empty() {
-        kind.to_owned()
-    } else {
-        format!("{kind}: {preview}")
-    };
+fn text_preview_node(path: &DocumentPath, kind: &str, bytes: u64, preview: String) -> TreeNode {
     TreeNode {
         mdpath: path.to_string(),
         kind: kind.to_owned(),
         bytes,
-        label,
+        label: format!("{kind}: {preview}"),
         data: TreeNodeData::Preview { preview },
+    }
+}
+
+fn kind_only_node(path: &DocumentPath, kind: &str, bytes: u64) -> TreeNode {
+    TreeNode {
+        mdpath: path.to_string(),
+        kind: kind.to_owned(),
+        bytes,
+        label: kind.to_owned(),
+        data: TreeNodeData::Preview {
+            preview: String::new(),
+        },
     }
 }
 

@@ -20,6 +20,6 @@ mod result;
 mod store;
 mod units;
 
-pub use result::{Hit, TermCount};
+pub use result::{FiniteScore, Hit, TermCount};
 pub use store::{walk_markdown, Scope, Store, Walk, WalkedFile};
 pub use units::{index_units, IndexUnit};

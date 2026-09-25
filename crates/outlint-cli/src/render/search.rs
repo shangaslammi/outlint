@@ -1,5 +1,7 @@
 //! Search output in human, JSON, and compact forms.
 
+#[cfg(test)]
+use outlint_search::FiniteScore;
 use outlint_search::{Hit, TermCount};
 use serde_json::json;
 
@@ -11,11 +13,11 @@ use super::{
 const VERSION: u64 = 1;
 
 /// Renders successful search hits in the selected machine or human format.
-pub(crate) fn hits(query: &str, values: &[Hit], format: crate::args::OutputFormat) -> String {
+pub(crate) fn hits(query: &str, values: &[Hit], format: crate::args::AgentFormat) -> String {
     match format {
-        crate::args::OutputFormat::Human => human_hits(values),
-        crate::args::OutputFormat::Json => json_hits(query, values),
-        crate::args::OutputFormat::Compact => compact_hits(values),
+        crate::args::AgentFormat::Human => human_hits(values),
+        crate::args::AgentFormat::Json => json_hits(query, values),
+        crate::args::AgentFormat::Compact => compact_hits(values),
     }
 }
 
@@ -24,12 +26,12 @@ pub(crate) fn hits(query: &str, values: &[Hit], format: crate::args::OutputForma
 pub(crate) fn no_hits(
     query: &str,
     counts: Option<&[TermCount]>,
-    format: crate::args::OutputFormat,
+    format: crate::args::AgentFormat,
 ) -> String {
     match format {
-        crate::args::OutputFormat::Human => human_no_hits(query, counts),
-        crate::args::OutputFormat::Json => json_no_hits(query, counts),
-        crate::args::OutputFormat::Compact => compact_no_hits(counts),
+        crate::args::AgentFormat::Human => human_no_hits(query, counts),
+        crate::args::AgentFormat::Json => json_no_hits(query, counts),
+        crate::args::AgentFormat::Compact => compact_no_hits(counts),
     }
 }
 
@@ -100,7 +102,7 @@ fn write_hit_json(output: &mut Vec<u8>, hit: &Hit) {
         object.value("mdpath", &json!(hit.mdpath));
         object.value("bytes", &json!(hit.bytes));
         object.value("section_bytes", &json!(hit.section_bytes));
-        object.value("score", &json!(hit.score));
+        object.value("score", &json!(hit.score.get()));
         object.value("snippet", &json!(hit.snippet));
     });
 }
@@ -172,7 +174,7 @@ mod tests {
                 mdpath: "$.setup/p[0]".into(),
                 bytes: 412,
                 section_bytes: Some(3_140),
-                score: 7.31,
+                score: FiniteScore::new(7.31).expect("fixture score is finite"),
                 snippet: "Run the setup script, then…".into(),
             },
             Hit {
@@ -180,7 +182,7 @@ mod tests {
                 mdpath: "$.decision-outcome".into(),
                 bytes: 900,
                 section_bytes: None,
-                score: 1.0,
+                score: FiniteScore::new(1.0).expect("fixture score is finite"),
                 snippet: "Chosen option: keep the current layout.".into(),
             },
             Hit {
@@ -188,7 +190,7 @@ mod tests {
                 mdpath: "$.options".into(),
                 bytes: 300,
                 section_bytes: None,
-                score: 0.5,
+                score: FiniteScore::new(0.5).expect("fixture score is finite"),
                 snippet: String::new(),
             },
         ]
@@ -251,10 +253,12 @@ mod tests {
     fn compact_output_is_one_escaped_record_per_hit() {
         let mut hits = fixture_hits();
         hits.truncate(1);
-        hits[0].snippet = "first\tsecond\nthird".into();
+        hits[0].path = "docs/tab\tcr\rlf\nesc\u{1b}slash\\.md".into();
+        hits[0].mdpath = "$.path\tcr\rlf\nesc\u{1b}slash\\".into();
+        hits[0].snippet = "first\tcr\rsecond\nthird\u{1b}slash\\".into();
         assert_eq!(
             compact_hits(&hits),
-            "docs/guide.md\t$.setup/p[0]\t412B/3.1kB\tfirst\\tsecond\\nthird\n"
+            "docs/tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\.md\t$.path\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\t412B/3.1kB\tfirst\\tcr\\u{d}second\\nthird\\u{1b}slash\\\\\n"
         );
     }
 }

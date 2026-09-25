@@ -4,6 +4,9 @@ mod common;
 
 use common::*;
 
+#[cfg(unix)]
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
 const FIXTURE: &str = "---\ntitle: Guide\n---\n\nRoot preamble paragraph.\n\n# Guide\n\nGuide intro.\n\n## Setup\n\nInstall the tool first.\n\n- first item\n- second item\n- third item\n\n```sh\noutlint check README.md\n```\n\n## FAQ\n\n### Question\n\nWhy?\n\n### Question\n\nHow?\n";
 
 #[test]
@@ -180,7 +183,54 @@ fn read_supports_json_compact_and_structured_path_errors() {
     assert_eq!(output.status.code(), Some(0));
     assert!(stdout(&output).starts_with("$.setup  109B  Setup\n"));
 
+    let output = run_with_format_env(
+        &directory,
+        &["read", "--tree", "docs/guide.md", "$.setup"],
+        "",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout(&output).starts_with("$.setup  109B  Setup\n"));
+    assert!(!stdout(&output).contains('\t'));
+
     let output = run_with_format_env(&directory, &["read", "docs/guide.md"], "bogus");
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("invalid OUTLINT_FORMAT value 'bogus'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn read_rejects_a_non_unicode_environment_format() {
+    let directory = TempDir::new("read-non-unicode-format");
+    directory.write("docs/guide.md", FIXTURE);
+
+    let output = run_with_format_env(
+        &directory,
+        &["read", "docs/guide.md"],
+        OsString::from_vec(vec![0xff]),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("invalid OUTLINT_FORMAT value"));
+}
+
+#[test]
+fn human_tree_preserves_empty_item_labels() {
+    let directory = TempDir::new("read-empty-item-labels");
+    directory.write(
+        "docs/guide.md",
+        "# Guide\n\n## Items\n\n-\n- [](/destination)\n",
+    );
+
+    let output = run(
+        &directory,
+        &["read", "--tree", "--blocks", "docs/guide.md", "$.items"],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "$.items                  31B  Items\n\
+         $.items/list[0]          21B  list (2 items)\n\
+         $.items/list[0]/item[0]  2B  item: \n\
+         $.items/list[0]/item[1]  19B  item: \n"
+    );
 }

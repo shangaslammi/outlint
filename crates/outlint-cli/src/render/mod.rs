@@ -7,7 +7,7 @@ pub(crate) mod read;
 #[cfg(feature = "search")]
 pub(crate) mod search;
 
-use crate::{args::OutputFormat, diagnostics::ValidationResult};
+use crate::{args::ValidationFormat, diagnostics::ValidationResult};
 
 /// Formats a byte count consistently across search and read presentations.
 #[cfg(any(feature = "search", feature = "read"))]
@@ -48,13 +48,12 @@ pub(crate) fn escape_compact(value: &str) -> String {
 /// is resolved by the caller; `use_color` is the caller's decision.
 pub(crate) fn render(
     results: &[ValidationResult],
-    format: OutputFormat,
+    format: ValidationFormat,
     use_color: bool,
 ) -> String {
     match format {
-        OutputFormat::Human => human::render_human(results, use_color),
-        OutputFormat::Json => json::render_json(results),
-        OutputFormat::Compact => String::new(),
+        ValidationFormat::Human => human::render_human(results, use_color),
+        ValidationFormat::Json => json::render_json(results),
     }
 }
 

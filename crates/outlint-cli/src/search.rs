@@ -9,7 +9,12 @@ use std::{
 
 use outlint_search::{walk_markdown, Hit, Scope, Store, TermCount};
 
-use crate::{args::OutputFormat, args::SearchOptions, render, write_stderr, write_stdout};
+use crate::{
+    args::AgentFormat,
+    args::SearchOptions,
+    render::{self, escape_compact},
+    write_stderr, write_stdout,
+};
 
 /// Exit 0 with at least one hit, 1 with none, 2 on a usage or operational
 /// error.
@@ -17,7 +22,7 @@ pub(crate) fn execute_search(options: &SearchOptions) -> u8 {
     let result = match search(options) {
         Ok(result) => result,
         Err(message) => {
-            write_stderr(&format!("outlint: {message}\n"));
+            write_stderr(&message_line(&message, options.format));
             return 2;
         }
     };
@@ -27,7 +32,7 @@ pub(crate) fn execute_search(options: &SearchOptions) -> u8 {
             result.term_counts.as_deref(),
             options.format,
         );
-        if options.format == OutputFormat::Json {
+        if options.format == AgentFormat::Json {
             if write_stdout(&rendered) == 2 {
                 2
             } else {
@@ -70,8 +75,8 @@ fn search(options: &SearchOptions) -> Result<SearchResult, String> {
     let scope = Scope::locate(&search_root)?;
     let store = Store::open(&scope)?;
     let walk = walk_markdown(&scope);
-    write_notes(&walk.notes);
-    write_notes(&store.refresh(&walk)?);
+    write_notes(&walk.notes, options.format);
+    write_notes(&store.refresh(&walk)?, options.format);
     let mut hits = store.search(&options.words)?;
     make_paths_relative(&mut hits, &current_dir, scope.search_root())?;
     let term_counts = if hits.is_empty() {
@@ -147,9 +152,17 @@ fn slash_path(path: &Path) -> Option<String> {
         .map(|components| components.join("/"))
 }
 
-fn write_notes(notes: &[String]) {
+fn message_line(message: &str, format: AgentFormat) -> String {
+    let message = match format {
+        AgentFormat::Compact => escape_compact(message),
+        AgentFormat::Human | AgentFormat::Json => message.to_owned(),
+    };
+    format!("outlint: {message}\n")
+}
+
+fn write_notes(notes: &[String], format: AgentFormat) {
     for note in notes {
-        write_stderr(&format!("outlint: {note}\n"));
+        write_stderr(&message_line(note, format));
     }
 }
 
@@ -182,6 +195,21 @@ mod tests {
                 "spec/outlint-spec.md"
             ),
             Some("outlint-spec.md".into())
+        );
+    }
+
+    #[test]
+    fn compact_notes_escape_control_characters_and_backslashes() {
+        assert_eq!(
+            message_line(
+                "docs/tab\tcr\rlf\nesc\u{1b}slash\\.md refreshed",
+                AgentFormat::Compact
+            ),
+            "outlint: docs/tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\.md refreshed\n"
+        );
+        assert_eq!(
+            message_line("docs/bad\nfile.md refreshed", AgentFormat::Human),
+            "outlint: docs/bad\nfile.md refreshed\n"
         );
     }
 }

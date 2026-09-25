@@ -26,7 +26,7 @@ use crate::{
         build_count_query, build_item_query, build_query, build_schema, snippet_query, Fields,
         INDEX_FORMAT_VERSION, KIND_TOMBSTONE, KIND_UNIT, MTIME, PATH, SIZE,
     },
-    result::{select_smallest_hits, CandidateHit, Hit, TermCount},
+    result::{select_smallest_hits, CandidateHit, FiniteScore, Hit, TermCount},
     units::{collapse_whitespace, index_units, IndexUnit},
 };
 
@@ -423,6 +423,7 @@ impl Store {
         generator.set_max_num_chars(SNIPPET_CHARS);
         let mut candidates = Vec::with_capacity(top.len());
         for (score, address) in top {
+            let score = finite_score(score)?;
             let document: TantivyDocument = searcher
                 .doc(address)
                 .map_err(|error| format!("cannot load search hit: {error}"))?;
@@ -472,6 +473,7 @@ impl Store {
         else {
             return Ok(None);
         };
+        let score = finite_score(score)?;
         let document: TantivyDocument = searcher
             .doc(address)
             .map_err(|error| format!("cannot load list item hit: {error}"))?;
@@ -537,7 +539,7 @@ fn hit_from_document(
     fields: &Fields,
     generator: &SnippetGenerator,
     document: &TantivyDocument,
-    score: f32,
+    score: FiniteScore,
 ) -> Option<Hit> {
     let text = |field| {
         document
@@ -558,6 +560,13 @@ fn hit_from_document(
         score,
         snippet: snippet_of(generator, document, &text(fields.snippet)),
     })
+}
+
+/// Turns an invalid engine score into an operational search failure before a
+/// result can cross the store boundary.
+fn finite_score(score: f32) -> Result<FiniteScore, String> {
+    FiniteScore::new(score)
+        .ok_or_else(|| "search engine returned a non-finite relevance score".to_owned())
 }
 
 /// Whether a rendered document path addresses a list block. Section slugs
@@ -762,6 +771,17 @@ mod tests {
         assert!(!is_list_path("$.list[0]"));
         assert!(!is_list_path("$.list"));
         assert!(!is_list_path("$.a/p[0]"));
+    }
+
+    #[test]
+    fn non_finite_engine_scores_are_operational_errors() {
+        for score in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                finite_score(score),
+                Err("search engine returned a non-finite relevance score".to_owned())
+            );
+        }
+        assert_eq!(finite_score(1.25).map(FiniteScore::get), Ok(1.25));
     }
 
     #[test]

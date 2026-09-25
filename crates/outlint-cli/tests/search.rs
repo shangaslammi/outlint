@@ -9,6 +9,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
 #[test]
 fn search_indexes_refreshes_and_forgets_workspace_markdown() {
     let directory = TempDir::new("search");
@@ -320,7 +323,29 @@ fn search_supports_json_compact_and_environment_defaults() {
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     assert!(stdout(&output).contains(" (section "));
 
+    let output = run_with_format_env(&directory, &["search", "exit", "codes"], "");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains(" (section "));
+    assert!(!stdout(&output).contains('\t'));
+
     let output = run_with_format_env(&directory, &["search", "exit", "codes"], "bogus");
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("invalid OUTLINT_FORMAT value 'bogus'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn search_rejects_a_non_unicode_environment_format() {
+    let directory = TempDir::new("search-non-unicode-format");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write("docs/guide.md", "# Guide\n\nExit codes.\n");
+
+    let output = run_with_format_env(
+        &directory,
+        &["search", "exit", "codes"],
+        OsString::from_vec(vec![0xff]),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("invalid OUTLINT_FORMAT value"));
 }

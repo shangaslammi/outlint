@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use crate::{
-    args::OutputFormat,
+    args::AgentFormat,
     read::{ReadFailure, ReadOutput, ReadTree, TreeNode, TreeNodeData},
 };
 
@@ -15,25 +15,25 @@ use super::{
 const VERSION: u64 = 1;
 
 /// Renders a resolved read result in the selected format.
-pub(crate) fn output(value: &ReadOutput, format: OutputFormat) -> String {
+pub(crate) fn output(value: &ReadOutput, format: AgentFormat) -> String {
     match (value, format) {
-        (ReadOutput::Content(content), OutputFormat::Human | OutputFormat::Compact) => {
+        (ReadOutput::Content(content), AgentFormat::Human | AgentFormat::Compact) => {
             content.content.clone()
         }
-        (ReadOutput::Content(content), OutputFormat::Json) => json_content(content),
-        (ReadOutput::Tree(tree), OutputFormat::Human) => human_tree(&tree.nodes),
-        (ReadOutput::Tree(tree), OutputFormat::Json) => json_tree(tree),
-        (ReadOutput::Tree(tree), OutputFormat::Compact) => compact_tree(&tree.nodes),
+        (ReadOutput::Content(content), AgentFormat::Json) => json_content(content),
+        (ReadOutput::Tree(tree), AgentFormat::Human) => human_tree(&tree.nodes),
+        (ReadOutput::Tree(tree), AgentFormat::Json) => json_tree(tree),
+        (ReadOutput::Tree(tree), AgentFormat::Compact) => compact_tree(&tree.nodes),
     }
 }
 
 /// Renders a path failure. JSON is a stdout object; the other forms retain
 /// the prototype's plain-text error line for stderr.
-pub(crate) fn error(value: &ReadFailure, format: OutputFormat) -> String {
+pub(crate) fn error(value: &ReadFailure, format: AgentFormat) -> String {
     match format {
-        OutputFormat::Human => human_error(value),
-        OutputFormat::Json => json_error(value),
-        OutputFormat::Compact => compact_error(value),
+        AgentFormat::Human => human_error(value),
+        AgentFormat::Json => json_error(value),
+        AgentFormat::Compact => compact_error(value),
     }
 }
 
@@ -196,11 +196,9 @@ fn write_error_json(output: &mut Vec<u8>, value: &ReadFailure) {
             });
         }
         ReadFailure::Other { path, message, .. } => {
-            object.value("kind", &json!("unresolved"));
+            object.value("kind", &json!("other"));
             object.value("path", &json!(path));
-            object.value("step", &json!(message));
-            object.value("resolved", &json!(path));
-            object.member("nodes", |output| output.extend_from_slice(b"[]"));
+            object.value("message", &json!(message));
         }
     });
 }
@@ -220,6 +218,15 @@ fn compact_tree(nodes: &[TreeNode]) -> String {
 
 fn compact_error(value: &ReadFailure) -> String {
     match value {
+        ReadFailure::Syntax {
+            path,
+            message,
+            offset,
+        } => format!(
+            "outlint: invalid document path '{}': {} at byte {offset}\n",
+            escape_compact(path),
+            escape_compact(message)
+        ),
         ReadFailure::Unresolved {
             file,
             path,
@@ -227,7 +234,11 @@ fn compact_error(value: &ReadFailure) -> String {
             resolved,
             nodes,
         } => format!(
-            "outlint: cannot resolve {path} in {file}: {step} not found under {resolved}\n{}",
+            "outlint: cannot resolve {} in {}: {} not found under {}\n{}",
+            escape_compact(path),
+            escape_compact(file),
+            escape_compact(step),
+            escape_compact(resolved),
             compact_tree(nodes)
         ),
         ReadFailure::Ambiguous {
@@ -237,11 +248,23 @@ fn compact_error(value: &ReadFailure) -> String {
             candidates,
             ..
         } => format!(
-            "outlint: ambiguous document path {path} in {file}: {} sections match '{step}'\n{}",
+            "outlint: ambiguous document path {} in {}: {} sections match '{}'\n{}",
+            escape_compact(path),
+            escape_compact(file),
             candidates.len(),
+            escape_compact(step),
             compact_tree(candidates)
         ),
-        ReadFailure::Syntax { .. } | ReadFailure::Other { .. } => human_error(value),
+        ReadFailure::Other {
+            file,
+            path,
+            message,
+        } => format!(
+            "outlint: cannot resolve {} in {}: {}\n",
+            escape_compact(path),
+            escape_compact(file),
+            escape_compact(message)
+        ),
     }
 }
 
@@ -319,5 +342,80 @@ mod tests {
         assert_eq!(value["error"]["kind"], "unresolved");
         assert_eq!(value["error"]["nodes"][0]["mdpath"], "$.setup");
         assert!(compact_error(&failure).contains("$.setup\t3.1kB\tSetup\n"));
+    }
+
+    #[test]
+    fn compact_tree_and_errors_escape_control_characters_and_backslashes() {
+        let controls = "tab\tcr\rlf\nesc\u{1b}slash\\";
+        let nodes = vec![
+            TreeNode {
+                mdpath: format!("$.heading-{controls}"),
+                kind: "section".into(),
+                bytes: 10,
+                label: format!("Heading {controls}"),
+                data: TreeNodeData::Heading {
+                    level: Some(2),
+                    text: Some(format!("Heading {controls}")),
+                },
+            },
+            TreeNode {
+                mdpath: "$.heading/p[0]".into(),
+                kind: "p".into(),
+                bytes: 8,
+                label: format!("p: Preview {controls}"),
+                data: TreeNodeData::Preview {
+                    preview: format!("Preview {controls}"),
+                },
+            },
+        ];
+        assert_eq!(
+            compact_tree(&nodes),
+            "$.heading-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\t10B\tHeading tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\n\
+             $.heading/p[0]\t8B\tp: Preview tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\n"
+        );
+
+        let failure = ReadFailure::Unresolved {
+            file: format!("docs/{controls}.md"),
+            path: format!("$.path-{controls}"),
+            step: format!("step-{controls}"),
+            resolved: format!("$.resolved-{controls}"),
+            nodes,
+        };
+        let rendered = compact_error(&failure);
+        assert_eq!(rendered.lines().count(), 3, "{rendered:?}");
+        assert!(rendered.starts_with(
+            "outlint: cannot resolve $.path-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\ in docs/tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\.md: step-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\ not found under $.resolved-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\n"
+        ));
+    }
+
+    #[test]
+    fn compact_syntax_and_other_errors_escape_all_values() {
+        let syntax = ReadFailure::Syntax {
+            path: "$\t.bad\\path".into(),
+            message: "bad\r\npath\u{1b}".into(),
+            offset: 2,
+        };
+        assert_eq!(
+            compact_error(&syntax),
+            "outlint: invalid document path '$\\t.bad\\\\path': bad\\u{d}\\npath\\u{1b} at byte 2\n"
+        );
+
+        let other = ReadFailure::Other {
+            file: "docs/bad\nfile.md".into(),
+            path: "$.bad\tpath".into(),
+            message: "failure\u{1b}\\detail".into(),
+        };
+        assert_eq!(
+            compact_error(&other),
+            "outlint: cannot resolve $.bad\\tpath in docs/bad\\nfile.md: failure\\u{1b}\\\\detail\n"
+        );
+        assert_eq!(
+            human_error(&other),
+            "outlint: cannot resolve $.bad\tpath in docs/bad\nfile.md: failure\u{1b}\\detail\n"
+        );
+        assert_eq!(
+            json_error(&other),
+            "{\"version\":1,\"error\":{\"kind\":\"other\",\"path\":\"$.bad\\tpath\",\"message\":\"failure\\u001b\\\\detail\"}}\n"
+        );
     }
 }

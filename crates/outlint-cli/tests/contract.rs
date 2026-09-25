@@ -63,7 +63,7 @@ fn validation_rejects_compact_and_ignores_outlint_format() {
     let with_environment = run_with_format_env(
         &directory,
         &["check", "docs/guide.md", "--schema", "schema.yml"],
-        "json",
+        "bogus",
     );
     assert_eq!(with_environment.status.code(), ordinary.status.code());
     assert_eq!(with_environment.stdout, ordinary.stdout);
