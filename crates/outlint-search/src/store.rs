@@ -26,7 +26,7 @@ use crate::{
         build_count_query, build_item_query, build_query, build_schema, snippet_query, Fields,
         INDEX_FORMAT_VERSION, KIND_TOMBSTONE, KIND_UNIT, MTIME, PATH, SIZE,
     },
-    render::{select_smallest_hits, CandidateHit, Hit, TermCount},
+    result::{select_smallest_hits, CandidateHit, Hit, TermCount},
     units::{collapse_whitespace, index_units, IndexUnit},
 };
 

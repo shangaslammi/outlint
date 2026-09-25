@@ -7,9 +7,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use outlint_search::{render_hits, render_no_hits, walk_markdown, Hit, Scope, Store};
+use outlint_search::{walk_markdown, Hit, Scope, Store, TermCount};
 
-use crate::{args::SearchOptions, write_stderr, write_stdout};
+use crate::{args::OutputFormat, args::SearchOptions, render, write_stderr, write_stdout};
 
 /// Exit 0 with at least one hit, 1 with none, 2 on a usage or operational
 /// error.
@@ -22,16 +22,33 @@ pub(crate) fn execute_search(options: &SearchOptions) -> u8 {
         }
     };
     if result.hits.is_empty() {
-        write_stderr(&result.no_hits);
-        1
+        let rendered = render::search::no_hits(
+            &options.words,
+            result.term_counts.as_deref(),
+            options.format,
+        );
+        if options.format == OutputFormat::Json {
+            if write_stdout(&rendered) == 2 {
+                2
+            } else {
+                1
+            }
+        } else {
+            write_stderr(&rendered);
+            1
+        }
     } else {
-        write_stdout(&result.hits)
+        write_stdout(&render::search::hits(
+            &options.words,
+            &result.hits,
+            options.format,
+        ))
     }
 }
 
 struct SearchResult {
-    hits: String,
-    no_hits: String,
+    hits: Vec<Hit>,
+    term_counts: Option<Vec<TermCount>>,
 }
 
 fn search(options: &SearchOptions) -> Result<SearchResult, String> {
@@ -57,16 +74,12 @@ fn search(options: &SearchOptions) -> Result<SearchResult, String> {
     write_notes(&store.refresh(&walk)?);
     let mut hits = store.search(&options.words)?;
     make_paths_relative(&mut hits, &current_dir, scope.search_root())?;
-    let no_hits = if hits.is_empty() {
-        let counts = store.term_counts(&options.words)?;
-        render_no_hits(&options.words, counts.as_deref())
+    let term_counts = if hits.is_empty() {
+        store.term_counts(&options.words)?
     } else {
-        String::new()
+        None
     };
-    Ok(SearchResult {
-        hits: render_hits(&hits),
-        no_hits,
-    })
+    Ok(SearchResult { hits, term_counts })
 }
 
 /// Rebases search-root-relative hit paths onto the invocation directory. Both

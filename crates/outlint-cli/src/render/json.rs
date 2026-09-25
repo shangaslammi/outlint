@@ -177,6 +177,76 @@ fn write_json_member(
     write_json_value(value, context, output);
 }
 
+/// Writes an object in the exact order in which `members` adds its fields.
+///
+/// The validation envelope above has context-dependent ordering rules. The
+/// provisional search and read formats use this smaller writer because every
+/// object in those formats has one explicit declaration order.
+#[cfg(any(feature = "search", feature = "read"))]
+pub(super) fn write_ordered_json_object(
+    output: &mut Vec<u8>,
+    members: impl FnOnce(&mut OrderedJsonObject<'_>),
+) {
+    output.push(b'{');
+    let mut object = OrderedJsonObject { output, written: 0 };
+    members(&mut object);
+    object.output.push(b'}');
+}
+
+/// An object writer whose calls define the emitted member order.
+#[cfg(any(feature = "search", feature = "read"))]
+pub(super) struct OrderedJsonObject<'a> {
+    output: &'a mut Vec<u8>,
+    written: usize,
+}
+
+#[cfg(any(feature = "search", feature = "read"))]
+impl OrderedJsonObject<'_> {
+    /// Adds one JSON value after the members already written.
+    pub(super) fn value(&mut self, key: &str, value: &Value) {
+        self.member(key, |output| {
+            write_json_value(value, JsonContext::Default, output)
+        });
+    }
+
+    /// Adds a member whose possibly nested value is written by `write`.
+    pub(super) fn member(&mut self, key: &str, write: impl FnOnce(&mut Vec<u8>)) {
+        if self.written != 0 {
+            self.output.push(b',');
+        }
+        self.written = self.written.saturating_add(1);
+        serde_json::to_writer(&mut *self.output, key)
+            .expect("writing a JSON key to a byte buffer is infallible");
+        self.output.push(b':');
+        write(self.output);
+    }
+}
+
+/// Writes an array whose elements are serialized by `write` in slice order.
+#[cfg(any(feature = "search", feature = "read"))]
+pub(super) fn write_ordered_json_array<T>(
+    output: &mut Vec<u8>,
+    values: &[T],
+    write: impl Fn(&mut Vec<u8>, &T),
+) {
+    output.push(b'[');
+    for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+            output.push(b',');
+        }
+        write(output, value);
+    }
+    output.push(b']');
+}
+
+/// Completes an already serialized JSON value as one newline-terminated
+/// invocation document.
+#[cfg(any(feature = "search", feature = "read"))]
+pub(super) fn finish_json_line(mut output: Vec<u8>) -> String {
+    output.push(b'\n');
+    String::from_utf8(output).expect("JSON serialization emits UTF-8")
+}
+
 fn diagnostic_json(diagnostic: &RenderedDiagnostic) -> Value {
     let mut object = Map::new();
     object.insert("id".into(), json!(diagnostic.id));

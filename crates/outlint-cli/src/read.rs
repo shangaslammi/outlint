@@ -10,7 +10,12 @@ use outlint_core::{
     TextRange,
 };
 
-use crate::{args::ReadOptions, schema_loading::read_utf8_file, write_stderr, write_stdout};
+use crate::{
+    args::{OutputFormat, ReadOptions},
+    render,
+    schema_loading::read_utf8_file,
+    write_stderr, write_stdout,
+};
 
 /// Exit 0 when the node was printed, 1 on a path syntax or resolution error,
 /// 2 on an operational error.
@@ -25,9 +30,9 @@ pub(crate) fn execute_read(options: &ReadOptions) -> u8 {
             return operational_error(&format!("cannot parse {}: {error}", options.file));
         }
     };
-    let rendered = parse_path(options.path.as_deref().unwrap_or("$")).and_then(|path| {
+    let result = parse_path(options.path.as_deref().unwrap_or("$")).and_then(|path| {
         if options.tree {
-            render_tree(
+            build_tree(
                 &options.file,
                 &source,
                 &document,
@@ -35,15 +40,27 @@ pub(crate) fn execute_read(options: &ReadOptions) -> u8 {
                 options.depth,
                 options.blocks,
             )
+            .map(ReadOutput::Tree)
         } else {
-            render_content(&source, &document, &path, options.depth)
+            build_content(&options.file, &source, &document, &path, options.depth)
+                .map(ReadOutput::Content)
         }
     });
-    match rendered {
-        Ok(text) => write_stdout(&text),
+    match result {
+        Ok(output) => write_stdout(&render::read::output(&output, options.format)),
         Err(error) => {
-            write_stderr(&render_error(&error, &options.file, &source, &document));
-            1
+            let failure = describe_error(&error, &options.file, &source, &document);
+            let rendered = render::read::error(&failure, options.format);
+            if options.format == OutputFormat::Json {
+                if write_stdout(&rendered) == 2 {
+                    2
+                } else {
+                    1
+                }
+            } else {
+                write_stderr(&rendered);
+                1
+            }
         }
     }
 }
@@ -53,7 +70,8 @@ fn operational_error(message: &str) -> u8 {
     2
 }
 
-/// Why a document path could not be read; rendered by [`render_error`].
+/// Why a document path could not be read; enriched by [`describe_error`]
+/// before presentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReadError {
     /// The argument is not a document path.
@@ -77,6 +95,80 @@ pub(crate) enum ReadError {
     /// A resolution failure the core reports but this prototype does not
     /// distinguish (`DocumentPathError` is non-exhaustive).
     Other { path: DocumentPath, message: String },
+}
+
+/// Structured successful output shared by all read renderers.
+pub(crate) enum ReadOutput {
+    Content(ReadContent),
+    Tree(ReadTree),
+}
+
+/// A resolved content read, including its canonical address.
+pub(crate) struct ReadContent {
+    pub(crate) file: String,
+    pub(crate) mdpath: String,
+    pub(crate) bytes: u64,
+    pub(crate) content: String,
+}
+
+/// A resolved tree listing, including the canonical listing base.
+pub(crate) struct ReadTree {
+    pub(crate) file: String,
+    pub(crate) mdpath: String,
+    pub(crate) nodes: Vec<TreeNode>,
+}
+
+/// One canonical tree row and the node-specific machine-readable fields.
+#[derive(Clone)]
+pub(crate) struct TreeNode {
+    pub(crate) mdpath: String,
+    pub(crate) kind: String,
+    pub(crate) bytes: u64,
+    pub(crate) label: String,
+    pub(crate) data: TreeNodeData,
+}
+
+/// Fields that distinguish headings, lists, and preview-bearing tree nodes.
+#[derive(Clone)]
+pub(crate) enum TreeNodeData {
+    Heading {
+        level: Option<u8>,
+        text: Option<String>,
+    },
+    List {
+        items: usize,
+    },
+    Preview {
+        preview: String,
+    },
+}
+
+/// Structured path-resolution failure shared by all read renderers.
+pub(crate) enum ReadFailure {
+    Syntax {
+        path: String,
+        message: String,
+        offset: usize,
+    },
+    Unresolved {
+        file: String,
+        path: String,
+        step: String,
+        resolved: String,
+        nodes: Vec<TreeNode>,
+    },
+    Ambiguous {
+        file: String,
+        path: String,
+        step: String,
+        resolved: String,
+        candidates: Vec<TreeNode>,
+    },
+    Other {
+        file: String,
+        path: String,
+        message: String,
+    },
 }
 
 /// Parses a path argument, prepending `$` when it is missing so that `.a.b`
@@ -135,6 +227,25 @@ pub(crate) fn render_content(
         _ => slices.push(extent_slice(source, node)),
     }
     Ok(join_slices(&slices, line_ending(source)))
+}
+
+fn build_content(
+    file: &str,
+    source: &str,
+    document: &Document,
+    path: &DocumentPath,
+    depth: Option<usize>,
+) -> Result<ReadContent, ReadError> {
+    let target = resolve_node(document, path)?;
+    let entries = document_paths(document);
+    let canonical = canonical_path(&entries, target).map_or_else(|| path.clone(), Clone::clone);
+    let content = render_content(source, document, path, depth)?;
+    Ok(ReadContent {
+        file: file.to_owned(),
+        mdpath: canonical.to_string(),
+        bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+        content,
+    })
 }
 
 /// Appends the section at `depth`: its full extent when the subtree fits,
@@ -223,6 +334,32 @@ fn trim_line_endings(mut text: &str) -> &str {
 /// `<mdpath>  <size>  <label>` with the path column padded to the longest
 /// path. Sections are listed `depth` levels down (all when `None`); blocks
 /// and list items only with `blocks`.
+pub(crate) fn build_tree(
+    file_label: &str,
+    source: &str,
+    document: &Document,
+    path: &DocumentPath,
+    depth: Option<usize>,
+    blocks: bool,
+) -> Result<ReadTree, ReadError> {
+    let target = resolve_node(document, path)?;
+    let entries = document_paths(document);
+    // The argument may spell the node non-canonically (`$.[0]`, `setup[0]`);
+    // the listing is keyed on the canonical path of the resolved node.
+    let base = canonical_path(&entries, target).map_or_else(|| path.clone(), Clone::clone);
+    let nodes = entries
+        .iter()
+        .filter(|(candidate, _)| listed(&base, candidate, depth, blocks))
+        .map(|(candidate, node)| tree_node(file_label, source, candidate, *node))
+        .collect();
+    Ok(ReadTree {
+        file: file_label.to_owned(),
+        mdpath: base.to_string(),
+        nodes,
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn render_tree(
     file_label: &str,
     source: &str,
@@ -231,32 +368,8 @@ pub(crate) fn render_tree(
     depth: Option<usize>,
     blocks: bool,
 ) -> Result<String, ReadError> {
-    let target = resolve_node(document, path)?;
-    let entries = document_paths(document);
-    // The argument may spell the node non-canonically (`$.[0]`, `setup[0]`);
-    // the listing is keyed on the canonical path of the resolved node.
-    let base = canonical_path(&entries, target).map_or_else(|| path.clone(), Clone::clone);
-    let rows: Vec<(String, String, String)> = entries
-        .iter()
-        .filter(|(candidate, _)| listed(&base, candidate, depth, blocks))
-        .map(|(candidate, node)| {
-            (
-                candidate.to_string(),
-                format_bytes(node_size(source, *node)),
-                node_label(file_label, source, *node),
-            )
-        })
-        .collect();
-    let width = rows
-        .iter()
-        .map(|(path, _, _)| path.len())
-        .max()
-        .unwrap_or(0);
-    let mut output = String::new();
-    for (path, size, label) in rows {
-        output.push_str(&format!("{path:<width$}  {size}  {label}\n"));
-    }
-    Ok(output)
+    build_tree(file_label, source, document, path, depth, blocks)
+        .map(|tree| render::read::human_tree(&tree.nodes))
 }
 
 /// Whether `candidate` belongs to the listing under `base`.
@@ -337,26 +450,82 @@ fn node_size(source: &str, node: DocumentNode<'_>) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
-fn node_label(file_label: &str, source: &str, node: DocumentNode<'_>) -> String {
+fn tree_node(
+    file_label: &str,
+    source: &str,
+    path: &DocumentPath,
+    node: DocumentNode<'_>,
+) -> TreeNode {
+    let bytes = node_size(source, node);
     match node {
-        DocumentNode::Root(document) => merged_title(document).map_or_else(
-            || file_label.to_owned(),
-            |title| title.heading.diagnostic_text.clone(),
-        ),
-        DocumentNode::Section(section) => section.heading.diagnostic_text.clone(),
-        DocumentNode::Block(block) => match block {
-            Block::Paragraph(leaf) => {
-                format!("p: {}", preview(slice(source, leaf.location.range)))
+        DocumentNode::Root(document) => {
+            let title = merged_title(document);
+            TreeNode {
+                mdpath: path.to_string(),
+                kind: "root".to_owned(),
+                bytes,
+                label: title.map_or_else(
+                    || file_label.to_owned(),
+                    |title| title.heading.diagnostic_text.clone(),
+                ),
+                data: TreeNodeData::Heading {
+                    level: title.map(|title| title.heading.level as u8),
+                    text: title.map(|title| title.heading.diagnostic_text.clone()),
+                },
             }
-            Block::List(list) => format!("list ({} items)", list.items.iter().count()),
-            Block::Code(_) => "code".to_owned(),
-            Block::Quote(_) => "quote".to_owned(),
-            Block::Html(_) => "html".to_owned(),
-            Block::Break(_) => "break".to_owned(),
-            _ => "block".to_owned(),
+        }
+        DocumentNode::Section(section) => TreeNode {
+            mdpath: path.to_string(),
+            kind: "section".to_owned(),
+            bytes,
+            label: section.heading.diagnostic_text.clone(),
+            data: TreeNodeData::Heading {
+                level: Some(section.heading.level as u8),
+                text: Some(section.heading.diagnostic_text.clone()),
+            },
         },
-        DocumentNode::Item(item) => format!("item: {}", preview(item_text(source, item))),
-        _ => String::new(),
+        DocumentNode::Block(block) => match block {
+            Block::Paragraph(leaf) => preview_node(
+                path,
+                "p",
+                bytes,
+                preview(slice(source, leaf.location.range)),
+            ),
+            Block::List(list) => {
+                let items = list.items.iter().count();
+                TreeNode {
+                    mdpath: path.to_string(),
+                    kind: "list".to_owned(),
+                    bytes,
+                    label: format!("list ({items} items)"),
+                    data: TreeNodeData::List { items },
+                }
+            }
+            Block::Code(_) => preview_node(path, "code", bytes, String::new()),
+            Block::Quote(_) => preview_node(path, "quote", bytes, String::new()),
+            Block::Html(_) => preview_node(path, "html", bytes, String::new()),
+            Block::Break(_) => preview_node(path, "break", bytes, String::new()),
+            _ => preview_node(path, "block", bytes, String::new()),
+        },
+        DocumentNode::Item(item) => {
+            preview_node(path, "item", bytes, preview(item_text(source, item)))
+        }
+        _ => preview_node(path, "block", bytes, String::new()),
+    }
+}
+
+fn preview_node(path: &DocumentPath, kind: &str, bytes: u64, preview: String) -> TreeNode {
+    let label = if preview.is_empty() {
+        kind.to_owned()
+    } else {
+        format!("{kind}: {preview}")
+    };
+    TreeNode {
+        mdpath: path.to_string(),
+        kind: kind.to_owned(),
+        bytes,
+        label,
+        data: TreeNodeData::Preview { preview },
     }
 }
 
@@ -465,20 +634,19 @@ fn step_text(path: &DocumentPath, index: usize) -> (String, bool) {
     }
 }
 
-/// The stderr text for `error`, `outlint: `-prefixed, with the listing of the
-/// deepest resolved node after an unresolved step and the candidate paths
-/// after an ambiguous one.
-pub(crate) fn render_error(
+/// Enriches a path failure with canonical rows before presentation.
+pub(crate) fn describe_error(
     error: &ReadError,
     file: &str,
     source: &str,
     document: &Document,
-) -> String {
+) -> ReadFailure {
     match error {
-        ReadError::Syntax { spelling, error } => format!(
-            "outlint: invalid document path '{spelling}': {} at byte {}\n",
-            error.message, error.offset.0
-        ),
+        ReadError::Syntax { spelling, error } => ReadFailure::Syntax {
+            path: spelling.clone(),
+            message: error.message.clone(),
+            offset: error.offset.0,
+        },
         ReadError::Unresolved {
             path,
             resolved_steps,
@@ -486,21 +654,25 @@ pub(crate) fn render_error(
             let entries = document_paths(document);
             let deepest = canonical_prefix(&entries, document, path, *resolved_steps);
             let (step, block_step) = step_text(path, *resolved_steps);
-            let listing = render_tree(file, source, document, &deepest, Some(1), block_step)
+            let nodes = build_tree(file, source, document, &deepest, Some(1), block_step)
+                .map(|tree| tree.nodes)
                 .unwrap_or_default();
-            format!("outlint: cannot resolve {path} in {file}: {step} not found under {deepest}\n{listing}")
+            ReadFailure::Unresolved {
+                file: file.to_owned(),
+                path: path.to_string(),
+                step,
+                resolved: deepest.to_string(),
+                nodes,
+            }
         }
         ReadError::Ambiguous {
             path,
             resolved_steps,
-            candidates,
+            candidates: _,
         } => {
             let entries = document_paths(document);
             let deepest = canonical_prefix(&entries, document, path, *resolved_steps);
-            let (slug, _) = step_text(path, *resolved_steps);
-            let mut output = format!(
-                "outlint: ambiguous document path {path} in {file}: {candidates} sections match '{slug}'\n"
-            );
+            let (step, _) = step_text(path, *resolved_steps);
             // The candidates are the enumerated sections below the resolved
             // prefix whose own section step carries the failing slug — its
             // children for a `.` step, its whole subtree for a `..` step — so
@@ -511,43 +683,50 @@ pub(crate) fn render_error(
                 Some(SectionStep::Descendant { slug, .. }) => (Some(slug), true),
                 _ => (None, false),
             };
-            for (candidate, _) in &entries {
-                let Some((SectionStep::Named { slug: last, .. }, parent)) =
-                    candidate.sections().split_last()
-                else {
-                    continue;
-                };
-                let below_deepest = if descendant {
-                    parent.starts_with(deepest.sections())
-                } else {
-                    parent == deepest.sections()
-                };
-                if candidate.blocks().is_empty() && below_deepest && Some(last) == failing {
-                    output.push_str(&format!("{candidate}\n"));
-                }
+            let candidates = entries
+                .iter()
+                .filter_map(|(candidate, node)| {
+                    let Some((SectionStep::Named { slug: last, .. }, parent)) =
+                        candidate.sections().split_last()
+                    else {
+                        return None;
+                    };
+                    let below_deepest = if descendant {
+                        parent.starts_with(deepest.sections())
+                    } else {
+                        parent == deepest.sections()
+                    };
+                    if candidate.blocks().is_empty() && below_deepest && Some(last) == failing {
+                        Some(tree_node(file, source, candidate, *node))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            ReadFailure::Ambiguous {
+                file: file.to_owned(),
+                path: path.to_string(),
+                step,
+                resolved: deepest.to_string(),
+                candidates,
             }
-            output
         }
-        ReadError::Other { path, message } => {
-            format!("outlint: cannot resolve {path} in {file}: {message}\n")
-        }
+        ReadError::Other { path, message } => ReadFailure::Other {
+            file: file.to_owned(),
+            path: path.to_string(),
+            message: message.clone(),
+        },
     }
 }
 
-/// A byte count as `<n>B` below 1000, else `<n.n>kB` below 1,000,000, else
-/// `<n.n>MB`, each with one decimal and rounded half up. Matches the search
-/// hit header exactly.
-fn format_bytes(bytes: u64) -> String {
-    let tenths = |unit: u64| (bytes + unit / 20) / (unit / 10);
-    if bytes < 1_000 {
-        format!("{bytes}B")
-    } else if bytes < 1_000_000 {
-        let tenths = tenths(1_000);
-        format!("{}.{}kB", tenths / 10, tenths % 10)
-    } else {
-        let tenths = tenths(1_000_000);
-        format!("{}.{}MB", tenths / 10, tenths % 10)
-    }
+#[cfg(test)]
+pub(crate) fn render_error(
+    error: &ReadError,
+    file: &str,
+    source: &str,
+    document: &Document,
+) -> String {
+    render::read::human_error(&describe_error(error, file, source, document))
 }
 
 #[cfg(test)]
@@ -754,12 +933,5 @@ mod tests {
         let error = parse_path(".Guide").expect_err("uppercase is not a slug");
         assert!(render_error(&error, "guide.md", FIXTURE, &document())
             .starts_with("outlint: invalid document path '$.Guide': "));
-    }
-
-    #[test]
-    fn format_bytes_picks_the_unit_and_keeps_one_decimal() {
-        assert_eq!(format_bytes(412), "412B");
-        assert_eq!(format_bytes(3_140), "3.1kB");
-        assert_eq!(format_bytes(2_450_000), "2.5MB");
     }
 }

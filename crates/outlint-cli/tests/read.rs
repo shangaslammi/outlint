@@ -34,3 +34,153 @@ fn read_prints_nodes_lists_trees_and_reports_path_errors() {
     let output = run(&directory, &["read", "--blocks", "guide.md"]);
     assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
 }
+
+#[test]
+fn read_supports_json_compact_and_structured_path_errors() {
+    let directory = TempDir::new("read-formats");
+    directory.write("docs/guide.md", FIXTURE);
+
+    let output = run(
+        &directory,
+        &[
+            "read",
+            "--format",
+            "json",
+            "docs/guide.md",
+            "$..question[1]",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let value = json_output(&output);
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["file"], "docs/guide.md");
+    assert_eq!(value["mdpath"], "$.faq.question[1]");
+    assert_eq!(
+        value["bytes"].as_u64(),
+        Some(value["content"].as_str().unwrap().len() as u64)
+    );
+
+    let output = run(
+        &directory,
+        &[
+            "read",
+            "--tree",
+            "--blocks",
+            "--format",
+            "json",
+            "docs/guide.md",
+            "$.setup[0]",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let value = json_output(&output);
+    assert_eq!(value["mdpath"], "$.setup");
+    assert_eq!(value["nodes"][0]["kind"], "section");
+    assert_eq!(value["nodes"][0]["level"], 2);
+    assert_eq!(value["nodes"][1]["kind"], "p");
+    assert_eq!(value["nodes"][1]["preview"], "Install the tool first.");
+    assert_eq!(value["nodes"][2]["items"], 3);
+
+    let output = run(
+        &directory,
+        &[
+            "read",
+            "--tree",
+            "--blocks",
+            "--format",
+            "compact",
+            "docs/guide.md",
+            "$.setup",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout(&output).contains("$.setup/list[0]/item[1]\t14B\titem: second item\n"));
+    assert!(!stdout(&output).contains("  "));
+
+    let output = run(
+        &directory,
+        &["read", "--format", "json", "docs/guide.md", ".setp"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stderr(&output), "");
+    let value = json_output(&output);
+    assert_eq!(value["error"]["kind"], "unresolved");
+    assert_eq!(value["error"]["path"], "$.setp");
+    assert_eq!(value["error"]["resolved"], "$");
+    assert_eq!(value["error"]["nodes"][1]["mdpath"], "$.setup");
+
+    let output = run(
+        &directory,
+        &["read", "--format", "json", "docs/guide.md", ".Setup"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let value = json_output(&output);
+    assert_eq!(value["error"]["kind"], "syntax");
+    assert_eq!(value["error"]["path"], "$.Setup");
+    assert!(value["error"]["message"].is_string());
+    assert!(value["error"]["offset"].is_u64());
+
+    let output = run(
+        &directory,
+        &[
+            "read",
+            "--format",
+            "json",
+            "docs/guide.md",
+            "$.faq.question",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let value = json_output(&output);
+    assert_eq!(value["error"]["kind"], "ambiguous");
+    assert_eq!(value["error"]["resolved"], "$.faq");
+    assert_eq!(
+        value["error"]["candidates"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        value["error"]["candidates"][0]["mdpath"],
+        "$.faq.question[0]"
+    );
+
+    let output = run(
+        &directory,
+        &[
+            "read",
+            "--format",
+            "compact",
+            "docs/guide.md",
+            "$.faq.question",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("$.faq.question[0]\t19B\tQuestion\n"));
+
+    let output = run_with_format_env(
+        &directory,
+        &["read", "--tree", "docs/guide.md", "$.setup"],
+        "compact",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout(&output).starts_with("$.setup\t109B\tSetup\n"));
+
+    let output = run_with_format_env(
+        &directory,
+        &[
+            "read",
+            "--tree",
+            "--format",
+            "human",
+            "docs/guide.md",
+            "$.setup",
+        ],
+        "bogus",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout(&output).starts_with("$.setup  109B  Setup\n"));
+
+    let output = run_with_format_env(&directory, &["read", "docs/guide.md"], "bogus");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("invalid OUTLINT_FORMAT value 'bogus'"));
+}

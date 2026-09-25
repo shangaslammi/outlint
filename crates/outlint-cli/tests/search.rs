@@ -3,6 +3,7 @@
 mod common;
 
 use common::*;
+use serde_json::json;
 use std::{
     fs,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -237,4 +238,89 @@ fn search_notices_a_same_size_rewrite_within_one_second() {
     let output = run(&directory, &["search", "loquats"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     assert!(stdout(&output).contains("  Loquats.\n"));
+}
+
+#[test]
+fn search_supports_json_compact_and_environment_defaults() {
+    let directory = TempDir::new("search-formats");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write(
+        "docs/guide.md",
+        "# Guide\n\n## Setup\n\nExit codes explain command outcomes.\n",
+    );
+
+    let output = run(&directory, &["search", "--format", "json", "exit", "codes"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let value = json_output(&output);
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["query"], "exit codes");
+    assert_eq!(value["hits"][0]["path"], "docs/guide.md");
+    assert_eq!(value["hits"][0]["mdpath"], "$.setup/p[0]");
+    assert!(value["hits"][0]["bytes"].is_u64());
+    assert!(value["hits"][0]["section_bytes"].is_u64());
+    assert!(value["hits"][0]["score"].is_number());
+    assert!(value.get("term_counts").is_none());
+
+    let output = run(
+        &directory,
+        &["search", "--format", "compact", "exit", "codes"],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let fields: Vec<_> = stdout(&output).trim_end().split('\t').collect();
+    assert_eq!(fields.len(), 4);
+    assert_eq!(fields[0], "docs/guide.md");
+    assert_eq!(fields[1], "$.setup/p[0]");
+    assert!(fields[2].contains('/'));
+    assert_eq!(fields[3], "Exit codes explain command outcomes.");
+
+    let output = run(
+        &directory,
+        &["search", "--format", "json", "exit", "missing"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stderr(&output), "");
+    let value = json_output(&output);
+    assert_eq!(value["hits"], json!([]));
+    assert_eq!(value["term_counts"][0]["term"], "exit");
+    assert_eq!(value["term_counts"][1]["term"], "missing");
+
+    let output = run(
+        &directory,
+        &["search", "--format", "compact", "exit", "missing"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).starts_with("outlint: no block contains all words; exit "));
+    assert!(stderr(&output).contains(", missing 0\n"));
+
+    let output = run(
+        &directory,
+        &["search", "--format", "json", "\"missing phrase\""],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let value = json_output(&output);
+    assert!(value["term_counts"].is_null());
+
+    let output = run(
+        &directory,
+        &["search", "--format", "compact", "\"missing phrase\""],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stderr(&output), "outlint: no search hits\n");
+
+    let output = run_with_format_env(&directory, &["search", "exit", "codes"], "compact");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output).trim_end().split('\t').count(), 4);
+
+    let output = run_with_format_env(
+        &directory,
+        &["search", "--format", "human", "exit", "codes"],
+        "bogus",
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains(" (section "));
+
+    let output = run_with_format_env(&directory, &["search", "exit", "codes"], "bogus");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("invalid OUTLINT_FORMAT value 'bogus'"));
 }

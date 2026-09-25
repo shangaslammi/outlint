@@ -95,6 +95,15 @@ pub(crate) fn run_in(directory: &Path, arguments: &[&str]) -> Output {
         .expect("outlint should run")
 }
 
+pub(crate) fn run_with_format_env(directory: &TempDir, arguments: &[&str], value: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_outlint"))
+        .args(arguments)
+        .env("OUTLINT_FORMAT", value)
+        .current_dir(directory.path())
+        .output()
+        .expect("outlint should run")
+}
+
 pub(crate) fn stdout(output: &Output) -> &str {
     std::str::from_utf8(&output.stdout).expect("stdout should be UTF-8")
 }

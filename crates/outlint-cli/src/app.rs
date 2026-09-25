@@ -23,7 +23,13 @@ use crate::{
     write_stderr, write_stdout,
 };
 
-pub(crate) fn run(args: &[String]) -> u8 {
+#[cfg(any(feature = "search", feature = "read"))]
+use crate::args::EnvironmentFormat;
+
+pub(crate) fn run(
+    args: &[String],
+    #[cfg(any(feature = "search", feature = "read"))] environment_format: EnvironmentFormat,
+) -> u8 {
     match args {
         [arg] if arg == "--help" || arg == "-h" => write_help(TOP_HELP),
         [arg] if arg == "--version" || arg == "-V" => {
@@ -42,17 +48,21 @@ pub(crate) fn run(args: &[String]) -> u8 {
             }
         }
         #[cfg(feature = "search")]
-        [command, rest @ ..] if command == "search" => match crate::args::parse_search_args(rest) {
-            Ok(ParseOutcome::Help) => write_help(crate::args::SEARCH_HELP),
-            Ok(ParseOutcome::Run(options)) => crate::search::execute_search(&options),
-            Err(message) => usage_error(&message, "outlint search --help"),
-        },
+        [command, rest @ ..] if command == "search" => {
+            match crate::args::parse_search_args(rest, &environment_format) {
+                Ok(ParseOutcome::Help) => write_help(crate::args::SEARCH_HELP),
+                Ok(ParseOutcome::Run(options)) => crate::search::execute_search(&options),
+                Err(message) => usage_error(&message, "outlint search --help"),
+            }
+        }
         #[cfg(feature = "read")]
-        [command, rest @ ..] if command == "read" => match crate::args::parse_read_args(rest) {
-            Ok(ParseOutcome::Help) => write_help(crate::args::READ_HELP),
-            Ok(ParseOutcome::Run(options)) => crate::read::execute_read(&options),
-            Err(message) => usage_error(&message, "outlint read --help"),
-        },
+        [command, rest @ ..] if command == "read" => {
+            match crate::args::parse_read_args(rest, &environment_format) {
+                Ok(ParseOutcome::Help) => write_help(crate::args::READ_HELP),
+                Ok(ParseOutcome::Run(options)) => crate::read::execute_read(&options),
+                Err(message) => usage_error(&message, "outlint read --help"),
+            }
+        }
         _ => usage_error("invalid or missing command", "outlint --help"),
     }
 }

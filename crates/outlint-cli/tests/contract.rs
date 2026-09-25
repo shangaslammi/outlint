@@ -30,6 +30,47 @@ fn envelope_version_remains_two() {
 }
 
 #[test]
+fn validation_rejects_compact_and_ignores_outlint_format() {
+    let directory = TempDir::new("validation-format-scope");
+    directory.write("schema.yml", VALID_SCHEMA);
+    directory.write("docs/guide.md", "## Other\n");
+
+    let compact = run(
+        &directory,
+        &[
+            "check",
+            "docs/guide.md",
+            "--schema",
+            "schema.yml",
+            "--format",
+            "compact",
+        ],
+    );
+    assert_eq!(compact.status.code(), Some(2));
+    assert!(stderr(&compact).contains("expected human or json"));
+
+    let compact = run(
+        &directory,
+        &["schema", "check", "schema.yml", "--format", "compact"],
+    );
+    assert_eq!(compact.status.code(), Some(2));
+    assert!(stderr(&compact).contains("expected human or json"));
+
+    let ordinary = run(
+        &directory,
+        &["check", "docs/guide.md", "--schema", "schema.yml"],
+    );
+    let with_environment = run_with_format_env(
+        &directory,
+        &["check", "docs/guide.md", "--schema", "schema.yml"],
+        "json",
+    );
+    assert_eq!(with_environment.status.code(), ordinary.status.code());
+    assert_eq!(with_environment.stdout, ordinary.stdout);
+    assert_eq!(with_environment.stderr, ordinary.stderr);
+}
+
+#[test]
 fn preamble_items_optional_members_are_omitted_not_null() {
     let directory = TempDir::new("preamble-items-optional-members");
     directory.write(

@@ -9,17 +9,17 @@
 //! each with a snippet of its text chosen around the query words; reading
 //! the full content is `outlint read`'s job.
 //!
-//! The split follows the workspace convention: [`index_units`] and
-//! [`render_hits`] are pure functions over text; [`Store`] and the walk are
-//! the filesystem shell around them.
+//! The split follows the workspace convention: [`index_units`] returns pure
+//! structured data from text; [`Store`] and the walk are the filesystem shell
+//! around it. Presentation belongs to the calling application.
 
 #![warn(missing_docs)]
 
 mod index;
-mod render;
+mod result;
 mod store;
 mod units;
 
-pub use render::{render_hits, render_no_hits, Hit, TermCount};
+pub use result::{Hit, TermCount};
 pub use store::{walk_markdown, Scope, Store, Walk, WalkedFile};
 pub use units::{index_units, IndexUnit};
