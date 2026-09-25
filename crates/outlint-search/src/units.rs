@@ -1,12 +1,12 @@
 //! Pure conversion of one Markdown source into index units.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use outlint_core::{
-    document_paths, merged_title, parse_markdown, Document, DocumentFrontmatter, DocumentNode,
-    DocumentPath, MarkdownOptions, MarkdownParseError, Section, TextRange,
+    document_paths, merged_title, parse_markdown, Block, Document, DocumentFrontmatter,
+    DocumentNode, DocumentPath, MarkdownOptions, MarkdownParseError, Section, TextRange,
 };
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// One searchable node of a Markdown document.
 ///
@@ -19,14 +19,19 @@ use pulldown_cmark::{Event, Options, Parser};
 pub struct IndexUnit {
     /// Rendered [`DocumentPath`] of the node.
     pub mdpath: String,
+    /// Rendered path of the direct parent list for an item unit; `None` for
+    /// every other unit. This links an item to the list unit whose text
+    /// contains it without deriving parentage from path spelling.
+    pub parent_list: Option<String>,
     /// Length in bytes of the node's full extent: the whole source for the
     /// root, the heading through the last descendant block for a section,
-    /// the block itself for a block.
+    /// the block itself for a block, or the item itself for a list item.
     pub bytes: u64,
-    /// Extent length of the enclosing section for a block unit; `None` for
-    /// section and root units and for every block addressed directly under
-    /// `$` — the root preamble and, when a sole H1 is merged into the root,
-    /// that title's own blocks, which have no enclosing section either.
+    /// Extent length of the enclosing section for a block or item unit;
+    /// `None` for section and root units and for every node addressed directly
+    /// under `$` — the root preamble and, when a sole H1 is merged into the
+    /// root, that title's own blocks and items, which have no enclosing
+    /// section either.
     pub section_bytes: Option<u64>,
     /// The ` / `-separated heading trail above the node. The root unit's
     /// context is the file stem alone; every other unit's is the stem, then
@@ -35,11 +40,12 @@ pub struct IndexUnit {
     /// the root's context is `a` and the paragraph's is `a / Only`.
     pub context: String,
     /// The visible text of the node: the heading text of a section, the
-    /// block's text for a block, the title text followed by the frontmatter
-    /// scalars for the root.
+    /// block's text for a block, an item's complete visible text for a list
+    /// item, or the title text followed by the frontmatter scalars for the
+    /// root. A folded lead-in paragraph precedes the addressed node's text.
     pub body_text: String,
-    /// The text a hit is excerpted from, whitespace-collapsed: for a block
-    /// its own visible text; for a section the visible text of its own
+    /// The text a hit is excerpted from, whitespace-collapsed: for a block or
+    /// item its own visible text; for a section the visible text of its own
     /// preamble blocks — those directly under its heading, not its child
     /// sections' — so the hit shows what the section says rather than repeat
     /// its heading; for the root the frontmatter scalars. Empty when the
@@ -49,10 +55,11 @@ pub struct IndexUnit {
 
 /// Splits `source` (the contents of `relative_path`) into index units.
 ///
-/// Sections contribute their heading text, blocks their visible text, and the
-/// root — only when it has a merged title or a frontmatter mapping — the title
-/// text followed by the scalar values of that frontmatter. List items are not
-/// separate units because their text is already part of the list block.
+/// Sections contribute their heading text, blocks their visible text, direct
+/// list items their complete visible text, and the root — only when it has a
+/// merged title or a frontmatter mapping — the title text followed by the
+/// scalar values of that frontmatter. Empty items produce no item unit, while
+/// their containing list still produces its block unit.
 ///
 /// # Errors
 ///
@@ -76,17 +83,22 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
     };
     let mut headings: HashMap<DocumentPath, String> = HashMap::new();
     let mut units = Vec::new();
+    let paths = document_paths(document);
+    let folds = lead_in_folds(source, &paths);
     // Blocks follow their section in document order, so the last section
     // seen owns every block until the next section step.
     let mut enclosing_section: Option<u64> = None;
-    for (path, node) in document_paths(document) {
-        let (body_text, bytes, section_bytes, snippet_text, is_section) = match node {
+    let mut enclosing_list: Option<String> = None;
+    for (path, node) in paths {
+        let (body_text, bytes, section_bytes, snippet_text, is_section, parent_list) = match node {
             DocumentNode::Root(document) => {
+                enclosing_list = None;
                 let Some((body_text, snippet_text)) = root_unit(document) else {
                     continue;
                 };
                 units.push(IndexUnit {
                     mdpath: path.to_string(),
+                    parent_list: None,
                     bytes: source.len() as u64,
                     section_bytes: None,
                     context: stem.to_owned(),
@@ -96,6 +108,7 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                 continue;
             }
             DocumentNode::Section(section) => {
+                enclosing_list = None;
                 let heading = &section.heading;
                 headings.insert(path.clone(), heading.diagnostic_text.clone());
                 let bytes = node.extent().map_or(0, byte_length);
@@ -106,25 +119,53 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                     None,
                     own_text(source, section),
                     true,
+                    None,
                 )
             }
-            DocumentNode::Block(_) => {
+            DocumentNode::Block(block) => {
+                enclosing_list = matches!(block, Block::List(_)).then(|| path.to_string());
+                if folds.skipped.contains(&path) {
+                    continue;
+                }
                 let Some(range) = node.extent() else {
                     continue;
                 };
-                let text = block_text(source, range);
+                let text = prefixed_text(folds.prefixes.get(&path), block_text(source, range));
                 (
                     text.clone(),
                     byte_length(range),
                     enclosing_section,
                     text,
                     false,
+                    None,
+                )
+            }
+            DocumentNode::Item(_) => {
+                let Some(parent_list) = enclosing_list.clone() else {
+                    continue;
+                };
+                let Some(range) = node.extent() else {
+                    continue;
+                };
+                let own_text = block_text(source, range);
+                if own_text.is_empty() {
+                    continue;
+                }
+                let text = prefixed_text(folds.prefixes.get(&path), own_text);
+                (
+                    text.clone(),
+                    byte_length(range),
+                    enclosing_section,
+                    text,
+                    false,
+                    Some(parent_list),
                 )
             }
             _ => continue,
         };
         units.push(IndexUnit {
             mdpath: path.to_string(),
+            parent_list,
             bytes,
             section_bytes,
             context: context_of(&base_context, &path, &headings, is_section),
@@ -133,6 +174,135 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
         });
     }
     units
+}
+
+#[derive(Default)]
+struct LeadInFolds {
+    skipped: HashSet<DocumentPath>,
+    prefixes: HashMap<DocumentPath, String>,
+}
+
+/// Plans lead-in folding without changing the parsed document. Runs of
+/// lead-ins accumulate onto the next sibling block unit. A list keeps the
+/// prefix on its list unit only: the introduction belongs to the collection,
+/// not to any one direct item.
+fn lead_in_folds(source: &str, paths: &[(DocumentPath, DocumentNode<'_>)]) -> LeadInFolds {
+    let mut folds = LeadInFolds::default();
+    let mut pending = String::new();
+    for (index, (path, node)) in paths.iter().enumerate() {
+        let DocumentNode::Block(block) = node else {
+            continue;
+        };
+        if let Block::Paragraph(_) = block {
+            let Some(range) = node.extent() else {
+                continue;
+            };
+            let text = block_text(source, range);
+            let next_is_sibling = paths.get(index + 1).is_some_and(|(next_path, next_node)| {
+                matches!(next_node, DocumentNode::Block(_))
+                    && next_path.sections() == path.sections()
+            });
+            if paragraph_is_lead_in(slice(source, range), &text)
+                && next_is_sibling
+                && destination_path(paths, index + 1).is_some()
+            {
+                push_word(&mut pending, &text);
+                folds.skipped.insert(path.clone());
+                continue;
+            }
+        }
+        if !pending.is_empty() {
+            if let Some(destination) = destination_path(paths, index) {
+                folds
+                    .prefixes
+                    .insert(destination, std::mem::take(&mut pending));
+            }
+        }
+    }
+    folds
+}
+
+/// The unit path emitted for the block at `index`.
+fn destination_path(
+    paths: &[(DocumentPath, DocumentNode<'_>)],
+    index: usize,
+) -> Option<DocumentPath> {
+    let (path, node) = paths.get(index)?;
+    match node {
+        DocumentNode::Block(_) => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn prefixed_text(prefix: Option<&String>, own_text: String) -> String {
+    let Some(prefix) = prefix else {
+        return own_text;
+    };
+    let mut text = prefix.clone();
+    push_word(&mut text, &own_text);
+    text
+}
+
+/// Maximum visible length of a colon-ended lead-in. A colon is weak syntax
+/// that also ends substantive prose; 120 characters keeps brief introductions
+/// foldable without making a long matching paragraph disappear behind the
+/// path of the block it introduces.
+const COLON_LEAD_IN_MAX_CHARS: usize = 120;
+
+fn paragraph_is_lead_in(markdown: &str, visible: &str) -> bool {
+    (visible.ends_with(':') && visible.chars().count() <= COLON_LEAD_IN_MAX_CHARS)
+        || entirely_emphasized(markdown)
+}
+
+/// Whether the paragraph's whole inline body is one strong or emphasis span.
+fn entirely_emphasized(markdown: &str) -> bool {
+    let events: Vec<_> = Parser::new_ext(markdown, Options::empty()).collect();
+    let Some((first, rest)) = events.split_first() else {
+        return false;
+    };
+    let Some((last, middle)) = rest.split_last() else {
+        return false;
+    };
+    if !matches!(first, Event::Start(Tag::Paragraph))
+        || !matches!(last, Event::End(TagEnd::Paragraph))
+    {
+        return false;
+    }
+    let kind = match middle.first() {
+        Some(Event::Start(Tag::Strong)) => EmphasisKind::Strong,
+        Some(Event::Start(Tag::Emphasis)) => EmphasisKind::Emphasis,
+        _ => return false,
+    };
+    let mut depth = 0_usize;
+    for (index, event) in middle.iter().enumerate() {
+        match (kind, event) {
+            (EmphasisKind::Strong, Event::Start(Tag::Strong))
+            | (EmphasisKind::Emphasis, Event::Start(Tag::Emphasis)) => {
+                let Some(nested) = depth.checked_add(1) else {
+                    return false;
+                };
+                depth = nested;
+            }
+            (EmphasisKind::Strong, Event::End(TagEnd::Strong))
+            | (EmphasisKind::Emphasis, Event::End(TagEnd::Emphasis)) => {
+                let Some(remaining) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = remaining;
+                if depth == 0 {
+                    return index == middle.len().saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+#[derive(Clone, Copy)]
+enum EmphasisKind {
+    Strong,
+    Emphasis,
 }
 
 /// The whitespace-collapsed visible text of the block at `range`.
@@ -287,6 +457,8 @@ mod tests {
                 "$.rollback-plan",
                 "$.rollback-plan/p[0]",
                 "$.rollback-plan/list[0]",
+                "$.rollback-plan/list[0]/item[0]",
+                "$.rollback-plan/list[0]/item[1]",
             ]
         );
 
@@ -324,9 +496,20 @@ mod tests {
 
         let list = &units[3];
         assert_eq!(list.body_text, "first step second step");
-        assert_eq!(list.snippet_text, "first step second step");
         assert_eq!(list.bytes, "- first step\n- second step\n".len() as u64);
-        assert_eq!(list.section_bytes, Some(rollback_bytes));
+        assert_eq!(list.parent_list, None);
+        let first_item = &units[4];
+        assert_eq!(first_item.body_text, "first step");
+        assert_eq!(first_item.snippet_text, "first step");
+        assert_eq!(first_item.bytes, "- first step\n".len() as u64);
+        assert_eq!(first_item.section_bytes, Some(rollback_bytes));
+        assert_eq!(
+            first_item.parent_list.as_deref(),
+            Some("$.rollback-plan/list[0]")
+        );
+        let second_item = &units[5];
+        assert_eq!(second_item.body_text, "second step");
+        assert_eq!(second_item.bytes, "- second step\n".len() as u64);
     }
 
     #[test]
@@ -371,5 +554,129 @@ mod tests {
         let units = index_units("a.md", "Preamble only.\n").expect("parses");
         let mdpaths: Vec<&str> = units.iter().map(|unit| unit.mdpath.as_str()).collect();
         assert_eq!(mdpaths, ["$/p[0]"]);
+    }
+
+    #[test]
+    fn lists_emit_non_empty_direct_items_with_nested_text() {
+        let source = "# Title\n\n- first\n  - nested detail\n- second\n-\n";
+        let units = index_units("a.md", source).expect("parses");
+        let items: Vec<_> = units
+            .iter()
+            .filter(|unit| unit.mdpath.contains("/item["))
+            .collect();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].mdpath, "$/list[0]/item[0]");
+        assert_eq!(items[0].body_text, "first nested detail");
+        assert_eq!(items[0].snippet_text, "first nested detail");
+        assert_eq!(items[0].bytes, "- first\n  - nested detail\n".len() as u64);
+        assert_eq!(items[1].mdpath, "$/list[0]/item[1]");
+        assert_eq!(items[1].body_text, "second");
+        assert_eq!(items[0].parent_list.as_deref(), Some("$/list[0]"));
+        assert_eq!(items[1].parent_list.as_deref(), Some("$/list[0]"));
+        let list = units
+            .iter()
+            .find(|unit| unit.mdpath == "$/list[0]")
+            .expect("list unit exists beside its items");
+        assert_eq!(list.body_text, "first nested detail second");
+        assert_eq!(list.parent_list, None);
+        assert_eq!(
+            list.bytes,
+            "- first\n  - nested detail\n- second\n-\n".len() as u64
+        );
+        assert!(!units.iter().any(|unit| unit.mdpath == "$/list[0]/item[2]"));
+    }
+
+    #[test]
+    fn lead_in_paragraphs_fold_into_the_following_unit() {
+        let source = "# Title\n\n**Exit codes.**\n\n| Code | Meaning |\n| --- | --- |\n| 0 | success |\n\nChoices:\n\n- first\n  - nested detail\n- second\n\n*Last lead:*\n";
+        let units = index_units("a.md", source).expect("parses");
+        let unit = |path: &str| {
+            units
+                .iter()
+                .find(|unit| unit.mdpath == path)
+                .unwrap_or_else(|| panic!("missing {path}"))
+        };
+
+        assert!(!units.iter().any(|unit| unit.mdpath == "$/p[0]"));
+        let table_like_paragraph = unit("$/p[1]");
+        assert_eq!(
+            table_like_paragraph.body_text,
+            "Exit codes. | Code | Meaning | | --- | --- | | 0 | success |"
+        );
+        assert_eq!(
+            table_like_paragraph.bytes,
+            "| Code | Meaning |\n| --- | --- |\n| 0 | success |\n".len() as u64
+        );
+
+        assert!(!units.iter().any(|unit| unit.mdpath == "$/p[2]"));
+        assert_eq!(
+            unit("$/list[0]").body_text,
+            "Choices: first nested detail second"
+        );
+        assert_eq!(unit("$/list[0]/item[0]").body_text, "first nested detail");
+        assert_eq!(unit("$/list[0]/item[1]").body_text, "second");
+        assert_eq!(
+            unit("$/list[0]").bytes,
+            "- first\n  - nested detail\n- second\n".len() as u64,
+            "folding does not inflate the addressed list's size"
+        );
+
+        assert_eq!(
+            unit("$/p[3]").body_text,
+            "Last lead:",
+            "a lead-in with no following sibling remains its own unit"
+        );
+    }
+
+    #[test]
+    fn long_colon_paragraph_stays_its_own_unit() {
+        let paragraph = "This policy explains how every request is evaluated, which exceptions remain available, why the decision is recorded, and what reviewers must verify before approval, and then it introduces an example:";
+        assert!(paragraph.chars().count() > COLON_LEAD_IN_MAX_CHARS);
+        let source = format!("# Title\n\n{paragraph}\n\n```text\nexample = true\n```\n");
+        let units = index_units("a.md", &source).expect("parses");
+        let paragraph_unit = units
+            .iter()
+            .find(|unit| unit.mdpath == "$/p[0]")
+            .expect("long paragraph remains addressable");
+        assert_eq!(paragraph_unit.body_text, paragraph);
+        let code = units
+            .iter()
+            .find(|unit| unit.mdpath == "$/code[0]")
+            .expect("following code remains addressable");
+        assert_eq!(code.body_text, "example = true");
+    }
+
+    #[test]
+    fn separate_emphasis_spans_do_not_make_a_pseudo_heading() {
+        let source = "# Title\n\n**Quux** and **zebracorn**\n\n```text\nexample = true\n```\n";
+        let units = index_units("a.md", source).expect("parses");
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.mdpath == "$/p[0]")
+                .map(|unit| unit.body_text.as_str()),
+            Some("Quux and zebracorn")
+        );
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.mdpath == "$/code[0]")
+                .map(|unit| unit.body_text.as_str()),
+            Some("example = true")
+        );
+    }
+
+    #[test]
+    fn nested_emphasis_inside_one_strong_span_still_folds() {
+        let source = "# Title\n\n**Quux and _nested zebracorn_**\n\n```text\nexample = true\n```\n";
+        let units = index_units("a.md", source).expect("parses");
+        assert!(!units.iter().any(|unit| unit.mdpath == "$/p[0]"));
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.mdpath == "$/code[0]")
+                .map(|unit| unit.body_text.as_str()),
+            Some("Quux and nested zebracorn example = true")
+        );
     }
 }

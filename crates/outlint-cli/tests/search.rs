@@ -60,11 +60,28 @@ fn search_indexes_refreshes_and_forgets_workspace_markdown() {
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     assert!(stdout(&output).contains("docs/alpha.md $.operations 77B\n\n"));
 
+    // No conjunction hit explains each simple term using the same stemmed
+    // matching as the search itself.
+    let output = run(&directory, &["search", "rollbacks", "kumquats"]);
+    assert_eq!(output.status.code(), Some(1), "stdout: {}", stdout(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "outlint: no block contains all of: rollbacks kumquats\n  \
+         rollbacks 1, kumquats 1\n  \
+         (a block must contain every word; drop or change the rarest words)\n"
+    );
+
     // A deleted file disappears from the index; no hits is exit 1.
     fs::remove_file(directory.path().join("beta.md")).expect("fixture removable");
     let output = run(&directory, &["search", "kumquat"]);
     assert_eq!(output.status.code(), Some(1), "stdout: {}", stdout(&output));
     assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "outlint: no block contains all of: kumquat\n  kumquat 0\n  \
+         (a block must contain every word; drop or change the rarest words)\n"
+    );
 }
 
 #[test]
@@ -100,10 +117,99 @@ fn search_scopes_to_the_search_root_and_shares_the_repository_index() {
     // --root scopes the same way from anywhere; a missing root is a usage error.
     let output = run(&directory, &["search", "--root", "other", "kumquat"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    assert_eq!(headers(&output), ["b.md"]);
+    assert_eq!(headers(&output), ["other/b.md"]);
+    #[cfg(feature = "read")]
+    {
+        let header = stdout(&output).lines().next().unwrap_or("");
+        let mut fields = header.split_whitespace();
+        let file = fields.next().unwrap_or("");
+        let mdpath = fields.next().unwrap_or("");
+        let read = run(&directory, &["read", file, mdpath]);
+        assert_eq!(read.status.code(), Some(0), "stderr: {}", stderr(&read));
+        assert!(stdout(&read).contains("Kumquat jam recipe."));
+    }
+
+    // Searching a parent from a subdirectory still prints paths usable from
+    // that subdirectory: a local path for its own file and `..` for a sibling.
+    let output = run_in(
+        &directory.path().join("docs"),
+        &["search", "--root", "..", "kumquat"],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(headers(&output), ["../other/b.md", "a.md"]);
     let output = run(&directory, &["search", "--root", "missing", "kumquat"]);
     assert_eq!(output.status.code(), Some(2), "stdout: {}", stdout(&output));
     assert!(stderr(&output).contains("--root 'missing' is not a directory"));
+}
+
+#[test]
+fn search_returns_item_paths_and_folds_lead_ins() {
+    let directory = TempDir::new("search-units");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write(
+        "guide.md",
+        "# Guide\n\n**Exit codes.**\n\n| Code | Meaning |\n| --- | --- |\n| 0 | success |\n\nSteps:\n\n- ordinary preparation\n- rare needle detail\n",
+    );
+
+    let output = run(&directory, &["search", "exit", "codes"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains(
+            "guide.md $/p[1] 49B\n  Exit codes. | Code | Meaning | | --- | --- | | 0 | success"
+        ),
+        "stdout: {}",
+        stdout(&output)
+    );
+    assert!(!stdout(&output).contains("$/p[0]"));
+
+    let output = run(&directory, &["search", "rare", "needle"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("guide.md $/list[0]/item[1] 21B\n  rare needle detail\n"));
+    assert!(!stdout(&output).contains("guide.md $/list[0] "));
+
+    let output = run(&directory, &["search", "ordinary", "detail"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("guide.md $/list[0] 44B\n"));
+    assert!(!stdout(&output).contains("/item["));
+
+    let output = run(&directory, &["search", "needle", "absentword"]);
+    assert_eq!(output.status.code(), Some(1), "stdout: {}", stdout(&output));
+    assert!(
+        stderr(&output).contains("needle 1, absentword 0"),
+        "item text must not double-count its containing list: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_matching_item_below_the_display_cut_still_suppresses_its_list() {
+    let directory = TempDir::new("search-list-cut");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    let mut source = "# Ranking\n\n".to_owned();
+    for index in 0..10 {
+        source.push_str(&format!(
+            "Needle orchard needle orchard competitor {index}.\n\n"
+        ));
+    }
+    source.push_str(
+        "Needle orchard needle orchard needle orchard needle orchard needle orchard:\n\n\
+         - needle orchard target\n\
+         - unrelated filler\n",
+    );
+    directory.write("ranking.md", source);
+
+    let output = run(&directory, &["search", "needle", "orchard"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let headers: Vec<_> = stdout(&output)
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with("  "))
+        .collect();
+    assert_eq!(headers.len(), 10, "stdout: {}", stdout(&output));
+    assert!(
+        headers.iter().all(|header| header.contains("/p[")),
+        "the high-scoring list must be suppressed even when its narrower item falls below the ten displayed hits: {}",
+        stdout(&output)
+    );
 }
 
 #[test]

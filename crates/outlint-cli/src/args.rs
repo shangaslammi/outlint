@@ -83,7 +83,8 @@ pub(crate) const SEARCH_HELP: &str = "Usage: outlint search [options] <WORD>...\
 Search the Markdown files under the search root (the current directory unless\n\
 --root is given) and print the best-matching blocks. The index lives under\n\
 .outlint/search/ in the enclosing Git repository, or in the search root when\n\
-there is none.\n\
+there is none. Hit paths are relative to the current directory and can be\n\
+passed directly to `outlint read`.\n\
 \n\
 Options:\n\
       --root <DIR>            Search the files under DIR instead\n\

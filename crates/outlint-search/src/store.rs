@@ -12,16 +12,21 @@ use std::{
 
 use ignore::WalkBuilder;
 use tantivy::{
-    collector::TopDocs, directory::error::LockError, doc, schema::Value, snippet::SnippetGenerator,
-    DocId, Index, IndexReader, ReloadPolicy, SegmentReader, TantivyDocument, TantivyError, Term,
+    collector::{Count, TopDocs},
+    directory::error::LockError,
+    doc,
+    schema::Value,
+    snippet::SnippetGenerator,
+    DocId, Index, IndexReader, ReloadPolicy, Searcher, SegmentReader, TantivyDocument,
+    TantivyError, Term,
 };
 
 use crate::{
     index::{
-        build_query, build_schema, snippet_query, Fields, INDEX_FORMAT_VERSION, KIND_TOMBSTONE,
-        KIND_UNIT, MTIME, PATH, SIZE,
+        build_count_query, build_item_query, build_query, build_schema, snippet_query, Fields,
+        INDEX_FORMAT_VERSION, KIND_TOMBSTONE, KIND_UNIT, MTIME, PATH, SIZE,
     },
-    render::{sort_hits, Hit},
+    render::{select_smallest_hits, CandidateHit, Hit, TermCount},
     units::{collapse_whitespace, index_units, IndexUnit},
 };
 
@@ -32,6 +37,8 @@ const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
 const WRITER_HEAP_BYTES: usize = 50_000_000;
 /// Hits returned per search.
 const HIT_LIMIT: usize = 10;
+/// Broad candidates fetched before list-to-item replacement and de-duplication.
+const CANDIDATE_LIMIT: usize = HIT_LIMIT * 4;
 /// Upper bound on a hit's snippet, in characters, before the ellipsis.
 const SNIPPET_CHARS: usize = 160;
 const INDEX_MARKER: &str = "outlint-index.json";
@@ -116,6 +123,11 @@ impl Scope {
             search_root,
             prefix,
         })
+    }
+
+    /// The canonical directory whose Markdown files this scope searches.
+    pub fn search_root(&self) -> &Path {
+        &self.search_root
     }
 }
 
@@ -369,6 +381,9 @@ impl Store {
                 if let Some(section_bytes) = unit.section_bytes {
                     document.add_u64(fields.section_bytes, section_bytes);
                 }
+                if let Some(parent_list) = unit.parent_list {
+                    document.add_text(fields.parent_list, parent_list);
+                }
                 writer
                     .add_document(document)
                     .map_err(|error| format!("cannot index {}: {error}", file.path))?;
@@ -383,10 +398,12 @@ impl Store {
         Ok(notes)
     }
 
-    /// Returns up to ten best-scoring units for `words` under the search
-    /// root, ordered by score, path, and document path, with paths made
-    /// relative to the search root and each hit carrying a snippet of its
-    /// text chosen around the query words.
+    /// Returns up to ten best-scoring smallest matching units for `words`
+    /// under the search root, ordered by score, path, and document path. A
+    /// matching list is replaced by its best matching item when one item
+    /// satisfies the whole query; otherwise the list represents a match whose
+    /// words are spread across items. Paths are relative to the search root,
+    /// and each hit carries a snippet chosen around the query words.
     ///
     /// # Errors
     ///
@@ -395,49 +412,99 @@ impl Store {
         let searcher = self.reader()?.searcher();
         let query = build_query(&self.index, &self.fields, words, &self.scope.prefix);
         let top = searcher
-            .search(&*query, &TopDocs::with_limit(HIT_LIMIT).order_by_score())
+            .search(
+                &*query,
+                &TopDocs::with_limit(CANDIDATE_LIMIT).order_by_score(),
+            )
             .map_err(|error| format!("cannot search: {error}"))?;
         let highlight = snippet_query(&self.index, &self.fields, words);
         let mut generator = SnippetGenerator::create(&searcher, &*highlight, self.fields.snippet)
             .map_err(|error| format!("cannot prepare snippets: {error}"))?;
         generator.set_max_num_chars(SNIPPET_CHARS);
-        let mut hits = Vec::with_capacity(top.len());
+        let mut candidates = Vec::with_capacity(top.len());
         for (score, address) in top {
             let document: TantivyDocument = searcher
                 .doc(address)
                 .map_err(|error| format!("cannot load search hit: {error}"))?;
-            let text = |field| {
-                document
-                    .get_first(field)
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .to_owned()
-            };
-            let number = |field| document.get_first(field).and_then(|value| value.as_u64());
-            let Some(mdpath) = document
-                .get_first(self.fields.mdpath)
-                .and_then(|value| value.as_str())
-            else {
-                // Unreachable: the query requires `kind:unit`, and every unit
-                // carries an `mdpath`. Kept so that a malformed document is
-                // dropped rather than rendered with an empty address.
+            let Some(hit) = hit_from_document(&self.fields, &generator, &document, score) else {
                 continue;
             };
-            let mut path = text(self.fields.path);
-            if path.starts_with(&self.scope.prefix) {
-                path.drain(..self.scope.prefix.len());
-            }
-            hits.push(Hit {
-                path,
-                mdpath: mdpath.to_owned(),
-                bytes: number(self.fields.bytes).unwrap_or(0),
-                section_bytes: number(self.fields.section_bytes),
-                score,
-                snippet: snippet_of(&generator, &document, &text(self.fields.snippet)),
-            });
+            let narrower =
+                self.best_matching_item(&searcher, &generator, words, &hit.path, &hit.mdpath)?;
+            candidates.push(CandidateHit { hit, narrower });
         }
-        sort_hits(&mut hits);
+        let mut hits = select_smallest_hits(candidates, HIT_LIMIT);
+        for hit in &mut hits {
+            if hit.path.starts_with(&self.scope.prefix) {
+                hit.path.drain(..self.scope.prefix.len());
+            }
+        }
         Ok(hits)
+    }
+
+    /// Finds the best item under `mdpath` in `path` that satisfies the whole
+    /// query. For non-list candidates the exact parent restriction simply
+    /// matches nothing, avoiding a separate stored node-kind field.
+    fn best_matching_item(
+        &self,
+        searcher: &Searcher,
+        generator: &SnippetGenerator,
+        words: &str,
+        path: &str,
+        mdpath: &str,
+    ) -> Result<Option<Hit>, String> {
+        let query = build_item_query(
+            &self.index,
+            &self.fields,
+            words,
+            &self.scope.prefix,
+            path,
+            mdpath,
+        );
+        let Some((score, address)) = searcher
+            .search(&*query, &TopDocs::with_limit(1).order_by_score())
+            .map_err(|error| format!("cannot search list items: {error}"))?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let document: TantivyDocument = searcher
+            .doc(address)
+            .map_err(|error| format!("cannot load list item hit: {error}"))?;
+        Ok(hit_from_document(&self.fields, generator, &document, score))
+    }
+
+    /// Counts, for a simple whitespace-separated word query, how many
+    /// non-item units under the search root match each user-spelled term in
+    /// their own body. Lists stand for their items so each piece of text is
+    /// counted once. The same query parser and stemmed field as
+    /// [`Self::search`] determine each count. Returns `None` when `words` uses
+    /// phrase, field, Boolean, or other query syntax for which independent
+    /// term counts would be misleading.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the index cannot be read or searched.
+    pub fn term_counts(&self, words: &str) -> Result<Option<Vec<TermCount>>, String> {
+        let Some(terms) = simple_query_terms(words) else {
+            return Ok(None);
+        };
+        let searcher = self.reader()?.searcher();
+        terms
+            .into_iter()
+            .map(|term| {
+                let query = build_count_query(&self.index, &self.fields, term, &self.scope.prefix);
+                let blocks = searcher
+                    .search(&*query, &Count)
+                    .map_err(|error| format!("cannot count search term '{term}': {error}"))?;
+                Ok(TermCount {
+                    term: term.to_owned(),
+                    blocks,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
     }
 
     fn reader(&self) -> Result<IndexReader, String> {
@@ -459,6 +526,48 @@ impl Store {
         }
         Ok(known)
     }
+}
+
+/// Loads the rendering fields of one indexed unit. A malformed index document
+/// without an address is ignored instead of producing an unreadable hit.
+fn hit_from_document(
+    fields: &Fields,
+    generator: &SnippetGenerator,
+    document: &TantivyDocument,
+    score: f32,
+) -> Option<Hit> {
+    let text = |field| {
+        document
+            .get_first(field)
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_owned()
+    };
+    let number = |field| document.get_first(field).and_then(|value| value.as_u64());
+    let mdpath = document
+        .get_first(fields.mdpath)
+        .and_then(|value| value.as_str())?;
+    Some(Hit {
+        path: text(fields.path),
+        mdpath: mdpath.to_owned(),
+        bytes: number(fields.bytes).unwrap_or(0),
+        section_bytes: number(fields.section_bytes),
+        score,
+        snippet: snippet_of(generator, document, &text(fields.snippet)),
+    })
+}
+
+/// User-spelled terms of a plain keyword query. Being conservative is
+/// intentional: a generic no-hits note is more useful than incorrect counts
+/// when tantivy could interpret punctuation or an uppercase operator as
+/// syntax.
+fn simple_query_terms(words: &str) -> Option<Vec<&str>> {
+    let terms: Vec<_> = words.split_whitespace().collect();
+    (!terms.is_empty()
+        && terms.iter().all(|term| {
+            term.chars().all(char::is_alphanumeric) && !matches!(*term, "AND" | "OR" | "NOT")
+        }))
+    .then_some(terms)
 }
 
 /// The excerpt of `text` — the hit's stored snippet text — shown under its
