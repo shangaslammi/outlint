@@ -1,7 +1,5 @@
 //! Search output in human, JSON, and compact forms.
 
-#[cfg(test)]
-use outlint_search::FiniteScore;
 use outlint_search::{Hit, TermCount};
 use serde_json::json;
 
@@ -102,7 +100,7 @@ fn write_hit_json(output: &mut Vec<u8>, hit: &Hit) {
         object.value("mdpath", &json!(hit.mdpath));
         object.value("bytes", &json!(hit.bytes));
         object.value("section_bytes", &json!(hit.section_bytes));
-        object.value("score", &json!(hit.score.get()));
+        object.value("score", &json!(hit.score));
         object.value("snippet", &json!(hit.snippet));
     });
 }
@@ -174,7 +172,7 @@ mod tests {
                 mdpath: "$.setup/p[0]".into(),
                 bytes: 412,
                 section_bytes: Some(3_140),
-                score: FiniteScore::new(7.31).expect("fixture score is finite"),
+                score: 7.31,
                 snippet: "Run the setup script, then…".into(),
             },
             Hit {
@@ -182,7 +180,7 @@ mod tests {
                 mdpath: "$.decision-outcome".into(),
                 bytes: 900,
                 section_bytes: None,
-                score: FiniteScore::new(1.0).expect("fixture score is finite"),
+                score: 1.0,
                 snippet: "Chosen option: keep the current layout.".into(),
             },
             Hit {
@@ -190,7 +188,7 @@ mod tests {
                 mdpath: "$.options".into(),
                 bytes: 300,
                 section_bytes: None,
-                score: FiniteScore::new(0.5).expect("fixture score is finite"),
+                score: 0.5,
                 snippet: String::new(),
             },
         ]
