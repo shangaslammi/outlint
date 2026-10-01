@@ -387,6 +387,16 @@ fn usage_directories_encoding_bom_help_and_version_follow_the_contract() {
     let help = run(&directory, &["--help"]);
     assert_eq!(help.status.code(), Some(0));
     assert!(stdout(&help).starts_with("Usage: outlint"));
+    assert!(stdout(&help).contains("\n  check          Validate Markdown documents\n"));
+    let check_help = run(&directory, &["check", "--help"]);
+    assert!(stdout(&check_help)
+        .contains("\n  -s, --schema <SCHEMA>       Use one schema for every input\n"));
+    assert!(stdout(&check_help).contains(
+        "\n      --color auto|always|never\n                              Control human-output color"
+    ));
+    let schema_help = run(&directory, &["schema", "check", "--help"]);
+    assert!(stdout(&schema_help)
+        .contains("\n      --format human|json     Select output format (default: human)\n"));
 
     let version = run(&directory, &["--version"]);
     assert_eq!(version.status.code(), Some(0));

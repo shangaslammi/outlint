@@ -1,43 +1,49 @@
 //! Help text and hand-written command-line argument parsing.
 
-pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
-\n\
-Commands:\n\
-  check          Validate Markdown documents\n\
-  schema check   Validate Outlint schema files\n\
-\n\
-Options:\n\
-  -h, --help     Show help\n\
-  -V, --version  Show version\n";
+pub(crate) const TOP_HELP: &str = "\
+Usage: outlint <command> [options]
 
-pub(crate) const CHECK_HELP: &str = "Usage: outlint check <FILE>... [options]\n\
-\n\
-Validate individual Markdown files. Without --schema, each file discovers its\n\
-schema separately: the nearest <stem>.outlint.yml (file name, extension\n\
-removed) or .outlint.yml, specific name first in each ancestor directory.\n\
-Standard input (-) requires --schema.\n\
-\n\
-Options:\n\
-  -s, --schema <SCHEMA>       Use one schema for every input\n\
-      --format human|json     Select output format (default: human)\n\
-      --color auto|always|never\n\
-                              Control human-output color (default: auto)\n\
-  -h, --help                  Show help\n\
-\n\
-Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.\n";
+Commands:
+  check          Validate Markdown documents
+  schema check   Validate Outlint schema files
 
-pub(crate) const SCHEMA_HELP: &str = "Usage: outlint schema check <SCHEMA>... [options]\n\
-\n\
-Validate schema syntax, normalization, ids, matchers, cardinalities, constraints,\n\
-and all other schema-load-time checks.\n\
-\n\
-Options:\n\
-      --format human|json     Select output format (default: human)\n\
-      --color auto|always|never\n\
-                              Control human-output color (default: auto)\n\
-  -h, --help                  Show help\n\
-\n\
-Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.\n";
+Options:
+  -h, --help     Show help
+  -V, --version  Show version
+";
+
+pub(crate) const CHECK_HELP: &str = "\
+Usage: outlint check <FILE>... [options]
+
+Validate individual Markdown files. Without --schema, each file discovers its
+schema separately: the nearest <stem>.outlint.yml (file name, extension
+removed) or .outlint.yml, specific name first in each ancestor directory.
+Standard input (-) requires --schema.
+
+Options:
+  -s, --schema <SCHEMA>       Use one schema for every input
+      --format human|json     Select output format (default: human)
+      --color auto|always|never
+                              Control human-output color (default: auto)
+  -h, --help                  Show help
+
+Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.
+";
+
+pub(crate) const SCHEMA_HELP: &str = "\
+Usage: outlint schema check <SCHEMA>... [options]
+
+Validate schema syntax, normalization, ids, matchers, cardinalities, constraints,
+and all other schema-load-time checks.
+
+Options:
+      --format human|json     Select output format (default: human)
+      --color auto|always|never
+                              Control human-output color (default: auto)
+  -h, --help                  Show help
+
+Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.
+";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
