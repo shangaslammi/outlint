@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use outlint_core::{
-    document_paths, merged_title, parse_markdown, Block, Document, DocumentFrontmatter,
-    DocumentNode, DocumentPath, MarkdownOptions, MarkdownParseError, Section, TextRange,
+    document_paths, merged_title, parse_markdown, Block, CanonicalDocumentPath, Document,
+    DocumentFrontmatter, DocumentNode, MarkdownOptions, MarkdownParseError, Section, TextRange,
 };
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -17,7 +17,7 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 /// whose body includes the merged title and whose snippet does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexUnit {
-    /// Rendered [`DocumentPath`] of the node.
+    /// Rendered [`CanonicalDocumentPath`] of the node.
     pub mdpath: String,
     /// Rendered path of the direct parent list for an item unit; `None` for
     /// every other unit. This links an item to the list unit whose text
@@ -81,7 +81,7 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
         Some(title) => format!("{stem} / {}", title.heading.diagnostic_text),
         None => stem.to_owned(),
     };
-    let mut headings: HashMap<DocumentPath, String> = HashMap::new();
+    let mut headings: HashMap<CanonicalDocumentPath, String> = HashMap::new();
     let mut units = Vec::new();
     let paths = document_paths(document);
     let folds = lead_in_folds(source, &paths);
@@ -178,15 +178,15 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
 
 #[derive(Default)]
 struct LeadInFolds {
-    skipped: HashSet<DocumentPath>,
-    prefixes: HashMap<DocumentPath, String>,
+    skipped: HashSet<CanonicalDocumentPath>,
+    prefixes: HashMap<CanonicalDocumentPath, String>,
 }
 
 /// Plans lead-in folding without changing the parsed document. Runs of
 /// lead-ins accumulate onto the next sibling block unit. A list keeps the
 /// prefix on its list unit only: the introduction belongs to the collection,
 /// not to any one direct item.
-fn lead_in_folds(source: &str, paths: &[(DocumentPath, DocumentNode<'_>)]) -> LeadInFolds {
+fn lead_in_folds(source: &str, paths: &[(CanonicalDocumentPath, DocumentNode<'_>)]) -> LeadInFolds {
     let mut folds = LeadInFolds::default();
     let mut pending = String::new();
     for (index, (path, node)) in paths.iter().enumerate() {
@@ -224,9 +224,9 @@ fn lead_in_folds(source: &str, paths: &[(DocumentPath, DocumentNode<'_>)]) -> Le
 
 /// The unit path emitted for the block at `index`.
 fn destination_path(
-    paths: &[(DocumentPath, DocumentNode<'_>)],
+    paths: &[(CanonicalDocumentPath, DocumentNode<'_>)],
     index: usize,
-) -> Option<DocumentPath> {
+) -> Option<CanonicalDocumentPath> {
     let (path, node) = paths.get(index)?;
     match node {
         DocumentNode::Block(_) => Some(path.clone()),
@@ -380,8 +380,8 @@ fn frontmatter_scalars(frontmatter: &DocumentFrontmatter) -> String {
 /// its body, not its context.
 fn context_of(
     base: &str,
-    path: &DocumentPath,
-    headings: &HashMap<DocumentPath, String>,
+    path: &CanonicalDocumentPath,
+    headings: &HashMap<CanonicalDocumentPath, String>,
     is_section: bool,
 ) -> String {
     let steps = path.sections();

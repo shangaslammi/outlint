@@ -5,9 +5,10 @@
 use std::path::Path;
 
 use outlint_core::{
-    document_paths, merged_title, parse_markdown, Block, BlockKind, Document, DocumentNode,
-    DocumentPath, DocumentPathError, DocumentPathSyntaxError, DocumentPathTerminal, ListItem,
-    MarkdownOptions, Section, SectionStep, TextRange,
+    document_paths, merged_title, parse_markdown, Block, BlockKind, CanonicalDocumentPath,
+    CanonicalSectionStep, Document, DocumentNode, DocumentPath, DocumentPathError,
+    DocumentPathSyntaxError, DocumentPathTerminal, ListItem, MarkdownOptions, Section, SectionStep,
+    TextRange,
 };
 
 use crate::{
@@ -246,7 +247,7 @@ fn build_content(
 ) -> Result<ReadContent, ReadError> {
     let target = resolve_node(document, path)?;
     let entries = document_paths(document);
-    let canonical = canonical_path(&entries, target).map_or_else(|| path.clone(), Clone::clone);
+    let canonical = canonical_path(&entries, target).ok_or_else(|| missing_canonical(path))?;
     let content = render_content(source, document, path, depth)?;
     Ok(ReadContent {
         file: file.to_owned(),
@@ -354,12 +355,8 @@ pub(crate) fn build_tree(
     let entries = document_paths(document);
     // The argument may spell the node non-canonically (`$.[0]`, `setup[0]`);
     // the listing is keyed on the canonical path of the resolved node.
-    let base = canonical_path(&entries, target).map_or_else(|| path.clone(), Clone::clone);
-    let nodes = entries
-        .iter()
-        .filter(|(candidate, _)| listed(&base, candidate, depth, blocks))
-        .map(|(candidate, node)| tree_node(file_label, source, candidate, *node))
-        .collect();
+    let base = canonical_path(&entries, target).ok_or_else(|| missing_canonical(path))?;
+    let nodes = tree_nodes(file_label, source, &entries, base, depth, blocks);
     Ok(ReadTree {
         file: file_label.to_owned(),
         mdpath: base.to_string(),
@@ -382,8 +379,8 @@ pub(crate) fn render_tree(
 
 /// Whether `candidate` belongs to the listing under `base`.
 fn listed(
-    base: &DocumentPath,
-    candidate: &DocumentPath,
+    base: &CanonicalDocumentPath,
+    candidate: &CanonicalDocumentPath,
     depth: Option<usize>,
     blocks: bool,
 ) -> bool {
@@ -421,9 +418,9 @@ fn listed(
 /// The canonical spelling of `target` among `entries` (from
 /// [`document_paths`]); `None` for a node the enumeration does not list.
 fn canonical_path<'e>(
-    entries: &'e [(DocumentPath, DocumentNode<'_>)],
+    entries: &'e [(CanonicalDocumentPath, DocumentNode<'_>)],
     target: DocumentNode<'_>,
-) -> Option<&'e DocumentPath> {
+) -> Option<&'e CanonicalDocumentPath> {
     entries
         .iter()
         .find(|(_, node)| same_node(*node, target))
@@ -433,19 +430,51 @@ fn canonical_path<'e>(
 /// The canonical spelling of the node the first `steps` steps of `path`
 /// resolve to. The user's spelling may name it non-canonically (`setup[0]`
 /// for a unique `setup`), and every message names the node as the listing
-/// does. Falls back to the truncated spelling when it does not resolve.
-fn canonical_prefix(
-    entries: &[(DocumentPath, DocumentNode<'_>)],
+/// does. Returns `None` when the prefix cannot be resolved or the resolved
+/// node is absent from enumeration.
+fn canonical_prefix<'e>(
+    entries: &'e [(CanonicalDocumentPath, DocumentNode<'_>)],
     document: &Document,
     path: &DocumentPath,
     steps: usize,
-) -> DocumentPath {
+) -> Option<&'e CanonicalDocumentPath> {
     let prefix = path.prefix(steps);
     prefix
         .resolve(document)
         .ok()
         .and_then(|target| canonical_path(entries, target))
-        .map_or(prefix, Clone::clone)
+}
+
+const MISSING_CANONICAL: &str = "resolved node is absent from document path enumeration";
+
+fn missing_canonical(path: &DocumentPath) -> ReadError {
+    ReadError::Other {
+        path: path.clone(),
+        message: MISSING_CANONICAL.to_owned(),
+    }
+}
+
+fn missing_canonical_failure(file: &str, path: &DocumentPath) -> ReadFailure {
+    ReadFailure::Other {
+        file: file.to_owned(),
+        path: path.to_string(),
+        message: MISSING_CANONICAL.to_owned(),
+    }
+}
+
+fn tree_nodes(
+    file_label: &str,
+    source: &str,
+    entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
+    base: &CanonicalDocumentPath,
+    depth: Option<usize>,
+    blocks: bool,
+) -> Vec<TreeNode> {
+    entries
+        .iter()
+        .filter(|(candidate, _)| listed(base, candidate, depth, blocks))
+        .map(|(candidate, node)| tree_node(file_label, source, candidate, *node))
+        .collect()
 }
 
 fn same_node(left: DocumentNode<'_>, right: DocumentNode<'_>) -> bool {
@@ -468,7 +497,7 @@ fn node_size(source: &str, node: DocumentNode<'_>) -> u64 {
 fn tree_node(
     file_label: &str,
     source: &str,
-    path: &DocumentPath,
+    path: &CanonicalDocumentPath,
     node: DocumentNode<'_>,
 ) -> TreeNode {
     let bytes = node_size(source, node);
@@ -537,7 +566,12 @@ fn tree_node(
     }
 }
 
-fn text_preview_node(path: &DocumentPath, kind: &str, bytes: u64, preview: String) -> TreeNode {
+fn text_preview_node(
+    path: &CanonicalDocumentPath,
+    kind: &str,
+    bytes: u64,
+    preview: String,
+) -> TreeNode {
     TreeNode {
         mdpath: path.to_string(),
         kind: kind.to_owned(),
@@ -547,7 +581,7 @@ fn text_preview_node(path: &DocumentPath, kind: &str, bytes: u64, preview: Strin
     }
 }
 
-fn kind_only_node(path: &DocumentPath, kind: &str, bytes: u64) -> TreeNode {
+fn kind_only_node(path: &CanonicalDocumentPath, kind: &str, bytes: u64) -> TreeNode {
     TreeNode {
         mdpath: path.to_string(),
         kind: kind.to_owned(),
@@ -674,11 +708,11 @@ pub(crate) fn describe_error(
             resolved_steps,
         } => {
             let entries = document_paths(document);
-            let deepest = canonical_prefix(&entries, document, path, *resolved_steps);
+            let Some(deepest) = canonical_prefix(&entries, document, path, *resolved_steps) else {
+                return missing_canonical_failure(file, path);
+            };
             let (step, block_step) = step_text(path, *resolved_steps);
-            let nodes = build_tree(file, source, document, &deepest, Some(1), block_step)
-                .map(|tree| tree.nodes)
-                .unwrap_or_default();
+            let nodes = tree_nodes(file, source, &entries, deepest, Some(1), block_step);
             ReadFailure::Unresolved {
                 file: file.to_owned(),
                 path: path.to_string(),
@@ -693,7 +727,9 @@ pub(crate) fn describe_error(
             candidates: _,
         } => {
             let entries = document_paths(document);
-            let deepest = canonical_prefix(&entries, document, path, *resolved_steps);
+            let Some(deepest) = canonical_prefix(&entries, document, path, *resolved_steps) else {
+                return missing_canonical_failure(file, path);
+            };
             let (step, _) = step_text(path, *resolved_steps);
             // The candidates are the enumerated sections below the resolved
             // prefix whose own section step carries the failing slug — its
@@ -708,7 +744,7 @@ pub(crate) fn describe_error(
             let candidates = entries
                 .iter()
                 .filter_map(|(candidate, node)| {
-                    let Some((SectionStep::Named { slug: last, .. }, parent)) =
+                    let Some((CanonicalSectionStep::Named { slug: last, .. }, parent)) =
                         candidate.sections().split_last()
                     else {
                         return None;

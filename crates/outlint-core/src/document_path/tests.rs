@@ -2,8 +2,8 @@
 //! enumeration.
 
 use super::{
-    document_paths, heading_slug, merged_title, DocumentNode, DocumentPath, DocumentPathError,
-    DocumentPathTerminal, HeadingSlug, SectionStep,
+    document_paths, heading_slug, merged_title, CanonicalSectionStep, DocumentNode, DocumentPath,
+    DocumentPathError, DocumentPathTerminal, HeadingSlug, SectionStep,
 };
 use crate::{
     parse_markdown, Block, BlockKind, ByteOffset, Document, HeaderLevel, MarkdownOptions, TextRange,
@@ -437,17 +437,57 @@ fn enumerated_paths_render_reparse_and_resolve_to_their_nodes() {
     );
     for ((path, node), spelling) in paths.iter().zip(&spellings) {
         let reparsed = parse(spelling);
-        assert_eq!(&reparsed, path, "{spelling}");
-        let resolved = reparsed
+        assert_eq!(reparsed, DocumentPath::from(path), "{spelling}");
+        let parsed_node = reparsed
             .resolve(&document)
             .unwrap_or_else(|error| panic!("{spelling}: {error}"));
-        assert_eq!(range(resolved), range(*node), "{spelling}");
+        let canonical_node = path
+            .resolve(&document)
+            .unwrap_or_else(|error| panic!("{spelling}: {error}"));
+        assert_eq!(range(parsed_node), range(*node), "{spelling}");
+        assert_eq!(range(canonical_node), range(*node), "{spelling}");
         assert_eq!(
-            std::mem::discriminant(&resolved),
+            std::mem::discriminant(&parsed_node),
+            std::mem::discriminant(node),
+            "{spelling}"
+        );
+        assert_eq!(
+            std::mem::discriminant(&canonical_node),
             std::mem::discriminant(node),
             "{spelling}"
         );
     }
+}
+
+#[test]
+fn enumerated_section_steps_and_prefixes_remain_canonical() {
+    let document = document();
+    let paths = document_paths(&document);
+    let question = paths
+        .iter()
+        .find(|(path, _)| path.to_string() == "$.faq.question[1]/p[0]")
+        .map(|(path, _)| path)
+        .expect("the second question paragraph is enumerated");
+    assert!(matches!(
+        question.sections(),
+        [
+            CanonicalSectionStep::Named { index: None, .. },
+            CanonicalSectionStep::Named { index: Some(1), .. }
+        ]
+    ));
+    assert_eq!(question.prefix(1).to_string(), "$.faq");
+    assert_eq!(question.prefix(2).to_string(), "$.faq.question[1]");
+    assert_eq!(question.prefix(3), *question);
+
+    let slugless = paths
+        .iter()
+        .find(|(path, _)| path.to_string() == "$.faq.[2]")
+        .map(|(path, _)| path)
+        .expect("the slugless section is enumerated");
+    assert!(matches!(
+        slugless.sections().last(),
+        Some(CanonicalSectionStep::Position(2))
+    ));
 }
 
 #[test]

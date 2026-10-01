@@ -214,6 +214,25 @@ pub enum SectionStep {
     },
 }
 
+/// One section step of an enumerated node's canonical address.
+///
+/// Enumeration reaches sections through direct-child edges only, so this type
+/// has no descendant variant. A canonical path therefore cannot contain the
+/// input-only `..` shorthand.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CanonicalSectionStep {
+    /// `.slug` or `.slug[i]`: a section addressed by its heading slug.
+    Named {
+        /// Slug produced from the section heading by [`heading_slug`].
+        slug: HeadingSlug,
+        /// Zero-based position among siblings sharing the slug, present only
+        /// when that slug repeats in the sibling list.
+        index: Option<usize>,
+    },
+    /// `.[i]`: the position of a section whose heading has no slug.
+    Position(usize),
+}
+
 /// The optional terminal of a document path.
 ///
 /// A terminal names either one direct preamble block or one direct item of a
@@ -285,19 +304,7 @@ impl DocumentPath {
             };
         }
         let terminal_steps = steps.saturating_sub(self.sections.len());
-        let terminal = match (self.terminal, terminal_steps) {
-            (_, 0) | (None, _) => None,
-            (Some(DocumentPathTerminal::DirectBlock { kind, index }), _) => {
-                Some(DocumentPathTerminal::DirectBlock { kind, index })
-            }
-            (Some(DocumentPathTerminal::ListItem { list_index, .. }), 1) => {
-                Some(DocumentPathTerminal::DirectBlock {
-                    kind: BlockKind::List,
-                    index: list_index,
-                })
-            }
-            (Some(terminal @ DocumentPathTerminal::ListItem { .. }), _) => Some(terminal),
-        };
+        let terminal = terminal_prefix(self.terminal, terminal_steps);
         Self { sections, terminal }
     }
 
@@ -363,6 +370,110 @@ impl DocumentPath {
                     })
             }
         }
+    }
+}
+
+/// The canonical address of a node returned by [`document_paths`].
+///
+/// Values originate only from document enumeration and contain no descendant
+/// steps. The private fields prevent callers from claiming that an arbitrary
+/// selector is canonical; conversion to [`DocumentPath`] is total when
+/// selector behavior is needed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CanonicalDocumentPath {
+    sections: Vec<CanonicalSectionStep>,
+    terminal: Option<DocumentPathTerminal>,
+}
+
+impl CanonicalDocumentPath {
+    /// The canonical section steps in path order.
+    pub fn sections(&self) -> &[CanonicalSectionStep] {
+        &self.sections
+    }
+
+    /// The direct block or list item selected after the section steps.
+    pub fn terminal(&self) -> Option<DocumentPathTerminal> {
+        self.terminal
+    }
+
+    /// Returns a canonical prefix containing at most `steps` section and
+    /// terminal steps.
+    ///
+    /// Section steps are retained first. A direct block consumes one further
+    /// step; a list item consumes two, with the intermediate prefix addressing
+    /// its containing direct list. A count beyond the path length returns the
+    /// whole path.
+    pub fn prefix(&self, steps: usize) -> Self {
+        let sections: Vec<_> = self.sections.iter().take(steps).cloned().collect();
+        if sections.len() < self.sections.len() {
+            return Self {
+                sections,
+                terminal: None,
+            };
+        }
+        let terminal_steps = steps.saturating_sub(self.sections.len());
+        let terminal = terminal_prefix(self.terminal, terminal_steps);
+        Self { sections, terminal }
+    }
+
+    /// Follows this canonical address through `document`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentPathError::Unresolved`] only when this path was
+    /// enumerated from a different document. Canonical named steps carry the
+    /// sibling index exactly when required, so they cannot be ambiguous in
+    /// the document that produced them.
+    pub fn resolve<'d>(
+        &self,
+        document: &'d Document,
+    ) -> Result<DocumentNode<'d>, DocumentPathError> {
+        DocumentPath::from(self).resolve(document)
+    }
+}
+
+impl From<&CanonicalDocumentPath> for DocumentPath {
+    fn from(path: &CanonicalDocumentPath) -> Self {
+        let sections = path
+            .sections
+            .iter()
+            .map(|step| match step {
+                CanonicalSectionStep::Named { slug, index } => SectionStep::Named {
+                    slug: slug.clone(),
+                    index: *index,
+                },
+                CanonicalSectionStep::Position(index) => SectionStep::Position(*index),
+            })
+            .collect();
+        Self {
+            sections,
+            terminal: path.terminal,
+        }
+    }
+}
+
+impl fmt::Display for CanonicalDocumentPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        DocumentPath::from(self).fmt(formatter)
+    }
+}
+
+fn terminal_prefix(
+    terminal: Option<DocumentPathTerminal>,
+    terminal_steps: usize,
+) -> Option<DocumentPathTerminal> {
+    match (terminal, terminal_steps) {
+        (_, 0) | (None, _) => None,
+        (Some(DocumentPathTerminal::DirectBlock { kind, index }), _) => {
+            Some(DocumentPathTerminal::DirectBlock { kind, index })
+        }
+        (Some(DocumentPathTerminal::ListItem { list_index, .. }), 1) => {
+            Some(DocumentPathTerminal::DirectBlock {
+                kind: BlockKind::List,
+                index: list_index,
+            })
+        }
+        (Some(terminal @ DocumentPathTerminal::ListItem { .. }), _) => Some(terminal),
     }
 }
 
@@ -576,9 +687,12 @@ pub fn merged_title(document: &Document) -> Option<&Section> {
 /// children follow as `$.child`. Every returned path resolves back to the
 /// node it is paired with.
 ///
-pub fn document_paths(document: &Document) -> Vec<(DocumentPath, DocumentNode<'_>)> {
-    let mut paths = vec![(DocumentPath::root(), DocumentNode::Root(document))];
-    let root = DocumentPath::root();
+pub fn document_paths(document: &Document) -> Vec<(CanonicalDocumentPath, DocumentNode<'_>)> {
+    let root = CanonicalDocumentPath {
+        sections: Vec::new(),
+        terminal: None,
+    };
+    let mut paths = vec![(root.clone(), DocumentNode::Root(document))];
     let parent = Parent::root(document);
     push_preamble(&root, parent.preamble(), &mut paths);
     push_sections(&root, parent.children(), &mut paths);
@@ -586,9 +700,9 @@ pub fn document_paths(document: &Document) -> Vec<(DocumentPath, DocumentNode<'_
 }
 
 fn push_sections<'d>(
-    parent: &DocumentPath,
+    parent: &CanonicalDocumentPath,
     siblings: &'d [Section],
-    paths: &mut Vec<(DocumentPath, DocumentNode<'d>)>,
+    paths: &mut Vec<(CanonicalDocumentPath, DocumentNode<'d>)>,
 ) {
     let slugs: Vec<Option<HeadingSlug>> = siblings
         .iter()
@@ -602,12 +716,12 @@ fn push_sections<'d>(
     }
     for ((position, section), slug) in siblings.iter().enumerate().zip(&slugs) {
         let step = match slug {
-            None => SectionStep::Position(position),
+            None => CanonicalSectionStep::Position(position),
             Some(slug) => {
                 let tally = tallies.entry(slug).or_default();
                 let index = (tally.total > 1).then_some(tally.emitted);
                 tally.emitted += 1;
-                SectionStep::Named {
+                CanonicalSectionStep::Named {
                     slug: slug.clone(),
                     index,
                 }
@@ -632,9 +746,9 @@ struct SlugTally {
 /// Emits `blocks`, the direct blocks addressed under `parent` in document
 /// order, numbering each per kind as it goes.
 fn push_preamble<'d>(
-    parent: &DocumentPath,
+    parent: &CanonicalDocumentPath,
     blocks: impl Iterator<Item = &'d Block>,
-    paths: &mut Vec<(DocumentPath, DocumentNode<'d>)>,
+    paths: &mut Vec<(CanonicalDocumentPath, DocumentNode<'d>)>,
 ) {
     let mut ordinals: HashMap<BlockKind, usize> = HashMap::new();
     for block in blocks {
@@ -649,7 +763,7 @@ fn push_preamble<'d>(
             continue;
         };
         for (item_index, item) in list.items.iter().enumerate() {
-            let path = DocumentPath {
+            let path = CanonicalDocumentPath {
                 sections: parent.sections.clone(),
                 terminal: Some(DocumentPathTerminal::ListItem {
                     list_index: index,

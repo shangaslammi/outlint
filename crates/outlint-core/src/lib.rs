@@ -15,8 +15,9 @@ mod validator;
 mod yaml;
 
 pub use document_path::{
-    document_paths, heading_slug, merged_title, DocumentNode, DocumentPath, DocumentPathError,
-    DocumentPathSyntaxError, DocumentPathTerminal, HeadingSlug, SectionStep,
+    document_paths, heading_slug, merged_title, CanonicalDocumentPath, CanonicalSectionStep,
+    DocumentNode, DocumentPath, DocumentPathError, DocumentPathSyntaxError, DocumentPathTerminal,
+    HeadingSlug, SectionStep,
 };
 pub use load_result::{
     ByteOffset, CapturePath, ConstraintIndex, ConstraintPath, ContentOwner, ContentRuleIndex,

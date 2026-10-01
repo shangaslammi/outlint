@@ -5,9 +5,9 @@
 //! non-empty direct list item, and one for the document root when it has a
 //! frontmatter mapping or a title (a sole H1, which document paths merge into
 //! the root) — and each unit is stored as one tantivy document addressed by its
-//! [`outlint_core::DocumentPath`]. Searching returns the best-scoring units,
-//! each with a snippet of its text chosen around the query words; reading
-//! the full content is `outlint read`'s job.
+//! [`outlint_core::CanonicalDocumentPath`]. Searching returns the best-scoring
+//! units, each with a snippet of its text chosen around the query words;
+//! reading the full content is `outlint read`'s job.
 //!
 //! The split follows the workspace convention: [`index_units`] returns pure
 //! structured data from text; [`Store`] and the walk are the filesystem shell

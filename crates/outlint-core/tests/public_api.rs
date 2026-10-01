@@ -39,6 +39,64 @@ fn public_errors_implement_the_standard_error_trait() {
     assert_error::<outlint_core::DocumentPathError>();
 }
 
+#[test]
+fn canonical_document_paths_have_a_read_only_public_surface() {
+    use outlint_core::{
+        document_paths, BlockKind, CanonicalDocumentPath, CanonicalSectionStep, DocumentNode,
+        DocumentPath, DocumentPathTerminal, SectionStep,
+    };
+
+    fn assert_value<T: std::fmt::Debug + Clone + PartialEq + Eq + std::hash::Hash>() {}
+    assert_value::<CanonicalSectionStep>();
+    assert_value::<CanonicalDocumentPath>();
+
+    let document = parse_markdown(
+        "# Guide\n\n## Setup\n\n- first\n- second\n",
+        MarkdownOptions::default(),
+    )
+    .expect("Markdown parsing succeeds");
+    let entries: Vec<(CanonicalDocumentPath, DocumentNode<'_>)> = document_paths(&document);
+    let canonical = entries
+        .iter()
+        .find(|(path, _)| path.to_string() == "$.setup/list[0]/item[1]")
+        .map(|(path, _)| path)
+        .expect("the second item has a canonical path");
+
+    let [CanonicalSectionStep::Named { slug, index }] = canonical.sections() else {
+        panic!("the item is in one named section")
+    };
+    assert_eq!(slug.as_str(), "setup");
+    assert_eq!(*index, None);
+    assert_eq!(
+        canonical.terminal(),
+        Some(DocumentPathTerminal::ListItem {
+            list_index: 0,
+            item_index: 1,
+        })
+    );
+    assert_eq!(canonical.prefix(2).to_string(), "$.setup/list[0]");
+    assert!(matches!(
+        canonical.prefix(2).terminal(),
+        Some(DocumentPathTerminal::DirectBlock {
+            kind: BlockKind::List,
+            index: 0
+        })
+    ));
+
+    let selector = DocumentPath::from(canonical);
+    assert_eq!(selector.to_string(), canonical.to_string());
+    assert!(matches!(
+        canonical.resolve(&document),
+        Ok(DocumentNode::Item(_))
+    ));
+
+    let descendant = DocumentPath::parse("$..setup").expect("input shorthand parses");
+    assert!(matches!(
+        descendant.sections(),
+        [SectionStep::Descendant { .. }]
+    ));
+}
+
 /// Pins the two validation signatures. If either result type changes, these
 /// coercions stop compiling and the change has to be made deliberately.
 #[test]
