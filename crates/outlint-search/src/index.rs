@@ -7,7 +7,8 @@ use tantivy::{
         BooleanQuery, BoostQuery, ExistsQuery, Occur, Query, QueryParser, RangeQuery, TermQuery,
     },
     schema::{
-        Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, STORED, STRING,
+        BytesOptions, Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST,
+        STORED, STRING,
     },
     Index, Term,
 };
@@ -20,6 +21,7 @@ pub(crate) const INDEX_FORMAT_VERSION: u32 = 9;
 pub(crate) const PATH: &str = "path";
 pub(crate) const MDPATH: &str = "mdpath";
 pub(crate) const PARENT_LIST: &str = "parent_list";
+pub(crate) const UNIT_KEY: &str = "unit_key";
 pub(crate) const BYTES: &str = "bytes";
 pub(crate) const SECTION_BYTES: &str = "section_bytes";
 pub(crate) const CONTEXT: &str = "context";
@@ -42,6 +44,7 @@ pub(crate) struct Fields {
     pub(crate) path: Field,
     pub(crate) mdpath: Field,
     pub(crate) parent_list: Field,
+    pub(crate) unit_key: Field,
     pub(crate) bytes: Field,
     pub(crate) section_bytes: Field,
     pub(crate) context: Field,
@@ -64,6 +67,7 @@ impl Fields {
             path: field(PATH)?,
             mdpath: field(MDPATH)?,
             parent_list: field(PARENT_LIST)?,
+            unit_key: field(UNIT_KEY)?,
             bytes: field(BYTES)?,
             section_bytes: field(SECTION_BYTES)?,
             context: field(CONTEXT)?,
@@ -85,12 +89,13 @@ impl Fields {
 /// is excerpted from it, and indexed only so the snippet generator can
 /// tokenize it the way the query terms were — it takes no part in scoring.
 /// `parent_list` is an exact stored and fast field present only on item units;
-/// it supports parent-restricted item queries and excluding duplicate item
-/// text from term counts. `bytes` and `section_bytes` are stored and never
-/// indexed, and `section_bytes` is absent on section and root units. `kind`
-/// is indexed and never stored: it is [`KIND_UNIT`] or [`KIND_TOMBSTONE`],
-/// and every query requires the former so a tombstone can never take a hit's
-/// place.
+/// it identifies aggregate lists to exclude and excludes duplicate item text
+/// from term counts. `unit_key` is a bytes fast field on every searchable
+/// unit, used for exact list exclusion and the path/document-path tie-break.
+/// `bytes` and `section_bytes` are stored and never indexed, and
+/// `section_bytes` is absent on section and root units. `kind` is indexed and
+/// never stored: it is [`KIND_UNIT`] or [`KIND_TOMBSTONE`], and every query
+/// requires the former so a tombstone can never take a hit's place.
 pub(crate) fn build_schema() -> (Schema, Fields) {
     let stemmed = TextOptions::default().set_indexing_options(
         TextFieldIndexing::default()
@@ -102,6 +107,7 @@ pub(crate) fn build_schema() -> (Schema, Fields) {
         path: builder.add_text_field(PATH, STRING | STORED | FAST),
         mdpath: builder.add_text_field(MDPATH, STRING | STORED),
         parent_list: builder.add_text_field(PARENT_LIST, STRING | STORED | FAST),
+        unit_key: builder.add_bytes_field(UNIT_KEY, BytesOptions::default().set_fast()),
         bytes: builder.add_u64_field(BYTES, STORED),
         section_bytes: builder.add_u64_field(SECTION_BYTES, STORED),
         context: builder.add_text_field(CONTEXT, stemmed.clone()),
@@ -159,21 +165,20 @@ pub(crate) fn build_query(
     Box::new(BooleanQuery::new(clauses))
 }
 
-/// Restricts the ordinary query to item units belonging to one concrete list
-/// in one file. Exact restrictions receive zero score, so the returned score
-/// remains comparable with scores from [`build_query`].
-pub(crate) fn build_item_query(
+/// Restricts the ordinary query to item units. Its matches are enumerated
+/// once to identify the aggregate lists excluded from the result universe.
+pub(crate) fn build_matching_items_query(
     index: &Index,
     fields: &Fields,
     words: &str,
     prefix: &str,
-    path: &str,
-    parent_list: &str,
 ) -> Box<dyn Query> {
     Box::new(BooleanQuery::new(vec![
         (Occur::Must, build_query(index, fields, words, prefix)),
-        (Occur::Must, exact_filter(fields.path, path)),
-        (Occur::Must, exact_filter(fields.parent_list, parent_list)),
+        (
+            Occur::Must,
+            Box::new(ExistsQuery::new(PARENT_LIST.to_owned(), false)),
+        ),
     ]))
 }
 
@@ -192,16 +197,6 @@ pub(crate) fn build_count_query(
             Box::new(ExistsQuery::new(PARENT_LIST.to_owned(), false)),
         ),
     ]))
-}
-
-fn exact_filter(field: Field, value: &str) -> Box<dyn Query> {
-    Box::new(BoostQuery::new(
-        Box::new(TermQuery::new(
-            Term::from_field_text(field, value),
-            IndexRecordOption::Basic,
-        )),
-        0.0,
-    ))
 }
 
 /// Builds the query whose terms choose what a hit's snippet centres on:

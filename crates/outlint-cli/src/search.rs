@@ -257,6 +257,7 @@ fn stored_field_name(field: StoredField) -> &'static str {
         StoredField::DocumentPath => "mdpath",
         StoredField::Bytes => "bytes",
         StoredField::Snippet => "snippet",
+        StoredField::ParentList => "parent_list",
         _ => "unknown",
     }
 }
@@ -305,12 +306,6 @@ fn library_error_message(error: &SearchError) -> String {
         }
         SearchErrorKind::LoadSearchHit => {
             format!("cannot load search hit: {}", error.cause)
-        }
-        SearchErrorKind::ExecuteItemSearch => {
-            format!("cannot search list items: {}", error.cause)
-        }
-        SearchErrorKind::LoadItemHit => {
-            format!("cannot load list item hit: {}", error.cause)
         }
         SearchErrorKind::CountTerm { term } => {
             format!("cannot count search term '{term}': {}", error.cause)

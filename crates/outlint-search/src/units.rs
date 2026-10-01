@@ -11,11 +11,10 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 /// One searchable node of a Markdown document.
 ///
 /// `body_text` is what gets tokenized and scored; `snippet_text` is what a
-/// hit shows a fragment of. Both are visible text with inline code marked by
-/// backticks — link targets, HTML, and comments never reach either — but they
-/// differ for a section, whose body is its heading and whose snippet is its
-/// own content, and for the root, whose body includes the merged title and
-/// whose snippet does not.
+/// hit shows a fragment of. The body retains the original search
+/// normalization, which separates adjacent Markdown text and code events;
+/// the snippet instead preserves source adjacency and inline-code backticks.
+/// Link targets, HTML, and comments never reach either representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexUnit {
     /// Rendered [`CanonicalDocumentPath`] of the node.
@@ -40,11 +39,10 @@ pub struct IndexUnit {
     /// enclosing heading texts. For `a.md` containing `# Only\n\nBody.\n`
     /// the root's context is `a` and the paragraph's is `a / Only`.
     pub context: String,
-    /// The visible text of the node, with inline code marked by backticks: the
-    /// heading text of a section, the block's text for a block, an item's
-    /// complete visible text for a list item, or the title text followed by
-    /// the frontmatter scalars for the root. A folded lead-in paragraph
-    /// precedes the addressed node's text.
+    /// The normalized searchable text of the node: adjacent Markdown text
+    /// and code events are separated exactly as in index format 8, preserving
+    /// its matching semantics. A folded lead-in paragraph precedes the
+    /// addressed node's text.
     pub body_text: String,
     /// The text a hit is excerpted from, whitespace-collapsed: for a block or
     /// item its own visible text; for a section the visible text of its own
@@ -119,7 +117,7 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                     heading.diagnostic_text.clone(),
                     bytes,
                     None,
-                    own_text(source, section),
+                    own_snippet_text(source, section),
                     true,
                     None,
                 )
@@ -132,12 +130,20 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                 let Some(range) = node.extent() else {
                     continue;
                 };
-                let text = prefixed_text(folds.prefixes.get(&path), block_text(source, range));
+                let prefix = folds.prefixes.get(&path);
+                let body_text = prefixed_text(
+                    prefix.map(|prefix| &prefix.body),
+                    normalized_block_text(source, range),
+                );
+                let snippet_text = prefixed_text(
+                    prefix.map(|prefix| &prefix.snippet),
+                    faithful_block_text(source, range),
+                );
                 (
-                    text.clone(),
+                    body_text,
                     byte_length(range),
                     enclosing_section,
-                    text,
+                    snippet_text,
                     false,
                     None,
                 )
@@ -149,16 +155,21 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                 let Some(range) = node.extent() else {
                     continue;
                 };
-                let own_text = block_text(source, range);
-                if own_text.is_empty() {
+                let normalized = normalized_block_text(source, range);
+                if normalized.is_empty() {
                     continue;
                 }
-                let text = prefixed_text(folds.prefixes.get(&path), own_text);
+                let prefix = folds.prefixes.get(&path);
+                let body_text = prefixed_text(prefix.map(|prefix| &prefix.body), normalized);
+                let snippet_text = prefixed_text(
+                    prefix.map(|prefix| &prefix.snippet),
+                    faithful_block_text(source, range),
+                );
                 (
-                    text.clone(),
+                    body_text,
                     byte_length(range),
                     enclosing_section,
-                    text,
+                    snippet_text,
                     false,
                     Some(parent_list),
                 )
@@ -181,7 +192,13 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
 #[derive(Default)]
 struct LeadInFolds {
     skipped: HashSet<CanonicalDocumentPath>,
-    prefixes: HashMap<CanonicalDocumentPath, String>,
+    prefixes: HashMap<CanonicalDocumentPath, LeadInPrefix>,
+}
+
+#[derive(Default)]
+struct LeadInPrefix {
+    body: String,
+    snippet: String,
 }
 
 /// Plans lead-in folding without changing the parsed document. Runs of
@@ -190,7 +207,7 @@ struct LeadInFolds {
 /// not to any one direct item.
 fn lead_in_folds(source: &str, paths: &[(CanonicalDocumentPath, DocumentNode<'_>)]) -> LeadInFolds {
     let mut folds = LeadInFolds::default();
-    let mut pending = String::new();
+    let mut pending = LeadInPrefix::default();
     for (index, (path, node)) in paths.iter().enumerate() {
         let DocumentNode::Block(block) = node else {
             continue;
@@ -199,21 +216,22 @@ fn lead_in_folds(source: &str, paths: &[(CanonicalDocumentPath, DocumentNode<'_>
             let Some(range) = node.extent() else {
                 continue;
             };
-            let text = block_text(source, range);
+            let body = normalized_block_text(source, range);
             let next_is_sibling = paths.get(index + 1).is_some_and(|(next_path, next_node)| {
                 matches!(next_node, DocumentNode::Block(_))
                     && next_path.sections() == path.sections()
             });
-            if paragraph_is_lead_in(slice(source, range), &text)
+            if paragraph_is_lead_in(slice(source, range), &body)
                 && next_is_sibling
                 && destination_path(paths, index + 1).is_some()
             {
-                push_word(&mut pending, &text);
+                push_word(&mut pending.body, &body);
+                push_word(&mut pending.snippet, &faithful_block_text(source, range));
                 folds.skipped.insert(path.clone());
                 continue;
             }
         }
-        if !pending.is_empty() {
+        if !pending.body.is_empty() {
             if let Some(destination) = destination_path(paths, index) {
                 folds
                     .prefixes
@@ -307,18 +325,24 @@ enum EmphasisKind {
     Emphasis,
 }
 
-/// The whitespace-collapsed visible text of the block at `range`.
-fn block_text(source: &str, range: TextRange) -> String {
-    collapse_whitespace(&visible_text(slice(source, range)))
+/// Search text normalized exactly as before snippets gained faithful source
+/// adjacency: each Markdown text or code event contributes one word chunk.
+fn normalized_block_text(source: &str, range: TextRange) -> String {
+    collapse_whitespace(&normalized_visible_text(slice(source, range)))
+}
+
+/// Whitespace-collapsed source-faithful text used only for snippets.
+fn faithful_block_text(source: &str, range: TextRange) -> String {
+    collapse_whitespace(&faithful_visible_text(slice(source, range)))
 }
 
 /// The visible text of a section's own preamble blocks, space-joined. Child
 /// sections are left out: their text belongs to their own units.
-fn own_text(source: &str, section: &Section) -> String {
+fn own_snippet_text(source: &str, section: &Section) -> String {
     let mut text = String::new();
     for block in section.preamble.iter() {
         if let Some(range) = DocumentNode::Block(block).extent() {
-            push_word(&mut text, &block_text(source, range));
+            push_word(&mut text, &faithful_block_text(source, range));
         }
     }
     text
@@ -403,11 +427,24 @@ fn context_of(
     context
 }
 
+/// Space-joins every text and code event, preserving the matching semantics
+/// of index format 8 while still dropping link destinations, HTML, and
+/// comments.
+fn normalized_visible_text(markdown: &str) -> String {
+    let mut text = String::new();
+    for event in Parser::new_ext(markdown, Options::empty()) {
+        if let Event::Text(payload) | Event::Code(payload) = event {
+            push_word(&mut text, &payload);
+        }
+    }
+    text
+}
+
 /// Concatenates the visible payloads of a Markdown slice. Inline markup does
 /// not create whitespace that was absent in the source, explicit breaks and
 /// block boundaries do, and inline code retains backticks for faithful
-/// snippets. Link targets, HTML, and comments never reach the tokenizer.
-fn visible_text(markdown: &str) -> String {
+/// snippets. Link targets, HTML, and comments are dropped.
+fn faithful_visible_text(markdown: &str) -> String {
     let mut text = String::new();
     let mut separator = false;
     for event in Parser::new_ext(markdown, Options::empty()) {
@@ -486,26 +523,59 @@ mod tests {
     #[test]
     fn visible_text_preserves_inline_adjacency_and_source_boundaries() {
         assert_eq!(
-            collapse_whitespace(&visible_text("Use `conflicting-frontmatter`.")),
+            collapse_whitespace(&faithful_visible_text("Use `conflicting-frontmatter`.")),
             "Use `conflicting-frontmatter`."
         );
         assert_eq!(
-            collapse_whitespace(&visible_text("micro*service* and inter**operate**")),
+            collapse_whitespace(&faithful_visible_text(
+                "micro*service* and inter**operate**"
+            )),
             "microservice and interoperate"
         );
         assert_eq!(
-            collapse_whitespace(&visible_text(
+            collapse_whitespace(&faithful_visible_text(
                 "Read [the guide](https://example.test/destination) now."
             )),
             "Read the guide now."
         );
         assert_eq!(
-            collapse_whitespace(&visible_text("first line\nsecond line  \nthird line")),
+            collapse_whitespace(&faithful_visible_text(
+                "first line\nsecond line  \nthird line"
+            )),
             "first line second line third line"
         );
         assert_eq!(
-            collapse_whitespace(&visible_text("- first\n  - nested detail\n- second")),
+            collapse_whitespace(&faithful_visible_text(
+                "- first\n  - nested detail\n- second"
+            )),
             "first nested detail second"
+        );
+        assert_eq!(
+            collapse_whitespace(&normalized_visible_text(
+                "micro*service* and `conflicting-frontmatter`."
+            )),
+            "micro service and conflicting-frontmatter ."
+        );
+    }
+
+    #[test]
+    fn body_matching_stays_normalized_while_snippets_are_faithful() {
+        let units = index_units(
+            "guide.md",
+            "# Guide\n\nUse micro*service* with `conflicting-frontmatter`.\n",
+        )
+        .expect("fixture parses");
+        let paragraph = units
+            .iter()
+            .find(|unit| unit.mdpath == "$/p[0]")
+            .expect("paragraph unit");
+        assert_eq!(
+            paragraph.body_text,
+            "Use micro service with conflicting-frontmatter ."
+        );
+        assert_eq!(
+            paragraph.snippet_text,
+            "Use microservice with `conflicting-frontmatter`."
         );
     }
 

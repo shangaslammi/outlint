@@ -1,6 +1,36 @@
 //! Structured search results and deterministic hit selection.
 
 use std::cmp::Ordering;
+use std::num::NonZeroU16;
+
+/// Largest result limit accepted by the search API and CLI.
+pub const MAX_SEARCH_LIMIT: usize = 1_000;
+
+/// A positive search result limit bounded by [`MAX_SEARCH_LIMIT`].
+///
+/// Keeping the bound in the type prevents callers from passing an allocation
+/// size derived directly from untrusted command-line input.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchLimit(NonZeroU16);
+
+impl SearchLimit {
+    /// Validates a raw limit against the inclusive supported range.
+    pub fn new(value: usize) -> Option<Self> {
+        if value > MAX_SEARCH_LIMIT {
+            return None;
+        }
+        u16::try_from(value)
+            .ok()
+            .and_then(NonZeroU16::new)
+            .map(Self)
+    }
+
+    /// Returns the validated limit as an indexing and collection size.
+    pub fn get(self) -> usize {
+        usize::from(self.0.get())
+    }
+}
 
 /// One matching index unit, as loaded back from the index.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,21 +53,14 @@ pub struct Hit {
 }
 
 /// Ranked hits together with the number of matching blocks before the display
-/// limit. Direct item units are excluded from `total` because their containing
-/// list is the block they refine.
+/// limit. A matching item is its own result; its aggregate list is excluded.
+/// A list remains a result only when its query words are spread across items.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchResults {
-    /// Best matches after list-to-item narrowing and the requested limit.
+    /// Best matches after aggregate-list exclusion and the requested limit.
     pub hits: Vec<Hit>,
-    /// Number of non-item units whose own body satisfies the query.
+    /// Number of units in the same filtered universe from which `hits` came.
     pub total: usize,
-}
-
-/// One broad candidate and the narrower matching item found beneath it, when
-/// the candidate is a list whose one item satisfies the whole query.
-pub(crate) struct CandidateHit {
-    pub(crate) hit: Hit,
-    pub(crate) narrower: Option<Hit>,
 }
 
 /// One user-spelled query term and the number of indexed non-item units whose
@@ -61,30 +84,6 @@ pub(crate) fn sort_hits(hits: &mut [Hit]) {
             .then_with(|| left.path.cmp(&right.path))
             .then_with(|| left.mdpath.cmp(&right.mdpath))
     });
-}
-
-/// Replaces list candidates with matching item candidates, removes duplicate
-/// units, restores the global score order, and applies the display limit.
-/// A list with no narrower match remains, representing words spread across
-/// its items.
-pub(crate) fn select_smallest_hits(candidates: Vec<CandidateHit>, limit: usize) -> Vec<Hit> {
-    let mut hits: Vec<Hit> = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let hit = candidate.narrower.unwrap_or(candidate.hit);
-        if let Some(existing) = hits
-            .iter_mut()
-            .find(|existing| existing.path == hit.path && existing.mdpath == hit.mdpath)
-        {
-            if hit.score > existing.score {
-                *existing = hit;
-            }
-        } else {
-            hits.push(hit);
-        }
-    }
-    sort_hits(&mut hits);
-    hits.truncate(limit);
-    hits
 }
 
 #[cfg(test)]
@@ -127,65 +126,13 @@ mod tests {
     }
 
     #[test]
-    fn smallest_hit_selection_replaces_lists_deduplicates_and_then_limits() {
-        let item = hit("a.md", "$/list[0]/item[1]", 2.0);
-        let mut candidates = vec![
-            CandidateHit {
-                hit: hit("a.md", "$/list[0]", 8.0),
-                narrower: Some(item.clone()),
-            },
-            CandidateHit {
-                hit: item,
-                narrower: None,
-            },
-            CandidateHit {
-                hit: hit("a.md", "$/list[1]", 1.5),
-                narrower: None,
-            },
-        ];
-        for index in 0..10 {
-            candidates.push(CandidateHit {
-                hit: hit(
-                    "a.md",
-                    &format!("$.higher-{index}"),
-                    10.0 - index as f32 / 10.0,
-                ),
-                narrower: None,
-            });
-        }
-
-        let selected = select_smallest_hits(candidates, 12);
-        assert_eq!(selected.len(), 12);
+    fn search_limit_enforces_its_non_zero_upper_bound() {
+        assert!(SearchLimit::new(0).is_none());
+        assert_eq!(SearchLimit::new(1).map(SearchLimit::get), Some(1));
         assert_eq!(
-            selected
-                .iter()
-                .filter(|hit| hit.mdpath == "$/list[0]/item[1]")
-                .count(),
-            1,
-            "the replacement and directly ranked item collapse to one hit"
+            SearchLimit::new(MAX_SEARCH_LIMIT).map(SearchLimit::get),
+            Some(MAX_SEARCH_LIMIT)
         );
-        assert!(!selected.iter().any(|hit| hit.mdpath == "$/list[0]"));
-        assert!(selected.iter().any(|hit| hit.mdpath == "$/list[1]"));
-
-        let selected = select_smallest_hits(
-            vec![CandidateHit {
-                hit: hit("a.md", "$/list[0]", 20.0),
-                narrower: Some(hit("a.md", "$/list[0]/item[1]", 0.1)),
-            }]
-            .into_iter()
-            .chain((0..10).map(|index| CandidateHit {
-                hit: hit(
-                    "a.md",
-                    &format!("$.higher-{index}"),
-                    10.0 - index as f32 / 10.0,
-                ),
-                narrower: None,
-            }))
-            .collect(),
-            10,
-        );
-        assert!(!selected
-            .iter()
-            .any(|hit| hit.mdpath.starts_with("$/list[0]")));
+        assert!(SearchLimit::new(MAX_SEARCH_LIMIT.saturating_add(1)).is_none());
     }
 }

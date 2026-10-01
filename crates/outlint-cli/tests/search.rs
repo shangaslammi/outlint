@@ -177,7 +177,7 @@ fn search_returns_item_paths_and_folds_lead_ins() {
     );
     assert_eq!(output.status.code(), Some(0));
     let value = json_output(&output);
-    assert_eq!(value["total"], 1, "the list, not its item, is the block");
+    assert_eq!(value["total"], 1, "the matching item replaces its list");
     assert_eq!(value["hits"][0]["mdpath"], "$/list[0]/item[1]");
 
     let output = run(&directory, &["search", "ordinary", "detail"]);
@@ -219,7 +219,43 @@ fn search_preserves_canonical_paths_for_merged_and_repeated_sections() {
 }
 
 #[test]
-fn a_matching_item_below_the_display_cut_still_suppresses_its_list() {
+fn matching_items_replace_only_their_list_and_share_the_exact_total() {
+    let directory = TempDir::new("search-list-items");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write(
+        "items.md",
+        "# Items\n\n- needle first\n- needle second\n\nSeparator.\n\n- ordinary preparation\n- rare detail\n",
+    );
+
+    let output = run(&directory, &["search", "--format", "json", "needle"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let value = json_output(&output);
+    assert_eq!(value["total"], 2);
+    let paths: Vec<_> = value["hits"]
+        .as_array()
+        .expect("hits array")
+        .iter()
+        .filter_map(|hit| hit["mdpath"].as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        ["$/list[0]/item[0]", "$/list[0]/item[1]"],
+        "both matching items remain and their aggregate list is absent"
+    );
+    assert!(value["total"].as_u64().unwrap_or(0) >= paths.len() as u64);
+
+    let output = run(
+        &directory,
+        &["search", "--format", "json", "ordinary", "detail"],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let value = json_output(&output);
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["hits"][0]["mdpath"], "$/list[1]");
+}
+
+#[test]
+fn aggregate_lists_cannot_crowd_better_final_hits_out_of_the_limit() {
     let directory = TempDir::new("search-list-cut");
     fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
     let mut source = "# Ranking\n\n".to_owned();
@@ -228,24 +264,33 @@ fn a_matching_item_below_the_display_cut_still_suppresses_its_list() {
             "Needle orchard needle orchard competitor {index}.\n\n"
         ));
     }
-    source.push_str(
-        "Needle orchard needle orchard needle orchard needle orchard needle orchard:\n\n\
-         - needle orchard target\n\
-         - unrelated filler\n",
-    );
+    for index in 0..40 {
+        source.push_str(&format!(
+            "Cluster {index}:\n\n\
+             - needle orchard target {index}\n\
+             - needle needle needle needle needle\n\
+             - orchard orchard orchard orchard orchard\n\n"
+        ));
+    }
     directory.write("ranking.md", source);
 
-    let output = run(&directory, &["search", "needle", "orchard"]);
+    let output = run(
+        &directory,
+        &["search", "--format", "json", "needle", "orchard"],
+    );
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    let headers: Vec<_> = stdout(&output)
-        .lines()
-        .filter(|line| !line.is_empty() && !line.starts_with("  ") && !line.starts_with('('))
+    let value = json_output(&output);
+    assert_eq!(value["total"], 50);
+    let paths: Vec<_> = value["hits"]
+        .as_array()
+        .expect("hits array")
+        .iter()
+        .filter_map(|hit| hit["mdpath"].as_str())
         .collect();
-    assert_eq!(headers.len(), 10, "stdout: {}", stdout(&output));
+    assert_eq!(paths.len(), 10);
     assert!(
-        headers.iter().all(|header| header.contains("/p[")),
-        "the high-scoring list must be suppressed even when its narrower item falls below the ten displayed hits: {}",
-        stdout(&output)
+        paths.iter().all(|path| path.contains("/p[")),
+        "forty high-scoring aggregate lists must not crowd the better paragraphs out after those lists are excluded: {paths:?}"
     );
 }
 
@@ -272,6 +317,7 @@ fn search_limit_and_total_render_in_every_format() {
     let value = json_output(&output);
     assert_eq!(value["total"], 12);
     assert_eq!(value["hits"].as_array().map(Vec::len), Some(4));
+    assert!(value["total"].as_u64().unwrap_or(0) >= 4);
     let rendered = stdout(&output);
     assert!(
         rendered.find("\"query\":").expect("query member")
@@ -300,12 +346,16 @@ fn search_limit_and_total_render_in_every_format() {
     );
     assert!(!stdout(&output).contains("use --limit"));
 
-    for value in ["0", "many"] {
+    for value in ["0", "1001", "18446744073709551615", "many"] {
         let output = run(&directory, &["search", "--limit", value, "needle"]);
         assert_eq!(output.status.code(), Some(2), "{value}");
         assert_eq!(stdout(&output), "");
-        assert!(stderr(&output).contains("expected a positive integer"));
+        assert!(stderr(&output).contains("expected an integer from 1 to 1000"));
     }
+
+    let output = run(&directory, &["search", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout(&output).contains("--limit <N>             Print 1..=1000 hits"));
 }
 
 #[test]
@@ -340,6 +390,19 @@ fn search_reports_index_creation_and_rebuilds_only_when_they_happen() {
         )
     );
 
+    let marker = fs::read_to_string(index.join("outlint-index.json")).expect("marker readable");
+    let old_version = marker.replace(env!("CARGO_PKG_VERSION"), "0.0.0");
+    directory.write(".outlint/search/outlint-index.json", &old_version);
+    let output = run(&directory, &["search", "needle"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "outlint: rebuilt search index at {} (outlint version changed)\n",
+            index.display()
+        )
+    );
+
     directory.write(".outlint/search/meta.json", "not an index");
     let output = run(&directory, &["search", "needle"]);
     assert_eq!(output.status.code(), Some(0));
@@ -358,16 +421,33 @@ fn search_snippets_keep_inline_code_and_adjacent_punctuation() {
     fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
     directory.write(
         "guide.md",
-        "# Guide\n\nUse `conflicting-frontmatter`. Then continue.\n",
+        "# Guide\n\nUse micro*service*, inter**operate**, and `conflicting-frontmatter`. Then continue.\n",
     );
 
     let output = run(&directory, &["search", "frontmatter"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     assert!(
-        stdout(&output).contains("  Use `conflicting-frontmatter`. Then continue.\n"),
+        stdout(&output).contains(
+            "  Use microservice, interoperate, and `conflicting-frontmatter`. Then continue.\n"
+        ),
         "stdout: {}",
         stdout(&output)
     );
+
+    for words in [["micro", "service"], ["inter", "operate"]] {
+        let output = run(&directory, &["search", words[0], words[1]]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{words:?}: {}",
+            stderr(&output)
+        );
+        assert!(stdout(&output).contains("guide.md $/p[0]"));
+    }
+    for word in ["microservice", "interoperate"] {
+        let output = run(&directory, &["search", word]);
+        assert_eq!(output.status.code(), Some(1), "{word}: {}", stdout(&output));
+    }
 }
 
 #[test]

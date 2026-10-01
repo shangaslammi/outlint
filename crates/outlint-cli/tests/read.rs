@@ -215,6 +215,13 @@ fn read_path_hints_render_in_every_format() {
 
     let output = run(
         &directory,
+        &["read", "docs/guide.md", "$..frontmatter-object"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).ends_with("did you mean $.2-schema-format.2-3-frontmatter-object?\n"));
+
+    let output = run(
+        &directory,
         &["read", "--format", "compact", "docs/guide.md", "$.setp"],
     );
     assert_eq!(output.status.code(), Some(1));

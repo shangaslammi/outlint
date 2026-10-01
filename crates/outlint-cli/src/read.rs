@@ -749,64 +749,57 @@ fn unresolved_suggestions(
     document: &Document,
     entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
 ) -> Vec<String> {
-    let Some(SectionStep::Named { slug, .. }) = path.sections().get(resolved_steps) else {
+    let Some(step) = path.sections().get(resolved_steps) else {
         return Vec::new();
+    };
+    let (slug, scope) = match step {
+        SectionStep::Named { slug, .. } => (slug, SuggestionScope::Named),
+        SectionStep::Descendant { slug, .. } => (slug, SuggestionScope::Descendant),
+        SectionStep::Position(_) => return Vec::new(),
     };
     let Some(deepest) = canonical_prefix(entries, document, path, resolved_steps) else {
         return Vec::new();
     };
-    let exact = deeper_slug_suggestions(
+    let exact = exact_slug_suggestions(
         path,
         resolved_steps,
         slug,
         deepest,
         document,
         entries,
-        SlugMatch::Exact,
+        scope,
     );
     if !exact.is_empty() {
         return exact;
     }
-    let suffix = deeper_slug_suggestions(
-        path,
-        resolved_steps,
-        slug,
-        deepest,
-        document,
-        entries,
-        SlugMatch::HyphenSuffix,
-    );
-    if !suffix.is_empty() {
-        return suffix;
-    }
-    let sibling_typos = typo_suggestions(slug.as_str(), deepest, entries);
-    if !sibling_typos.is_empty() {
-        return sibling_typos;
-    }
-    deeper_typo_suggestions(
+    ranked_slug_suggestions(
         path,
         resolved_steps,
         slug.as_str(),
         deepest,
         document,
         entries,
+        scope,
     )
 }
 
 #[derive(Clone, Copy)]
-enum SlugMatch {
-    Exact,
-    HyphenSuffix,
+enum SuggestionScope {
+    Named,
+    Descendant,
 }
 
-fn deeper_slug_suggestions(
+/// Raw exact slugs form the first match class. For a named step only deeper
+/// descendants participate because an exact direct child would have resolved;
+/// a descendant step searches the complete subtree below its resolved prefix.
+fn exact_slug_suggestions(
     path: &DocumentPath,
     resolved_steps: usize,
     slug: &outlint_core::HeadingSlug,
     deepest: &CanonicalDocumentPath,
     document: &Document,
     entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
-    match_kind: SlugMatch,
+    scope: SuggestionScope,
 ) -> Vec<String> {
     entries
         .iter()
@@ -820,28 +813,20 @@ fn deeper_slug_suggestions(
                 .sections()
                 .len()
                 .saturating_sub(deepest.sections().len());
-            let slug_matches = match match_kind {
-                SlugMatch::Exact => depth > 1 && last == slug,
-                SlugMatch::HyphenSuffix => {
-                    depth >= 1 && is_proper_hyphen_suffix(last.as_str(), slug.as_str())
-                }
+            let eligible = match scope {
+                SuggestionScope::Named => depth > 1,
+                SuggestionScope::Descendant => depth >= 1,
             };
             if !matches!(node, DocumentNode::Section(_))
                 || !candidate.sections().starts_with(deepest.sections())
-                || !slug_matches
+                || !eligible
+                || last != slug
             {
                 return None;
             }
             apply_resolving_remainder(path, resolved_steps, candidate, document, entries)
         })
         .collect()
-}
-
-fn is_proper_hyphen_suffix(candidate: &str, suffix: &str) -> bool {
-    candidate != suffix
-        && candidate
-            .strip_suffix(suffix)
-            .is_some_and(|prefix| prefix.ends_with('-'))
 }
 
 /// Replaces the failed section step with `candidate`, then retains the
@@ -880,46 +865,34 @@ fn apply_resolving_remainder(
     None
 }
 
-fn typo_suggestions(
-    misspelled: &str,
-    deepest: &CanonicalDocumentPath,
-    entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
-) -> Vec<String> {
-    let mut candidates = Vec::new();
-    let mut best = usize::MAX;
-    for (candidate, node) in entries {
-        let Some((CanonicalSectionStep::Named { slug, .. }, parent)) =
-            candidate.sections().split_last()
-        else {
-            continue;
-        };
-        if !matches!(node, DocumentNode::Section(_)) || parent != deepest.sections() {
-            continue;
-        }
-        let distance = levenshtein(misspelled, slug.as_str());
-        let threshold = typo_threshold(misspelled.len().max(slug.as_str().len()));
-        if distance == 0 || distance > threshold || distance > best {
-            continue;
-        }
-        if distance < best {
-            best = distance;
-            candidates.clear();
-        }
-        candidates.push(candidate.to_string());
-    }
-    candidates
-}
-
-fn deeper_typo_suggestions(
+/// Ranks the second match class by capped edit distance. Numeric heading
+/// prefixes (`2-3-`) are stripped before comparison, so an exact numbered
+/// suffix has distance zero. Direct sibling typos compete with those suffix
+/// matches; raw deeper typos are a fallback only when no sibling is within
+/// threshold. The best distance wins and ties retain document order.
+fn ranked_slug_suggestions(
     path: &DocumentPath,
     resolved_steps: usize,
     misspelled: &str,
     deepest: &CanonicalDocumentPath,
     document: &Document,
     entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
+    scope: SuggestionScope,
 ) -> Vec<String> {
-    let mut candidates = Vec::new();
-    let mut best = usize::MAX;
+    let sibling_typo_exists = matches!(scope, SuggestionScope::Named)
+        && entries.iter().any(|(candidate, node)| {
+            let Some((CanonicalSectionStep::Named { slug, .. }, parent)) =
+                candidate.sections().split_last()
+            else {
+                return false;
+            };
+            matches!(node, DocumentNode::Section(_))
+                && parent == deepest.sections()
+                && capped_slug_distance(misspelled, slug.as_str())
+                    .is_some_and(|distance| distance > 0)
+        });
+    let mut suggestions = Vec::new();
+    let mut best_distance = usize::MAX;
     for (candidate, node) in entries {
         let Some((CanonicalSectionStep::Named { slug, .. }, _)) = candidate.sections().split_last()
         else {
@@ -931,45 +904,67 @@ fn deeper_typo_suggestions(
             .saturating_sub(deepest.sections().len());
         if !matches!(node, DocumentNode::Section(_))
             || !candidate.sections().starts_with(deepest.sections())
-            || depth <= 1
+            || depth == 0
         {
             continue;
         }
-        let candidate_best = hyphen_suffixes(slug.as_str())
-            .filter_map(|suffix| {
-                let distance = levenshtein(misspelled, suffix);
-                let threshold = typo_threshold(misspelled.len().max(suffix.len()));
-                (distance > 0 && distance <= threshold).then_some(distance)
-            })
-            .min();
-        let Some(distance) = candidate_best else {
+        let raw_distance = capped_slug_distance(misspelled, slug.as_str());
+        let numbered_distance = numbered_heading_tail(slug.as_str())
+            .and_then(|tail| capped_slug_distance(misspelled, tail));
+        let distance = match scope {
+            SuggestionScope::Descendant => min_distance(raw_distance, numbered_distance),
+            SuggestionScope::Named if depth == 1 => min_distance(
+                raw_distance.filter(|distance| *distance > 0),
+                numbered_distance,
+            ),
+            SuggestionScope::Named if sibling_typo_exists => numbered_distance,
+            SuggestionScope::Named => min_distance(
+                raw_distance.filter(|distance| *distance > 0),
+                numbered_distance,
+            ),
+        };
+        let Some(distance) = distance else {
             continue;
         };
-        if distance > best {
+        if distance > best_distance {
             continue;
         }
-        if distance < best {
-            best = distance;
-            candidates.clear();
-        }
-        if let Some(suggestion) =
+        let Some(suggestion) =
             apply_resolving_remainder(path, resolved_steps, candidate, document, entries)
-        {
-            candidates.push(suggestion);
+        else {
+            continue;
+        };
+        if distance < best_distance {
+            best_distance = distance;
+            suggestions.clear();
         }
+        suggestions.push(suggestion);
     }
-    candidates
+    suggestions
 }
 
-/// Every suffix beginning at a hyphen-delimited component, longest first.
-/// Including the whole slug lets an unnumbered deeper heading participate in
-/// the fallback while still allowing a numbered heading's semantic tail to
-/// provide the closer match.
-fn hyphen_suffixes(slug: &str) -> impl Iterator<Item = &str> {
-    std::iter::once(slug).chain(
-        slug.match_indices('-')
-            .filter_map(|(index, _)| slug.get(index.saturating_add(1)..)),
-    )
+fn min_distance(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(distance), None) | (None, Some(distance)) => Some(distance),
+        (None, None) => None,
+    }
+}
+
+/// Removes only leading all-digit hyphen components. Textual prefixes are
+/// never treated as numbering: `2-3-name` yields `name`, while `not-name`
+/// yields no suffix.
+fn numbered_heading_tail(slug: &str) -> Option<&str> {
+    let mut rest = slug;
+    let mut stripped = false;
+    while let Some((component, tail)) = rest.split_once('-') {
+        if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
+            break;
+        }
+        stripped = true;
+        rest = tail;
+    }
+    (stripped && !rest.is_empty()).then_some(rest)
 }
 
 /// Allows one edit for short slugs, two for medium slugs, and three for long
@@ -978,22 +973,55 @@ fn typo_threshold(slug_len: usize) -> usize {
     slug_len.div_ceil(3).clamp(1, 3)
 }
 
-fn levenshtein(left: &str, right: &str) -> usize {
-    let mut previous: Vec<usize> = (0..=right.len()).collect();
-    let mut current = vec![0; right.len().saturating_add(1)];
-    for (left_index, left_byte) in left.bytes().enumerate() {
-        current[0] = left_index.saturating_add(1);
-        for (right_index, right_byte) in right.bytes().enumerate() {
-            let substitution =
-                previous[right_index].saturating_add(usize::from(left_byte != right_byte));
-            current[right_index.saturating_add(1)] = previous[right_index.saturating_add(1)]
+fn capped_slug_distance(left: &str, right: &str) -> Option<usize> {
+    let threshold = typo_threshold(left.len().max(right.len()));
+    capped_levenshtein(left.as_bytes(), right.as_bytes(), threshold)
+}
+
+/// Computes Levenshtein distance only inside the useful threshold band. A
+/// length gap or row whose minimum already exceeds the cap exits immediately.
+fn capped_levenshtein(left: &[u8], right: &[u8], threshold: usize) -> Option<usize> {
+    if left.len().abs_diff(right.len()) > threshold {
+        return None;
+    }
+    let beyond = threshold.saturating_add(1);
+    let mut previous = vec![beyond; right.len().saturating_add(1)];
+    let mut current = vec![beyond; right.len().saturating_add(1)];
+    for (index, value) in previous
+        .iter_mut()
+        .enumerate()
+        .take(right.len().min(threshold).saturating_add(1))
+    {
+        *value = index;
+    }
+    for (left_index, left_byte) in left.iter().enumerate() {
+        current.fill(beyond);
+        let row = left_index.saturating_add(1);
+        if row <= threshold {
+            current[0] = row;
+        }
+        let start = row.saturating_sub(threshold).max(1);
+        let end = row.saturating_add(threshold).min(right.len());
+        let mut row_minimum = current[0];
+        for column in start..=end {
+            let substitution = previous[column.saturating_sub(1)]
+                .saturating_add(usize::from(*left_byte != right[column.saturating_sub(1)]));
+            current[column] = previous[column]
                 .saturating_add(1)
-                .min(current[right_index].saturating_add(1))
-                .min(substitution);
+                .min(current[column.saturating_sub(1)].saturating_add(1))
+                .min(substitution)
+                .min(beyond);
+            row_minimum = row_minimum.min(current[column]);
+        }
+        if row_minimum > threshold {
+            return None;
         }
         std::mem::swap(&mut previous, &mut current);
     }
-    previous.get(right.len()).copied().unwrap_or(left.len())
+    previous
+        .get(right.len())
+        .copied()
+        .filter(|distance| *distance <= threshold)
 }
 
 /// Enriches a path failure with canonical rows before presentation.
@@ -1345,6 +1373,11 @@ mod tests {
             "an exact deeper slug outranks broader suffixes"
         );
         assert_eq!(suggestions_for(NUMBERED, "$.options"), ["$.7-options"]);
+        assert_eq!(
+            suggestions_for(NUMBERED, "$..frontmatter-object.properties"),
+            ["$.2-schema-format.2-3-frontmatter-object.properties"],
+            "descendant failures search below the resolved prefix"
+        );
     }
 
     #[test]
@@ -1361,12 +1394,48 @@ mod tests {
             ["$.2-schema-format.2-3-frontmatter-object"]
         );
 
-        const SIBLING_FIRST: &str = "# Guide\n\n## Frontmatter Objects\n\n## 2. Schema Format\n\n### 2.3 Frontmatter Objecc\n";
+        const SIBLING_FIRST: &str = "# Guide\n\n## Frontmatter Objects\n\n## 2. Schema Format\n\n### 2.3 Frontmatter Objekk\n";
         assert_eq!(
             suggestions_for(SIBLING_FIRST, "$.frontmatter-object"),
             ["$.frontmatter-objects"],
-            "an in-threshold sibling typo suppresses the deeper fallback"
+            "a closer sibling typo outranks a numbered deeper typo"
         );
+    }
+
+    #[test]
+    fn only_numeric_heading_prefixes_are_suffixes() {
+        const SOURCE: &str =
+            "# Guide\n\n## Frontmatter Objects\n\n## Schema\n\n### Not Frontmatter Object\n";
+        assert_eq!(
+            suggestions_for(SOURCE, "$.frontmatter-object"),
+            ["$.frontmatter-objects"],
+            "a textual prefix must not hide the closer sibling typo"
+        );
+        assert_eq!(
+            numbered_heading_tail("2-3-frontmatter-object"),
+            Some("frontmatter-object")
+        );
+        assert_eq!(numbered_heading_tail("7-options"), Some("options"));
+        assert_eq!(numbered_heading_tail("not-frontmatter-object"), None);
+    }
+
+    #[test]
+    fn capped_edit_distance_handles_long_input_across_many_headings() {
+        assert_eq!(capped_levenshtein(b"kitten", b"sitting", 3), Some(3));
+        assert_eq!(capped_levenshtein(b"option", b"options", 1), Some(1));
+        assert_eq!(capped_levenshtein(b"abcd", b"wxyz", 3), None);
+        assert_eq!(capped_levenshtein(b"", b"abc", 3), Some(3));
+        assert_eq!(capped_levenshtein(b"", b"abcd", 3), None);
+
+        let query_slug = "a".repeat(2_048);
+        let candidate_slug = format!("bbbb{}", "a".repeat(2_044));
+        let mut source = "# Guide\n".to_owned();
+        for _ in 0..200 {
+            source.push_str("\n## ");
+            source.push_str(&candidate_slug);
+            source.push('\n');
+        }
+        assert!(suggestions_for(&source, &format!("$.{query_slug}")).is_empty());
     }
 
     #[test]

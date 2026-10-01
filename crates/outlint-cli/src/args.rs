@@ -1,5 +1,8 @@
 //! Help text and hand-written command-line argument parsing.
 
+#[cfg(feature = "search")]
+use outlint_search::{SearchLimit, MAX_SEARCH_LIMIT};
+
 pub(crate) fn top_help() -> String {
     let mut help = "Usage: outlint <command> [options]\n\
                     \n\
@@ -60,7 +63,7 @@ passed directly to `outlint read`.\n\
 \n\
 Options:\n\
       --root <DIR>            Search the files under DIR instead\n\
-      --limit <N>             Print at most N hits (default: 10)\n\
+      --limit <N>             Print 1..=1000 hits (default: 10)\n\
       --format human|json|compact\n\
                               Select output format (default: human)\n\
       OUTLINT_FORMAT          Set the default format; --format overrides it\n\
@@ -141,8 +144,8 @@ pub(crate) struct SearchOptions {
     pub(crate) root: Option<String>,
     /// The search words joined by single spaces; never blank.
     pub(crate) words: String,
-    /// Maximum hits to print; always positive.
-    pub(crate) limit: usize,
+    /// Maximum hits to print, validated within the supported non-zero range.
+    pub(crate) limit: SearchLimit,
     /// Presentation selected explicitly or by `OUTLINT_FORMAT`.
     pub(crate) format: ReadSearchFormat,
 }
@@ -297,18 +300,16 @@ pub(crate) fn parse_search_args(
     if words.trim().is_empty() {
         return Err("missing search words".to_owned());
     }
-    let limit = limit
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .ok()
-                .filter(|limit| *limit > 0)
-                .ok_or_else(|| {
-                    format!("invalid --limit value '{value}' (expected a positive integer)")
-                })
-        })
-        .transpose()?
-        .unwrap_or(10);
+    let limit_spelling = limit.as_deref().unwrap_or("10");
+    let limit = limit_spelling
+        .parse::<usize>()
+        .ok()
+        .and_then(SearchLimit::new)
+        .ok_or_else(|| {
+            format!(
+                "invalid --limit value '{limit_spelling}' (expected an integer from 1 to {MAX_SEARCH_LIMIT})"
+            )
+        })?;
     let format = match format {
         Some(format) => format,
         None => parse_environment_format(environment)?,
@@ -486,7 +487,9 @@ mod tests {
         let parse = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
             match parse_search_args(&args, &EnvironmentFormat::Unset) {
-                Ok(ParseOutcome::Run(options)) => Ok((options.root, options.words, options.limit)),
+                Ok(ParseOutcome::Run(options)) => {
+                    Ok((options.root, options.words, options.limit.get()))
+                }
                 Ok(ParseOutcome::Help) => Ok((None, "help".to_owned(), 10)),
                 Err(message) => Err(message),
             }
@@ -508,6 +511,12 @@ mod tests {
         assert!(parse(&["--limit", "0", "word"]).is_err());
         assert!(parse(&["--limit", "-1", "word"]).is_err());
         assert!(parse(&["--limit", "many", "word"]).is_err());
+        assert_eq!(
+            parse(&["--limit", "1000", "word"]).map(|value| value.2),
+            Ok(1000)
+        );
+        assert!(parse(&["--limit", "1001", "word"]).is_err());
+        assert!(parse(&["--limit", "18446744073709551615", "word"]).is_err());
         assert!(parse(&["--limit", "1", "--limit", "2", "word"]).is_err());
         assert!(parse(&["-x", "word"]).is_err());
     }

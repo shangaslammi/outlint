@@ -20,7 +20,7 @@ mod result;
 mod store;
 mod units;
 
-pub use result::{Hit, SearchResults, TermCount};
+pub use result::{Hit, SearchLimit, SearchResults, TermCount, MAX_SEARCH_LIMIT};
 pub use store::{
     walk_markdown, Scope, SearchError, SearchErrorKind, SearchNote, SearchNoteOperation, Store,
     StoredField, Walk, WalkedFile,

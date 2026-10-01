@@ -7,26 +7,30 @@ use std::{
     io::{self, Read},
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
     time::UNIX_EPOCH,
 };
 
 use ignore::{Error as WalkError, WalkBuilder};
 use tantivy::{
-    collector::{Count, TopDocs},
+    collector::{
+        sort_key::{SortByBytes, SortBySimilarityScore},
+        BytesFilterCollector, Count, DocSetCollector, TopDocs,
+    },
     directory::error::LockError,
     doc,
     schema::Value,
     snippet::SnippetGenerator,
-    DocId, Index, IndexReader, ReloadPolicy, Searcher, SegmentReader, TantivyDocument,
+    DocId, Index, IndexReader, Order, ReloadPolicy, Searcher, SegmentReader, TantivyDocument,
     TantivyError, Term,
 };
 
 use crate::{
     index::{
-        build_count_query, build_item_query, build_query, build_schema, snippet_query, Fields,
-        INDEX_FORMAT_VERSION, KIND_TOMBSTONE, KIND_UNIT, MTIME, PATH, SIZE,
+        build_count_query, build_matching_items_query, build_query, build_schema, snippet_query,
+        Fields, INDEX_FORMAT_VERSION, KIND_TOMBSTONE, KIND_UNIT, MTIME, PATH, SIZE, UNIT_KEY,
     },
-    result::{select_smallest_hits, CandidateHit, Hit, SearchResults, TermCount},
+    result::{sort_hits, Hit, SearchLimit, SearchResults, TermCount},
     units::{collapse_whitespace, index_units, IndexUnit},
 };
 
@@ -35,9 +39,6 @@ use crate::{
 const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
 /// Memory budget handed to the tantivy writer.
 const WRITER_HEAP_BYTES: usize = 50_000_000;
-/// Broad candidates fetched per requested result before list-to-item
-/// replacement and de-duplication.
-const CANDIDATES_PER_HIT: usize = 4;
 /// Upper bound on a hit's snippet, in characters, before the ellipsis.
 const SNIPPET_CHARS: usize = 160;
 const INDEX_MARKER: &str = "outlint-index.json";
@@ -87,10 +88,6 @@ pub enum SearchErrorKind {
     PrepareSnippets,
     /// A ranked hit could not be loaded.
     LoadSearchHit,
-    /// A query for matching list items could not be executed.
-    ExecuteItemSearch,
-    /// A matching list-item hit could not be loaded.
-    LoadItemHit,
     /// A query term could not be counted.
     CountTerm {
         /// The user-spelled term being counted.
@@ -115,6 +112,8 @@ pub enum StoredField {
     Bytes,
     /// Source text used to produce the displayed snippet.
     Snippet,
+    /// Canonical document path of an item's aggregate list.
+    ParentList,
 }
 
 /// A noteworthy index lifecycle event or recoverable issue that leaves search
@@ -412,13 +411,26 @@ fn plan_refresh(
     RefreshPlan { reindex, remove }
 }
 
-/// Reads only the leading numeric format member written by this crate. Other
-/// marker content remains opaque and causes the safer open-failure rebuild
-/// note rather than being treated as a known format transition.
-fn marker_format(marker: Option<&str>) -> Option<u32> {
-    let digits = marker?.strip_prefix("{\"format\": ")?;
-    let end = digits.find(|character: char| !character.is_ascii_digit())?;
-    digits.get(..end)?.parse().ok()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IndexMarker<'a> {
+    format: u32,
+    outlint: &'a str,
+}
+
+/// Parses the exact small marker shape written by this crate. Unknown marker
+/// content remains an open failure rather than being assigned a guessed
+/// compatibility reason.
+fn parse_index_marker(marker: &str) -> Option<IndexMarker<'_>> {
+    let marker = marker.strip_suffix('\n').unwrap_or(marker);
+    let members = marker.strip_prefix("{\"format\": ")?.strip_suffix("\"}")?;
+    let (format, outlint) = members.split_once(", \"outlint\": \"")?;
+    if outlint.contains('"') {
+        return None;
+    }
+    Some(IndexMarker {
+        format: format.parse().ok()?,
+        outlint,
+    })
 }
 
 /// Describes the successful creation or rebuild selected from already-read
@@ -439,12 +451,14 @@ fn rebuilt_index_note(
     SearchNote {
         path: Some(directory.to_path_buf()),
         operation: SearchNoteOperation::RebuildIndex,
-        cause: if marker_format(actual_marker).is_some_and(|format| format != INDEX_FORMAT_VERSION)
-        {
-            "format changed".to_owned()
-        } else {
-            "index could not be opened".to_owned()
-        },
+        cause: match actual_marker.and_then(parse_index_marker) {
+            Some(marker) if marker.format != INDEX_FORMAT_VERSION => "format changed",
+            Some(marker) if marker.outlint != env!("CARGO_PKG_VERSION") => {
+                "outlint version changed"
+            }
+            _ => "index could not be opened",
+        }
+        .to_owned(),
     }
 }
 
@@ -621,6 +635,7 @@ impl Store {
                 continue;
             }
             for unit in units {
+                let key = unit_key(&file.path, &unit.mdpath);
                 let mut document = doc!(
                     fields.path => file.path.as_str(),
                     fields.mdpath => unit.mdpath,
@@ -632,6 +647,7 @@ impl Store {
                     fields.size => file.size,
                     fields.kind => KIND_UNIT,
                 );
+                document.add_bytes(fields.unit_key, &key);
                 if let Some(section_bytes) = unit.section_bytes {
                     document.add_u64(fields.section_bytes, section_bytes);
                 }
@@ -665,55 +681,49 @@ impl Store {
     }
 
     /// Returns up to `limit` best-scoring smallest matching units for `words`
-    /// under the search root, ordered by score, path, and document path. A
-    /// matching list is replaced by its best matching item when one item
-    /// satisfies the whole query; otherwise the list represents a match whose
-    /// words are spread across items. Paths are relative to the search root,
-    /// and each hit carries a snippet chosen around the query words.
+    /// under the search root, ordered by score, path, and document path.
+    /// Matching items remain independent hits and their aggregate list is
+    /// excluded; a list remains only when no one item contains every query
+    /// word. Paths are relative to the search root, and each hit carries a
+    /// snippet chosen around the query words.
     ///
     /// # Errors
     ///
     /// Returns a structured error when the index cannot be read or a stored
     /// hit is corrupt.
-    pub fn search(&self, words: &str, limit: usize) -> Result<SearchResults, SearchError> {
+    pub fn search(&self, words: &str, limit: SearchLimit) -> Result<SearchResults, SearchError> {
         let searcher = self.reader()?.searcher();
         let query = build_query(&self.index, &self.fields, words, &self.scope.prefix);
-        let count_query = build_count_query(&self.index, &self.fields, words, &self.scope.prefix);
-        let total = searcher
-            .search(&*count_query, &Count)
+        let excluded_lists = Arc::new(self.matching_list_keys(&searcher, words)?);
+        let excluded_for_filter = Arc::clone(&excluded_lists);
+        let ranked = TopDocs::with_limit(limit.get()).order_by((
+            (SortBySimilarityScore, Order::Desc),
+            (SortByBytes::for_field(UNIT_KEY), Order::Asc),
+        ));
+        let collector = BytesFilterCollector::new(
+            UNIT_KEY.to_owned(),
+            move |key: &[u8]| !excluded_for_filter.contains(key),
+            (Count, ranked),
+        );
+        let (total, top) = searcher
+            .search(&*query, &collector)
             .map_err(|error| search_error(SearchErrorKind::ExecuteSearch, None, error))?;
-        let candidate_limit = limit.saturating_mul(CANDIDATES_PER_HIT);
-        let top = if candidate_limit == 0 {
-            Vec::new()
-        } else {
-            searcher
-                .search(
-                    &*query,
-                    &TopDocs::with_limit(candidate_limit).order_by_score(),
-                )
-                .map_err(|error| search_error(SearchErrorKind::ExecuteSearch, None, error))?
-        };
         let highlight = snippet_query(&self.index, &self.fields, words);
         let mut generator =
             SnippetGenerator::create(&searcher, &*highlight, self.fields.snippet)
                 .map_err(|error| search_error(SearchErrorKind::PrepareSnippets, None, error))?;
         generator.set_max_num_chars(SNIPPET_CHARS);
-        let mut candidates = Vec::with_capacity(top.len());
-        for (score, address) in top {
+        let mut hits = Vec::with_capacity(top.len());
+        for ((score, _key), address) in top {
             let document: TantivyDocument = searcher
                 .doc(address)
                 .map_err(|error| search_error(SearchErrorKind::LoadSearchHit, None, error))?;
             let Some(hit) = hit_from_document(&self.fields, &generator, &document, score)? else {
                 continue;
             };
-            let narrower = if is_list_path(&hit.mdpath) {
-                self.best_matching_item(&searcher, &generator, words, &hit.path, &hit.mdpath)?
-            } else {
-                None
-            };
-            candidates.push(CandidateHit { hit, narrower });
+            hits.push(hit);
         }
-        let mut hits = select_smallest_hits(candidates, limit);
+        sort_hits(&mut hits);
         for hit in &mut hits {
             if hit.path.starts_with(&self.scope.prefix) {
                 hit.path.drain(..self.scope.prefix.len());
@@ -722,37 +732,34 @@ impl Store {
         Ok(SearchResults { hits, total })
     }
 
-    /// Finds the best item of the list at `mdpath` in `path` that satisfies
-    /// the whole query. Only called for list candidates: for any other node
-    /// the parent restriction would match nothing, at the cost of a query.
-    fn best_matching_item(
+    /// Enumerates matching item units once and returns the exact identities of
+    /// their aggregate lists. Stored fields are used after one unscored query;
+    /// result candidates never trigger additional searches.
+    fn matching_list_keys(
         &self,
         searcher: &Searcher,
-        generator: &SnippetGenerator,
         words: &str,
-        path: &str,
-        mdpath: &str,
-    ) -> Result<Option<Hit>, SearchError> {
-        let query = build_item_query(
-            &self.index,
-            &self.fields,
-            words,
-            &self.scope.prefix,
-            path,
-            mdpath,
-        );
-        let Some((score, address)) = searcher
-            .search(&*query, &TopDocs::with_limit(1).order_by_score())
-            .map_err(|error| search_error(SearchErrorKind::ExecuteItemSearch, None, error))?
-            .into_iter()
-            .next()
-        else {
-            return Ok(None);
-        };
-        let document: TantivyDocument = searcher
-            .doc(address)
-            .map_err(|error| search_error(SearchErrorKind::LoadItemHit, None, error))?;
-        hit_from_document(&self.fields, generator, &document, score)
+    ) -> Result<HashSet<Vec<u8>>, SearchError> {
+        let query =
+            build_matching_items_query(&self.index, &self.fields, words, &self.scope.prefix);
+        let addresses = searcher
+            .search(&*query, &DocSetCollector)
+            .map_err(|error| search_error(SearchErrorKind::ExecuteSearch, None, error))?;
+        let mut keys = HashSet::with_capacity(addresses.len());
+        for address in addresses {
+            let document: TantivyDocument = searcher
+                .doc(address)
+                .map_err(|error| search_error(SearchErrorKind::LoadSearchHit, None, error))?;
+            let path = required_stored_text(&document, self.fields.path, StoredField::Path, None)?;
+            let parent = required_stored_text(
+                &document,
+                self.fields.parent_list,
+                StoredField::ParentList,
+                Some(path),
+            )?;
+            keys.insert(unit_key(path, parent));
+        }
+        Ok(keys)
     }
 
     /// Counts, for a simple whitespace-separated word query, how many
@@ -814,6 +821,24 @@ impl Store {
     }
 }
 
+fn required_stored_text<'a>(
+    document: &'a TantivyDocument,
+    field: tantivy::schema::Field,
+    stored: StoredField,
+    path: Option<&str>,
+) -> Result<&'a str, SearchError> {
+    document
+        .get_first(field)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            search_error(
+                SearchErrorKind::CorruptIndexRecord { field: stored },
+                path.map(PathBuf::from),
+                "required stored field is missing or has the wrong type",
+            )
+        })
+}
+
 /// Loads the rendering fields of one indexed unit. A non-finite score (which
 /// JSON cannot carry) is skipped; a missing or mistyped required field is a
 /// typed corruption error.
@@ -864,13 +889,15 @@ fn hit_from_document(
     }))
 }
 
-/// Whether a rendered document path addresses a list block. Section slugs
-/// never contain `/`, so the last `/` step of a canonical path is its block
-/// or item step, and only a list's is spelled `list[i]`.
-fn is_list_path(mdpath: &str) -> bool {
-    mdpath
-        .rsplit_once('/')
-        .is_some_and(|(_, step)| step.starts_with("list["))
+/// Stable byte identity ordered first by repository path and then by
+/// canonical document path. Neither component can contain NUL, so the
+/// separator makes the pair injective while preserving that lexical order.
+fn unit_key(path: &str, mdpath: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(path.len().saturating_add(mdpath.len()).saturating_add(1));
+    key.extend_from_slice(path.as_bytes());
+    key.push(0);
+    key.extend_from_slice(mdpath.as_bytes());
+    key
 }
 
 /// User-spelled terms of a plain keyword query. Being conservative is
@@ -1076,7 +1103,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn index_lifecycle_notes_distinguish_creation_format_and_open_failures() {
+    fn index_lifecycle_notes_distinguish_creation_format_version_and_open_failures() {
         let directory = Path::new("workspace/.outlint/search");
         let created = rebuilt_index_note(directory, false, None);
         assert_eq!(created.operation, SearchNoteOperation::CreateIndex);
@@ -1090,19 +1117,15 @@ mod tests {
         assert_eq!(changed.operation, SearchNoteOperation::RebuildIndex);
         assert_eq!(changed.cause, "format changed");
 
+        let old_version =
+            format!("{{\"format\": {INDEX_FORMAT_VERSION}, \"outlint\": \"0.0.0\"}}\n");
+        let changed = rebuilt_index_note(directory, true, Some(&old_version));
+        assert_eq!(changed.operation, SearchNoteOperation::RebuildIndex);
+        assert_eq!(changed.cause, "outlint version changed");
+
         let unreadable = rebuilt_index_note(directory, true, Some("not a marker"));
         assert_eq!(unreadable.operation, SearchNoteOperation::RebuildIndex);
         assert_eq!(unreadable.cause, "index could not be opened");
-    }
-
-    #[test]
-    fn is_list_path_matches_only_a_final_list_step() {
-        assert!(is_list_path("$/list[0]"));
-        assert!(is_list_path("$.a.b/list[3]"));
-        assert!(!is_list_path("$.a/list[0]/item[1]"));
-        assert!(!is_list_path("$.list[0]"));
-        assert!(!is_list_path("$.list"));
-        assert!(!is_list_path("$.a/p[0]"));
     }
 
     #[test]
