@@ -379,6 +379,23 @@ impl DocumentPath {
 /// steps. The private fields prevent callers from claiming that an arbitrary
 /// selector is canonical; conversion to [`DocumentPath`] is total when
 /// selector behavior is needed.
+///
+/// Callers cannot build one from parts:
+///
+/// ```compile_fail
+/// use outlint_core::CanonicalDocumentPath;
+///
+/// let _ = CanonicalDocumentPath { sections: Vec::new(), terminal: None };
+/// ```
+///
+/// nor from a parsed path:
+///
+/// ```compile_fail
+/// use outlint_core::{CanonicalDocumentPath, DocumentPath};
+///
+/// let parsed = DocumentPath::parse("$..setup").expect("valid path");
+/// let _ = CanonicalDocumentPath::from(&parsed);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CanonicalDocumentPath {
     sections: Vec<CanonicalSectionStep>,
