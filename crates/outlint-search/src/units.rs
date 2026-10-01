@@ -391,12 +391,8 @@ fn context_of(
         steps.len()
     };
     let mut context = base.to_owned();
-    let mut prefix = DocumentPath::root();
-    for step in steps.iter().take(ancestors) {
-        let Some(next) = prefix.with_section(step.clone()) else {
-            break;
-        };
-        prefix = next;
+    for count in 1..=ancestors {
+        let prefix = path.prefix(count);
         if let Some(text) = headings.get(&prefix) {
             context.push_str(" / ");
             context.push_str(text);

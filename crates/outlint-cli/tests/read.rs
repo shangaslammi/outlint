@@ -270,6 +270,31 @@ fn list_and_item_tree_bases_have_stable_block_membership() {
 }
 
 #[test]
+fn read_rejects_non_document_terminals_and_impossible_block_chains() {
+    let directory = TempDir::new("read-invalid-terminals");
+    directory.write("docs/guide.md", FIXTURE);
+
+    for path in [
+        "$/table[0]",
+        "$/row[0]",
+        "$/cell[0]",
+        "$/col[0]",
+        "$/p[0]/p[0]",
+        "$/list[0]/list[0]",
+        "$/p[0]/list[0]/item[0]",
+        "$.setup/list[0]/item[0]/p[0]",
+        "$.setup/list[0]/item[0]/list[0]/item[0]",
+    ] {
+        let output = run(
+            &directory,
+            &["read", "--format", "json", "docs/guide.md", path],
+        );
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+        assert_eq!(json_output(&output)["error"]["kind"], "syntax", "{path}");
+    }
+}
+
+#[test]
 fn resolution_errors_keep_the_deepest_canonical_prefix() {
     let directory = TempDir::new("read-resolution-prefixes");
     directory.write("docs/guide.md", FIXTURE);

@@ -5,9 +5,9 @@
 use std::path::Path;
 
 use outlint_core::{
-    document_paths, merged_title, parse_markdown, Block, Document, DocumentNode, DocumentPath,
-    DocumentPathError, DocumentPathSyntaxError, ListItem, MarkdownOptions, Section, SectionStep,
-    TextRange,
+    document_paths, merged_title, parse_markdown, Block, BlockKind, Document, DocumentNode,
+    DocumentPath, DocumentPathError, DocumentPathSyntaxError, DocumentPathTerminal, ListItem,
+    MarkdownOptions, Section, SectionStep, TextRange,
 };
 
 use crate::{
@@ -390,16 +390,23 @@ fn listed(
     if !candidate.sections().starts_with(base.sections()) {
         return false;
     }
-    if !base.blocks().is_empty() {
+    if let Some(base_terminal) = base.terminal() {
         // A block or item target lists itself; a list target also lists its
         // items when blocks are requested.
-        return candidate.sections().len() == base.sections().len()
-            && candidate.blocks().starts_with(base.blocks())
-            && match candidate.blocks().len().saturating_sub(base.blocks().len()) {
-                0 => true,
-                1 => blocks,
-                _ => false,
-            };
+        if candidate.sections().len() != base.sections().len() {
+            return false;
+        }
+        return match (base_terminal, candidate.terminal()) {
+            (left, Some(right)) if left == right => true,
+            (
+                DocumentPathTerminal::DirectBlock {
+                    kind: BlockKind::List,
+                    index,
+                },
+                Some(DocumentPathTerminal::ListItem { list_index, .. }),
+            ) => blocks && index == list_index,
+            _ => false,
+        };
     }
     let extra = candidate
         .sections()
@@ -408,7 +415,7 @@ fn listed(
     if depth.is_some_and(|depth| extra > depth) {
         return false;
     }
-    blocks || candidate.blocks().is_empty()
+    blocks || candidate.terminal().is_none()
 }
 
 /// The canonical spelling of `target` among `entries` (from
@@ -433,7 +440,7 @@ fn canonical_prefix(
     path: &DocumentPath,
     steps: usize,
 ) -> DocumentPath {
-    let prefix = truncate(path, steps);
+    let prefix = path.prefix(steps);
     prefix
         .resolve(document)
         .ok()
@@ -616,25 +623,6 @@ fn resolve_node<'d>(
     })
 }
 
-/// The first `steps` steps of `path`, section steps first as in the grammar.
-fn truncate(path: &DocumentPath, steps: usize) -> DocumentPath {
-    let mut result = DocumentPath::root();
-    for step in path.sections().iter().take(steps) {
-        let Some(extended) = result.clone().with_section(step.clone()) else {
-            break;
-        };
-        result = extended;
-    }
-    let block_steps = steps.saturating_sub(path.sections().len());
-    for step in path.blocks().iter().take(block_steps) {
-        let Some(extended) = result.clone().with_block(*step) else {
-            break;
-        };
-        result = extended;
-    }
-    result
-}
-
 /// The spelling of the step at `index` and whether it is a block step.
 fn step_text(path: &DocumentPath, index: usize) -> (String, bool) {
     let sections = path.sections();
@@ -654,10 +642,18 @@ fn step_text(path: &DocumentPath, index: usize) -> (String, bool) {
         };
         return (text, false);
     }
-    match path.blocks().get(index.saturating_sub(sections.len())) {
-        Some(step) => (format!("{}[{}]", step.kind.keyword(), step.index), true),
-        None => (path.to_string(), false),
+    let terminal_index = index.saturating_sub(sections.len());
+    let terminal_steps = match path.terminal() {
+        None => 0,
+        Some(DocumentPathTerminal::DirectBlock { .. }) => 1,
+        Some(DocumentPathTerminal::ListItem { .. }) => 2,
+    };
+    if terminal_index >= terminal_steps {
+        return (path.to_string(), false);
     }
+    let prefix = path.prefix(index.saturating_add(1)).to_string();
+    let step = prefix.rsplit('/').next().unwrap_or(&prefix).to_owned();
+    (step, true)
 }
 
 /// Enriches a path failure with canonical rows before presentation.
@@ -722,7 +718,7 @@ pub(crate) fn describe_error(
                     } else {
                         parent == deepest.sections()
                     };
-                    if candidate.blocks().is_empty() && below_deepest && Some(last) == failing {
+                    if candidate.terminal().is_none() && below_deepest && Some(last) == failing {
                         Some(tree_node(file, source, candidate, *node))
                     } else {
                         None

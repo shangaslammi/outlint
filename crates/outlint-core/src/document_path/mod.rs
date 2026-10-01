@@ -14,20 +14,21 @@
 //! # Grammar
 //!
 //! ```text
-//! doc-path     = "$" *( section-step ) [ "/" block-seg *( "/" block-seg ) ]
+//! doc-path     = "$" *( section-step ) [ "/" terminal ]
 //! section-step = "." ( slug [ "[" index "]" ] / "[" index "]" )
 //!              / ".." slug [ "[" index "]" ]
-//! block-seg    = kind [ "[" index "]" ]
-//! kind         = "p" | "list" | "item" | "table" | "row" | "cell" | "col"
-//!              | "code" | "quote" | "html" | "break"
+//! terminal     = block-kind [ "[" index "]" ]
+//!              / "list" [ "[" index "]" ] [ "/item" [ "[" index "]" ] ]
+//! block-kind   = "p" | "code" | "quote" | "html" | "break"
 //! index        = "0" / [1-9][0-9]*
 //! slug         = [a-z0-9]+(-[a-z0-9]+)*
 //! ```
 //!
 //! Every path starts at the root, `$`. Each `.` descends into a child section
 //! of the node reached so far, each `..` into a section anywhere below it, and
-//! a final run of `/` steps descends into the preamble blocks of the node
-//! reached (or of the root when no section step precedes them).
+//! an optional `/` terminal selects a direct preamble block of the node reached
+//! (or of the root when no section step precedes it), and optionally one of a
+//! direct list's items.
 //!
 //! A `.` step is either *named* or *positional*. A named step `slug` selects
 //! the sibling whose heading slugs to `slug`; when several siblings share the
@@ -47,18 +48,15 @@
 //! canonical spelling of a node, which [`document_paths`] produces and
 //! [`Display`](std::fmt::Display) preserves, only ever uses `.` steps.
 //!
-//! A block step `kind[i]` selects the `i`-th block *of that kind* among the
-//! parent's direct preamble blocks, so `p[1]` is the second paragraph even
-//! when a list sits between the two paragraphs. The index may be omitted and
-//! then defaults to `0`; the canonical spelling produced by
-//! [`Display`](std::fmt::Display) always writes it. An `item[i]` step is only
-//! valid directly after a `list` step and selects the list's `i`-th direct
-//! item. Indices everywhere are zero-based.
-//!
-//! The kinds `table`, `row`, `cell`, and `col` are reserved for a table model
-//! that the parsed document does not yet expose; paths using them parse but
-//! never resolve. Likewise, no block step can follow an `item` step because
-//! item contents are not exposed by the model.
+//! A direct block terminal `kind[i]` selects the `i`-th block *of that kind*
+//! among the parent's direct preamble blocks, so `p[1]` is the second paragraph
+//! even when a list sits between the two paragraphs. The index may be omitted
+//! and then defaults to `0`; the canonical spelling produced by
+//! [`Display`](std::fmt::Display) always writes it. An `item[i]` segment is
+//! only valid directly after a `list` terminal and selects the list's `i`-th
+//! direct item. A terminal always ends the path, because the document model
+//! exposes neither nested blocks nor item contents. Indices everywhere are
+//! zero-based.
 //!
 //! # A sole H1 is the document root
 //!
@@ -92,7 +90,7 @@ use std::fmt;
 
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
-use crate::{Block, ByteOffset, Document, HeaderLevel, ListItem, Section, TextRange};
+use crate::{Block, BlockKind, ByteOffset, Document, HeaderLevel, ListItem, Section, TextRange};
 
 #[cfg(test)]
 mod tests;
@@ -216,111 +214,40 @@ pub enum SectionStep {
     },
 }
 
-/// The kind named by a block step.
+/// The optional terminal of a document path.
 ///
-/// The variants are the keywords of the path grammar. `Paragraph`, `List`,
-/// `Quote`, `Code`, `Html`, and `Break` correspond to the variants of
-/// [`Block`]; `Item` selects a list item, and the table kinds are reserved
-/// for a table model that is not yet exposed. The enum is non-exhaustive
-/// because the reserved kinds may change when that model lands.
-///
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
-pub enum BlockPathKind {
-    /// `p`: a paragraph.
-    Paragraph,
-    /// `list`: a list.
-    List,
-    /// `item`: a direct item of the preceding list step.
-    Item,
-    /// `table`: reserved for a table.
-    Table,
-    /// `row`: reserved for a table row.
-    Row,
-    /// `cell`: reserved for a table cell.
-    Cell,
-    /// `col`: reserved for a table column.
-    Column,
-    /// `code`: a fenced or indented code block.
-    Code,
-    /// `quote`: a block quote.
-    Quote,
-    /// `html`: a visible HTML block.
-    Html,
-    /// `break`: a thematic break.
-    Break,
-}
-
-impl BlockPathKind {
-    const ALL: [Self; 11] = [
-        Self::Paragraph,
-        Self::List,
-        Self::Item,
-        Self::Table,
-        Self::Row,
-        Self::Cell,
-        Self::Column,
-        Self::Code,
-        Self::Quote,
-        Self::Html,
-        Self::Break,
-    ];
-
-    /// Returns the keyword spelling this kind in a path.
-    pub fn keyword(self) -> &'static str {
-        match self {
-            Self::Paragraph => "p",
-            Self::List => "list",
-            Self::Item => "item",
-            Self::Table => "table",
-            Self::Row => "row",
-            Self::Cell => "cell",
-            Self::Column => "col",
-            Self::Code => "code",
-            Self::Quote => "quote",
-            Self::Html => "html",
-            Self::Break => "break",
-        }
-    }
-
-    fn from_keyword(keyword: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.keyword() == keyword)
-    }
-
-    /// The kind that addresses `block`.
-    fn of(block: &Block) -> Self {
-        match block {
-            Block::Paragraph(_) => Self::Paragraph,
-            Block::List(_) => Self::List,
-            Block::Quote(_) => Self::Quote,
-            Block::Code(_) => Self::Code,
-            Block::Html(_) => Self::Html,
-            Block::Break(_) => Self::Break,
-        }
-    }
-}
-
-/// One `/` step of a document path, selecting a block or list item.
-///
+/// A terminal names either one direct preamble block or one direct item of a
+/// direct list. These are the only block-shaped nodes exposed by the document
+/// model, so every value is resolvable in some document and no terminal can be
+/// followed by another path step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockStep {
-    /// The kind of node selected.
-    pub kind: BlockPathKind,
-    /// Zero-based position among the parent's nodes of that kind.
-    pub index: usize,
+pub enum DocumentPathTerminal {
+    /// A direct preamble block of the root or selected section.
+    DirectBlock {
+        /// Kind of direct block selected.
+        kind: BlockKind,
+        /// Zero-based position among direct blocks of `kind`.
+        index: usize,
+    },
+    /// A direct item of a direct list block.
+    ListItem {
+        /// Zero-based position among direct list blocks.
+        list_index: usize,
+        /// Zero-based position among the selected list's direct items.
+        item_index: usize,
+    },
 }
 
 /// A parsed document path.
 ///
-/// Section steps come first and block steps last, mirroring the grammar. The
-/// fields are private so that an `item` step can only ever directly follow a
-/// `list` step, which is the only two-step block sequence the grammar accepts;
-/// every value is
-/// therefore renderable and re-parseable to an equal value.
+/// Section steps come first and an optional terminal comes last, mirroring the
+/// grammar. The fields are private so arbitrary block chains and unattached
+/// item steps cannot be represented; every value is therefore renderable and
+/// re-parseable to an equal value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocumentPath {
     sections: Vec<SectionStep>,
-    blocks: Vec<BlockStep>,
+    terminal: Option<DocumentPathTerminal>,
 }
 
 impl DocumentPath {
@@ -328,7 +255,7 @@ impl DocumentPath {
     pub fn root() -> Self {
         Self {
             sections: Vec::new(),
-            blocks: Vec::new(),
+            terminal: None,
         }
     }
 
@@ -337,34 +264,41 @@ impl DocumentPath {
         &self.sections
     }
 
-    /// The block steps in path order.
-    pub fn blocks(&self) -> &[BlockStep] {
-        &self.blocks
+    /// The direct block or list item selected after the section steps.
+    pub fn terminal(&self) -> Option<DocumentPathTerminal> {
+        self.terminal
     }
 
-    /// Extends a path that has no block steps by one child section step.
+    /// Returns the prefix containing at most `steps` section and terminal
+    /// steps.
     ///
-    /// Returns `None` when the path already descends into blocks, because the
-    /// grammar places every section step before the first block step.
-    pub fn with_section(mut self, step: SectionStep) -> Option<Self> {
-        if !self.blocks.is_empty() {
-            return None;
+    /// Section steps are retained first. A direct block consumes one further
+    /// step; a list item consumes two, with the intermediate prefix addressing
+    /// its containing direct list. A count beyond the path length returns the
+    /// whole path.
+    pub fn prefix(&self, steps: usize) -> Self {
+        let sections: Vec<_> = self.sections.iter().take(steps).cloned().collect();
+        if sections.len() < self.sections.len() {
+            return Self {
+                sections,
+                terminal: None,
+            };
         }
-        self.sections.push(step);
-        Some(self)
-    }
-
-    /// Extends the path by one block step.
-    ///
-    /// Returns `None` when `step` is an `item` step that would not directly
-    /// follow a `list` step, the one combination the grammar rejects.
-    pub fn with_block(mut self, step: BlockStep) -> Option<Self> {
-        let follows_list = self.blocks.last().map(|last| last.kind) == Some(BlockPathKind::List);
-        if step.kind == BlockPathKind::Item && !follows_list {
-            return None;
-        }
-        self.blocks.push(step);
-        Some(self)
+        let terminal_steps = steps.saturating_sub(self.sections.len());
+        let terminal = match (self.terminal, terminal_steps) {
+            (_, 0) | (None, _) => None,
+            (Some(DocumentPathTerminal::DirectBlock { kind, index }), _) => {
+                Some(DocumentPathTerminal::DirectBlock { kind, index })
+            }
+            (Some(DocumentPathTerminal::ListItem { list_index, .. }), 1) => {
+                Some(DocumentPathTerminal::DirectBlock {
+                    kind: BlockKind::List,
+                    index: list_index,
+                })
+            }
+            (Some(terminal @ DocumentPathTerminal::ListItem { .. }), _) => Some(terminal),
+        };
+        Self { sections, terminal }
     }
 
     /// Parses the textual spelling of a path (see the grammar on [`DocumentPath`]).
@@ -385,12 +319,8 @@ impl DocumentPath {
     /// section step without an index matches several sections, and
     /// [`DocumentPathError::Unresolved`] when a step matches nothing: an
     /// unknown slug, an out-of-range index, a block kind absent from the
-    /// preamble, or a step the model cannot answer: any table kind, any block
-    /// step after an `item` step, and any second or later block step other
-    /// than an `item` step directly after a `list` step, because the model
-    /// exposes no block below another block (`$/p[0]/p[1]` and
-    /// `$/list[0]/list[0]` parse but never resolve). Both carry the number of
-    /// steps that resolved before the failure.
+    /// preamble, or an out-of-range list item. Both carry the number of steps
+    /// that resolved before the failure.
     ///
     /// A merged title (see [`merged_title`]) is not a node: `$.title.child`
     /// is unresolved at its first step and `$.child` reaches the section.
@@ -407,19 +337,32 @@ impl DocumentPath {
             resolved_steps += 1;
         }
 
-        let mut steps = self.blocks.iter();
-        let Some(first) = steps.next() else {
-            return Ok(parent.node());
-        };
-        let mut current = select_block(parent.preamble(), *first)
-            .ok_or(DocumentPathError::Unresolved { resolved_steps })?;
-        resolved_steps += 1;
-        for step in steps {
-            current = select_within(current, *step)
-                .ok_or(DocumentPathError::Unresolved { resolved_steps })?;
-            resolved_steps += 1;
+        match self.terminal {
+            None => Ok(parent.node()),
+            Some(DocumentPathTerminal::DirectBlock { kind, index }) => {
+                select_block(parent.preamble(), kind, index)
+                    .map(DocumentNode::Block)
+                    .ok_or(DocumentPathError::Unresolved { resolved_steps })
+            }
+            Some(DocumentPathTerminal::ListItem {
+                list_index,
+                item_index,
+            }) => {
+                let list = select_block(parent.preamble(), BlockKind::List, list_index)
+                    .and_then(|block| match block {
+                        Block::List(list) => Some(list),
+                        _ => None,
+                    })
+                    .ok_or(DocumentPathError::Unresolved { resolved_steps })?;
+                list.items
+                    .iter()
+                    .nth(item_index)
+                    .map(DocumentNode::Item)
+                    .ok_or(DocumentPathError::Unresolved {
+                        resolved_steps: resolved_steps.saturating_add(1),
+                    })
+            }
         }
-        Ok(current.node())
     }
 }
 
@@ -432,7 +375,7 @@ impl std::str::FromStr for DocumentPath {
 }
 
 impl fmt::Display for DocumentPath {
-    /// Writes the canonical spelling: every block index explicit, no other
+    /// Writes the canonical spelling: every terminal index explicit, no other
     /// whitespace or decoration. A descendant step is written back as `..`,
     /// so a parsed path round-trips; only paths from [`document_paths`] are
     /// canonical spellings of a node.
@@ -452,8 +395,17 @@ impl fmt::Display for DocumentPath {
                 write!(formatter, "[{index}]")?;
             }
         }
-        for step in &self.blocks {
-            write!(formatter, "/{}[{}]", step.kind.keyword(), step.index)?;
+        match self.terminal {
+            None => {}
+            Some(DocumentPathTerminal::DirectBlock { kind, index }) => {
+                write!(formatter, "/{}[{index}]", block_kind_keyword(kind))?;
+            }
+            Some(DocumentPathTerminal::ListItem {
+                list_index,
+                item_index,
+            }) => {
+                write!(formatter, "/list[{list_index}]/item[{item_index}]")?;
+            }
         }
         Ok(())
     }
@@ -468,9 +420,9 @@ pub enum DocumentNode<'d> {
     Root(&'d Document),
     /// A section, addressed by a path ending in a section step.
     Section(&'d Section),
-    /// A direct preamble block, addressed by a path ending in a block step.
+    /// A direct preamble block, addressed by a direct block terminal.
     Block(&'d Block),
-    /// A direct list item, addressed by a path ending in an `item` step.
+    /// A direct list item, addressed by a list item terminal.
     Item(&'d ListItem),
 }
 
@@ -548,9 +500,10 @@ impl std::error::Error for DocumentPathSyntaxError {}
 
 /// A well-formed document path that does not address a node of a document.
 ///
-/// `resolved_steps` counts section and block steps together in path order,
-/// so a caller can report the deepest node that was reached by resolving the
-/// path truncated to that many steps.
+/// `resolved_steps` counts section steps followed by terminal segments in
+/// path order, so a caller can report the deepest node that was reached by
+/// resolving the path truncated to that many steps. A list item terminal
+/// contributes its `list` and `item` segments separately.
 ///
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -683,26 +636,62 @@ fn push_preamble<'d>(
     blocks: impl Iterator<Item = &'d Block>,
     paths: &mut Vec<(DocumentPath, DocumentNode<'d>)>,
 ) {
-    let mut ordinals: HashMap<BlockPathKind, usize> = HashMap::new();
+    let mut ordinals: HashMap<BlockKind, usize> = HashMap::new();
     for block in blocks {
-        let kind = BlockPathKind::of(block);
+        let kind = block_kind(block);
         let ordinal = ordinals.entry(kind).or_default();
         let index = *ordinal;
         *ordinal += 1;
         let mut path = parent.clone();
-        path.blocks.push(BlockStep { kind, index });
+        path.terminal = Some(DocumentPathTerminal::DirectBlock { kind, index });
         paths.push((path.clone(), DocumentNode::Block(block)));
         let Block::List(list) = block else {
             continue;
         };
-        for (index, item) in list.items.iter().enumerate() {
-            let mut path = path.clone();
-            path.blocks.push(BlockStep {
-                kind: BlockPathKind::Item,
-                index,
-            });
+        for (item_index, item) in list.items.iter().enumerate() {
+            let path = DocumentPath {
+                sections: parent.sections.clone(),
+                terminal: Some(DocumentPathTerminal::ListItem {
+                    list_index: index,
+                    item_index,
+                }),
+            };
             paths.push((path, DocumentNode::Item(item)));
         }
+    }
+}
+
+fn block_kind(block: &Block) -> BlockKind {
+    match block {
+        Block::Paragraph(_) => BlockKind::Paragraph,
+        Block::List(_) => BlockKind::List,
+        Block::Quote(_) => BlockKind::Quote,
+        Block::Code(_) => BlockKind::Code,
+        Block::Html(_) => BlockKind::Html,
+        Block::Break(_) => BlockKind::Break,
+    }
+}
+
+fn block_kind_keyword(kind: BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Paragraph => "p",
+        BlockKind::List => "list",
+        BlockKind::Quote => "quote",
+        BlockKind::Code => "code",
+        BlockKind::Html => "html",
+        BlockKind::Break => "break",
+    }
+}
+
+fn block_kind_from_keyword(keyword: &str) -> Option<BlockKind> {
+    match keyword {
+        "p" => Some(BlockKind::Paragraph),
+        "list" => Some(BlockKind::List),
+        "quote" => Some(BlockKind::Quote),
+        "code" => Some(BlockKind::Code),
+        "html" => Some(BlockKind::Html),
+        "break" => Some(BlockKind::Break),
+        _ => None,
     }
 }
 
@@ -736,7 +725,7 @@ impl<'d> Parent<'d> {
         }
     }
 
-    /// The direct blocks a `/` step counts over: the root's own preamble
+    /// The direct blocks a terminal counts over: the root's own preamble
     /// followed by a merged title's blocks, in document order.
     fn preamble(&self) -> impl Iterator<Item = &'d Block> {
         let (own, merged) = match self {
@@ -823,58 +812,13 @@ fn descendants(sections: &[Section]) -> impl Iterator<Item = &Section> {
     })
 }
 
-/// A node reached by at least one block step.
-#[derive(Clone, Copy)]
-enum BlockNode<'d> {
-    Block(&'d Block),
-    Item(&'d ListItem),
-}
-
-impl<'d> BlockNode<'d> {
-    fn node(self) -> DocumentNode<'d> {
-        match self {
-            Self::Block(block) => DocumentNode::Block(block),
-            Self::Item(item) => DocumentNode::Item(item),
-        }
-    }
-}
-
-/// Applies the first block step, which always selects one of the parent's
-/// direct blocks.
+/// Selects one of a parent's direct blocks by kind-specific ordinal.
 fn select_block<'d>(
     blocks: impl Iterator<Item = &'d Block>,
-    step: BlockStep,
-) -> Option<BlockNode<'d>> {
-    if !is_preamble_kind(step.kind) {
-        return None;
-    }
-    blocks
-        .filter(|block| BlockPathKind::of(block) == step.kind)
-        .nth(step.index)
-        .map(BlockNode::Block)
-}
-
-/// Applies a block step after another: only `list` followed by `item` is
-/// answerable, because the model exposes no block below an item.
-fn select_within(current: BlockNode<'_>, step: BlockStep) -> Option<BlockNode<'_>> {
-    match (current, step.kind) {
-        (BlockNode::Block(Block::List(list)), BlockPathKind::Item) => {
-            list.items.iter().nth(step.index).map(BlockNode::Item)
-        }
-        _ => None,
-    }
-}
-
-fn is_preamble_kind(kind: BlockPathKind) -> bool {
-    matches!(
-        kind,
-        BlockPathKind::Paragraph
-            | BlockPathKind::List
-            | BlockPathKind::Code
-            | BlockPathKind::Quote
-            | BlockPathKind::Html
-            | BlockPathKind::Break
-    )
+    kind: BlockKind,
+    index: usize,
+) -> Option<&'d Block> {
+    blocks.filter(|block| block_kind(block) == kind).nth(index)
 }
 
 /// A cursor over the bytes of a path spelling.
@@ -899,26 +843,18 @@ impl<'a> Parser<'a> {
         if !self.eat(b'$') {
             return Err(self.error("a document path starts with `$`"));
         }
-        let mut path = DocumentPath::root();
+        let mut sections = Vec::new();
         while self.eat(b'.') {
-            path.sections.push(self.section_step()?);
+            sections.push(self.section_step()?);
         }
-        if self.eat(b'/') {
-            loop {
-                let step = self.block_step(path.blocks.last().map(|last| last.kind))?;
-                path.blocks.push(step);
-                if !self.eat(b'/') {
-                    break;
-                }
-            }
-        }
+        let terminal = self.eat(b'/').then(|| self.terminal()).transpose()?;
         match self.peek_char() {
-            None => Ok(path),
-            Some(character) if path.blocks.is_empty() => Err(self.error(format!(
+            None => Ok(DocumentPath { sections, terminal }),
+            Some(character) if terminal.is_none() => Err(self.error(format!(
                 "unexpected {character:?}; expected `.`, `/`, or the end of the path"
             ))),
             Some(character) => Err(self.error(format!(
-                "unexpected {character:?}; expected `/` or the end of the path"
+                "unexpected {character:?}; expected the end of the path"
             ))),
         }
     }
@@ -976,24 +912,32 @@ impl<'a> Parser<'a> {
         self.take_while(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
     }
 
-    fn block_step(
-        &mut self,
-        previous: Option<BlockPathKind>,
-    ) -> Result<BlockStep, DocumentPathSyntaxError> {
+    fn terminal(&mut self) -> Result<DocumentPathTerminal, DocumentPathSyntaxError> {
         let start = self.position;
         let keyword = self.take_while(|byte| byte.is_ascii_lowercase());
-        let Some(kind) = BlockPathKind::from_keyword(keyword) else {
-            return Err(self.error_at(
-                start,
-                "expected a block kind: `p`, `list`, `item`, `table`, `row`, `cell`, `col`, \
-                 `code`, `quote`, `html`, or `break`",
-            ));
+        let Some(kind) = block_kind_from_keyword(keyword) else {
+            let message = if keyword == "item" {
+                "`item` must directly follow a `list` step"
+            } else {
+                "expected a direct block kind: `p`, `list`, `code`, `quote`, `html`, or `break`"
+            };
+            return Err(self.error_at(start, message));
         };
-        if kind == BlockPathKind::Item && previous != Some(BlockPathKind::List) {
-            return Err(self.error_at(start, "`item` must directly follow a `list` step"));
-        }
         let index = if self.eat(b'[') { self.index()? } else { 0 };
-        Ok(BlockStep { kind, index })
+        if kind != BlockKind::List || !self.eat(b'/') {
+            return Ok(DocumentPathTerminal::DirectBlock { kind, index });
+        }
+
+        let item_start = self.position;
+        let keyword = self.take_while(|byte| byte.is_ascii_lowercase());
+        if keyword != "item" {
+            return Err(self.error_at(item_start, "expected `item` directly after a `list` step"));
+        }
+        let item_index = if self.eat(b'[') { self.index()? } else { 0 };
+        Ok(DocumentPathTerminal::ListItem {
+            list_index: index,
+            item_index,
+        })
     }
 
     /// Parses the digits and closing bracket of an index whose `[` has been

@@ -2,10 +2,12 @@
 //! enumeration.
 
 use super::{
-    document_paths, heading_slug, merged_title, BlockPathKind, BlockStep, DocumentNode,
-    DocumentPath, DocumentPathError, HeadingSlug, SectionStep,
+    document_paths, heading_slug, merged_title, DocumentNode, DocumentPath, DocumentPathError,
+    DocumentPathTerminal, HeadingSlug, SectionStep,
 };
-use crate::{parse_markdown, Block, ByteOffset, Document, HeaderLevel, MarkdownOptions, TextRange};
+use crate::{
+    parse_markdown, Block, BlockKind, ByteOffset, Document, HeaderLevel, MarkdownOptions, TextRange,
+};
 
 const SOURCE: &str = "\
 Intro paragraph.
@@ -86,7 +88,6 @@ fn every_segment_form_round_trips_through_its_canonical_spelling() {
         "$.setup/p[0]",
         "$.setup/list[0]/item[3]",
         "$/p[0]",
-        "$.api/table[0]/row[2]/cell[1]",
         "$..a",
         "$.a..b[1]/p[0]",
     ] {
@@ -108,17 +109,11 @@ fn an_omitted_block_index_defaults_to_zero() {
         }]
     );
     assert_eq!(
-        path.blocks(),
-        [
-            BlockStep {
-                kind: BlockPathKind::List,
-                index: 0
-            },
-            BlockStep {
-                kind: BlockPathKind::Item,
-                index: 0
-            },
-        ]
+        path.terminal(),
+        Some(DocumentPathTerminal::ListItem {
+            list_index: 0,
+            item_index: 0,
+        })
     );
 }
 
@@ -131,7 +126,6 @@ fn rejects_malformed_spellings_at_the_offending_byte() {
         ("$/item[0]", 2),
         ("$/frob", 2),
         ("$.setup.", 8),
-        ("$.setup/list[0]/item[0]/item[0]", 24),
         ("$.-setup", 2),
         ("$.a--b", 4),
         ("$.a-", 4),
@@ -145,23 +139,42 @@ fn rejects_malformed_spellings_at_the_offending_byte() {
 }
 
 #[test]
-fn builders_keep_item_steps_behind_list_steps() {
-    let item = BlockStep {
-        kind: BlockPathKind::Item,
-        index: 0,
-    };
-    let list = BlockStep {
-        kind: BlockPathKind::List,
-        index: 0,
-    };
-    assert_eq!(DocumentPath::root().with_block(item), None);
-    let path = DocumentPath::root()
-        .with_section(SectionStep::Position(0))
-        .and_then(|path| path.with_block(list))
-        .and_then(|path| path.with_block(item))
-        .expect("list then item is well-formed");
-    assert_eq!(path.to_string(), "$.[0]/list[0]/item[0]");
-    assert_eq!(path.with_section(SectionStep::Position(1)), None);
+fn rejects_non_document_terminals_and_impossible_block_chains() {
+    for spelling in [
+        "$.api/table[0]",
+        "$.api/row[2]",
+        "$.api/cell[1]",
+        "$.api/col[0]",
+        "$.setup/p[0]/p[0]",
+        "$.setup/list[0]/list[0]",
+        "$.setup/p[0]/list[0]/item[0]",
+        "$.setup/list[0]/item[0]/p[0]",
+        "$.setup/list[0]/item[0]/list[0]/item[0]",
+    ] {
+        assert!(DocumentPath::parse(spelling).is_err(), "{spelling}");
+    }
+}
+
+#[test]
+fn prefixes_truncate_sections_before_the_terminal() {
+    let path = parse("$.faq.question[1]/list[2]/item[3]");
+    assert_eq!(path.prefix(0).to_string(), "$");
+    assert_eq!(path.prefix(1).to_string(), "$.faq");
+    assert_eq!(path.prefix(2).to_string(), "$.faq.question[1]");
+    assert_eq!(path.prefix(3).to_string(), "$.faq.question[1]/list[2]");
+    assert_eq!(path.prefix(4), path);
+    assert_eq!(path.prefix(usize::MAX), path);
+    assert_eq!(
+        path.prefix(3).terminal(),
+        Some(DocumentPathTerminal::DirectBlock {
+            kind: BlockKind::List,
+            index: 2,
+        })
+    );
+
+    let paragraph = parse("$.setup/p[1]");
+    assert_eq!(paragraph.prefix(1).to_string(), "$.setup");
+    assert_eq!(paragraph.prefix(2), paragraph);
 }
 
 #[test]
@@ -245,11 +258,9 @@ fn block_ordinals_count_per_kind_and_items_follow_lists() {
 fn unanswerable_steps_are_unresolved_after_the_deepest_reached_node() {
     let document = document();
     for (spelling, resolved_steps) in [
-        ("$.setup/table[0]", 1),
         ("$.setup/p[2]", 1),
         ("$.setup/list[1]", 1),
         ("$.setup/list[0]/item[3]", 2),
-        ("$.setup/list[0]/item[0]/p[0]", 3),
         ("$.faq.missing", 1),
         ("$..faq.missing", 1),
         ("$.faq..question[0].missing", 2),
