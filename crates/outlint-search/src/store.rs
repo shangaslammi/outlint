@@ -26,7 +26,7 @@ use crate::{
         build_count_query, build_item_query, build_query, build_schema, snippet_query, Fields,
         INDEX_FORMAT_VERSION, KIND_TOMBSTONE, KIND_UNIT, MTIME, PATH, SIZE,
     },
-    result::{select_smallest_hits, CandidateHit, Hit, TermCount},
+    result::{select_smallest_hits, CandidateHit, Hit, SearchResults, TermCount},
     units::{collapse_whitespace, index_units, IndexUnit},
 };
 
@@ -35,10 +35,9 @@ use crate::{
 const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
 /// Memory budget handed to the tantivy writer.
 const WRITER_HEAP_BYTES: usize = 50_000_000;
-/// Hits returned per search.
-const HIT_LIMIT: usize = 10;
-/// Broad candidates fetched before list-to-item replacement and de-duplication.
-const CANDIDATE_LIMIT: usize = HIT_LIMIT * 4;
+/// Broad candidates fetched per requested result before list-to-item
+/// replacement and de-duplication.
+const CANDIDATES_PER_HIT: usize = 4;
 /// Upper bound on a hit's snippet, in characters, before the ellipsis.
 const SNIPPET_CHARS: usize = 160;
 const INDEX_MARKER: &str = "outlint-index.json";
@@ -118,12 +117,13 @@ pub enum StoredField {
     Snippet,
 }
 
-/// A recoverable walk or refresh issue that leaves search able to continue.
+/// A noteworthy index lifecycle event or recoverable issue that leaves search
+/// able to continue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchNote {
     /// The affected path, when the operation identified one.
     pub path: Option<PathBuf>,
-    /// The operation that was skipped or degraded.
+    /// The operation that occurred, was skipped, or was degraded.
     pub operation: SearchNoteOperation,
     /// The underlying reason without presentation prefixes.
     pub cause: String,
@@ -133,6 +133,10 @@ pub struct SearchNote {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SearchNoteOperation {
+    /// The search index directory was created for the first time.
+    CreateIndex,
+    /// An existing search index directory was replaced.
+    RebuildIndex,
     /// Walking an entry or ignore file failed.
     Walk,
     /// Reading file metadata failed.
@@ -408,6 +412,42 @@ fn plan_refresh(
     RefreshPlan { reindex, remove }
 }
 
+/// Reads only the leading numeric format member written by this crate. Other
+/// marker content remains opaque and causes the safer open-failure rebuild
+/// note rather than being treated as a known format transition.
+fn marker_format(marker: Option<&str>) -> Option<u32> {
+    let digits = marker?.strip_prefix("{\"format\": ")?;
+    let end = digits.find(|character: char| !character.is_ascii_digit())?;
+    digits.get(..end)?.parse().ok()
+}
+
+/// Describes the successful creation or rebuild selected from already-read
+/// filesystem state. Keeping this choice pure makes the user-visible reason
+/// independent of the I/O that performs the rebuild.
+fn rebuilt_index_note(
+    directory: &Path,
+    directory_existed: bool,
+    actual_marker: Option<&str>,
+) -> SearchNote {
+    if !directory_existed {
+        return SearchNote {
+            path: Some(directory.to_path_buf()),
+            operation: SearchNoteOperation::CreateIndex,
+            cause: "index directory did not exist".to_owned(),
+        };
+    }
+    SearchNote {
+        path: Some(directory.to_path_buf()),
+        operation: SearchNoteOperation::RebuildIndex,
+        cause: if marker_format(actual_marker).is_some_and(|format| format != INDEX_FORMAT_VERSION)
+        {
+            "format changed".to_owned()
+        } else {
+            "index could not be opened".to_owned()
+        },
+    }
+}
+
 impl Store {
     /// Opens the index under `<repo>/.outlint/search/`, or creates it when it
     /// is missing.
@@ -420,8 +460,9 @@ impl Store {
     /// # Errors
     ///
     /// Returns a structured error when a directory, metadata file, or index
-    /// cannot be created, removed, or written.
-    pub fn open_or_rebuild(scope: &Scope) -> Result<Self, SearchError> {
+    /// cannot be created, removed, or written. On success, notes identify a
+    /// newly created or rebuilt directory; an ordinary open returns none.
+    pub fn open_or_rebuild(scope: &Scope) -> Result<(Self, Vec<SearchNote>), SearchError> {
         let outlint_dir = scope.repo.join(".outlint");
         fs::create_dir_all(&outlint_dir).map_err(|error| {
             search_error(
@@ -437,22 +478,28 @@ impl Store {
             })?;
         }
         let directory = outlint_dir.join("search");
+        let directory_existed = directory.exists();
         let marker = directory.join(INDEX_MARKER);
         let expected_marker = format!(
             "{{\"format\": {INDEX_FORMAT_VERSION}, \"outlint\": \"{}\"}}\n",
             env!("CARGO_PKG_VERSION")
         );
-        if fs::read_to_string(&marker).ok().as_deref() == Some(expected_marker.as_str()) {
+        let actual_marker = fs::read_to_string(&marker).ok();
+        if actual_marker.as_deref() == Some(expected_marker.as_str()) {
             if let Ok(index) = Index::open_in_dir(&directory) {
                 if let Ok(fields) = Fields::of(&index.schema()) {
-                    return Ok(Self {
-                        scope: scope.clone(),
-                        index,
-                        fields,
-                    });
+                    return Ok((
+                        Self {
+                            scope: scope.clone(),
+                            index,
+                            fields,
+                        },
+                        Vec::new(),
+                    ));
                 }
             }
         }
+        let note = rebuilt_index_note(&directory, directory_existed, actual_marker.as_deref());
         if directory.exists() {
             fs::remove_dir_all(&directory).map_err(|error| {
                 search_error(
@@ -476,11 +523,14 @@ impl Store {
         fs::write(&marker, expected_marker).map_err(|error| {
             search_error(SearchErrorKind::WriteFile, Some(marker.clone()), error)
         })?;
-        Ok(Self {
-            scope: scope.clone(),
-            index,
-            fields,
-        })
+        Ok((
+            Self {
+                scope: scope.clone(),
+                index,
+                fields,
+            },
+            vec![note],
+        ))
     }
 
     /// Brings the index in line with `walk`, the walk of the search root:
@@ -614,7 +664,7 @@ impl Store {
         Ok(notes)
     }
 
-    /// Returns up to ten best-scoring smallest matching units for `words`
+    /// Returns up to `limit` best-scoring smallest matching units for `words`
     /// under the search root, ordered by score, path, and document path. A
     /// matching list is replaced by its best matching item when one item
     /// satisfies the whole query; otherwise the list represents a match whose
@@ -625,15 +675,24 @@ impl Store {
     ///
     /// Returns a structured error when the index cannot be read or a stored
     /// hit is corrupt.
-    pub fn search(&self, words: &str) -> Result<Vec<Hit>, SearchError> {
+    pub fn search(&self, words: &str, limit: usize) -> Result<SearchResults, SearchError> {
         let searcher = self.reader()?.searcher();
         let query = build_query(&self.index, &self.fields, words, &self.scope.prefix);
-        let top = searcher
-            .search(
-                &*query,
-                &TopDocs::with_limit(CANDIDATE_LIMIT).order_by_score(),
-            )
+        let count_query = build_count_query(&self.index, &self.fields, words, &self.scope.prefix);
+        let total = searcher
+            .search(&*count_query, &Count)
             .map_err(|error| search_error(SearchErrorKind::ExecuteSearch, None, error))?;
+        let candidate_limit = limit.saturating_mul(CANDIDATES_PER_HIT);
+        let top = if candidate_limit == 0 {
+            Vec::new()
+        } else {
+            searcher
+                .search(
+                    &*query,
+                    &TopDocs::with_limit(candidate_limit).order_by_score(),
+                )
+                .map_err(|error| search_error(SearchErrorKind::ExecuteSearch, None, error))?
+        };
         let highlight = snippet_query(&self.index, &self.fields, words);
         let mut generator =
             SnippetGenerator::create(&searcher, &*highlight, self.fields.snippet)
@@ -654,13 +713,13 @@ impl Store {
             };
             candidates.push(CandidateHit { hit, narrower });
         }
-        let mut hits = select_smallest_hits(candidates, HIT_LIMIT);
+        let mut hits = select_smallest_hits(candidates, limit);
         for hit in &mut hits {
             if hit.path.starts_with(&self.scope.prefix) {
                 hit.path.drain(..self.scope.prefix.len());
             }
         }
-        Ok(hits)
+        Ok(SearchResults { hits, total })
     }
 
     /// Finds the best item of the list at `mdpath` in `path` that satisfies
@@ -834,7 +893,7 @@ fn simple_query_terms(words: &str) -> Option<Vec<&str>> {
 /// no term matches.) The fragment is widened over punctuation stuck to its
 /// ends, which the generator's token bounds leave out, so `release` becomes
 /// `release.`; whitespace is collapsed, since the generator keeps newlines;
-/// and `…` marks a fragment that stops short of the end of the text.
+/// and `…` marks either end at which the fragment cuts the text.
 fn snippet_of(generator: &SnippetGenerator, document: &TantivyDocument, text: &str) -> String {
     if text.is_empty() {
         return String::new();
@@ -846,6 +905,9 @@ fn snippet_of(generator: &SnippetGenerator, document: &TantivyDocument, text: &s
         _ => 0..leading_fragment(text, SNIPPET_CHARS).len(),
     };
     let mut excerpt = collapse_whitespace(&text[range.clone()]);
+    if range.start > 0 {
+        excerpt.insert(0, '…');
+    }
     if range.end < text.len() {
         excerpt.push('…');
     }
@@ -1012,6 +1074,26 @@ mod tests {
     use tantivy::{collector::TopDocs, doc, Index};
 
     use super::*;
+
+    #[test]
+    fn index_lifecycle_notes_distinguish_creation_format_and_open_failures() {
+        let directory = Path::new("workspace/.outlint/search");
+        let created = rebuilt_index_note(directory, false, None);
+        assert_eq!(created.operation, SearchNoteOperation::CreateIndex);
+        assert_eq!(created.path.as_deref(), Some(directory));
+
+        let old_marker = format!(
+            "{{\"format\": {}, \"outlint\": \"0.1.0\"}}\n",
+            INDEX_FORMAT_VERSION.saturating_sub(1)
+        );
+        let changed = rebuilt_index_note(directory, true, Some(&old_marker));
+        assert_eq!(changed.operation, SearchNoteOperation::RebuildIndex);
+        assert_eq!(changed.cause, "format changed");
+
+        let unreadable = rebuilt_index_note(directory, true, Some("not a marker"));
+        assert_eq!(unreadable.operation, SearchNoteOperation::RebuildIndex);
+        assert_eq!(unreadable.cause, "index could not be opened");
+    }
 
     #[test]
     fn is_list_path_matches_only_a_final_list_step() {
@@ -1182,8 +1264,9 @@ mod tests {
         let text = format!("{filler}The kumquat orchard thrives. {filler}");
         let excerpt = excerpt(&text, "kumquats");
         assert!(excerpt.contains("kumquat orchard"), "{excerpt}");
+        assert!(excerpt.starts_with('…'), "{excerpt}");
         assert!(excerpt.ends_with('…'), "{excerpt}");
-        assert!(excerpt.chars().count() <= SNIPPET_CHARS + 1, "{excerpt}");
+        assert!(excerpt.chars().count() <= SNIPPET_CHARS + 2, "{excerpt}");
         assert!(!excerpt.contains("  "), "{excerpt}");
     }
 

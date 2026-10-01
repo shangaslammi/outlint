@@ -111,6 +111,7 @@ fn read_supports_json_compact_and_structured_path_errors() {
     assert_eq!(value["error"]["path"], "$.setp");
     assert_eq!(value["error"]["resolved"], "$");
     assert_eq!(value["error"]["nodes"][1]["mdpath"], "$.setup");
+    assert_eq!(value["error"]["suggestions"][0], "$.setup");
 
     let output = run(
         &directory,
@@ -122,6 +123,7 @@ fn read_supports_json_compact_and_structured_path_errors() {
     assert_eq!(value["error"]["path"], "$.Setup");
     assert!(value["error"]["message"].is_string());
     assert!(value["error"]["offset"].is_u64());
+    assert!(value["error"]["suggestions"].is_array());
 
     let output = run(
         &directory,
@@ -145,6 +147,7 @@ fn read_supports_json_compact_and_structured_path_errors() {
         value["error"]["candidates"][0]["mdpath"],
         "$.faq.question[0]"
     );
+    assert_eq!(value["error"]["suggestions"], serde_json::json!([]));
 
     let output = run(
         &directory,
@@ -195,6 +198,67 @@ fn read_supports_json_compact_and_structured_path_errors() {
     let output = run_with_format_env(&directory, &["read", "docs/guide.md"], "bogus");
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("invalid OUTLINT_FORMAT value 'bogus'"));
+}
+
+#[test]
+fn read_path_hints_render_in_every_format() {
+    const HINTS: &str = "# Guide\n\n## 2. Schema Format\n\n### 2.3 Frontmatter Object\n\n#### Properties\n\n## Setup\n\n## 7. Options\n";
+    let directory = TempDir::new("read-hints");
+    directory.write("docs/guide.md", HINTS);
+
+    let output = run(
+        &directory,
+        &["read", "docs/guide.md", "$.frontmatter-object"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).ends_with("did you mean $.2-schema-format.2-3-frontmatter-object?\n"));
+
+    let output = run(
+        &directory,
+        &["read", "--format", "compact", "docs/guide.md", "$.setp"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).ends_with("did you mean $.setup?\n"));
+
+    let output = run(
+        &directory,
+        &["read", "--format", "compact", "docs/guide.md", "$.options"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).ends_with("did you mean $.7-options?\n"));
+
+    let output = run(
+        &directory,
+        &[
+            "read",
+            "--format",
+            "json",
+            "docs/guide.md",
+            "$.frontmater-object",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        json_output(&output)["error"]["suggestions"],
+        serde_json::json!(["$.2-schema-format.2-3-frontmatter-object"])
+    );
+
+    let output = run(
+        &directory,
+        &["read", "--format", "json", "docs/guide.md", "$.7. Options"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stderr(&output), "");
+    assert_eq!(
+        json_output(&output)["error"]["suggestions"],
+        serde_json::json!(["$.7-options"])
+    );
+    let rendered = stdout(&output);
+    let offset = rendered.find("\"offset\":").expect("offset member");
+    let suggestions = rendered
+        .find("\"suggestions\":")
+        .expect("suggestions member");
+    assert!(offset < suggestions, "{rendered}");
 }
 
 #[cfg(unix)]

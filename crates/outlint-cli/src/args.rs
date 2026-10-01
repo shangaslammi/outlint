@@ -60,6 +60,7 @@ passed directly to `outlint read`.\n\
 \n\
 Options:\n\
       --root <DIR>            Search the files under DIR instead\n\
+      --limit <N>             Print at most N hits (default: 10)\n\
       --format human|json|compact\n\
                               Select output format (default: human)\n\
       OUTLINT_FORMAT          Set the default format; --format overrides it\n\
@@ -140,6 +141,8 @@ pub(crate) struct SearchOptions {
     pub(crate) root: Option<String>,
     /// The search words joined by single spaces; never blank.
     pub(crate) words: String,
+    /// Maximum hits to print; always positive.
+    pub(crate) limit: usize,
     /// Presentation selected explicitly or by `OUTLINT_FORMAT`.
     pub(crate) format: ReadSearchFormat,
 }
@@ -257,6 +260,7 @@ pub(crate) fn parse_search_args(
 ) -> Result<ParseOutcome<SearchOptions>, String> {
     let mut words = Vec::new();
     let mut root = None;
+    let mut limit = None;
     let mut format = None;
     let mut positional_only = false;
     let mut index = 0;
@@ -270,6 +274,10 @@ pub(crate) fn parse_search_args(
                 "--root" => {
                     let value = option_value(args, &mut index, argument)?;
                     set_once(&mut root, value, "--root")?;
+                }
+                "--limit" => {
+                    let value = option_value(args, &mut index, argument)?;
+                    set_once(&mut limit, value, "--limit")?;
                 }
                 "--format" => {
                     format = Some(parse_read_search_format(
@@ -289,6 +297,18 @@ pub(crate) fn parse_search_args(
     if words.trim().is_empty() {
         return Err("missing search words".to_owned());
     }
+    let limit = limit
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|limit| *limit > 0)
+                .ok_or_else(|| {
+                    format!("invalid --limit value '{value}' (expected a positive integer)")
+                })
+        })
+        .transpose()?
+        .unwrap_or(10);
     let format = match format {
         Some(format) => format,
         None => parse_environment_format(environment)?,
@@ -296,6 +316,7 @@ pub(crate) fn parse_search_args(
     Ok(ParseOutcome::Run(SearchOptions {
         root,
         words,
+        limit,
         format,
     }))
 }
@@ -453,6 +474,7 @@ mod tests {
     fn read_search_command_help_explains_the_environment_default() {
         assert!(super::SEARCH_HELP
             .contains("OUTLINT_FORMAT          Set the default format; --format overrides it"));
+        assert!(super::SEARCH_HELP.contains("--limit <N>"));
         assert!(super::READ_HELP
             .contains("OUTLINT_FORMAT          Set the default format; --format overrides it"));
     }
@@ -464,25 +486,29 @@ mod tests {
         let parse = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
             match parse_search_args(&args, &EnvironmentFormat::Unset) {
-                Ok(ParseOutcome::Run(options)) => Ok((options.root, options.words)),
-                Ok(ParseOutcome::Help) => Ok((None, "help".to_owned())),
+                Ok(ParseOutcome::Run(options)) => Ok((options.root, options.words, options.limit)),
+                Ok(ParseOutcome::Help) => Ok((None, "help".to_owned(), 10)),
                 Err(message) => Err(message),
             }
         };
         assert_eq!(
-            parse(&["--root", "docs", "rollback", "plan"]),
-            Ok((Some("docs".to_owned()), "rollback plan".to_owned()))
+            parse(&["--root", "docs", "--limit", "7", "rollback", "plan"]),
+            Ok((Some("docs".to_owned()), "rollback plan".to_owned(), 7))
         );
         assert_eq!(
             parse(&["rollback", "--root", "docs", "plan"]),
-            Ok((Some("docs".to_owned()), "rollback plan".to_owned()))
+            Ok((Some("docs".to_owned()), "rollback plan".to_owned(), 10))
         );
         assert_eq!(
             parse(&["--", "--root", "x"]),
-            Ok((None, "--root x".to_owned()))
+            Ok((None, "--root x".to_owned(), 10))
         );
         assert!(parse(&["--root", "docs"]).is_err());
         assert!(parse(&["--root"]).is_err());
+        assert!(parse(&["--limit", "0", "word"]).is_err());
+        assert!(parse(&["--limit", "-1", "word"]).is_err());
+        assert!(parse(&["--limit", "many", "word"]).is_err());
+        assert!(parse(&["--limit", "1", "--limit", "2", "word"]).is_err());
         assert!(parse(&["-x", "word"]).is_err());
     }
 

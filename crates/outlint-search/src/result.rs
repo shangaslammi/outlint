@@ -22,6 +22,17 @@ pub struct Hit {
     pub snippet: String,
 }
 
+/// Ranked hits together with the number of matching blocks before the display
+/// limit. Direct item units are excluded from `total` because their containing
+/// list is the block they refine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchResults {
+    /// Best matches after list-to-item narrowing and the requested limit.
+    pub hits: Vec<Hit>,
+    /// Number of non-item units whose own body satisfies the query.
+    pub total: usize,
+}
+
 /// One broad candidate and the narrower matching item found beneath it, when
 /// the candidate is a list whose one item satisfies the whole query.
 pub(crate) struct CandidateHit {

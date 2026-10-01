@@ -171,6 +171,15 @@ fn search_returns_item_paths_and_folds_lead_ins() {
     assert!(stdout(&output).contains("guide.md $/list[0]/item[1] 21B\n  rare needle detail\n"));
     assert!(!stdout(&output).contains("guide.md $/list[0] "));
 
+    let output = run(
+        &directory,
+        &["search", "--format", "json", "rare", "needle"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let value = json_output(&output);
+    assert_eq!(value["total"], 1, "the list, not its item, is the block");
+    assert_eq!(value["hits"][0]["mdpath"], "$/list[0]/item[1]");
+
     let output = run(&directory, &["search", "ordinary", "detail"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     assert!(stdout(&output).contains("guide.md $/list[0] 44B\n"));
@@ -230,12 +239,133 @@ fn a_matching_item_below_the_display_cut_still_suppresses_its_list() {
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let headers: Vec<_> = stdout(&output)
         .lines()
-        .filter(|line| !line.is_empty() && !line.starts_with("  "))
+        .filter(|line| !line.is_empty() && !line.starts_with("  ") && !line.starts_with('('))
         .collect();
     assert_eq!(headers.len(), 10, "stdout: {}", stdout(&output));
     assert!(
         headers.iter().all(|header| header.contains("/p[")),
         "the high-scoring list must be suppressed even when its narrower item falls below the ten displayed hits: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn search_limit_and_total_render_in_every_format() {
+    let directory = TempDir::new("search-limit");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    let mut source = "# Entries\n\n".to_owned();
+    for index in 0..12 {
+        source.push_str(&format!("Needle entry {index}.\n\n"));
+    }
+    directory.write("entries.md", source);
+
+    let output = run(&directory, &["search", "--limit", "2", "needle"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).ends_with("(2 of 12 matching blocks; use --limit to see more)\n"));
+
+    let output = run(
+        &directory,
+        &["search", "--format", "json", "--limit", "4", "needle"],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    let value = json_output(&output);
+    assert_eq!(value["total"], 12);
+    assert_eq!(value["hits"].as_array().map(Vec::len), Some(4));
+    let rendered = stdout(&output);
+    assert!(
+        rendered.find("\"query\":").expect("query member")
+            < rendered.find("\"total\":").expect("total member")
+    );
+
+    let output = run(
+        &directory,
+        &["search", "--format", "compact", "--limit", "3", "needle"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output).lines().count(), 3);
+    assert_eq!(
+        stderr(&output),
+        "(3 of 12 matching blocks; use --limit to see more)\n"
+    );
+
+    let output = run(&directory, &["search", "--limit", "12", "needle"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output)
+            .lines()
+            .filter(|line| line.starts_with("entries.md "))
+            .count(),
+        12
+    );
+    assert!(!stdout(&output).contains("use --limit"));
+
+    for value in ["0", "many"] {
+        let output = run(&directory, &["search", "--limit", value, "needle"]);
+        assert_eq!(output.status.code(), Some(2), "{value}");
+        assert_eq!(stdout(&output), "");
+        assert!(stderr(&output).contains("expected a positive integer"));
+    }
+}
+
+#[test]
+fn search_reports_index_creation_and_rebuilds_only_when_they_happen() {
+    let directory = TempDir::new("search-index-notes");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write("guide.md", "# Guide\n\nNeedle.\n");
+    let index = directory.path().join(".outlint/search");
+
+    let output = run(&directory, &["search", "needle"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stderr(&output),
+        format!("outlint: created search index at {}\n", index.display())
+    );
+
+    let output = run(&directory, &["search", "needle"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stderr(&output), "");
+
+    directory.write(
+        ".outlint/search/outlint-index.json",
+        "{\"format\": 1, \"outlint\": \"0.1.0\"}\n",
+    );
+    let output = run(&directory, &["search", "needle"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "outlint: rebuilt search index at {} (format changed)\n",
+            index.display()
+        )
+    );
+
+    directory.write(".outlint/search/meta.json", "not an index");
+    let output = run(&directory, &["search", "needle"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "outlint: rebuilt search index at {} (index could not be opened)\n",
+            index.display()
+        )
+    );
+}
+
+#[test]
+fn search_snippets_keep_inline_code_and_adjacent_punctuation() {
+    let directory = TempDir::new("search-snippet-fidelity");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write(
+        "guide.md",
+        "# Guide\n\nUse `conflicting-frontmatter`. Then continue.\n",
+    );
+
+    let output = run(&directory, &["search", "frontmatter"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("  Use `conflicting-frontmatter`. Then continue.\n"),
+        "stdout: {}",
         stdout(&output)
     );
 }

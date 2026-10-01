@@ -5,10 +5,10 @@
 use std::path::Path;
 
 use outlint_core::{
-    document_paths, merged_title, parse_markdown, Block, BlockKind, CanonicalDocumentPath,
-    CanonicalSectionStep, Document, DocumentNode, DocumentPath, DocumentPathError,
-    DocumentPathSyntaxError, DocumentPathTerminal, ListItem, MarkdownOptions, Section, SectionStep,
-    TextRange,
+    document_paths, heading_slug, merged_title, parse_markdown, Block, BlockKind,
+    CanonicalDocumentPath, CanonicalSectionStep, Document, DocumentNode, DocumentPath,
+    DocumentPathError, DocumentPathSyntaxError, DocumentPathTerminal, ListItem, MarkdownOptions,
+    Section, SectionStep, TextRange,
 };
 
 use crate::{
@@ -158,6 +158,7 @@ pub(crate) enum ReadFailure {
         path: String,
         message: String,
         offset: usize,
+        suggestions: Vec<String>,
     },
     Unresolved {
         file: String,
@@ -165,6 +166,7 @@ pub(crate) enum ReadFailure {
         step: String,
         resolved: String,
         nodes: Vec<TreeNode>,
+        suggestions: Vec<String>,
     },
     Ambiguous {
         file: String,
@@ -172,11 +174,13 @@ pub(crate) enum ReadFailure {
         step: String,
         resolved: String,
         candidates: Vec<TreeNode>,
+        suggestions: Vec<String>,
     },
     Other {
         file: String,
         path: String,
         message: String,
+        suggestions: Vec<String>,
     },
 }
 
@@ -459,6 +463,7 @@ fn missing_canonical_failure(file: &str, path: &DocumentPath) -> ReadFailure {
         file: file.to_owned(),
         path: path.to_string(),
         message: MISSING_CANONICAL.to_owned(),
+        suggestions: Vec::new(),
     }
 }
 
@@ -690,6 +695,307 @@ fn step_text(path: &DocumentPath, index: usize) -> (String, bool) {
     (step, true)
 }
 
+const SUGGESTION_LIMIT: usize = 5;
+
+/// Returns canonical alternatives for a path failure, in document order and
+/// capped so an error remains scannable. This is deliberately a pure
+/// transform of the parsed failure and the document enumeration.
+pub(crate) fn path_suggestions(error: &ReadError, document: &Document) -> Vec<String> {
+    let entries = document_paths(document);
+    let mut suggestions = match error {
+        ReadError::Syntax { spelling, .. } => syntax_suggestions(spelling, &entries),
+        ReadError::Unresolved {
+            path,
+            resolved_steps,
+        } => unresolved_suggestions(path, *resolved_steps, document, &entries),
+        ReadError::Ambiguous { .. } | ReadError::Other { .. } => Vec::new(),
+    };
+    suggestions.dedup();
+    suggestions.truncate(SUGGESTION_LIMIT);
+    suggestions
+}
+
+fn syntax_suggestions(
+    spelling: &str,
+    entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
+) -> Vec<String> {
+    let heading = spelling
+        .strip_prefix("$..")
+        .or_else(|| spelling.strip_prefix("$."));
+    let Some(slug) = heading.and_then(heading_slug) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|(path, node)| {
+            let (
+                CanonicalSectionStep::Named {
+                    slug: candidate, ..
+                },
+                _,
+            ) = path.sections().split_last()?
+            else {
+                return None;
+            };
+            (matches!(node, DocumentNode::Section(_)) && candidate == &slug)
+                .then(|| path.to_string())
+        })
+        .collect()
+}
+
+fn unresolved_suggestions(
+    path: &DocumentPath,
+    resolved_steps: usize,
+    document: &Document,
+    entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
+) -> Vec<String> {
+    let Some(SectionStep::Named { slug, .. }) = path.sections().get(resolved_steps) else {
+        return Vec::new();
+    };
+    let Some(deepest) = canonical_prefix(entries, document, path, resolved_steps) else {
+        return Vec::new();
+    };
+    let exact = deeper_slug_suggestions(
+        path,
+        resolved_steps,
+        slug,
+        deepest,
+        document,
+        entries,
+        SlugMatch::Exact,
+    );
+    if !exact.is_empty() {
+        return exact;
+    }
+    let suffix = deeper_slug_suggestions(
+        path,
+        resolved_steps,
+        slug,
+        deepest,
+        document,
+        entries,
+        SlugMatch::HyphenSuffix,
+    );
+    if !suffix.is_empty() {
+        return suffix;
+    }
+    let sibling_typos = typo_suggestions(slug.as_str(), deepest, entries);
+    if !sibling_typos.is_empty() {
+        return sibling_typos;
+    }
+    deeper_typo_suggestions(
+        path,
+        resolved_steps,
+        slug.as_str(),
+        deepest,
+        document,
+        entries,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SlugMatch {
+    Exact,
+    HyphenSuffix,
+}
+
+fn deeper_slug_suggestions(
+    path: &DocumentPath,
+    resolved_steps: usize,
+    slug: &outlint_core::HeadingSlug,
+    deepest: &CanonicalDocumentPath,
+    document: &Document,
+    entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
+    match_kind: SlugMatch,
+) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|(candidate, node)| {
+            let (CanonicalSectionStep::Named { slug: last, .. }, _) =
+                candidate.sections().split_last()?
+            else {
+                return None;
+            };
+            let depth = candidate
+                .sections()
+                .len()
+                .saturating_sub(deepest.sections().len());
+            let slug_matches = match match_kind {
+                SlugMatch::Exact => depth > 1 && last == slug,
+                SlugMatch::HyphenSuffix => {
+                    depth >= 1 && is_proper_hyphen_suffix(last.as_str(), slug.as_str())
+                }
+            };
+            if !matches!(node, DocumentNode::Section(_))
+                || !candidate.sections().starts_with(deepest.sections())
+                || !slug_matches
+            {
+                return None;
+            }
+            apply_resolving_remainder(path, resolved_steps, candidate, document, entries)
+        })
+        .collect()
+}
+
+fn is_proper_hyphen_suffix(candidate: &str, suffix: &str) -> bool {
+    candidate != suffix
+        && candidate
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with('-'))
+}
+
+/// Replaces the failed section step with `candidate`, then retains the
+/// longest remaining prefix that still resolves. A later bad step therefore
+/// does not hide the useful correction for the first one.
+fn apply_resolving_remainder(
+    path: &DocumentPath,
+    resolved_steps: usize,
+    candidate: &CanonicalDocumentPath,
+    document: &Document,
+    entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
+) -> Option<String> {
+    let replaced = path.prefix(resolved_steps.saturating_add(1)).to_string();
+    let total_steps = path.sections().len()
+        + match path.terminal() {
+            None => 0,
+            Some(DocumentPathTerminal::DirectBlock { .. }) => 1,
+            Some(DocumentPathTerminal::ListItem { .. }) => 2,
+        };
+    for kept in (resolved_steps.saturating_add(1)..=total_steps).rev() {
+        let original = path.prefix(kept).to_string();
+        let Some(remainder) = original.strip_prefix(&replaced) else {
+            continue;
+        };
+        let spelling = format!("{candidate}{remainder}");
+        let Ok(suggestion) = DocumentPath::parse(&spelling) else {
+            continue;
+        };
+        let Ok(target) = suggestion.resolve(document) else {
+            continue;
+        };
+        if let Some(canonical) = canonical_path(entries, target) {
+            return Some(canonical.to_string());
+        }
+    }
+    None
+}
+
+fn typo_suggestions(
+    misspelled: &str,
+    deepest: &CanonicalDocumentPath,
+    entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut best = usize::MAX;
+    for (candidate, node) in entries {
+        let Some((CanonicalSectionStep::Named { slug, .. }, parent)) =
+            candidate.sections().split_last()
+        else {
+            continue;
+        };
+        if !matches!(node, DocumentNode::Section(_)) || parent != deepest.sections() {
+            continue;
+        }
+        let distance = levenshtein(misspelled, slug.as_str());
+        let threshold = typo_threshold(misspelled.len().max(slug.as_str().len()));
+        if distance == 0 || distance > threshold || distance > best {
+            continue;
+        }
+        if distance < best {
+            best = distance;
+            candidates.clear();
+        }
+        candidates.push(candidate.to_string());
+    }
+    candidates
+}
+
+fn deeper_typo_suggestions(
+    path: &DocumentPath,
+    resolved_steps: usize,
+    misspelled: &str,
+    deepest: &CanonicalDocumentPath,
+    document: &Document,
+    entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut best = usize::MAX;
+    for (candidate, node) in entries {
+        let Some((CanonicalSectionStep::Named { slug, .. }, _)) = candidate.sections().split_last()
+        else {
+            continue;
+        };
+        let depth = candidate
+            .sections()
+            .len()
+            .saturating_sub(deepest.sections().len());
+        if !matches!(node, DocumentNode::Section(_))
+            || !candidate.sections().starts_with(deepest.sections())
+            || depth <= 1
+        {
+            continue;
+        }
+        let candidate_best = hyphen_suffixes(slug.as_str())
+            .filter_map(|suffix| {
+                let distance = levenshtein(misspelled, suffix);
+                let threshold = typo_threshold(misspelled.len().max(suffix.len()));
+                (distance > 0 && distance <= threshold).then_some(distance)
+            })
+            .min();
+        let Some(distance) = candidate_best else {
+            continue;
+        };
+        if distance > best {
+            continue;
+        }
+        if distance < best {
+            best = distance;
+            candidates.clear();
+        }
+        if let Some(suggestion) =
+            apply_resolving_remainder(path, resolved_steps, candidate, document, entries)
+        {
+            candidates.push(suggestion);
+        }
+    }
+    candidates
+}
+
+/// Every suffix beginning at a hyphen-delimited component, longest first.
+/// Including the whole slug lets an unnumbered deeper heading participate in
+/// the fallback while still allowing a numbered heading's semantic tail to
+/// provide the closer match.
+fn hyphen_suffixes(slug: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(slug).chain(
+        slug.match_indices('-')
+            .filter_map(|(index, _)| slug.get(index.saturating_add(1)..)),
+    )
+}
+
+/// Allows one edit for short slugs, two for medium slugs, and three for long
+/// ones. Slugs are ASCII, so byte length is their character length.
+fn typo_threshold(slug_len: usize) -> usize {
+    slug_len.div_ceil(3).clamp(1, 3)
+}
+
+fn levenshtein(left: &str, right: &str) -> usize {
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len().saturating_add(1)];
+    for (left_index, left_byte) in left.bytes().enumerate() {
+        current[0] = left_index.saturating_add(1);
+        for (right_index, right_byte) in right.bytes().enumerate() {
+            let substitution =
+                previous[right_index].saturating_add(usize::from(left_byte != right_byte));
+            current[right_index.saturating_add(1)] = previous[right_index.saturating_add(1)]
+                .saturating_add(1)
+                .min(current[right_index].saturating_add(1))
+                .min(substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous.get(right.len()).copied().unwrap_or(left.len())
+}
+
 /// Enriches a path failure with canonical rows before presentation.
 pub(crate) fn describe_error(
     error: &ReadError,
@@ -697,11 +1003,13 @@ pub(crate) fn describe_error(
     source: &str,
     document: &Document,
 ) -> ReadFailure {
+    let suggestions = path_suggestions(error, document);
     match error {
         ReadError::Syntax { spelling, error } => ReadFailure::Syntax {
             path: spelling.clone(),
             message: error.message.clone(),
             offset: error.offset.0,
+            suggestions,
         },
         ReadError::Unresolved {
             path,
@@ -719,6 +1027,7 @@ pub(crate) fn describe_error(
                 step,
                 resolved: deepest.to_string(),
                 nodes,
+                suggestions,
             }
         }
         ReadError::Ambiguous {
@@ -767,12 +1076,14 @@ pub(crate) fn describe_error(
                 step,
                 resolved: deepest.to_string(),
                 candidates,
+                suggestions,
             }
         }
         ReadError::Other { path, message } => ReadFailure::Other {
             file: file.to_owned(),
             path: path.to_string(),
             message: message.clone(),
+            suggestions,
         },
     }
 }
@@ -913,7 +1224,8 @@ mod tests {
             "outlint: cannot resolve $.setp in guide.md: setp not found under $\n\
              $        229B  Guide\n\
              $.setup  109B  Setup\n\
-             $.faq    47B  FAQ\n"
+             $.faq    47B  FAQ\n\
+             did you mean $.setup?\n"
         );
     }
 
@@ -923,8 +1235,8 @@ mod tests {
         assert_eq!(
             render_error(&error, "guide.md", FIXTURE, &document()),
             "outlint: ambiguous document path $.faq.question in guide.md: 2 sections match 'question'\n\
-             $.faq.question[0]\n\
-             $.faq.question[1]\n"
+             $.faq.question[0]  19B  Question\n\
+             $.faq.question[1]  19B  Question\n"
         );
     }
 
@@ -934,8 +1246,8 @@ mod tests {
         assert_eq!(
             render_error(&ambiguous, "guide.md", FIXTURE, &document()),
             "outlint: ambiguous document path $..question in guide.md: 2 sections match '..question'\n\
-             $.faq.question[0]\n\
-             $.faq.question[1]\n"
+             $.faq.question[0]  19B  Question\n\
+             $.faq.question[1]  19B  Question\n"
         );
         assert_eq!(
             content("$..question[1]", None).as_deref(),
@@ -973,8 +1285,8 @@ mod tests {
         assert_eq!(
             render_error(&ambiguous, "setup.md", DUPLICATES, &document),
             "outlint: ambiguous document path $.setup[0].question in setup.md: 2 sections match 'question'\n\
-             $.setup.question[0]\n\
-             $.setup.question[1]\n"
+             $.setup.question[0]  19B  Question\n\
+             $.setup.question[1]  19B  Question\n"
         );
         let unresolved = render_content(DUPLICATES, &document, &path("$.setup[0].missing"), None)
             .expect_err("does not resolve");
@@ -984,6 +1296,97 @@ mod tests {
                  $.setup  "
             )
         );
+    }
+
+    fn suggestions_for(source: &str, spelling: &str) -> Vec<String> {
+        let document = parse_markdown(source, MarkdownOptions::default()).expect("fixture parses");
+        let error = match parse_path(spelling) {
+            Ok(path) => resolve_node(&document, &path).expect_err("fixture path fails"),
+            Err(error) => error,
+        };
+        path_suggestions(&error, &document)
+    }
+
+    #[test]
+    fn deeper_slug_suggestions_keep_the_resolving_remainder() {
+        const SOURCE: &str =
+            "# Guide\n\n## Schema Format\n\n### Frontmatter Object\n\n#### Properties\n";
+        assert_eq!(
+            suggestions_for(SOURCE, "$.frontmatter-object.properties"),
+            ["$.schema-format.frontmatter-object.properties"]
+        );
+        assert_eq!(
+            suggestions_for(SOURCE, "$.frontmatter-object.missing"),
+            ["$.schema-format.frontmatter-object"]
+        );
+    }
+
+    #[test]
+    fn numbered_slugs_match_by_suffix_after_exact_deeper_matches() {
+        const NUMBERED: &str = "# Guide\n\n## 2. Schema Format\n\n### 2.3 Frontmatter Object\n\n#### Properties\n\n### Object\n\n## 7. Options\n";
+        assert_eq!(
+            suggestions_for(NUMBERED, "$.frontmatter-object.properties"),
+            ["$.2-schema-format.2-3-frontmatter-object.properties"]
+        );
+        assert_eq!(
+            suggestions_for(
+                "# Guide\n\n## 2. Schema Format\n\n### 2.3 Frontmatter Object\n\n## 4. Frontmatter Object\n",
+                "$.frontmatter-object"
+            ),
+            [
+                "$.2-schema-format.2-3-frontmatter-object",
+                "$.4-frontmatter-object"
+            ],
+            "suffix matches stay in document order"
+        );
+        assert_eq!(
+            suggestions_for(NUMBERED, "$.object"),
+            ["$.2-schema-format.object"],
+            "an exact deeper slug outranks broader suffixes"
+        );
+        assert_eq!(suggestions_for(NUMBERED, "$.options"), ["$.7-options"]);
+    }
+
+    #[test]
+    fn typo_suggestions_keep_only_the_best_sibling_distance() {
+        const SOURCE: &str = "# Guide\n\n## Setup\n\n## Setups Extra\n\n## Reference\n";
+        assert_eq!(suggestions_for(SOURCE, "$.setp"), ["$.setup"]);
+    }
+
+    #[test]
+    fn deeper_numbered_suffixes_are_the_typo_fallback() {
+        const NUMBERED: &str = "# Guide\n\n## 2. Schema Format\n\n### 2.3 Frontmatter Object\n";
+        assert_eq!(
+            suggestions_for(NUMBERED, "$.frontmater-object"),
+            ["$.2-schema-format.2-3-frontmatter-object"]
+        );
+
+        const SIBLING_FIRST: &str = "# Guide\n\n## Frontmatter Objects\n\n## 2. Schema Format\n\n### 2.3 Frontmatter Objecc\n";
+        assert_eq!(
+            suggestions_for(SIBLING_FIRST, "$.frontmatter-object"),
+            ["$.frontmatter-objects"],
+            "an in-threshold sibling typo suppresses the deeper fallback"
+        );
+    }
+
+    #[test]
+    fn heading_text_suggestions_use_the_document_slug_algorithm() {
+        const SOURCE: &str = "# Guide\n\n## 7. Options\n\n## Mälardalen Notes\n";
+        assert_eq!(suggestions_for(SOURCE, "$.7. Options"), ["$.7-options"]);
+        assert_eq!(
+            suggestions_for(SOURCE, "$.Mälardalen Notes"),
+            ["$.malardalen-notes"]
+        );
+    }
+
+    #[test]
+    fn suggestions_are_capped_and_absent_for_unhelpful_failures() {
+        const MANY: &str =
+            "# Guide\n\n## Match\n\n## Match\n\n## Match\n\n## Match\n\n## Match\n\n## Match\n";
+        assert_eq!(suggestions_for(MANY, "$.Match").len(), SUGGESTION_LIMIT);
+        assert!(suggestions_for(FIXTURE, "$.unrelated-name").is_empty());
+        assert!(suggestions_for(FIXTURE, "$.setup/list[8]").is_empty());
+        assert!(suggestions_for(FIXTURE, "$.faq.question").is_empty());
     }
 
     #[test]

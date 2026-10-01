@@ -14,7 +14,7 @@ use tantivy::{
 
 /// Bumped whenever the schema or the unit derivation changes incompatibly;
 /// the store rebuilds an index recorded under another version.
-pub(crate) const INDEX_FORMAT_VERSION: u32 = 8;
+pub(crate) const INDEX_FORMAT_VERSION: u32 = 9;
 
 /// Field names, so the schema and the fast-field readers agree.
 pub(crate) const PATH: &str = "path";

@@ -11,10 +11,11 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 /// One searchable node of a Markdown document.
 ///
 /// `body_text` is what gets tokenized and scored; `snippet_text` is what a
-/// hit shows a fragment of. Both are visible text — link targets, HTML, and
-/// comments never reach either — but they differ for a section, whose body
-/// is its heading and whose snippet is its own content, and for the root,
-/// whose body includes the merged title and whose snippet does not.
+/// hit shows a fragment of. Both are visible text with inline code marked by
+/// backticks — link targets, HTML, and comments never reach either — but they
+/// differ for a section, whose body is its heading and whose snippet is its
+/// own content, and for the root, whose body includes the merged title and
+/// whose snippet does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexUnit {
     /// Rendered [`CanonicalDocumentPath`] of the node.
@@ -39,10 +40,11 @@ pub struct IndexUnit {
     /// enclosing heading texts. For `a.md` containing `# Only\n\nBody.\n`
     /// the root's context is `a` and the paragraph's is `a / Only`.
     pub context: String,
-    /// The visible text of the node: the heading text of a section, the
-    /// block's text for a block, an item's complete visible text for a list
-    /// item, or the title text followed by the frontmatter scalars for the
-    /// root. A folded lead-in paragraph precedes the addressed node's text.
+    /// The visible text of the node, with inline code marked by backticks: the
+    /// heading text of a section, the block's text for a block, an item's
+    /// complete visible text for a list item, or the title text followed by
+    /// the frontmatter scalars for the root. A folded lead-in paragraph
+    /// precedes the addressed node's text.
     pub body_text: String,
     /// The text a hit is excerpted from, whitespace-collapsed: for a block or
     /// item its own visible text; for a section the visible text of its own
@@ -401,16 +403,55 @@ fn context_of(
     context
 }
 
-/// Concatenates the text and code payloads of a Markdown slice, so link
-/// targets, HTML, and comments never reach the tokenizer.
+/// Concatenates the visible payloads of a Markdown slice. Inline markup does
+/// not create whitespace that was absent in the source, explicit breaks and
+/// block boundaries do, and inline code retains backticks for faithful
+/// snippets. Link targets, HTML, and comments never reach the tokenizer.
 fn visible_text(markdown: &str) -> String {
     let mut text = String::new();
+    let mut separator = false;
     for event in Parser::new_ext(markdown, Options::empty()) {
-        if let Event::Text(payload) | Event::Code(payload) = event {
-            push_word(&mut text, &payload);
+        match event {
+            Event::Text(payload) => push_visible(&mut text, &payload, &mut separator),
+            Event::Code(payload) => {
+                let code = format!("`{payload}`");
+                push_visible(&mut text, &code, &mut separator);
+            }
+            Event::SoftBreak | Event::HardBreak => separator = true,
+            Event::Start(tag) if !inline_tag_end(tag.to_end()) => separator = true,
+            Event::End(end) if !inline_tag_end(end) => separator = true,
+            _ => {}
         }
     }
     text
+}
+
+fn inline_tag_end(end: TagEnd) -> bool {
+    matches!(
+        end,
+        TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
+            | TagEnd::Superscript
+            | TagEnd::Subscript
+            | TagEnd::Link
+            | TagEnd::Image
+    )
+}
+
+fn push_visible(text: &mut String, payload: &str, separator: &mut bool) {
+    if payload.is_empty() {
+        return;
+    }
+    if *separator
+        && !text.is_empty()
+        && !text.ends_with(char::is_whitespace)
+        && !payload.starts_with(char::is_whitespace)
+    {
+        text.push(' ');
+    }
+    *separator = false;
+    text.push_str(payload);
 }
 
 fn push_word(text: &mut String, word: &str) {
@@ -441,6 +482,32 @@ mod tests {
     use super::*;
 
     const FIXTURE: &str = "---\ntitle: Rollout\ntags: [ops, release]\n---\n\n# Deployment\n\n## Rollback plan\n\nRestore the [previous release](https://example.test/rel) now. <!-- secret note -->\n\n- first step\n- second step\n";
+
+    #[test]
+    fn visible_text_preserves_inline_adjacency_and_source_boundaries() {
+        assert_eq!(
+            collapse_whitespace(&visible_text("Use `conflicting-frontmatter`.")),
+            "Use `conflicting-frontmatter`."
+        );
+        assert_eq!(
+            collapse_whitespace(&visible_text("micro*service* and inter**operate**")),
+            "microservice and interoperate"
+        );
+        assert_eq!(
+            collapse_whitespace(&visible_text(
+                "Read [the guide](https://example.test/destination) now."
+            )),
+            "Read the guide now."
+        );
+        assert_eq!(
+            collapse_whitespace(&visible_text("first line\nsecond line  \nthird line")),
+            "first line second line third line"
+        );
+        assert_eq!(
+            collapse_whitespace(&visible_text("- first\n  - nested detail\n- second")),
+            "first nested detail second"
+        );
+    }
 
     #[test]
     fn index_units_enumerate_root_sections_and_blocks() {

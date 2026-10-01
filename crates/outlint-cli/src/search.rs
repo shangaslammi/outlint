@@ -34,6 +34,7 @@ pub(crate) fn execute_search(options: &SearchOptions) -> u8 {
     if result.hits.is_empty() {
         let rendered = render::search::no_hits(
             &options.words,
+            result.total,
             result.term_counts.as_deref(),
             options.format,
         );
@@ -48,16 +49,26 @@ pub(crate) fn execute_search(options: &SearchOptions) -> u8 {
             1
         }
     } else {
-        write_stdout(&render::search::hits(
+        let status = write_stdout(&render::search::hits(
             &options.words,
             &result.hits,
+            result.total,
             options.format,
-        ))
+        ));
+        if options.format == ReadSearchFormat::Compact {
+            if let Some(note) =
+                render::search::compact_truncation_note(result.hits.len(), result.total)
+            {
+                write_stderr(&note);
+            }
+        }
+        status
     }
 }
 
 struct SearchResult {
     hits: Vec<Hit>,
+    total: usize,
     term_counts: Option<Vec<TermCount>>,
 }
 
@@ -106,19 +117,24 @@ fn search_with_notes(
         None => current_dir.clone(),
     };
     let scope = Scope::locate(&search_root)?;
-    let store = Store::open_or_rebuild(&scope)?;
+    let (store, open_notes) = Store::open_or_rebuild(&scope)?;
+    notes.extend(open_notes);
     let walk = walk_markdown(&scope);
     notes.extend(walk.notes.iter().cloned());
     notes.extend(store.refresh(&walk)?);
-    let mut hits = store.search(&options.words)?;
-    make_paths_relative(&mut hits, &current_dir, scope.search_root())
+    let mut matches = store.search(&options.words, options.limit)?;
+    make_paths_relative(&mut matches.hits, &current_dir, scope.search_root())
         .map_err(SearchFailure::Shell)?;
-    let term_counts = if hits.is_empty() {
+    let term_counts = if matches.hits.is_empty() {
         store.term_counts(&options.words)?
     } else {
         None
     };
-    Ok(SearchResult { hits, term_counts })
+    Ok(SearchResult {
+        hits: matches.hits,
+        total: matches.total,
+        term_counts,
+    })
 }
 
 /// Rebases search-root-relative hit paths onto the invocation directory. Both
@@ -207,6 +223,15 @@ fn display_path(path: Option<&Path>) -> String {
 
 fn search_note_message(note: &SearchNote) -> String {
     match note.operation {
+        SearchNoteOperation::CreateIndex => format!(
+            "created search index at {}",
+            display_path(note.path.as_deref())
+        ),
+        SearchNoteOperation::RebuildIndex => format!(
+            "rebuilt search index at {} ({})",
+            display_path(note.path.as_deref()),
+            note.cause
+        ),
         SearchNoteOperation::Walk => format!("cannot walk: {}", note.cause),
         SearchNoteOperation::Stat => format!(
             "cannot stat {}: {}",

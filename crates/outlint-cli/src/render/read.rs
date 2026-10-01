@@ -66,11 +66,12 @@ pub(crate) fn human_tree(nodes: &[TreeNode]) -> String {
 }
 
 pub(crate) fn human_error(value: &ReadFailure) -> String {
-    match value {
+    let mut output = match value {
         ReadFailure::Syntax {
             path,
             message,
             offset,
+            ..
         } => format!(
             "outlint: invalid document path '{}': {} at byte {offset}\n",
             escape_human(path),
@@ -82,6 +83,7 @@ pub(crate) fn human_error(value: &ReadFailure) -> String {
             step,
             resolved,
             nodes,
+            ..
         } => format!(
             "outlint: cannot resolve {} in {}: {} not found under {}\n{}",
             escape_human(path),
@@ -104,23 +106,23 @@ pub(crate) fn human_error(value: &ReadFailure) -> String {
                 candidates.len(),
                 escape_human(step)
             );
-            for candidate in candidates {
-                output.push_str(&escape_human(&candidate.mdpath));
-                output.push('\n');
-            }
+            output.push_str(&human_tree(candidates));
             output
         }
         ReadFailure::Other {
             file,
             path,
             message,
+            ..
         } => format!(
             "outlint: cannot resolve {} in {}: {}\n",
             escape_human(path),
             escape_human(file),
             escape_human(message)
         ),
-    }
+    };
+    append_suggestions(&mut output, failure_suggestions(value), escape_human);
+    output
 }
 
 fn json_tree(tree: &ReadTree) -> String {
@@ -185,17 +187,20 @@ fn write_error_json(output: &mut Vec<u8>, value: &ReadFailure) {
             path,
             message,
             offset,
+            suggestions,
         } => {
             object.value("kind", &json!("syntax"));
             object.value("path", &json!(path));
             object.value("message", &json!(message));
             object.value("offset", &json!(offset));
+            object.value("suggestions", &json!(suggestions));
         }
         ReadFailure::Unresolved {
             path,
             step,
             resolved,
             nodes,
+            suggestions,
             ..
         } => {
             object.value("kind", &json!("unresolved"));
@@ -205,12 +210,14 @@ fn write_error_json(output: &mut Vec<u8>, value: &ReadFailure) {
             object.member("nodes", |output| {
                 write_ordered_json_array(output, nodes, write_node_json)
             });
+            object.value("suggestions", &json!(suggestions));
         }
         ReadFailure::Ambiguous {
             path,
             step,
             resolved,
             candidates,
+            suggestions,
             ..
         } => {
             object.value("kind", &json!("ambiguous"));
@@ -220,11 +227,18 @@ fn write_error_json(output: &mut Vec<u8>, value: &ReadFailure) {
             object.member("candidates", |output| {
                 write_ordered_json_array(output, candidates, write_node_json)
             });
+            object.value("suggestions", &json!(suggestions));
         }
-        ReadFailure::Other { path, message, .. } => {
+        ReadFailure::Other {
+            path,
+            message,
+            suggestions,
+            ..
+        } => {
             object.value("kind", &json!("other"));
             object.value("path", &json!(path));
             object.value("message", &json!(message));
+            object.value("suggestions", &json!(suggestions));
         }
     });
 }
@@ -243,11 +257,12 @@ fn compact_tree(nodes: &[TreeNode]) -> String {
 }
 
 fn compact_error(value: &ReadFailure) -> String {
-    match value {
+    let mut output = match value {
         ReadFailure::Syntax {
             path,
             message,
             offset,
+            ..
         } => format!(
             "outlint: invalid document path '{}': {} at byte {offset}\n",
             escape_compact(path),
@@ -259,6 +274,7 @@ fn compact_error(value: &ReadFailure) -> String {
             step,
             resolved,
             nodes,
+            ..
         } => format!(
             "outlint: cannot resolve {} in {}: {} not found under {}\n{}",
             escape_compact(path),
@@ -285,12 +301,32 @@ fn compact_error(value: &ReadFailure) -> String {
             file,
             path,
             message,
+            ..
         } => format!(
             "outlint: cannot resolve {} in {}: {}\n",
             escape_compact(path),
             escape_compact(file),
             escape_compact(message)
         ),
+    };
+    append_suggestions(&mut output, failure_suggestions(value), escape_compact);
+    output
+}
+
+fn failure_suggestions(value: &ReadFailure) -> &[String] {
+    match value {
+        ReadFailure::Syntax { suggestions, .. }
+        | ReadFailure::Unresolved { suggestions, .. }
+        | ReadFailure::Ambiguous { suggestions, .. }
+        | ReadFailure::Other { suggestions, .. } => suggestions,
+    }
+}
+
+fn append_suggestions(output: &mut String, suggestions: &[String], escape: fn(&str) -> String) {
+    for suggestion in suggestions {
+        output.push_str("did you mean ");
+        output.push_str(&escape(suggestion));
+        output.push_str("?\n");
     }
 }
 
@@ -358,11 +394,12 @@ mod tests {
             step: "setp".into(),
             resolved: "$".into(),
             nodes: nodes(),
+            suggestions: vec!["$.setup".into()],
         };
         let rendered = json_error(&failure);
         assert_eq!(
             rendered,
-            "{\"version\":1,\"error\":{\"kind\":\"unresolved\",\"path\":\"$.setp\",\"step\":\"setp\",\"resolved\":\"$\",\"nodes\":[{\"mdpath\":\"$.setup\",\"kind\":\"section\",\"level\":2,\"text\":\"Setup\",\"bytes\":3140},{\"mdpath\":\"$.setup/p[0]\",\"kind\":\"p\",\"preview\":\"Install first.\",\"bytes\":24}]}}\n"
+            "{\"version\":1,\"error\":{\"kind\":\"unresolved\",\"path\":\"$.setp\",\"step\":\"setp\",\"resolved\":\"$\",\"nodes\":[{\"mdpath\":\"$.setup\",\"kind\":\"section\",\"level\":2,\"text\":\"Setup\",\"bytes\":3140},{\"mdpath\":\"$.setup/p[0]\",\"kind\":\"p\",\"preview\":\"Install first.\",\"bytes\":24}],\"suggestions\":[\"$.setup\"]}}\n"
         );
         let value: Value = serde_json::from_str(&rendered).expect("renderer emits valid JSON");
         assert_eq!(value["error"]["kind"], "unresolved");
@@ -406,6 +443,7 @@ mod tests {
             step: format!("step-{controls}"),
             resolved: format!("$.resolved-{controls}"),
             nodes,
+            suggestions: Vec::new(),
         };
         let rendered = compact_error(&failure);
         assert_eq!(rendered.lines().count(), 3, "{rendered:?}");
@@ -420,6 +458,7 @@ mod tests {
             path: "$\t.bad\\path".into(),
             message: "bad\r\npath\u{1b}".into(),
             offset: 2,
+            suggestions: Vec::new(),
         };
         assert_eq!(
             compact_error(&syntax),
@@ -430,6 +469,7 @@ mod tests {
             file: "docs/bad\nfile.md".into(),
             path: "$.bad\tpath".into(),
             message: "failure\u{1b}\\detail".into(),
+            suggestions: Vec::new(),
         };
         assert_eq!(
             compact_error(&other),
@@ -441,7 +481,7 @@ mod tests {
         );
         assert_eq!(
             json_error(&other),
-            "{\"version\":1,\"error\":{\"kind\":\"other\",\"path\":\"$.bad\\tpath\",\"message\":\"failure\\u001b\\\\detail\"}}\n"
+            "{\"version\":1,\"error\":{\"kind\":\"other\",\"path\":\"$.bad\\tpath\",\"message\":\"failure\\u001b\\\\detail\",\"suggestions\":[]}}\n"
         );
     }
 

@@ -11,10 +11,15 @@ use super::{
 const SEARCH_ENVELOPE_VERSION: u64 = 1;
 
 /// Renders successful search hits in the selected machine or human format.
-pub(crate) fn hits(query: &str, values: &[Hit], format: crate::args::ReadSearchFormat) -> String {
+pub(crate) fn hits(
+    query: &str,
+    values: &[Hit],
+    total: usize,
+    format: crate::args::ReadSearchFormat,
+) -> String {
     match format {
-        crate::args::ReadSearchFormat::Human => human_hits(values),
-        crate::args::ReadSearchFormat::Json => json_hits(query, values),
+        crate::args::ReadSearchFormat::Human => human_hits(values, total),
+        crate::args::ReadSearchFormat::Json => json_hits(query, total, values),
         crate::args::ReadSearchFormat::Compact => compact_hits(values),
     }
 }
@@ -23,17 +28,18 @@ pub(crate) fn hits(query: &str, values: &[Hit], format: crate::args::ReadSearchF
 /// JSON remains the invocation's single stdout object.
 pub(crate) fn no_hits(
     query: &str,
+    total: usize,
     counts: Option<&[TermCount]>,
     format: crate::args::ReadSearchFormat,
 ) -> String {
     match format {
         crate::args::ReadSearchFormat::Human => human_no_hits(query, counts),
-        crate::args::ReadSearchFormat::Json => json_no_hits(query, counts),
+        crate::args::ReadSearchFormat::Json => json_no_hits(query, total, counts),
         crate::args::ReadSearchFormat::Compact => compact_no_hits(counts),
     }
 }
 
-fn human_hits(hits: &[Hit]) -> String {
+fn human_hits(hits: &[Hit], total: usize) -> String {
     let mut output = String::new();
     for hit in hits {
         output.push_str(&format!(
@@ -53,7 +59,21 @@ fn human_hits(hits: &[Hit]) -> String {
         }
         output.push('\n');
     }
+    if let Some(note) = truncation_note(hits.len(), total) {
+        output.push_str(&note);
+    }
     output
+}
+
+/// The limit note for stderr in compact mode. Human output incorporates the
+/// same line in stdout; JSON carries the counts structurally.
+pub(crate) fn compact_truncation_note(shown: usize, total: usize) -> Option<String> {
+    truncation_note(shown, total)
+}
+
+fn truncation_note(shown: usize, total: usize) -> Option<String> {
+    (shown < total)
+        .then(|| format!("({shown} of {total} matching blocks; use --limit to see more)\n"))
 }
 
 fn human_no_hits(query: &str, counts: Option<&[TermCount]>) -> String {
@@ -69,13 +89,14 @@ fn human_no_hits(query: &str, counts: Option<&[TermCount]>) -> String {
     output
 }
 
-fn json_hits(query: &str, hits: &[Hit]) -> String {
+fn json_hits(query: &str, total: usize, hits: &[Hit]) -> String {
     let mut output = Vec::new();
     // Search objects follow their documented wire order; do not route these
     // through `serde_json::Map`, whose default representation sorts keys.
     write_ordered_json_object(&mut output, |object| {
         object.value("version", &json!(SEARCH_ENVELOPE_VERSION));
         object.value("query", &json!(query));
+        object.value("total", &json!(total));
         object.member("hits", |output| {
             write_ordered_json_array(output, hits, write_hit_json)
         });
@@ -83,11 +104,12 @@ fn json_hits(query: &str, hits: &[Hit]) -> String {
     finish_json_line(output)
 }
 
-fn json_no_hits(query: &str, counts: Option<&[TermCount]>) -> String {
+fn json_no_hits(query: &str, total: usize, counts: Option<&[TermCount]>) -> String {
     let mut output = Vec::new();
     write_ordered_json_object(&mut output, |object| {
         object.value("version", &json!(SEARCH_ENVELOPE_VERSION));
         object.value("query", &json!(query));
+        object.value("total", &json!(total));
         object.member("hits", |output| output.extend_from_slice(b"[]"));
         object.member("term_counts", |output| match counts {
             Some(counts) => write_ordered_json_array(output, counts, write_term_count_json),
@@ -200,7 +222,7 @@ mod tests {
     #[test]
     fn human_output_uses_the_documented_layout() {
         assert_eq!(
-            human_hits(&fixture_hits()),
+            human_hits(&fixture_hits(), 3),
             "docs/guide.md $.setup/p[0] 412B (section 3.1kB)\n  Run the setup script, then…\n\n\
              docs/notes.md $.decision-outcome 900B\n  Chosen option: keep the current layout.\n\n\
              docs/notes.md $.options 300B\n\n"
@@ -222,10 +244,10 @@ mod tests {
     #[test]
     fn json_has_versioned_hits_and_no_hit_counts() {
         let hits = fixture_hits();
-        let rendered = json_hits("setup", &hits[..1]);
+        let rendered = json_hits("setup", 1, &hits[..1]);
         assert_eq!(
             rendered,
-            "{\"version\":1,\"query\":\"setup\",\"hits\":[{\"path\":\"docs/guide.md\",\"mdpath\":\"$.setup/p[0]\",\"bytes\":412,\"section_bytes\":3140,\"score\":7.31,\"snippet\":\"Run the setup script, then…\"}]}\n"
+            "{\"version\":1,\"query\":\"setup\",\"total\":1,\"hits\":[{\"path\":\"docs/guide.md\",\"mdpath\":\"$.setup/p[0]\",\"bytes\":412,\"section_bytes\":3140,\"score\":7.31,\"snippet\":\"Run the setup script, then…\"}]}\n"
         );
         let value: Value = serde_json::from_str(&rendered).expect("renderer emits JSON");
         assert_eq!(value["version"], 1);
@@ -236,17 +258,17 @@ mod tests {
             term: "missing".into(),
             blocks: 0,
         }];
-        let rendered = json_no_hits("missing", Some(&counts));
+        let rendered = json_no_hits("missing", 0, Some(&counts));
         assert_eq!(
             rendered,
-            "{\"version\":1,\"query\":\"missing\",\"hits\":[],\"term_counts\":[{\"term\":\"missing\",\"blocks\":0}]}\n"
+            "{\"version\":1,\"query\":\"missing\",\"total\":0,\"hits\":[],\"term_counts\":[{\"term\":\"missing\",\"blocks\":0}]}\n"
         );
         let value: Value = serde_json::from_str(&rendered).expect("renderer emits JSON");
         assert_eq!(value["hits"], json!([]));
         assert_eq!(value["term_counts"][0]["term"], "missing");
 
         let value: Value =
-            serde_json::from_str(&json_no_hits("missing", None)).expect("renderer emits JSON");
+            serde_json::from_str(&json_no_hits("missing", 0, None)).expect("renderer emits JSON");
         assert!(value["term_counts"].is_null());
     }
 
@@ -271,12 +293,24 @@ mod tests {
         hits[0].mdpath = "$.bad\tpath".into();
         hits[0].snippet = "line\rbreak\u{1b}".into();
         assert_eq!(
-            human_hits(&hits),
+            human_hits(&hits, 1),
             "docs/bad\\nfile.md $.bad\\tpath 412B (section 3.1kB)\n  line\\rbreak\\x1b\n\n"
         );
         assert_eq!(
             human_no_hits("bad\nquery", None),
             "outlint: no search hits for: bad\\nquery\n"
         );
+    }
+
+    #[test]
+    fn truncated_results_report_the_matching_block_total() {
+        let hits = fixture_hits();
+        assert!(human_hits(&hits[..1], 87)
+            .ends_with("(1 of 87 matching blocks; use --limit to see more)\n"));
+        assert_eq!(
+            compact_truncation_note(10, 87).as_deref(),
+            Some("(10 of 87 matching blocks; use --limit to see more)\n")
+        );
+        assert_eq!(compact_truncation_note(10, 10), None);
     }
 }
