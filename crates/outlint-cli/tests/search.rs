@@ -186,6 +186,30 @@ fn search_returns_item_paths_and_folds_lead_ins() {
 }
 
 #[test]
+fn search_preserves_canonical_paths_for_merged_and_repeated_sections() {
+    let directory = TempDir::new("search-canonical-paths");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write(
+        "docs/paths.md",
+        "Root apricot.\n\n# Guide\n\nRoot banana.\n\n## 🎉\n\nCedar content.\n\n## Notes\n\nDahlia content.\n\n## Notes\n\nElm content.\n",
+    );
+
+    for (term, expected) in [
+        ("apricot", "$/p[0]"),
+        ("banana", "$/p[1]"),
+        ("cedar", "$.[0]/p[0]"),
+        ("dahlia", "$.notes[0]/p[0]"),
+        ("elm", "$.notes[1]/p[0]"),
+    ] {
+        let output = run(&directory, &["search", "--format", "json", term]);
+        assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+        let value = json_output(&output);
+        assert_eq!(value["hits"][0]["path"], "docs/paths.md", "{term}");
+        assert_eq!(value["hits"][0]["mdpath"], expected, "{term}");
+    }
+}
+
+#[test]
 fn a_matching_item_below_the_display_cut_still_suppresses_its_list() {
     let directory = TempDir::new("search-list-cut");
     fs::create_dir(directory.path().join(".git")).expect("fake repository marker");

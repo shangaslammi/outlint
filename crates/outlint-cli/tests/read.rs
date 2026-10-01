@@ -234,3 +234,179 @@ fn human_tree_preserves_empty_item_labels() {
          $.items/list[0]/item[1]  19B  item: \n"
     );
 }
+
+#[test]
+fn list_and_item_tree_bases_have_stable_block_membership() {
+    let directory = TempDir::new("read-list-item-trees");
+    directory.write("docs/guide.md", FIXTURE);
+
+    for (extra, expected) in [
+        (&[][..], "$.setup/list[0]\t40B\tlist (3 items)\n"),
+        (
+            &["--blocks"][..],
+            "$.setup/list[0]\t40B\tlist (3 items)\n\
+             $.setup/list[0]/item[0]\t13B\titem: first item\n\
+             $.setup/list[0]/item[1]\t14B\titem: second item\n\
+             $.setup/list[0]/item[2]\t13B\titem: third item\n",
+        ),
+    ] {
+        let mut arguments = vec!["read", "--tree", "--format", "compact"];
+        arguments.extend_from_slice(extra);
+        arguments.extend_from_slice(&["docs/guide.md", "$.setup/list[0]"]);
+        let output = run(&directory, &arguments);
+        assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+        assert_eq!(stdout(&output), expected);
+    }
+
+    let expected = "$.setup/list[0]/item[1]\t14B\titem: second item\n";
+    for extra in [&[][..], &["--blocks"][..]] {
+        let mut arguments = vec!["read", "--tree", "--format", "compact"];
+        arguments.extend_from_slice(extra);
+        arguments.extend_from_slice(&["docs/guide.md", "$.setup/list[0]/item[1]"]);
+        let output = run(&directory, &arguments);
+        assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+        assert_eq!(stdout(&output), expected);
+    }
+}
+
+#[test]
+fn resolution_errors_keep_the_deepest_canonical_prefix() {
+    let directory = TempDir::new("read-resolution-prefixes");
+    directory.write("docs/guide.md", FIXTURE);
+
+    for (path, step, resolved, nodes) in [
+        (
+            "$.setup/list[1]",
+            "list[1]",
+            "$.setup",
+            vec![
+                "$.setup",
+                "$.setup/p[0]",
+                "$.setup/list[0]",
+                "$.setup/list[0]/item[0]",
+                "$.setup/list[0]/item[1]",
+                "$.setup/list[0]/item[2]",
+                "$.setup/code[0]",
+            ],
+        ),
+        (
+            "$.setup/list[0]/item[3]",
+            "item[3]",
+            "$.setup/list[0]",
+            vec![
+                "$.setup/list[0]",
+                "$.setup/list[0]/item[0]",
+                "$.setup/list[0]/item[1]",
+                "$.setup/list[0]/item[2]",
+            ],
+        ),
+        (
+            "$..faq.missing",
+            "missing",
+            "$.faq",
+            vec!["$.faq", "$.faq.question[0]", "$.faq.question[1]"],
+        ),
+    ] {
+        let output = run(
+            &directory,
+            &["read", "--format", "json", "docs/guide.md", path],
+        );
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+        let value = json_output(&output);
+        assert_eq!(value["error"]["kind"], "unresolved", "{path}");
+        assert_eq!(value["error"]["step"], step, "{path}");
+        assert_eq!(value["error"]["resolved"], resolved, "{path}");
+        let actual: Vec<&str> = value["error"]["nodes"]
+            .as_array()
+            .expect("error nodes are an array")
+            .iter()
+            .filter_map(|node| node["mdpath"].as_str())
+            .collect();
+        assert_eq!(actual, nodes, "{path}");
+    }
+}
+
+#[test]
+fn positional_duplicate_and_merged_root_paths_render_canonically() {
+    const PATHS: &str = "\
+Root before.
+
+# Guide
+
+Root after.
+
+## 🎉
+
+Celebration.
+
+## Notes
+
+First.
+
+## Notes
+
+Second.
+";
+    let directory = TempDir::new("read-canonical-paths");
+    directory.write("docs/paths.md", PATHS);
+
+    let output = run(
+        &directory,
+        &[
+            "read",
+            "--tree",
+            "--blocks",
+            "--format",
+            "json",
+            "docs/paths.md",
+            "$",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let value = json_output(&output);
+    let actual: Vec<&str> = value["nodes"]
+        .as_array()
+        .expect("tree nodes are an array")
+        .iter()
+        .filter_map(|node| node["mdpath"].as_str())
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            "$",
+            "$/p[0]",
+            "$/p[1]",
+            "$.[0]",
+            "$.[0]/p[0]",
+            "$.notes[0]",
+            "$.notes[0]/p[0]",
+            "$.notes[1]",
+            "$.notes[1]/p[0]",
+        ]
+    );
+
+    let output = run(
+        &directory,
+        &["read", "--format", "json", "docs/paths.md", "$.[0]"],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(json_output(&output)["mdpath"], "$.[0]");
+
+    for path in ["$.notes", "$..notes"] {
+        let output = run(
+            &directory,
+            &["read", "--format", "json", "docs/paths.md", path],
+        );
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+        let value = json_output(&output);
+        assert_eq!(value["error"]["kind"], "ambiguous", "{path}");
+        assert_eq!(value["error"]["resolved"], "$", "{path}");
+        let candidates: Vec<&str> = value["error"]["candidates"]
+            .as_array()
+            .expect("candidates are an array")
+            .iter()
+            .filter_map(|node| node["mdpath"].as_str())
+            .collect();
+        assert_eq!(candidates, ["$.notes[0]", "$.notes[1]"], "{path}");
+    }
+}

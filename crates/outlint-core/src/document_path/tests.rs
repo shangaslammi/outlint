@@ -247,9 +247,12 @@ fn unanswerable_steps_are_unresolved_after_the_deepest_reached_node() {
     for (spelling, resolved_steps) in [
         ("$.setup/table[0]", 1),
         ("$.setup/p[2]", 1),
+        ("$.setup/list[1]", 1),
         ("$.setup/list[0]/item[3]", 2),
         ("$.setup/list[0]/item[0]/p[0]", 3),
         ("$.faq.missing", 1),
+        ("$..faq.missing", 1),
+        ("$.faq..question[0].missing", 2),
         ("$.[2]", 0),
         // The merged H1 has no address of its own.
         ("$.guide.setup", 0),
@@ -425,6 +428,54 @@ fn enumerated_paths_render_reparse_and_resolve_to_their_nodes() {
         let reparsed = parse(spelling);
         assert_eq!(&reparsed, path, "{spelling}");
         let resolved = reparsed
+            .resolve(&document)
+            .unwrap_or_else(|error| panic!("{spelling}: {error}"));
+        assert_eq!(range(resolved), range(*node), "{spelling}");
+        assert_eq!(
+            std::mem::discriminant(&resolved),
+            std::mem::discriminant(node),
+            "{spelling}"
+        );
+    }
+}
+
+#[test]
+fn every_supported_direct_block_kind_has_a_stable_canonical_path() {
+    const BLOCKS: &str = "\
+paragraph
+
+> quote
+
+```text
+code
+```
+
+<div>
+html
+</div>
+
+---
+
+- item
+";
+    let document = parse_markdown(BLOCKS, MarkdownOptions::default()).expect("the fixture parses");
+    let paths = document_paths(&document);
+    let spellings: Vec<String> = paths.iter().map(|(path, _)| path.to_string()).collect();
+    assert_eq!(
+        spellings,
+        [
+            "$",
+            "$/p[0]",
+            "$/quote[0]",
+            "$/code[0]",
+            "$/html[0]",
+            "$/break[0]",
+            "$/list[0]",
+            "$/list[0]/item[0]",
+        ]
+    );
+    for ((_, node), spelling) in paths.iter().zip(&spellings) {
+        let resolved = parse(spelling)
             .resolve(&document)
             .unwrap_or_else(|error| panic!("{spelling}: {error}"));
         assert_eq!(range(resolved), range(*node), "{spelling}");
