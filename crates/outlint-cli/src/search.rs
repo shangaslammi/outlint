@@ -7,22 +7,27 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use outlint_search::{walk_markdown, Hit, Scope, Store, TermCount};
+use outlint_search::{
+    walk_markdown, Hit, Scope, SearchError, SearchErrorKind, SearchNote, SearchNoteOperation,
+    Store, StoredField, TermCount,
+};
 
 use crate::{
-    args::AgentFormat,
+    args::ReadSearchFormat,
     args::SearchOptions,
-    render::{self, escape_compact},
+    render::{self, escape_compact, escape_human},
     write_stderr, write_stdout,
 };
 
 /// Exit 0 with at least one hit, 1 with none, 2 on a usage or operational
 /// error.
 pub(crate) fn execute_search(options: &SearchOptions) -> u8 {
-    let result = match search(options) {
+    let run = search(options);
+    write_notes(&run.notes, options.format);
+    let result = match run.result {
         Ok(result) => result,
-        Err(message) => {
-            write_stderr(&message_line(&message, options.format));
+        Err(error) => {
+            write_stderr(&message_line(&search_error_message(&error), options.format));
             return 2;
         }
     };
@@ -32,7 +37,7 @@ pub(crate) fn execute_search(options: &SearchOptions) -> u8 {
             result.term_counts.as_deref(),
             options.format,
         );
-        if options.format == AgentFormat::Json {
+        if options.format == ReadSearchFormat::Json {
             if write_stdout(&rendered) == 2 {
                 2
             } else {
@@ -56,29 +61,58 @@ struct SearchResult {
     term_counts: Option<Vec<TermCount>>,
 }
 
-fn search(options: &SearchOptions) -> Result<SearchResult, String> {
-    let current_dir = env::current_dir()
-        .map_err(|error| format!("cannot determine the current directory: {error}"))?;
-    let current_dir = current_dir
-        .canonicalize()
-        .map_err(|error| format!("cannot resolve the current directory: {error}"))?;
+struct SearchRun {
+    notes: Vec<SearchNote>,
+    result: Result<SearchResult, SearchFailure>,
+}
+
+enum SearchFailure {
+    Shell(String),
+    Library(SearchError),
+}
+
+impl From<SearchError> for SearchFailure {
+    fn from(error: SearchError) -> Self {
+        Self::Library(error)
+    }
+}
+
+fn search(options: &SearchOptions) -> SearchRun {
+    let mut notes = Vec::new();
+    let result = search_with_notes(options, &mut notes);
+    SearchRun { notes, result }
+}
+
+fn search_with_notes(
+    options: &SearchOptions,
+    notes: &mut Vec<SearchNote>,
+) -> Result<SearchResult, SearchFailure> {
+    let current_dir = env::current_dir().map_err(|error| {
+        SearchFailure::Shell(format!("cannot determine the current directory: {error}"))
+    })?;
+    let current_dir = current_dir.canonicalize().map_err(|error| {
+        SearchFailure::Shell(format!("cannot resolve the current directory: {error}"))
+    })?;
     let search_root = match &options.root {
         Some(root) => {
             let path = current_dir.join(root);
             if !path.is_dir() {
-                return Err(format!("--root '{root}' is not a directory"));
+                return Err(SearchFailure::Shell(format!(
+                    "--root '{root}' is not a directory"
+                )));
             }
             path
         }
         None => current_dir.clone(),
     };
     let scope = Scope::locate(&search_root)?;
-    let store = Store::open(&scope)?;
+    let store = Store::open_or_rebuild(&scope)?;
     let walk = walk_markdown(&scope);
-    write_notes(&walk.notes, options.format);
-    write_notes(&store.refresh(&walk)?, options.format);
+    notes.extend(walk.notes.iter().cloned());
+    notes.extend(store.refresh(&walk)?);
     let mut hits = store.search(&options.words)?;
-    make_paths_relative(&mut hits, &current_dir, scope.search_root())?;
+    make_paths_relative(&mut hits, &current_dir, scope.search_root())
+        .map_err(SearchFailure::Shell)?;
     let term_counts = if hits.is_empty() {
         store.term_counts(&options.words)?
     } else {
@@ -152,17 +186,120 @@ fn slash_path(path: &Path) -> Option<String> {
         .map(|components| components.join("/"))
 }
 
-fn message_line(message: &str, format: AgentFormat) -> String {
+fn message_line(message: &str, format: ReadSearchFormat) -> String {
     let message = match format {
-        AgentFormat::Compact => escape_compact(message),
-        AgentFormat::Human | AgentFormat::Json => message.to_owned(),
+        ReadSearchFormat::Compact => escape_compact(message),
+        ReadSearchFormat::Human => escape_human(message),
+        ReadSearchFormat::Json => message.to_owned(),
     };
     format!("outlint: {message}\n")
 }
 
-fn write_notes(notes: &[String], format: AgentFormat) {
+fn write_notes(notes: &[SearchNote], format: ReadSearchFormat) {
     for note in notes {
-        write_stderr(&message_line(note, format));
+        write_stderr(&message_line(&search_note_message(note), format));
+    }
+}
+
+fn display_path(path: Option<&Path>) -> String {
+    path.map_or_else(|| "<unknown>".to_owned(), |path| path.display().to_string())
+}
+
+fn search_note_message(note: &SearchNote) -> String {
+    match note.operation {
+        SearchNoteOperation::Walk => format!("cannot walk: {}", note.cause),
+        SearchNoteOperation::Stat => format!(
+            "cannot stat {}: {}",
+            display_path(note.path.as_deref()),
+            note.cause
+        ),
+        SearchNoteOperation::EncodePath | SearchNoteOperation::IndexFile => format!(
+            "skipping {}: {}",
+            display_path(note.path.as_deref()),
+            note.cause
+        ),
+        SearchNoteOperation::RefreshIndex => {
+            "search index is being refreshed by another process; searching the existing index"
+                .to_owned()
+        }
+        _ => format!("search note: {}", note.cause),
+    }
+}
+
+fn stored_field_name(field: StoredField) -> &'static str {
+    match field {
+        StoredField::Path => "path",
+        StoredField::DocumentPath => "mdpath",
+        StoredField::Bytes => "bytes",
+        StoredField::Snippet => "snippet",
+        _ => "unknown",
+    }
+}
+
+fn search_error_message(error: &SearchFailure) -> String {
+    match error {
+        SearchFailure::Shell(message) => message.clone(),
+        SearchFailure::Library(error) => library_error_message(error),
+    }
+}
+
+fn library_error_message(error: &SearchError) -> String {
+    let path = || display_path(error.path.as_deref());
+    match &error.kind {
+        SearchErrorKind::ResolveSearchRoot => {
+            format!("cannot resolve {}: {}", path(), error.cause)
+        }
+        SearchErrorKind::NonUtf8SearchRoot => {
+            format!("search root {} is not valid UTF-8", path())
+        }
+        SearchErrorKind::CreateDirectory => {
+            format!("cannot create {}: {}", path(), error.cause)
+        }
+        SearchErrorKind::WriteFile => format!("cannot write {}: {}", path(), error.cause),
+        SearchErrorKind::RemoveDirectory => {
+            format!("cannot remove {}: {}", path(), error.cause)
+        }
+        SearchErrorKind::CreateIndex => format!("cannot create search index: {}", error.cause),
+        SearchErrorKind::OpenIndexWriter => {
+            format!("cannot open search index for writing: {}", error.cause)
+        }
+        SearchErrorKind::IndexFile => {
+            format!("cannot index {}: {}", path(), error.cause)
+        }
+        SearchErrorKind::CommitIndex => format!("cannot commit search index: {}", error.cause),
+        SearchErrorKind::FinishIndexMerge => {
+            format!("cannot finish search index merge: {}", error.cause)
+        }
+        SearchErrorKind::OpenIndexReader => {
+            format!("cannot open search index: {}", error.cause)
+        }
+        SearchErrorKind::ReadIndex => format!("cannot read search index: {}", error.cause),
+        SearchErrorKind::ExecuteSearch => format!("cannot search: {}", error.cause),
+        SearchErrorKind::PrepareSnippets => {
+            format!("cannot prepare snippets: {}", error.cause)
+        }
+        SearchErrorKind::LoadSearchHit => {
+            format!("cannot load search hit: {}", error.cause)
+        }
+        SearchErrorKind::ExecuteItemSearch => {
+            format!("cannot search list items: {}", error.cause)
+        }
+        SearchErrorKind::LoadItemHit => {
+            format!("cannot load list item hit: {}", error.cause)
+        }
+        SearchErrorKind::CountTerm { term } => {
+            format!("cannot count search term '{term}': {}", error.cause)
+        }
+        SearchErrorKind::CorruptIndexRecord { field } => format!(
+            "corrupt search index record{}: required field '{}' is missing or invalid",
+            error
+                .path
+                .as_deref()
+                .map(|path| format!(" for {}", path.display()))
+                .unwrap_or_default(),
+            stored_field_name(*field)
+        ),
+        _ => format!("search failed: {}", error.cause),
     }
 }
 
@@ -203,13 +340,13 @@ mod tests {
         assert_eq!(
             message_line(
                 "docs/tab\tcr\rlf\nesc\u{1b}slash\\.md refreshed",
-                AgentFormat::Compact
+                ReadSearchFormat::Compact
             ),
             "outlint: docs/tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\.md refreshed\n"
         );
         assert_eq!(
-            message_line("docs/bad\nfile.md refreshed", AgentFormat::Human),
-            "outlint: docs/bad\nfile.md refreshed\n"
+            message_line("docs/bad\nfile.md refreshed", ReadSearchFormat::Human),
+            "outlint: docs/bad\\nfile.md refreshed\n"
         );
     }
 }

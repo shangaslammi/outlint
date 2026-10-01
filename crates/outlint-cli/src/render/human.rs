@@ -5,6 +5,8 @@ use crate::diagnostics::{
     RenderedMatcher, RenderedReference, RenderedSchemaNode, RenderedTarget, ValidationResult,
 };
 
+use super::{escape_human, escape_human_quoted};
+
 pub(super) fn render_human(results: &[ValidationResult], use_color: bool) -> String {
     let diagnostic_count = results
         .iter()
@@ -331,64 +333,6 @@ fn human_matcher(matcher: &RenderedMatcher) -> String {
         RenderedMatcher::Any => "any heading".to_owned(),
         RenderedMatcher::Unknown => "unknown matcher".to_owned(),
     }
-}
-
-/// Whether a character can alter terminal layout or the visual ordering of
-/// trusted formatter text.
-fn escape_human_character(character: char, escaped: &mut String) -> bool {
-    match character {
-        '\n' => escaped.push_str("\\n"),
-        '\r' => escaped.push_str("\\r"),
-        '\t' => escaped.push_str("\\t"),
-        '\u{1b}' => escaped.push_str("\\x1b"),
-        character
-            if character.is_control()
-                || matches!(
-                    character,
-                    '\u{061c}'
-                        | '\u{200e}'
-                        | '\u{200f}'
-                        | '\u{2028}'..='\u{202e}'
-                        | '\u{2066}'..='\u{206f}'
-                ) =>
-        {
-            escaped.push_str(&format!("\\u{{{:x}}}", u32::from(character)));
-        }
-        _ => return false,
-    }
-    true
-}
-
-/// Escapes untrusted text for a free-text position in human output.
-///
-/// Control characters, Unicode line separators, and bidi formatting controls
-/// are escaped so document- or schema-controlled text cannot drive or spoof
-/// the terminal. Printable quotes and backslashes remain verbatim here; text
-/// inside formatter-owned quotes goes through [`escape_human_quoted`].
-fn escape_human(value: &str) -> String {
-    let mut escaped = String::new();
-    for character in value.chars() {
-        if !escape_human_character(character, &mut escaped) {
-            escaped.push(character);
-        }
-    }
-    escaped
-}
-
-/// Escapes untrusted text inside a formatter-owned `"..."` field.
-fn escape_human_quoted(value: &str) -> String {
-    let mut escaped = String::new();
-    for character in value.chars() {
-        if escape_human_character(character, &mut escaped) {
-            continue;
-        }
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            character => escaped.push(character),
-        }
-    }
-    escaped
 }
 
 /// Joins a header's already-distinct path segments for human presentation.

@@ -1,52 +1,24 @@
 //! Help text and hand-written command-line argument parsing.
 
-#[cfg(not(any(feature = "search", feature = "read")))]
-pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
-\n\
-Commands:\n\
-  check          Validate Markdown documents\n\
-  schema check   Validate Outlint schema files\n\
-\n\
-Options:\n\
-  -h, --help     Show help\n\
-  -V, --version  Show version\n";
-
-#[cfg(all(feature = "search", not(feature = "read")))]
-pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
-\n\
-Commands:\n\
-  check          Validate Markdown documents\n\
-  schema check   Validate Outlint schema files\n\
-  search         Search Markdown blocks by keyword\n\
-\n\
-Options:\n\
-  -h, --help     Show help\n\
-  -V, --version  Show version\n";
-
-#[cfg(all(feature = "read", not(feature = "search")))]
-pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
-\n\
-Commands:\n\
-  check          Validate Markdown documents\n\
-  schema check   Validate Outlint schema files\n\
-  read           Print a Markdown node by document path\n\
-\n\
-Options:\n\
-  -h, --help     Show help\n\
-  -V, --version  Show version\n";
-
-#[cfg(all(feature = "search", feature = "read"))]
-pub(crate) const TOP_HELP: &str = "Usage: outlint <command> [options]\n\
-\n\
-Commands:\n\
-  check          Validate Markdown documents\n\
-  schema check   Validate Outlint schema files\n\
-  search         Search Markdown blocks by keyword\n\
-  read           Print a Markdown node by document path\n\
-\n\
-Options:\n\
-  -h, --help     Show help\n\
-  -V, --version  Show version\n";
+pub(crate) fn top_help() -> String {
+    let mut help = "Usage: outlint <command> [options]\n\
+                    \n\
+                    Commands:\n\
+                      check          Validate Markdown documents\n\
+                      schema check   Validate Outlint schema files\n"
+        .to_owned();
+    #[cfg(feature = "search")]
+    help.push_str("search         Search Markdown blocks by keyword\n");
+    #[cfg(feature = "read")]
+    help.push_str("read           Print a Markdown node by document path\n");
+    help.push_str(
+        "\n\
+         Options:\n\
+           -h, --help     Show help\n\
+           -V, --version  Show version\n",
+    );
+    help
+}
 
 pub(crate) const CHECK_HELP: &str = "Usage: outlint check <FILE>... [options]\n\
 \n\
@@ -122,7 +94,7 @@ pub(crate) enum ValidationFormat {
 
 #[cfg(any(feature = "search", feature = "read"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentFormat {
+pub(crate) enum ReadSearchFormat {
     Human,
     Json,
     Compact,
@@ -169,7 +141,7 @@ pub(crate) struct SearchOptions {
     /// The search words joined by single spaces; never blank.
     pub(crate) words: String,
     /// Presentation selected explicitly or by `OUTLINT_FORMAT`.
-    pub(crate) format: AgentFormat,
+    pub(crate) format: ReadSearchFormat,
 }
 
 #[cfg(feature = "read")]
@@ -177,7 +149,7 @@ pub(crate) struct SearchOptions {
 pub(crate) struct ReadOptions {
     /// The Markdown file as given.
     pub(crate) file: String,
-    /// The document path argument as given; `$` when omitted.
+    /// The document path argument as given; `None` when omitted.
     pub(crate) path: Option<String>,
     /// List the structure under the node instead of printing its content.
     pub(crate) tree: bool,
@@ -186,7 +158,7 @@ pub(crate) struct ReadOptions {
     /// Levels of descendant sections to include; unlimited when `None`.
     pub(crate) depth: Option<usize>,
     /// Presentation selected explicitly or by `OUTLINT_FORMAT`.
-    pub(crate) format: AgentFormat,
+    pub(crate) format: ReadSearchFormat,
 }
 
 pub(crate) enum ParseOutcome<T> {
@@ -300,7 +272,7 @@ pub(crate) fn parse_search_args(
                     set_once(&mut root, value, "--root")?;
                 }
                 "--format" => {
-                    format = Some(parse_agent_format(
+                    format = Some(parse_read_search_format(
                         option_value(args, &mut index, argument)?,
                         "--format",
                     )?);
@@ -354,7 +326,7 @@ pub(crate) fn parse_read_args(
                     set_once(&mut depth, value, "--depth")?;
                 }
                 "--format" => {
-                    format = Some(parse_agent_format(
+                    format = Some(parse_read_search_format(
                         option_value(args, &mut index, argument)?,
                         "--format",
                     )?);
@@ -426,11 +398,11 @@ fn parse_validation_format(value: String) -> Result<ValidationFormat, String> {
 }
 
 #[cfg(any(feature = "search", feature = "read"))]
-fn parse_agent_format(value: String, source: &str) -> Result<AgentFormat, String> {
+fn parse_read_search_format(value: String, source: &str) -> Result<ReadSearchFormat, String> {
     match value.as_str() {
-        "human" => Ok(AgentFormat::Human),
-        "json" => Ok(AgentFormat::Json),
-        "compact" => Ok(AgentFormat::Compact),
+        "human" => Ok(ReadSearchFormat::Human),
+        "json" => Ok(ReadSearchFormat::Json),
+        "compact" => Ok(ReadSearchFormat::Compact),
         _ => Err(format!(
             "invalid {source} value '{value}' (expected human, json, or compact)"
         )),
@@ -438,11 +410,13 @@ fn parse_agent_format(value: String, source: &str) -> Result<AgentFormat, String
 }
 
 #[cfg(any(feature = "search", feature = "read"))]
-fn parse_environment_format(environment: &EnvironmentFormat) -> Result<AgentFormat, String> {
+fn parse_environment_format(environment: &EnvironmentFormat) -> Result<ReadSearchFormat, String> {
     match environment {
-        EnvironmentFormat::Unset => Ok(AgentFormat::Human),
-        EnvironmentFormat::Value(value) if value.is_empty() => Ok(AgentFormat::Human),
-        EnvironmentFormat::Value(value) => parse_agent_format(value.clone(), "OUTLINT_FORMAT"),
+        EnvironmentFormat::Unset => Ok(ReadSearchFormat::Human),
+        EnvironmentFormat::Value(value) if value.is_empty() => Ok(ReadSearchFormat::Human),
+        EnvironmentFormat::Value(value) => {
+            parse_read_search_format(value.clone(), "OUTLINT_FORMAT")
+        }
         EnvironmentFormat::NonUnicode => {
             Err("invalid OUTLINT_FORMAT value (expected human, json, or compact)".to_owned())
         }
@@ -476,7 +450,7 @@ mod tests {
 
     #[cfg(all(feature = "search", feature = "read"))]
     #[test]
-    fn agent_command_help_explains_the_environment_default() {
+    fn read_search_command_help_explains_the_environment_default() {
         assert!(super::SEARCH_HELP
             .contains("OUTLINT_FORMAT          Set the default format; --format overrides it"));
         assert!(super::READ_HELP
@@ -514,29 +488,29 @@ mod tests {
 
     #[cfg(feature = "search")]
     #[test]
-    fn agent_formats_use_the_environment_only_as_a_default() {
-        use super::{parse_search_args, AgentFormat};
+    fn read_search_formats_use_the_environment_only_as_a_default() {
+        use super::{parse_search_args, ReadSearchFormat};
 
         let args = vec!["word".to_owned()];
         let environment = EnvironmentFormat::Value("compact".to_owned());
         let Ok(ParseOutcome::Run(options)) = parse_search_args(&args, &environment) else {
             panic!("environment format should parse");
         };
-        assert_eq!(options.format, AgentFormat::Compact);
+        assert_eq!(options.format, ReadSearchFormat::Compact);
 
         let args = vec!["--format".to_owned(), "human".to_owned(), "word".to_owned()];
         let environment = EnvironmentFormat::Value("bogus".to_owned());
         let Ok(ParseOutcome::Run(options)) = parse_search_args(&args, &environment) else {
             panic!("explicit format should override the environment");
         };
-        assert_eq!(options.format, AgentFormat::Human);
+        assert_eq!(options.format, ReadSearchFormat::Human);
 
         let environment = EnvironmentFormat::Value(String::new());
         let Ok(ParseOutcome::Run(options)) = parse_search_args(&["word".to_owned()], &environment)
         else {
             panic!("empty environment value should be unset");
         };
-        assert_eq!(options.format, AgentFormat::Human);
+        assert_eq!(options.format, ReadSearchFormat::Human);
 
         let environment = EnvironmentFormat::Value("bogus".to_owned());
         match parse_search_args(&["word".to_owned()], &environment) {

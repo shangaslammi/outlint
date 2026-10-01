@@ -10,7 +10,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use ignore::WalkBuilder;
+use ignore::{Error as WalkError, WalkBuilder};
 use tantivy::{
     collector::{Count, TopDocs},
     directory::error::LockError,
@@ -43,6 +43,120 @@ const CANDIDATE_LIMIT: usize = HIT_LIMIT * 4;
 const SNIPPET_CHARS: usize = 160;
 const INDEX_MARKER: &str = "outlint-index.json";
 
+/// A failed search-library operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchError {
+    /// The operation or invariant that failed.
+    pub kind: SearchErrorKind,
+    /// The affected filesystem or indexed path, when one is known.
+    pub path: Option<PathBuf>,
+    /// The underlying provider or operating-system message.
+    pub cause: String,
+}
+
+/// The operation or invariant represented by a [`SearchError`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SearchErrorKind {
+    /// The search root could not be canonicalized.
+    ResolveSearchRoot,
+    /// The search root's repository-relative spelling is not UTF-8.
+    NonUtf8SearchRoot,
+    /// An index directory could not be created.
+    CreateDirectory,
+    /// An index metadata file could not be written.
+    WriteFile,
+    /// An unusable index directory could not be removed before rebuilding.
+    RemoveDirectory,
+    /// A new Tantivy index could not be created.
+    CreateIndex,
+    /// The index writer could not be opened.
+    OpenIndexWriter,
+    /// One Markdown file could not be added to the index.
+    IndexFile,
+    /// The index changes could not be committed.
+    CommitIndex,
+    /// Tantivy's merge workers did not finish successfully.
+    FinishIndexMerge,
+    /// The index reader could not be opened.
+    OpenIndexReader,
+    /// Indexed file signatures could not be read.
+    ReadIndex,
+    /// A search query could not be executed.
+    ExecuteSearch,
+    /// Snippet generation could not be prepared.
+    PrepareSnippets,
+    /// A ranked hit could not be loaded.
+    LoadSearchHit,
+    /// A query for matching list items could not be executed.
+    ExecuteItemSearch,
+    /// A matching list-item hit could not be loaded.
+    LoadItemHit,
+    /// A query term could not be counted.
+    CountTerm {
+        /// The user-spelled term being counted.
+        term: String,
+    },
+    /// A required field was absent or had the wrong stored type.
+    CorruptIndexRecord {
+        /// The required field that was unusable.
+        field: StoredField,
+    },
+}
+
+/// A required field stored in each searchable index record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StoredField {
+    /// Repository-relative Markdown file path.
+    Path,
+    /// Canonical document path inside the Markdown file.
+    DocumentPath,
+    /// Byte length of the indexed unit.
+    Bytes,
+    /// Source text used to produce the displayed snippet.
+    Snippet,
+}
+
+/// A recoverable walk or refresh issue that leaves search able to continue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchNote {
+    /// The affected path, when the operation identified one.
+    pub path: Option<PathBuf>,
+    /// The operation that was skipped or degraded.
+    pub operation: SearchNoteOperation,
+    /// The underlying reason without presentation prefixes.
+    pub cause: String,
+}
+
+/// The operation represented by a [`SearchNote`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SearchNoteOperation {
+    /// Walking an entry or ignore file failed.
+    Walk,
+    /// Reading file metadata failed.
+    Stat,
+    /// A path could not be represented as a lossless index key.
+    EncodePath,
+    /// A Markdown file could not be indexed from its content or bytes.
+    IndexFile,
+    /// Another process owns the index writer lock.
+    RefreshIndex,
+}
+
+fn search_error(
+    kind: SearchErrorKind,
+    path: Option<PathBuf>,
+    cause: impl std::fmt::Display,
+) -> SearchError {
+    SearchError {
+        kind,
+        path,
+        cause: cause.to_string(),
+    }
+}
+
 /// One Markdown file found by [`walk_markdown`], with the change signature the
 /// refresh compares against the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +176,7 @@ pub struct Walk {
     /// The Markdown files found, sorted by path.
     pub files: Vec<WalkedFile>,
     /// One note per entry that could not be examined or was skipped.
-    pub notes: Vec<String>,
+    pub notes: Vec<SearchNote>,
     /// Whether every entry under the search root was examined. When `false`,
     /// a file absent from `files` may still exist, so a refresh must not
     /// treat indexed files it did not see as deleted.
@@ -91,12 +205,16 @@ impl Scope {
     ///
     /// # Errors
     ///
-    /// Returns a message when `search_root` cannot be canonicalized or its
-    /// path inside the repository is not valid UTF-8.
-    pub fn locate(search_root: &Path) -> Result<Self, String> {
-        let search_root = search_root
-            .canonicalize()
-            .map_err(|error| format!("cannot resolve {}: {error}", search_root.display()))?;
+    /// Returns a structured error when `search_root` cannot be canonicalized
+    /// or its path inside the repository is not valid UTF-8.
+    pub fn locate(search_root: &Path) -> Result<Self, SearchError> {
+        let search_root = search_root.canonicalize().map_err(|error| {
+            search_error(
+                SearchErrorKind::ResolveSearchRoot,
+                Some(search_root.to_path_buf()),
+                error,
+            )
+        })?;
         let repo = search_root
             .ancestors()
             .find(|directory| directory.join(".git").exists())
@@ -110,9 +228,10 @@ impl Scope {
             Some(relative) => match slash_path(relative) {
                 Some(relative) => format!("{relative}/"),
                 None => {
-                    return Err(format!(
-                        "search root {} is not valid UTF-8",
-                        search_root.display()
+                    return Err(search_error(
+                        SearchErrorKind::NonUtf8SearchRoot,
+                        Some(search_root.clone()),
+                        "path is not valid UTF-8",
                     ))
                 }
             },
@@ -147,6 +266,22 @@ fn is_markdown_extension(extension: &str) -> bool {
     extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
 }
 
+/// The path tagged onto a recursive-walk error, when the walker supplied one.
+fn walk_error_path(error: &WalkError) -> Option<&Path> {
+    match error {
+        WalkError::Partial(errors) => errors.iter().find_map(walk_error_path),
+        WalkError::WithLineNumber { err, .. } | WalkError::WithDepth { err, .. } => {
+            walk_error_path(err)
+        }
+        WalkError::WithPath { path, .. } => Some(path),
+        WalkError::Loop { child, .. } => Some(child),
+        WalkError::Io(_)
+        | WalkError::Glob { .. }
+        | WalkError::UnrecognizedFileType(_)
+        | WalkError::InvalidDefinition => None,
+    }
+}
+
 /// Lists the Markdown files under the scope's search root, respecting ignore
 /// files and skipping hidden entries, symlinks, and files whose name is not
 /// valid UTF-8. Oversized files are listed like any other, so the refresh
@@ -164,7 +299,11 @@ pub fn walk_markdown(scope: &Scope) -> Walk {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                notes.push(format!("cannot walk: {error}"));
+                notes.push(SearchNote {
+                    path: walk_error_path(&error).map(Path::to_path_buf),
+                    operation: SearchNoteOperation::Walk,
+                    cause: error.to_string(),
+                });
                 complete = false;
                 continue;
             }
@@ -182,7 +321,11 @@ pub fn walk_markdown(scope: &Scope) -> Walk {
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(error) => {
-                notes.push(format!("cannot stat {}: {error}", entry.path().display()));
+                notes.push(SearchNote {
+                    path: Some(entry.path().to_path_buf()),
+                    operation: SearchNoteOperation::Stat,
+                    cause: error.to_string(),
+                });
                 complete = false;
                 continue;
             }
@@ -191,10 +334,11 @@ pub fn walk_markdown(scope: &Scope) -> Walk {
             continue;
         };
         let Some(path) = slash_path(relative) else {
-            notes.push(format!(
-                "skipping {}: file name is not valid UTF-8",
-                entry.path().display()
-            ));
+            notes.push(SearchNote {
+                path: Some(entry.path().to_path_buf()),
+                operation: SearchNoteOperation::EncodePath,
+                cause: "file name is not valid UTF-8".to_owned(),
+            });
             continue;
         };
         let mtime = metadata
@@ -226,23 +370,71 @@ pub struct Store {
     fields: Fields,
 }
 
+/// Filesystem changes needed to reconcile one walk with indexed signatures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefreshPlan {
+    reindex: Vec<WalkedFile>,
+    remove: Vec<String>,
+}
+
+/// Compares signatures without reading files or touching the index. Removal
+/// is suppressed after an incomplete walk because an absent entry may still
+/// exist on disk.
+fn plan_refresh(
+    walked: &[WalkedFile],
+    indexed: &HashMap<String, (u64, u64)>,
+    search_root_prefix: &str,
+    walk_complete: bool,
+) -> RefreshPlan {
+    let walked_paths: HashSet<&str> = walked.iter().map(|file| file.path.as_str()).collect();
+    let reindex = walked
+        .iter()
+        .filter(|file| indexed.get(&file.path) != Some(&(file.mtime, file.size)))
+        .cloned()
+        .collect();
+    let mut remove = if walk_complete {
+        indexed
+            .keys()
+            .filter(|path| {
+                let path: &str = path;
+                path.starts_with(search_root_prefix) && !walked_paths.contains(path)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    remove.sort();
+    RefreshPlan { reindex, remove }
+}
+
 impl Store {
-    /// Opens the index under `<repo>/.outlint/search/`, creating it — and the
-    /// `.outlint/.gitignore` that keeps it out of version control — when
-    /// missing, and rebuilding it when its format marker or its files are
-    /// unusable.
+    /// Opens the index under `<repo>/.outlint/search/`, or creates it when it
+    /// is missing.
+    ///
+    /// This operation may delete and rebuild the entire search index
+    /// directory. It does so when the format marker differs from the current
+    /// format, the index cannot be opened, or its schema is unusable. It also
+    /// creates `.outlint/.gitignore` when missing.
     ///
     /// # Errors
     ///
-    /// Returns a message when the directory or the index cannot be created.
-    pub fn open(scope: &Scope) -> Result<Self, String> {
+    /// Returns a structured error when a directory, metadata file, or index
+    /// cannot be created, removed, or written.
+    pub fn open_or_rebuild(scope: &Scope) -> Result<Self, SearchError> {
         let outlint_dir = scope.repo.join(".outlint");
-        fs::create_dir_all(&outlint_dir)
-            .map_err(|error| format!("cannot create {}: {error}", outlint_dir.display()))?;
+        fs::create_dir_all(&outlint_dir).map_err(|error| {
+            search_error(
+                SearchErrorKind::CreateDirectory,
+                Some(outlint_dir.clone()),
+                error,
+            )
+        })?;
         let gitignore = outlint_dir.join(".gitignore");
         if !gitignore.exists() {
-            fs::write(&gitignore, "*\n")
-                .map_err(|error| format!("cannot write {}: {error}", gitignore.display()))?;
+            fs::write(&gitignore, "*\n").map_err(|error| {
+                search_error(SearchErrorKind::WriteFile, Some(gitignore.clone()), error)
+            })?;
         }
         let directory = outlint_dir.join("search");
         let marker = directory.join(INDEX_MARKER);
@@ -262,16 +454,28 @@ impl Store {
             }
         }
         if directory.exists() {
-            fs::remove_dir_all(&directory)
-                .map_err(|error| format!("cannot remove {}: {error}", directory.display()))?;
+            fs::remove_dir_all(&directory).map_err(|error| {
+                search_error(
+                    SearchErrorKind::RemoveDirectory,
+                    Some(directory.clone()),
+                    error,
+                )
+            })?;
         }
-        fs::create_dir_all(&directory)
-            .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+        fs::create_dir_all(&directory).map_err(|error| {
+            search_error(
+                SearchErrorKind::CreateDirectory,
+                Some(directory.clone()),
+                error,
+            )
+        })?;
         let (schema, fields) = build_schema();
-        let index = Index::create_in_dir(&directory, schema)
-            .map_err(|error| format!("cannot create search index: {error}"))?;
-        fs::write(&marker, expected_marker)
-            .map_err(|error| format!("cannot write {}: {error}", marker.display()))?;
+        let index = Index::create_in_dir(&directory, schema).map_err(|error| {
+            search_error(SearchErrorKind::CreateIndex, Some(directory.clone()), error)
+        })?;
+        fs::write(&marker, expected_marker).map_err(|error| {
+            search_error(SearchErrorKind::WriteFile, Some(marker.clone()), error)
+        })?;
         Ok(Self {
             scope: scope.clone(),
             index,
@@ -302,24 +506,11 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns a message when the index cannot be read or written.
-    pub fn refresh(&self, walk: &Walk) -> Result<Vec<String>, String> {
+    /// Returns a structured error when the index cannot be read or written.
+    pub fn refresh(&self, walk: &Walk) -> Result<Vec<SearchNote>, SearchError> {
         let known = self.indexed_files()?;
-        let walked: HashSet<&String> = walk.files.iter().map(|file| &file.path).collect();
-        let stale: Vec<&WalkedFile> = walk
-            .files
-            .iter()
-            .filter(|file| known.get(&file.path) != Some(&(file.mtime, file.size)))
-            .collect();
-        let removed: Vec<&String> = if walk.complete {
-            known
-                .keys()
-                .filter(|path| path.starts_with(&self.scope.prefix) && !walked.contains(path))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if stale.is_empty() && removed.is_empty() {
+        let plan = plan_refresh(&walk.files, &known, &self.scope.prefix, walk.complete);
+        if plan.reindex.is_empty() && plan.remove.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -327,18 +518,25 @@ impl Store {
         let mut writer = match self.index.writer::<TantivyDocument>(WRITER_HEAP_BYTES) {
             Ok(writer) => writer,
             Err(TantivyError::LockFailure(LockError::LockBusy, _)) => {
-                notes.push(
-                    "search index is being refreshed by another process; searching the existing index"
-                        .to_owned(),
-                );
+                notes.push(SearchNote {
+                    path: Some(self.scope.repo.join(".outlint/search")),
+                    operation: SearchNoteOperation::RefreshIndex,
+                    cause: "another process holds the writer lock".to_owned(),
+                });
                 return Ok(notes);
             }
-            Err(error) => return Err(format!("cannot open search index for writing: {error}")),
+            Err(error) => {
+                return Err(search_error(
+                    SearchErrorKind::OpenIndexWriter,
+                    Some(self.scope.repo.join(".outlint/search")),
+                    error,
+                ))
+            }
         };
-        for path in removed {
+        for path in &plan.remove {
             writer.delete_term(Term::from_field_text(self.fields.path, path));
         }
-        for file in stale {
+        for file in &plan.reindex {
             writer.delete_term(Term::from_field_text(self.fields.path, &file.path));
             let units = match load_units(&self.scope.repo, file) {
                 Load::Units(units) => units,
@@ -363,7 +561,13 @@ impl Store {
                         fields.size => file.size,
                         fields.kind => KIND_TOMBSTONE,
                     ))
-                    .map_err(|error| format!("cannot index {}: {error}", file.path))?;
+                    .map_err(|error| {
+                        search_error(
+                            SearchErrorKind::IndexFile,
+                            Some(PathBuf::from(&file.path)),
+                            error,
+                        )
+                    })?;
                 continue;
             }
             for unit in units {
@@ -384,17 +588,29 @@ impl Store {
                 if let Some(parent_list) = unit.parent_list {
                     document.add_text(fields.parent_list, parent_list);
                 }
-                writer
-                    .add_document(document)
-                    .map_err(|error| format!("cannot index {}: {error}", file.path))?;
+                writer.add_document(document).map_err(|error| {
+                    search_error(
+                        SearchErrorKind::IndexFile,
+                        Some(PathBuf::from(&file.path)),
+                        error,
+                    )
+                })?;
             }
         }
-        writer
-            .commit()
-            .map_err(|error| format!("cannot commit search index: {error}"))?;
-        writer
-            .wait_merging_threads()
-            .map_err(|error| format!("cannot finish search index merge: {error}"))?;
+        writer.commit().map_err(|error| {
+            search_error(
+                SearchErrorKind::CommitIndex,
+                Some(self.scope.repo.join(".outlint/search")),
+                error,
+            )
+        })?;
+        writer.wait_merging_threads().map_err(|error| {
+            search_error(
+                SearchErrorKind::FinishIndexMerge,
+                Some(self.scope.repo.join(".outlint/search")),
+                error,
+            )
+        })?;
         Ok(notes)
     }
 
@@ -407,8 +623,9 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns a message when the index cannot be read.
-    pub fn search(&self, words: &str) -> Result<Vec<Hit>, String> {
+    /// Returns a structured error when the index cannot be read or a stored
+    /// hit is corrupt.
+    pub fn search(&self, words: &str) -> Result<Vec<Hit>, SearchError> {
         let searcher = self.reader()?.searcher();
         let query = build_query(&self.index, &self.fields, words, &self.scope.prefix);
         let top = searcher
@@ -416,17 +633,18 @@ impl Store {
                 &*query,
                 &TopDocs::with_limit(CANDIDATE_LIMIT).order_by_score(),
             )
-            .map_err(|error| format!("cannot search: {error}"))?;
+            .map_err(|error| search_error(SearchErrorKind::ExecuteSearch, None, error))?;
         let highlight = snippet_query(&self.index, &self.fields, words);
-        let mut generator = SnippetGenerator::create(&searcher, &*highlight, self.fields.snippet)
-            .map_err(|error| format!("cannot prepare snippets: {error}"))?;
+        let mut generator =
+            SnippetGenerator::create(&searcher, &*highlight, self.fields.snippet)
+                .map_err(|error| search_error(SearchErrorKind::PrepareSnippets, None, error))?;
         generator.set_max_num_chars(SNIPPET_CHARS);
         let mut candidates = Vec::with_capacity(top.len());
         for (score, address) in top {
             let document: TantivyDocument = searcher
                 .doc(address)
-                .map_err(|error| format!("cannot load search hit: {error}"))?;
-            let Some(hit) = hit_from_document(&self.fields, &generator, &document, score) else {
+                .map_err(|error| search_error(SearchErrorKind::LoadSearchHit, None, error))?;
+            let Some(hit) = hit_from_document(&self.fields, &generator, &document, score)? else {
                 continue;
             };
             let narrower = if is_list_path(&hit.mdpath) {
@@ -455,7 +673,7 @@ impl Store {
         words: &str,
         path: &str,
         mdpath: &str,
-    ) -> Result<Option<Hit>, String> {
+    ) -> Result<Option<Hit>, SearchError> {
         let query = build_item_query(
             &self.index,
             &self.fields,
@@ -466,7 +684,7 @@ impl Store {
         );
         let Some((score, address)) = searcher
             .search(&*query, &TopDocs::with_limit(1).order_by_score())
-            .map_err(|error| format!("cannot search list items: {error}"))?
+            .map_err(|error| search_error(SearchErrorKind::ExecuteItemSearch, None, error))?
             .into_iter()
             .next()
         else {
@@ -474,8 +692,8 @@ impl Store {
         };
         let document: TantivyDocument = searcher
             .doc(address)
-            .map_err(|error| format!("cannot load list item hit: {error}"))?;
-        Ok(hit_from_document(&self.fields, generator, &document, score))
+            .map_err(|error| search_error(SearchErrorKind::LoadItemHit, None, error))?;
+        hit_from_document(&self.fields, generator, &document, score)
     }
 
     /// Counts, for a simple whitespace-separated word query, how many
@@ -488,8 +706,8 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns a message when the index cannot be read or searched.
-    pub fn term_counts(&self, words: &str) -> Result<Option<Vec<TermCount>>, String> {
+    /// Returns a structured error when the index cannot be read or searched.
+    pub fn term_counts(&self, words: &str) -> Result<Option<Vec<TermCount>>, SearchError> {
         let Some(terms) = simple_query_terms(words) else {
             return Ok(None);
         };
@@ -498,9 +716,15 @@ impl Store {
             .into_iter()
             .map(|term| {
                 let query = build_count_query(&self.index, &self.fields, term, &self.scope.prefix);
-                let blocks = searcher
-                    .search(&*query, &Count)
-                    .map_err(|error| format!("cannot count search term '{term}': {error}"))?;
+                let blocks = searcher.search(&*query, &Count).map_err(|error| {
+                    search_error(
+                        SearchErrorKind::CountTerm {
+                            term: term.to_owned(),
+                        },
+                        None,
+                        error,
+                    )
+                })?;
                 Ok(TermCount {
                     term: term.to_owned(),
                     blocks,
@@ -510,58 +734,75 @@ impl Store {
             .map(Some)
     }
 
-    fn reader(&self) -> Result<IndexReader, String> {
+    fn reader(&self) -> Result<IndexReader, SearchError> {
         self.index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
-            .map_err(|error| format!("cannot open search index: {error}"))
+            .map_err(|error| search_error(SearchErrorKind::OpenIndexReader, None, error))
     }
 
     /// The `(mtime, size)` signature of every indexed file, read from fast
     /// fields without loading stored documents.
-    fn indexed_files(&self) -> Result<HashMap<String, (u64, u64)>, String> {
+    fn indexed_files(&self) -> Result<HashMap<String, (u64, u64)>, SearchError> {
         let searcher = self.reader()?.searcher();
         let mut known = HashMap::new();
         for segment in searcher.segment_readers() {
             collect_segment_files(segment, &mut known)
-                .map_err(|error| format!("cannot read search index: {error}"))?;
+                .map_err(|error| search_error(SearchErrorKind::ReadIndex, None, error))?;
         }
         Ok(known)
     }
 }
 
-/// Loads the rendering fields of one indexed unit. A malformed index document
-/// without an address, or a non-finite score (which JSON cannot carry), is
-/// ignored instead of producing an unreadable hit.
+/// Loads the rendering fields of one indexed unit. A non-finite score (which
+/// JSON cannot carry) is skipped; a missing or mistyped required field is a
+/// typed corruption error.
 fn hit_from_document(
     fields: &Fields,
     generator: &SnippetGenerator,
     document: &TantivyDocument,
     score: f32,
-) -> Option<Hit> {
+) -> Result<Option<Hit>, SearchError> {
     if !score.is_finite() {
-        return None;
+        return Ok(None);
     }
-    let text = |field| {
-        document
-            .get_first(field)
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_owned()
+    let corrupt = |field, path: Option<&str>| {
+        search_error(
+            SearchErrorKind::CorruptIndexRecord { field },
+            path.map(PathBuf::from),
+            "required stored field is missing or has the wrong type",
+        )
     };
-    let number = |field| document.get_first(field).and_then(|value| value.as_u64());
+    let path = document
+        .get_first(fields.path)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| corrupt(StoredField::Path, None))?
+        .to_owned();
     let mdpath = document
         .get_first(fields.mdpath)
-        .and_then(|value| value.as_str())?;
-    Some(Hit {
-        path: text(fields.path),
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| corrupt(StoredField::DocumentPath, Some(&path)))?
+        .to_owned();
+    let bytes = document
+        .get_first(fields.bytes)
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| corrupt(StoredField::Bytes, Some(&path)))?;
+    let snippet_text = document
+        .get_first(fields.snippet)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| corrupt(StoredField::Snippet, Some(&path)))?;
+    let section_bytes = document
+        .get_first(fields.section_bytes)
+        .and_then(|value| value.as_u64());
+    Ok(Some(Hit {
+        path,
         mdpath: mdpath.to_owned(),
-        bytes: number(fields.bytes).unwrap_or(0),
-        section_bytes: number(fields.section_bytes),
+        bytes,
+        section_bytes,
         score,
-        snippet: snippet_of(generator, document, &text(fields.snippet)),
-    })
+        snippet: snippet_of(generator, document, snippet_text),
+    }))
 }
 
 /// Whether a rendered document path addresses a list block. Section slugs
@@ -709,11 +950,11 @@ enum Load {
     /// its content — over the size cap, not UTF-8, or unparseable — which
     /// cannot change without changing its `(mtime, size)` signature. The
     /// note explains why; a tombstone records the signature.
-    Skipped(String),
+    Skipped(SearchNote),
     /// The file could not be opened or read. The cause (permissions, a
     /// device error) can go away without touching the signature, so nothing
     /// is recorded and the file is retried on the next refresh.
-    Unreadable(String),
+    Unreadable(SearchNote),
 }
 
 /// Reads and splits one walked file into units, or explains in one note why
@@ -722,20 +963,34 @@ fn load_units(repo: &Path, file: &WalkedFile) -> Load {
     let bytes = match read_capped(&repo.join(&file.path)) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
-            return Load::Skipped(format!(
-                "skipping {}: larger than {} MiB",
-                file.path,
-                MAX_FILE_SIZE >> 20
-            ))
+            return Load::Skipped(SearchNote {
+                path: Some(PathBuf::from(&file.path)),
+                operation: SearchNoteOperation::IndexFile,
+                cause: format!("larger than {} MiB", MAX_FILE_SIZE >> 20),
+            })
         }
-        Err(error) => return Load::Unreadable(format!("skipping {}: {error}", file.path)),
+        Err(error) => {
+            return Load::Unreadable(SearchNote {
+                path: Some(PathBuf::from(&file.path)),
+                operation: SearchNoteOperation::IndexFile,
+                cause: error.to_string(),
+            })
+        }
     };
     let Ok(source) = String::from_utf8(bytes) else {
-        return Load::Skipped(format!("skipping {}: not valid UTF-8", file.path));
+        return Load::Skipped(SearchNote {
+            path: Some(PathBuf::from(&file.path)),
+            operation: SearchNoteOperation::IndexFile,
+            cause: "not valid UTF-8".to_owned(),
+        });
     };
     match index_units(&file.path, &source) {
         Ok(units) => Load::Units(units),
-        Err(error) => Load::Skipped(format!("skipping {}: {error}", file.path)),
+        Err(error) => Load::Skipped(SearchNote {
+            path: Some(PathBuf::from(&file.path)),
+            operation: SearchNoteOperation::IndexFile,
+            cause: error.to_string(),
+        }),
     }
 }
 
@@ -766,6 +1021,83 @@ mod tests {
         assert!(!is_list_path("$.list[0]"));
         assert!(!is_list_path("$.list"));
         assert!(!is_list_path("$.a/p[0]"));
+    }
+
+    #[test]
+    fn refresh_plan_reindexes_changed_files_and_removes_only_complete_scope_entries() {
+        let walked = vec![
+            WalkedFile {
+                path: "docs/a.md".into(),
+                mtime: 1,
+                size: 10,
+            },
+            WalkedFile {
+                path: "docs/b.md".into(),
+                mtime: 3,
+                size: 20,
+            },
+            WalkedFile {
+                path: "docs/c.md".into(),
+                mtime: 4,
+                size: 30,
+            },
+        ];
+        let indexed = HashMap::from([
+            ("docs/a.md".to_owned(), (1, 10)),
+            ("docs/b.md".to_owned(), (2, 20)),
+            ("docs/gone.md".to_owned(), (5, 40)),
+            ("notes/kept.md".to_owned(), (6, 50)),
+        ]);
+
+        let plan = plan_refresh(&walked, &indexed, "docs/", true);
+        assert_eq!(
+            plan.reindex
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["docs/b.md", "docs/c.md"]
+        );
+        assert_eq!(plan.remove, ["docs/gone.md"]);
+
+        let incomplete = plan_refresh(&walked, &indexed, "docs/", false);
+        assert!(incomplete.remove.is_empty());
+    }
+
+    #[test]
+    fn malformed_hit_reports_the_required_stored_field() {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("writer");
+        writer
+            .add_document(doc!(
+                fields.path => "docs/a.md",
+                fields.mdpath => "$/p[0]",
+                fields.context => "a",
+                fields.body => "text",
+                fields.snippet => "text",
+                fields.kind => KIND_UNIT,
+            ))
+            .expect("add");
+        writer.commit().expect("commit");
+        let searcher = index.reader().expect("reader").searcher();
+        let query = build_query(&index, &fields, "*", "");
+        let top = searcher
+            .search(&*query, &TopDocs::with_limit(1).order_by_score())
+            .expect("search");
+        let document: TantivyDocument = searcher.doc(top[0].1).expect("doc");
+        let highlight = snippet_query(&index, &fields, "text");
+        let generator =
+            SnippetGenerator::create(&searcher, &*highlight, fields.snippet).expect("generator");
+
+        let error = hit_from_document(&fields, &generator, &document, 1.0)
+            .expect_err("missing bytes is corrupt");
+        assert_eq!(
+            error.kind,
+            SearchErrorKind::CorruptIndexRecord {
+                field: StoredField::Bytes
+            }
+        );
+        assert_eq!(error.path.as_deref(), Some(Path::new("docs/a.md")));
     }
 
     #[test]

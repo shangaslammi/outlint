@@ -11,8 +11,8 @@ use outlint_core::{
 };
 
 use crate::{
-    args::{AgentFormat, ReadOptions},
-    render::{self, escape_compact},
+    args::{ReadOptions, ReadSearchFormat},
+    render::{self, escape_compact, escape_human},
     schema_loading::read_utf8_file,
     write_stderr, write_stdout,
 };
@@ -54,7 +54,7 @@ pub(crate) fn execute_read(options: &ReadOptions) -> u8 {
         Err(error) => {
             let failure = describe_error(&error, &options.file, &source, &document);
             let rendered = render::read::error(&failure, options.format);
-            if options.format == AgentFormat::Json {
+            if options.format == ReadSearchFormat::Json {
                 if write_stdout(&rendered) == 2 {
                     2
                 } else {
@@ -68,10 +68,11 @@ pub(crate) fn execute_read(options: &ReadOptions) -> u8 {
     }
 }
 
-fn operational_error(message: &str, format: AgentFormat) -> u8 {
+fn operational_error(message: &str, format: ReadSearchFormat) -> u8 {
     let message = match format {
-        AgentFormat::Compact => escape_compact(message),
-        AgentFormat::Human | AgentFormat::Json => message.to_owned(),
+        ReadSearchFormat::Compact => escape_compact(message),
+        ReadSearchFormat::Human => escape_human(message),
+        ReadSearchFormat::Json => message.to_owned(),
     };
     write_stderr(&format!("outlint: {message}\n"));
     2
@@ -99,7 +100,7 @@ pub(crate) enum ReadError {
         resolved_steps: usize,
         candidates: usize,
     },
-    /// A resolution failure the core reports but this prototype does not
+    /// A resolution failure the core reports but this command does not
     /// distinguish (`DocumentPathError` is non-exhaustive).
     Other { path: DocumentPath, message: String },
 }
@@ -570,10 +571,13 @@ fn item_text<'s>(source: &'s str, item: &'s ListItem) -> &'s str {
     }
 }
 
-/// The first line, cut to 60 characters with `…` appended when truncated.
+const PREVIEW_CHAR_LIMIT: usize = 60;
+
+/// The first line, cut to [`PREVIEW_CHAR_LIMIT`] characters with `…` appended
+/// when truncated.
 fn preview(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default();
-    let mut characters = line.char_indices().skip(60);
+    let mut characters = line.char_indices().skip(PREVIEW_CHAR_LIMIT);
     match characters.next() {
         Some((cut, _)) => format!("{}…", line.get(..cut).unwrap_or_default()),
         None => line.to_owned(),

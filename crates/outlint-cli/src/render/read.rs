@@ -3,53 +3,63 @@
 use serde_json::json;
 
 use crate::{
-    args::AgentFormat,
+    args::ReadSearchFormat,
     read::{ReadFailure, ReadOutput, ReadTree, TreeNode, TreeNodeData},
 };
 
 use super::{
-    escape_compact, format_bytes,
+    escape_compact, escape_human, format_bytes,
     json::{finish_json_line, write_ordered_json_array, write_ordered_json_object},
 };
 
-const VERSION: u64 = 1;
+const READ_ENVELOPE_VERSION: u64 = 1;
 
 /// Renders a resolved read result in the selected format.
-pub(crate) fn output(value: &ReadOutput, format: AgentFormat) -> String {
+pub(crate) fn output(value: &ReadOutput, format: ReadSearchFormat) -> String {
     match (value, format) {
-        (ReadOutput::Content(content), AgentFormat::Human | AgentFormat::Compact) => {
+        (ReadOutput::Content(content), ReadSearchFormat::Human | ReadSearchFormat::Compact) => {
             content.content.clone()
         }
-        (ReadOutput::Content(content), AgentFormat::Json) => json_content(content),
-        (ReadOutput::Tree(tree), AgentFormat::Human) => human_tree(&tree.nodes),
-        (ReadOutput::Tree(tree), AgentFormat::Json) => json_tree(tree),
-        (ReadOutput::Tree(tree), AgentFormat::Compact) => compact_tree(&tree.nodes),
+        (ReadOutput::Content(content), ReadSearchFormat::Json) => json_content(content),
+        (ReadOutput::Tree(tree), ReadSearchFormat::Human) => human_tree(&tree.nodes),
+        (ReadOutput::Tree(tree), ReadSearchFormat::Json) => json_tree(tree),
+        (ReadOutput::Tree(tree), ReadSearchFormat::Compact) => compact_tree(&tree.nodes),
     }
 }
 
-/// Renders a path failure. JSON is a stdout object; the other forms retain
-/// the prototype's plain-text error line for stderr.
-pub(crate) fn error(value: &ReadFailure, format: AgentFormat) -> String {
+/// Renders a path failure. JSON is a stdout object; the other forms are
+/// plain-text error lines for stderr.
+pub(crate) fn error(value: &ReadFailure, format: ReadSearchFormat) -> String {
     match format {
-        AgentFormat::Human => human_error(value),
-        AgentFormat::Json => json_error(value),
-        AgentFormat::Compact => compact_error(value),
+        ReadSearchFormat::Human => human_error(value),
+        ReadSearchFormat::Json => json_error(value),
+        ReadSearchFormat::Compact => compact_error(value),
     }
 }
 
 pub(crate) fn human_tree(nodes: &[TreeNode]) -> String {
-    let width = nodes
+    let rows: Vec<_> = nodes
         .iter()
-        .map(|node| node.mdpath.len())
+        .map(|node| {
+            (
+                escape_human(&node.mdpath),
+                escape_human(&node.label),
+                node.bytes,
+            )
+        })
+        .collect();
+    let width = rows
+        .iter()
+        .map(|(path, _, _)| path.len())
         .max()
         .unwrap_or(0);
     let mut output = String::new();
-    for node in nodes {
+    for (path, label, bytes) in rows {
         output.push_str(&format!(
             "{:<width$}  {}  {}\n",
-            node.mdpath,
-            format_bytes(node.bytes),
-            node.label
+            path,
+            format_bytes(bytes),
+            label
         ));
     }
     output
@@ -61,7 +71,11 @@ pub(crate) fn human_error(value: &ReadFailure) -> String {
             path,
             message,
             offset,
-        } => format!("outlint: invalid document path '{path}': {message} at byte {offset}\n"),
+        } => format!(
+            "outlint: invalid document path '{}': {} at byte {offset}\n",
+            escape_human(path),
+            escape_human(message)
+        ),
         ReadFailure::Unresolved {
             file,
             path,
@@ -69,7 +83,11 @@ pub(crate) fn human_error(value: &ReadFailure) -> String {
             resolved,
             nodes,
         } => format!(
-            "outlint: cannot resolve {path} in {file}: {step} not found under {resolved}\n{}",
+            "outlint: cannot resolve {} in {}: {} not found under {}\n{}",
+            escape_human(path),
+            escape_human(file),
+            escape_human(step),
+            escape_human(resolved),
             human_tree(nodes)
         ),
         ReadFailure::Ambiguous {
@@ -80,11 +98,14 @@ pub(crate) fn human_error(value: &ReadFailure) -> String {
             ..
         } => {
             let mut output = format!(
-                "outlint: ambiguous document path {path} in {file}: {} sections match '{step}'\n",
-                candidates.len()
+                "outlint: ambiguous document path {} in {}: {} sections match '{}'\n",
+                escape_human(path),
+                escape_human(file),
+                candidates.len(),
+                escape_human(step)
             );
             for candidate in candidates {
-                output.push_str(&candidate.mdpath);
+                output.push_str(&escape_human(&candidate.mdpath));
                 output.push('\n');
             }
             output
@@ -93,7 +114,12 @@ pub(crate) fn human_error(value: &ReadFailure) -> String {
             file,
             path,
             message,
-        } => format!("outlint: cannot resolve {path} in {file}: {message}\n"),
+        } => format!(
+            "outlint: cannot resolve {} in {}: {}\n",
+            escape_human(path),
+            escape_human(file),
+            escape_human(message)
+        ),
     }
 }
 
@@ -102,7 +128,7 @@ fn json_tree(tree: &ReadTree) -> String {
     // Read objects follow their documented wire order; do not route these
     // through `serde_json::Map`, whose default representation sorts keys.
     write_ordered_json_object(&mut output, |object| {
-        object.value("version", &json!(VERSION));
+        object.value("version", &json!(READ_ENVELOPE_VERSION));
         object.value("file", &json!(tree.file));
         object.value("mdpath", &json!(tree.mdpath));
         object.member("nodes", |output| {
@@ -115,7 +141,7 @@ fn json_tree(tree: &ReadTree) -> String {
 fn json_content(content: &crate::read::ReadContent) -> String {
     let mut output = Vec::new();
     write_ordered_json_object(&mut output, |object| {
-        object.value("version", &json!(VERSION));
+        object.value("version", &json!(READ_ENVELOPE_VERSION));
         object.value("file", &json!(content.file));
         object.value("mdpath", &json!(content.mdpath));
         object.value("bytes", &json!(content.bytes));
@@ -147,7 +173,7 @@ fn write_node_json(output: &mut Vec<u8>, node: &TreeNode) {
 fn json_error(value: &ReadFailure) -> String {
     let mut output = Vec::new();
     write_ordered_json_object(&mut output, |object| {
-        object.value("version", &json!(VERSION));
+        object.value("version", &json!(READ_ENVELOPE_VERSION));
         object.member("error", |output| write_error_json(output, value));
     });
     finish_json_line(output)
@@ -411,11 +437,22 @@ mod tests {
         );
         assert_eq!(
             human_error(&other),
-            "outlint: cannot resolve $.bad\tpath in docs/bad\nfile.md: failure\u{1b}\\detail\n"
+            "outlint: cannot resolve $.bad\\tpath in docs/bad\\nfile.md: failure\\x1b\\detail\n"
         );
         assert_eq!(
             json_error(&other),
             "{\"version\":1,\"error\":{\"kind\":\"other\",\"path\":\"$.bad\\tpath\",\"message\":\"failure\\u001b\\\\detail\"}}\n"
+        );
+    }
+
+    #[test]
+    fn human_tree_escapes_terminal_controls() {
+        let mut values = nodes();
+        values[0].mdpath = "$.bad\npath".into();
+        values[0].label = "Heading\tlabel\u{202e}".into();
+        assert_eq!(
+            human_tree(&values),
+            "$.bad\\npath   3.1kB  Heading\\tlabel\\u{202e}\n$.setup/p[0]  24B  p: Install first.\n"
         );
     }
 }

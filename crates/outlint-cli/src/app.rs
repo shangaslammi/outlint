@@ -9,8 +9,8 @@ use outlint_core::{
 
 use crate::{
     args::{
-        parse_check_args, parse_schema_args, CheckOptions, ColorChoice, ParseOutcome,
-        SchemaOptions, ValidationFormat, CHECK_HELP, SCHEMA_HELP, TOP_HELP,
+        parse_check_args, parse_schema_args, top_help, CheckOptions, ColorChoice, ParseOutcome,
+        SchemaOptions, ValidationFormat, CHECK_HELP, SCHEMA_HELP,
     },
     diagnostics::{
         render_document_diagnostic, render_schema_errors, sort_diagnostics, InvocationOutput,
@@ -31,7 +31,7 @@ pub(crate) fn run(
     #[cfg(any(feature = "search", feature = "read"))] environment_format: EnvironmentFormat,
 ) -> u8 {
     match args {
-        [arg] if arg == "--help" || arg == "-h" => write_help(TOP_HELP),
+        [arg] if arg == "--help" || arg == "-h" => write_help(&top_help()),
         [arg] if arg == "--version" || arg == "-V" => {
             write_stdout(&format!("outlint {}\n", env!("CARGO_PKG_VERSION")))
         }

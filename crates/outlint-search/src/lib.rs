@@ -1,6 +1,6 @@
 //! Full-text search over Markdown documents by outline.
 //!
-//! A prototype: every Markdown file under a search root is split into *index
+//! Every Markdown file under a search root is split into *index
 //! units* — one per section heading, one per visible preamble block, one per
 //! non-empty direct list item, and one for the document root when it has a
 //! frontmatter mapping or a title (a sole H1, which document paths merge into
@@ -21,5 +21,8 @@ mod store;
 mod units;
 
 pub use result::{Hit, TermCount};
-pub use store::{walk_markdown, Scope, Store, Walk, WalkedFile};
+pub use store::{
+    walk_markdown, Scope, SearchError, SearchErrorKind, SearchNote, SearchNoteOperation, Store,
+    StoredField, Walk, WalkedFile,
+};
 pub use units::{index_units, IndexUnit};

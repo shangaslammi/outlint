@@ -222,8 +222,11 @@ Anything else, including a CLI argument parser, needs a concrete
 justification — argv handling is hand-rolled today and that is fine at
 this size.
 
-No Cargo features exist. Do not add one to make a dependency optional
-unless a user has asked to build without it.
+The core linter (`outlint check`, `outlint schema check`, and `outlint-core`)
+uses no Cargo features and must remain buildable and testable without any.
+Additional functionality layered on linting is opt-in on the `outlint` CLI
+crate: currently `search`, `read`, and their `full` shorthand. Build and test
+that functionality with `--all-features` or `--features full`.
 
 ## Tests
 
@@ -248,8 +251,10 @@ Run:
 
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets --features outlint/full -- -D warnings
     cargo test --workspace
-    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+    cargo test --workspace --features outlint/full
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --features outlint/full
 
 CI (`.github/workflows/ci.yml`) runs the tests on stable across Linux, macOS,
 and Windows, fmt and clippy on Linux, the doc build with
@@ -260,7 +265,8 @@ against the committed `deny.toml` (advisories, licenses, bans, sources) — run
 it locally only when touching dependencies. If a check here starts catching
 things CI misses, add it to CI.
 
-`--all-features` is omitted deliberately — no crate defines features.
+The featureless commands above protect the core-linter contract; the explicit
+full-feature commands cover the optional search and read functionality.
 
 If a change touches release packaging, keep `npm/outlint/package.json`
 `version` in sync with `[workspace.package] version` in `Cargo.toml`.

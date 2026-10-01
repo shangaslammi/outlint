@@ -104,7 +104,6 @@ mod tests;
 /// already has the slug form. A value therefore always spells a valid named
 /// section segment.
 ///
-/// This API is provisional and may change in a minor release before 1.0.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct HeadingSlug(String);
@@ -184,8 +183,6 @@ pub fn heading_slug(text: &str) -> Option<HeadingSlug> {
 /// Descendant steps are accepted on input only; [`document_paths`] never
 /// emits one.
 ///
-/// This API is provisional and may change in a minor release before 1.0.
-///
 /// [`Named`]: Self::Named
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SectionStep {
@@ -227,7 +224,6 @@ pub enum SectionStep {
 /// for a table model that is not yet exposed. The enum is non-exhaustive
 /// because the reserved kinds may change when that model lands.
 ///
-/// This API is provisional and may change in a minor release before 1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum BlockPathKind {
@@ -306,7 +302,6 @@ impl BlockPathKind {
 
 /// One `/` step of a document path, selecting a block or list item.
 ///
-/// This API is provisional and may change in a minor release before 1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockStep {
     /// The kind of node selected.
@@ -319,10 +314,9 @@ pub struct BlockStep {
 ///
 /// Section steps come first and block steps last, mirroring the grammar. The
 /// fields are private so that an `item` step can only ever directly follow a
-/// `list` step, which is the one sequence the grammar rejects; every value is
+/// `list` step, which is the only two-step block sequence the grammar accepts;
+/// every value is
 /// therefore renderable and re-parseable to an equal value.
-///
-/// This API is provisional and may change in a minor release before 1.0.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocumentPath {
     sections: Vec<SectionStep>,
@@ -467,7 +461,6 @@ impl fmt::Display for DocumentPath {
 
 /// The node a document path resolved to.
 ///
-/// This API is provisional and may change in a minor release before 1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DocumentNode<'d> {
@@ -533,7 +526,6 @@ fn block_range(block: &Block) -> TextRange {
 
 /// A spelling that is not a document path.
 ///
-/// This API is provisional and may change in a minor release before 1.0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentPathSyntaxError {
     /// Byte offset into the parsed text at which the path stops being valid.
@@ -560,7 +552,6 @@ impl std::error::Error for DocumentPathSyntaxError {}
 /// so a caller can report the deepest node that was reached by resolving the
 /// path truncated to that many steps.
 ///
-/// This API is provisional and may change in a minor release before 1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DocumentPathError {
@@ -613,7 +604,6 @@ impl std::error::Error for DocumentPathError {}
 /// addressed as parsed. Consumers that need the title text (a label for `$`,
 /// a search context) take it from the returned section.
 ///
-/// This API is provisional and may change in a minor release before 1.0.
 pub fn merged_title(document: &Document) -> Option<&Section> {
     match document.sections.as_slice() {
         [only] if only.heading.level == HeaderLevel::H1 => Some(only),
@@ -633,7 +623,6 @@ pub fn merged_title(document: &Document) -> Option<&Section> {
 /// children follow as `$.child`. Every returned path resolves back to the
 /// node it is paired with.
 ///
-/// This API is provisional and may change in a minor release before 1.0.
 pub fn document_paths(document: &Document) -> Vec<(DocumentPath, DocumentNode<'_>)> {
     let mut paths = vec![(DocumentPath::root(), DocumentNode::Root(document))];
     let root = DocumentPath::root();

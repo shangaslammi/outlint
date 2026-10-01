@@ -4,18 +4,18 @@ use outlint_search::{Hit, TermCount};
 use serde_json::json;
 
 use super::{
-    escape_compact, format_bytes,
+    escape_compact, escape_human, format_bytes,
     json::{finish_json_line, write_ordered_json_array, write_ordered_json_object},
 };
 
-const VERSION: u64 = 1;
+const SEARCH_ENVELOPE_VERSION: u64 = 1;
 
 /// Renders successful search hits in the selected machine or human format.
-pub(crate) fn hits(query: &str, values: &[Hit], format: crate::args::AgentFormat) -> String {
+pub(crate) fn hits(query: &str, values: &[Hit], format: crate::args::ReadSearchFormat) -> String {
     match format {
-        crate::args::AgentFormat::Human => human_hits(values),
-        crate::args::AgentFormat::Json => json_hits(query, values),
-        crate::args::AgentFormat::Compact => compact_hits(values),
+        crate::args::ReadSearchFormat::Human => human_hits(values),
+        crate::args::ReadSearchFormat::Json => json_hits(query, values),
+        crate::args::ReadSearchFormat::Compact => compact_hits(values),
     }
 }
 
@@ -24,12 +24,12 @@ pub(crate) fn hits(query: &str, values: &[Hit], format: crate::args::AgentFormat
 pub(crate) fn no_hits(
     query: &str,
     counts: Option<&[TermCount]>,
-    format: crate::args::AgentFormat,
+    format: crate::args::ReadSearchFormat,
 ) -> String {
     match format {
-        crate::args::AgentFormat::Human => human_no_hits(query, counts),
-        crate::args::AgentFormat::Json => json_no_hits(query, counts),
-        crate::args::AgentFormat::Compact => compact_no_hits(counts),
+        crate::args::ReadSearchFormat::Human => human_no_hits(query, counts),
+        crate::args::ReadSearchFormat::Json => json_no_hits(query, counts),
+        crate::args::ReadSearchFormat::Compact => compact_no_hits(counts),
     }
 }
 
@@ -38,8 +38,8 @@ fn human_hits(hits: &[Hit]) -> String {
     for hit in hits {
         output.push_str(&format!(
             "{} {} {}",
-            hit.path,
-            hit.mdpath,
+            escape_human(&hit.path),
+            escape_human(&hit.mdpath),
             format_bytes(hit.bytes)
         ));
         if let Some(section_bytes) = hit.section_bytes {
@@ -48,7 +48,7 @@ fn human_hits(hits: &[Hit]) -> String {
         output.push('\n');
         if !hit.snippet.is_empty() {
             output.push_str("  ");
-            output.push_str(&hit.snippet);
+            output.push_str(&escape_human(&hit.snippet));
             output.push('\n');
         }
         output.push('\n');
@@ -58,9 +58,12 @@ fn human_hits(hits: &[Hit]) -> String {
 
 fn human_no_hits(query: &str, counts: Option<&[TermCount]>) -> String {
     let Some(counts) = counts.filter(|counts| !counts.is_empty()) else {
-        return format!("outlint: no search hits for: {query}\n");
+        return format!("outlint: no search hits for: {}\n", escape_human(query));
     };
-    let mut output = format!("outlint: no block contains all of: {query}\n  ");
+    let mut output = format!(
+        "outlint: no block contains all of: {}\n  ",
+        escape_human(query)
+    );
     append_counts(&mut output, counts, ", ");
     output.push_str("\n  (a block must contain every word; drop or change the rarest words)\n");
     output
@@ -71,7 +74,7 @@ fn json_hits(query: &str, hits: &[Hit]) -> String {
     // Search objects follow their documented wire order; do not route these
     // through `serde_json::Map`, whose default representation sorts keys.
     write_ordered_json_object(&mut output, |object| {
-        object.value("version", &json!(VERSION));
+        object.value("version", &json!(SEARCH_ENVELOPE_VERSION));
         object.value("query", &json!(query));
         object.member("hits", |output| {
             write_ordered_json_array(output, hits, write_hit_json)
@@ -83,7 +86,7 @@ fn json_hits(query: &str, hits: &[Hit]) -> String {
 fn json_no_hits(query: &str, counts: Option<&[TermCount]>) -> String {
     let mut output = Vec::new();
     write_ordered_json_object(&mut output, |object| {
-        object.value("version", &json!(VERSION));
+        object.value("version", &json!(SEARCH_ENVELOPE_VERSION));
         object.value("query", &json!(query));
         object.member("hits", |output| output.extend_from_slice(b"[]"));
         object.member("term_counts", |output| match counts {
@@ -153,7 +156,7 @@ fn append_counts(output: &mut String, counts: &[TermCount], separator: &str) {
         if index > 0 {
             output.push_str(separator);
         }
-        output.push_str(&count.term);
+        output.push_str(&escape_human(&count.term));
         output.push(' ');
         output.push_str(&count.blocks.to_string());
     }
@@ -195,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn human_output_preserves_the_prototype_layout() {
+    fn human_output_uses_the_documented_layout() {
         assert_eq!(
             human_hits(&fixture_hits()),
             "docs/guide.md $.setup/p[0] 412B (section 3.1kB)\n  Run the setup script, then…\n\n\
@@ -257,6 +260,23 @@ mod tests {
         assert_eq!(
             compact_hits(&hits),
             "docs/tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\.md\t$.path\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\t412B/3.1kB\tfirst\\tcr\\u{d}second\\nthird\\u{1b}slash\\\\\n"
+        );
+    }
+
+    #[test]
+    fn human_output_escapes_terminal_controls() {
+        let mut hits = fixture_hits();
+        hits.truncate(1);
+        hits[0].path = "docs/bad\nfile.md".into();
+        hits[0].mdpath = "$.bad\tpath".into();
+        hits[0].snippet = "line\rbreak\u{1b}".into();
+        assert_eq!(
+            human_hits(&hits),
+            "docs/bad\\nfile.md $.bad\\tpath 412B (section 3.1kB)\n  line\\rbreak\\x1b\n\n"
+        );
+        assert_eq!(
+            human_no_hits("bad\nquery", None),
+            "outlint: no search hits for: bad\\nquery\n"
         );
     }
 }

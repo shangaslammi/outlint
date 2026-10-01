@@ -8,6 +8,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation = "https://docs.rs/outlint-search"
+readme = "README.md"
+keywords = ["markdown", "search", "outline", "index", "text"]
+categories = ["text-processing", "development-tools"]
 
 [dependencies]
 ignore = "0.4"
