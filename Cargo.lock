@@ -1026,6 +1026,7 @@ version = "0.1.0"
 dependencies = [
  "ignore",
  "outlint-core",
+ "proptest",
  "pulldown-cmark",
  "tantivy",
 ]

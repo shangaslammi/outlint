@@ -1,6 +1,10 @@
 //! Unit tests for document path parsing, rendering, resolution, and
 //! enumeration.
 
+use std::collections::HashSet;
+
+use proptest::prelude::*;
+
 use super::{
     document_paths, heading_slug, merged_title, CanonicalSectionStep, DocumentNode, DocumentPath,
     DocumentPathError, DocumentPathTerminal, HeadingSlug, SectionStep,
@@ -535,5 +539,73 @@ html
             std::mem::discriminant(node),
             "{spelling}"
         );
+    }
+}
+
+fn arbitrary_markdown() -> impl Strategy<Value = String> {
+    let text = "[a-zé界 ]{0,16}";
+    let heading = prop_oneof![
+        Just("FAQ".to_owned()),
+        Just("faq!".to_owned()),
+        Just("🎉".to_owned()),
+        text
+    ];
+    let item = prop_oneof![
+        text.prop_map(|text| format!("- {text}\n")),
+        text.prop_map(|text| format!("- {text}\n  - nested\n")),
+        Just("-\n".to_owned()),
+    ];
+    let block = prop_oneof![
+        4 => (1usize..7, heading).prop_map(|(level, text)| format!("{} {text}\n\n", "#".repeat(level))),
+        1 => text.prop_map(|text| format!("{text}\n\n")),
+        1 => text.prop_map(|text| format!("{text}:\n\n")),
+        1 => proptest::collection::vec(item, 1..5).prop_map(|items| format!("{}\n", items.concat())),
+        1 => text.prop_map(|text| format!("```\n{text}\n```\n\n")),
+        1 => Just("> quote\n\n".to_owned()),
+        1 => Just("<div>html</div>\n\n".to_owned()),
+        1 => Just("***\n\n".to_owned()),
+        1 => Just("<!-- transparent -->\n\n".to_owned()),
+        1 => Just("\n".to_owned()),
+    ];
+    (
+        proptest::option::of(text),
+        proptest::collection::vec(block, 0..24),
+        prop_oneof![Just("\n"), Just("\r\n"), Just("\r")],
+    )
+        .prop_map(|(frontmatter, blocks, ending)| {
+            let prefix = frontmatter
+                .map_or_else(String::new, |text| format!("---\ntitle: '{text}'\n---\n\n"));
+            format!("{prefix}{}", blocks.concat()).replace('\n', ending)
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn arbitrary_paths_parse_totally_and_round_trip(
+        spelling in prop_oneof![
+            1 => any::<String>(),
+            3 => r"\$([$. \[\]/0-9a-z-]|p|code|quote|html|break|list|item){0,96}",
+            6 => r"\$(\.\.?[a-z0-9]{1,8}(-[a-z0-9]{1,8})?(\[[0-9]{1,3}\])?|\.\[[0-9]{1,3}\]){0,6}(/(p|code|quote|html|break|list)(\[[0-9]{1,3}\])?(/item(\[[0-9]{1,3}\])?)?)?",
+        ],
+    ) {
+        if let Ok(path) = DocumentPath::parse(&spelling) {
+            prop_assert_eq!(DocumentPath::parse(&path.to_string()), Ok(path));
+        }
+    }
+
+    #[test]
+    fn arbitrary_document_paths_are_distinct_and_resolve_to_their_nodes(
+        source in arbitrary_markdown(),
+    ) {
+        let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
+        let mut spellings = HashSet::new();
+        for (path, node) in document_paths(&document) {
+            let spelling = path.to_string();
+            let parsed = DocumentPath::parse(&spelling).expect("enumerated path parses");
+            prop_assert_eq!(parsed.resolve(&document), Ok(node));
+            prop_assert!(spellings.insert(spelling));
+        }
     }
 }

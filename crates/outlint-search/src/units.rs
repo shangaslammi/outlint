@@ -517,6 +517,8 @@ fn file_stem(relative_path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     const FIXTURE: &str = "---\ntitle: Rollout\ntags: [ops, release]\n---\n\n# Deployment\n\n## Rollback plan\n\nRestore the [previous release](https://example.test/rel) now. <!-- secret note -->\n\n- first step\n- second step\n";
@@ -832,5 +834,75 @@ mod tests {
                 .map(|unit| unit.body_text.as_str()),
             Some("Quux and nested zebracorn example = true")
         );
+    }
+
+    fn arbitrary_markdown() -> impl Strategy<Value = String> {
+        let text = "[a-zé界 ]{0,16}";
+        let heading = prop_oneof![
+            Just("FAQ".to_owned()),
+            Just("faq!".to_owned()),
+            Just("🎉".to_owned()),
+            text
+        ];
+        let item = prop_oneof![
+            text.prop_map(|text| format!("- {text}\n")),
+            text.prop_map(|text| format!("- {text}\n  - nested\n")),
+            Just("-\n".to_owned()),
+        ];
+        let block = prop_oneof![
+            4 => (1usize..7, heading)
+                .prop_map(|(level, text)| format!("{} {text}\n\n", "#".repeat(level))),
+            1 => text.prop_map(|text| format!("{text}\n\n")),
+            1 => text.prop_map(|text| format!("{text}:\n\n")),
+            1 => proptest::collection::vec(item, 1..5).prop_map(|items| format!("{}\n", items.concat())),
+            1 => text.prop_map(|text| format!("```\n{text}\n```\n\n")),
+            1 => Just("> quote\n\n".to_owned()),
+            1 => Just("<div>html</div>\n\n".to_owned()),
+            1 => Just("***\n\n".to_owned()),
+            1 => Just("<!-- transparent -->\n\n".to_owned()),
+            1 => Just("\n".to_owned()),
+        ];
+        (
+            proptest::option::of(text),
+            proptest::collection::vec(block, 0..24),
+            prop_oneof![Just("\n"), Just("\r\n"), Just("\r")],
+        )
+            .prop_map(|(frontmatter, blocks, ending)| {
+                let prefix = frontmatter
+                    .map_or_else(String::new, |text| format!("---\ntitle: '{text}'\n---\n\n"));
+                format!("{prefix}{}", blocks.concat()).replace('\n', ending)
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn arbitrary_units_are_addressable_and_sized_by_their_extent(
+            source in arbitrary_markdown(),
+        ) {
+            let units = index_units("docs/guide.md", &source).expect("Markdown indexing succeeds");
+            let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
+            for unit in units {
+                let node = unit.mdpath.resolve(&document).expect("unit path resolves");
+                let bytes = match node {
+                    DocumentNode::Root(_) => source.len(),
+                    _ => {
+                        let extent = node.extent().expect("non-root node has an extent");
+                        extent.end.0 - extent.start.0
+                    }
+                };
+                prop_assert_eq!(unit.bytes, bytes as u64);
+                if let DocumentNode::Item(item) = node {
+                    let parent = unit.parent_list.as_ref().expect("item unit has a parent list");
+                    let parent_node = parent.resolve(&document).expect("parent list path resolves");
+                    let DocumentNode::Block(Block::List(list)) = parent_node else {
+                        prop_assert!(false, "item parent resolves to {parent_node:?}");
+                        return Ok(());
+                    };
+                    prop_assert!(list.items.iter().any(|child| std::ptr::eq(child, item)));
+                }
+            }
+        }
     }
 }
