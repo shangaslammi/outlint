@@ -1,5 +1,6 @@
 # Rust / Cargo
 /target
+/dist/full/bin/
 **/*.rs.bk
 *.pdb
 

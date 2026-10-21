@@ -93,7 +93,7 @@ JSON output is the full diagnostic shape; the conformance corpus's
 diverge deliberately — do not "align" them.
 
 MSRV is declared: `rust-version = "1.88"` in `[workspace.package]`, with
-a pinned CI job running `cargo test --workspace --locked` on it.
+pinned CI jobs testing both check-only and full-feature builds on it.
 
 Test surface: unit tests sit next to the code in `loader/`, `markdown/`, and
 `validator/`, including property tests over header parsing, YAML/matcher
@@ -269,7 +269,11 @@ The featureless commands above protect the core-linter contract; the explicit
 full-feature commands cover the optional search and read functionality.
 
 If a change touches release packaging, keep `npm/outlint/package.json`
-`version` in sync with `[workspace.package] version` in `Cargo.toml`.
+`version` and `dist/full/dist.toml` package `version` in sync with
+`[workspace.package] version` in `Cargo.toml`. The original `outlint` archives
+and npm bootstrap distribute the check-only CLI; `outlint-full` archives use
+the same sources with all CLI features enabled. Regenerate release.yml using
+the pinned cargo-dist version after changing distribution configuration.
 
 Report which checks were actually run.
 

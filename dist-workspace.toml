@@ -1,5 +1,5 @@
 [workspace]
-members = ["cargo:."]
+members = ["cargo:.", "dist:dist/full"]
 
 # Config for 'dist' (cargo-dist). The release workflow this generates
 # (.github/workflows/release.yml) ships pre-built binaries only: crates.io
@@ -9,6 +9,9 @@ members = ["cargo:."]
 # The preferred dist version to use in CI (pinned exactly so releases are
 # reproducible; `dist init` after bumping this regenerates the workflow)
 cargo-dist-version = "0.32.0"
+# Build each Cargo app with its own feature selection. The full edition is a
+# separate distribution of the same CLI, built by dist/full/build.sh.
+precise-builds = true
 # CI backends to support
 ci = "github"
 # The installers to generate for each app

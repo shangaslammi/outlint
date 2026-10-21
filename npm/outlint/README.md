@@ -16,6 +16,12 @@ verifies its cargo-dist SHA-256 sidecar, and stores it in the current user's
 cache. Later commands use the cached binary. The first command therefore needs
 access to GitHub Releases.
 
+This package downloads the check-only edition (`check` and `schema check`).
+For `search`, `read`, and all other optional commands, use the `outlint-full`
+archives or installers on the
+[GitHub Release](https://github.com/shangaslammi/outlint/releases), or build
+from source with `cargo install outlint --locked --all-features`.
+
 Pre-built binaries are available for macOS on Arm and x64, glibc Linux on Arm
 and x64, musl Linux on x64, and x64 Windows. Building from source with
 `cargo install outlint` may support additional Rust targets.

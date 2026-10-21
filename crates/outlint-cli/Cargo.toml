@@ -27,3 +27,9 @@ outlint-search = { path = "../outlint-search", version = "0.1.0", optional = tru
 search = ["dep:outlint-search"]
 read = []
 full = ["search", "read"]
+
+[package.metadata.dist]
+# The original archives and npm bootstrap distribute the core linter.
+default-features = false
+all-features = false
+features = []

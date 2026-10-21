@@ -41,6 +41,29 @@ Each release also ships pre-built binaries and installer scripts on its
 release page for the shell and PowerShell one-liners and per-platform
 archives with checksums.
 
+There are two editions for each supported platform:
+
+| Edition | Archive name | Commands |
+|---|---|---|
+| Check-only | `outlint-<target>.tar.xz` (Windows: `.zip`) | `check`, `schema check` |
+| Full | `outlint-full-<target>.tar.xz` (Windows: `.zip`) | All commands, including `search` and `read` |
+
+Both contain a binary named `outlint` (`outlint.exe` on Windows). Choose
+`outlint-installer.sh` / `outlint-installer.ps1` for check-only, or
+`outlint-full-installer.sh` / `outlint-full-installer.ps1` for full. Installing
+one edition replaces the other when they use the same installation directory.
+The npm package downloads the check-only edition.
+
+To build the full edition from source:
+
+```sh
+cargo install outlint --locked --all-features
+```
+
+`--features full` enables the current `search` and `read` commands;
+`--all-features` also includes any future optional commands.
+`--locked` uses the release's tested dependency versions, including on the MSRV.
+
 ## Quickstart
 
 Write a schema. The default project schema is `.outlint.yml`:
@@ -516,7 +539,7 @@ tools under the same conditions — see
 
 ## MSRV
 
-Rust 1.86.
+Rust 1.88.
 
 The minimum supported Rust version is part of the compatibility contract:
 raising it is a minor-version change (a patch release will never require a
@@ -536,12 +559,16 @@ Before submitting, run:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo test --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
 CI runs the dependency-resolving Cargo commands with `--locked`, runs tests on
-stable Linux, macOS, and Windows, and runs the full test suite on Rust 1.86.
+stable Linux, macOS, and Windows in both check-only and full configurations,
+and tests both configurations on the Rust 1.88 MSRV. It also builds and checks
+the two Linux release archives and their checksums.
 The local commands above omit `--locked` so an intentional lockfile change is
 reported normally; `cargo fmt` does not resolve dependencies.
 

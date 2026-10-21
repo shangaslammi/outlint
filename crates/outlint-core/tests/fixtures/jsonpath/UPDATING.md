@@ -85,7 +85,7 @@ looking at, and it is unaffected by the vendored suite.
 
 ```sh
 cargo test -p outlint-core --test jsonpath_cts_core --locked
-cargo +1.86.0 test -p outlint-core --test jsonpath_cts_core --locked
+cargo +1.88.0 test -p outlint-core --test jsonpath_cts_core --locked
 ```
 
 Then confirm the checked-in manifest is exactly what the generator emits:
@@ -101,7 +101,7 @@ rm "$tmp_manifest"
 Finish with the workspace gate: `cargo fmt --all -- --check`, `cargo clippy
 --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace
 --locked`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
---locked`, `cargo +1.86.0 test --workspace --locked`, and `cargo deny check`.
+--locked`, `cargo +1.88.0 test --workspace --locked`, and `cargo deny check`.
 
 ### 8. Escalate any core failure
 
