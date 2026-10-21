@@ -10,6 +10,7 @@ mod markdown;
 mod matcher;
 mod regex_capture;
 mod schema;
+mod slug;
 mod typed_value;
 mod validator;
 mod yaml;

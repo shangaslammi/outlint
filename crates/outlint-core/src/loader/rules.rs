@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::document_path::heading_slug;
 use crate::matcher::{compile_anchored_pattern, compile_glob_pattern};
 use crate::regex_capture;
+use crate::slug::heading_slug;
 use crate::typed_value::ValueType;
 use crate::{
     CaptureName, CapturePath, Cardinality, ChildScope, ContentRulePath, DeclaredScope, ExactText,
