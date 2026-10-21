@@ -195,6 +195,26 @@ fn search_returns_item_paths_and_folds_lead_ins() {
 }
 
 #[test]
+#[cfg(feature = "read")]
+fn search_bom_frontmatter_hit_is_readable() {
+    let directory = TempDir::new("search-bom-frontmatter");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write(
+        "docs/guide.md",
+        "\u{feff}---\ntitle: x\n---\n\nIntro paragraph about widgets.\n",
+    );
+
+    let output = run(&directory, &["search", "--format", "json", "widgets"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let value = json_output(&output);
+    let mdpath = value["hits"][0]["mdpath"].as_str().expect("hit path");
+    assert_eq!(mdpath, "$/p[0]");
+
+    let output = run(&directory, &["read", "docs/guide.md", mdpath]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+}
+
+#[test]
 fn search_preserves_canonical_paths_for_merged_and_repeated_sections() {
     let directory = TempDir::new("search-canonical-paths");
     fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
