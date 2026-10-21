@@ -67,10 +67,10 @@ request.
 
 ## Getting set up
 
-MSRV is **Rust 1.86**. That is a compatibility contract: raising it is a
+MSRV is **Rust 1.88**. That is a compatibility contract: raising it is a
 minor-version change, a patch release will never require a newer toolchain,
 and it is checked by a dedicated CI job. Use stable for development and check
-against 1.86 if you touch anything that might depend on a newer feature.
+against 1.88 if you touch anything that might depend on a newer feature.
 
 ```sh
 git clone https://github.com/shangaslammi/outlint
@@ -79,18 +79,21 @@ cargo build --workspace
 cargo run -p outlint -- check README.md --schema path/to/schema.outlint.yml
 ```
 
-The workspace has two crates:
+The workspace has three crates:
 
 - `crates/outlint-core` — schema model, loader, Markdown outline parser, and
   validator. A pure library: no filesystem, no environment, no printing.
 - `crates/outlint-cli` — the `outlint` binary. The IO shell: reads argv, reads
   files, calls core, formats output, picks the exit code.
+- `crates/outlint-search` — Markdown search and its local index, used by the
+  CLI's optional `search` feature.
 
 ## Verification
 
-Run all four before opening a pull request. CI runs all four: tests on stable
-across Linux, macOS, and Windows, formatting, Clippy, and rustdoc on Linux. It
-also runs the full test suite on Rust 1.86 and `cargo deny check`. Commands
+Run the checks below before opening a pull request. CI tests check-only and
+full builds on stable across Linux, macOS, and Windows, with formatting,
+Clippy, and rustdoc on Linux. It also tests both builds on Rust 1.88, checks
+the packaged Linux binaries, and runs `cargo deny check`. Commands
 that resolve the Cargo dependency graph use the committed lockfile in CI; the
 local commands below omit `--locked` so Cargo can report an intentionally
 changed lockfile normally.
@@ -98,12 +101,22 @@ changed lockfile normally.
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo test --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-`--all-features` is omitted deliberately: no crate defines any Cargo features,
-and adding one to make a dependency optional needs a concrete user request.
+The core linter uses no features. The CLI's `search` and `read` features are
+optional; `full` enables both, and `--all-features` includes every optional
+command. Release archives keep check-only and full editions separate.
+
+Release packaging is configured in `dist-workspace.toml`. The check-only
+edition uses the Cargo package; `dist/full/dist.toml` and `dist/full/build.sh`
+build the full edition from the same sources with all features. Keep the
+versions in `Cargo.toml`, `npm/outlint/package.json`, and `dist/full/dist.toml`
+in sync. After changing distribution configuration, regenerate the workflow
+with cargo-dist 0.32.0 (`dist generate --mode ci`) and run `dist plan`.
 
 Say which checks you actually ran in the pull request description.
 

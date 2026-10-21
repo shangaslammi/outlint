@@ -1,0 +1,8 @@
+# Cyclic inline references are permitted by §2.3. No property is evaluated,
+# so unevaluatedProperties rejects the frontmatter mapping at the root pointer.
+version: 1
+title: "*"
+frontmatter:
+  schema:
+    $ref: "#"
+    unevaluatedProperties: false

@@ -1,0 +1,28 @@
+//! Full-text search over Markdown documents by outline.
+//!
+//! Every Markdown file under a search root is split into *index
+//! units* — one per section heading, one per visible preamble block, one per
+//! non-empty direct list item, and one for the document root when it has a
+//! frontmatter mapping or a title (a sole H1, which document paths merge into
+//! the root) — and each unit is stored as one tantivy document addressed by its
+//! [`outlint_core::CanonicalDocumentPath`]. Searching returns the best-scoring
+//! units, each with a snippet of its text chosen around the query words;
+//! reading the full content is `outlint read`'s job.
+//!
+//! The split follows the workspace convention: [`index_units`] returns pure
+//! structured data from text; [`Store`] and the walk are the filesystem shell
+//! around it. Presentation belongs to the calling application.
+
+#![warn(missing_docs)]
+
+mod index;
+mod result;
+mod store;
+mod units;
+
+pub use result::{Hit, SearchLimit, SearchResults, TermCount, MAX_SEARCH_LIMIT};
+pub use store::{
+    walk_markdown, Scope, SearchError, SearchErrorKind, SearchNote, SearchNoteOperation, Store,
+    StoredField, Walk, WalkedFile,
+};
+pub use units::{index_units, IndexUnit};

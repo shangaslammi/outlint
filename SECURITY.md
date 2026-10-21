@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-The current release is `0.1.0`, distributed through GitHub Releases, crates.io,
+The current release is `0.2.0`, distributed through GitHub Releases, crates.io,
 and npm.
 
 | Version | Supported |
 | --- | --- |
-| `0.1.0` | Yes — fixes land on `main` and ship in the next release |
+| `0.2.0` | Yes — fixes land on `main` and ship in the next release |
 | Anything else | No |
 
 While the project is pre-1.0 there are no maintained release branches and no

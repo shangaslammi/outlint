@@ -705,7 +705,7 @@ impl<'a> Scanner<'a> {
     /// the split is always on a character boundary.
     fn take_token(&mut self) -> Result<&'a str, LocatorParseError> {
         let rest = self.rest();
-        let end = rest.find(['.', '/', '[']).map_or(rest.len(), |end| end);
+        let end = rest.find(['.', '/', '[']).unwrap_or(rest.len());
         let Some((token, remaining)) = rest.split_at_checked(end) else {
             return Err(LocatorParseError::new(
                 LocatorParseErrorKind::UnexpectedCharacter,

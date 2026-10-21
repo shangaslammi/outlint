@@ -3,14 +3,17 @@
 ## Project
 
 Outlint validates the header structure (outline) of Markdown documents
-against a declarative schema. Rust workspace at the 0.1.0 initial release;
+against a declarative schema. Rust workspace preparing the 0.2.0 release;
 expect breaking changes before 1.0.
 
-    crates/outlint-core   schema model, schema loader, validator (library)
-    crates/outlint-cli    the `outlint` binary
-    spec/outlint-spec.md  the specification (normative)
-    testdata/             conformance corpus, shared by all implementations
-    npm/outlint/          npm distribution packaging
+    crates/outlint-core    schema model, schema loader, validator (library)
+    crates/outlint-cli     the `outlint` binary
+    crates/outlint-search  indexing for the experimental search extension
+    spec/outlint-spec.md   the specification (normative)
+    spec/*-spec.md         search and read (experimental extensions),
+                           document paths (provisional)
+    testdata/              conformance corpus, shared by all implementations
+    npm/outlint/           npm distribution packaging
 
 ## The spec is normative
 
@@ -34,7 +37,7 @@ invent, rename, or repurpose one without a spec change.
 
 ## Current state
 
-Released as 0.1.0; the working tree implements the current specification. The
+Preparing 0.2.0; the working tree implements the current specification. The
 pipeline in `outlint-core`: `load_schema` / `load_schema_with_resources`
 (`loader/`) turn schema text into a normalized `Schema` or an
 `InvalidSchema` carrying positioned `SchemaError`s; `parse_markdown`
@@ -44,7 +47,9 @@ invariant failure; ordinary CommonMark recovery remains successful.
 `validate` / `PreparedValidator`
 (`validator/`, including `validator/sequence.rs`) map a `Schema` plus a
 `Document` to `Vec<Diagnostic>` using bounded ordered assignment.
-`matcher.rs` and `case_fold.rs` are private helpers.
+`matcher.rs` and `case_fold.rs` are private helpers. The provisional
+`document_read/` API selects content and lists typed document-path rows,
+including failure context and suggestions, without IO or presentation labels.
 
 Preamble blocks and direct list items extend the parsed tree without changing
 schema version 1 or JSON envelope version 2. `Document` and `Section` own
@@ -82,7 +87,7 @@ boolean reads or type-preserving equality; `fm.<name>` denotes only a typed
 capture declared by `frontmatter.captures`. The former dynamic `fm.key` and
 `fm.key=value` meanings are not part of the current language.
 
-The CLI has two subcommands: `outlint check <FILE>...` (nearest
+The validator has two CLI subcommands: `outlint check <FILE>...` (nearest
 `<stem>.outlint.yml` or `.outlint.yml` discovered per file unless
 `--schema` is given; `-` reads
 stdin and requires `--schema`) and `outlint schema check <SCHEMA>...`.
@@ -92,8 +97,13 @@ JSON output is the full diagnostic shape; the conformance corpus's
 `expected.json` records only portable `{id, target}` entries. The two
 diverge deliberately — do not "align" them.
 
-MSRV is declared: `rust-version = "1.86"` in `[workspace.package]`, with
-a pinned CI job running `cargo test --workspace --locked` on it.
+Experimental `search` and `read` subcommands are optional, behind Cargo
+features and shipped only in the full edition. Their contracts are in
+`spec/search-spec.md` and `spec/read-spec.md`, outside the validator's
+specification and stability promises.
+
+MSRV is declared: `rust-version = "1.88"` in `[workspace.package]`, with
+pinned CI jobs testing both check-only and full-feature builds on it.
 
 Test surface: unit tests sit next to the code in `loader/`, `markdown/`, and
 `validator/`, including property tests over header parsing, YAML/matcher
@@ -222,8 +232,11 @@ Anything else, including a CLI argument parser, needs a concrete
 justification — argv handling is hand-rolled today and that is fine at
 this size.
 
-No Cargo features exist. Do not add one to make a dependency optional
-unless a user has asked to build without it.
+The core linter (`outlint check`, `outlint schema check`, and `outlint-core`)
+uses no Cargo features and must remain buildable and testable without any.
+Additional functionality layered on linting is opt-in on the `outlint` CLI
+crate: currently `search`, `read`, and their `full` shorthand. Build and test
+that functionality with `--all-features` or `--features full`.
 
 ## Tests
 
@@ -248,22 +261,29 @@ Run:
 
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets --features outlint/full -- -D warnings
     cargo test --workspace
-    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+    cargo test --workspace --features outlint/full
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --features outlint/full
 
 CI (`.github/workflows/ci.yml`) runs the tests on stable across Linux, macOS,
 and Windows, fmt and clippy on Linux, the doc build with
-`RUSTDOCFLAGS="-D warnings"`, and the full test suite on the 1.86 MSRV. Cargo
+`RUSTDOCFLAGS="-D warnings"`, and the full test suite on the 1.88 MSRV. Cargo
 commands that resolve dependencies use `--locked`; `cargo fmt` runs as shown
 above because it does not resolve them. CI additionally runs `cargo deny check`
 against the committed `deny.toml` (advisories, licenses, bans, sources) — run
 it locally only when touching dependencies. If a check here starts catching
 things CI misses, add it to CI.
 
-`--all-features` is omitted deliberately — no crate defines features.
+The featureless commands above protect the core-linter contract; the explicit
+full-feature commands cover the optional search and read functionality.
 
 If a change touches release packaging, keep `npm/outlint/package.json`
-`version` in sync with `[workspace.package] version` in `Cargo.toml`.
+`version` and `dist/full/dist.toml` package `version` in sync with
+`[workspace.package] version` in `Cargo.toml`. The original `outlint` archives
+and npm bootstrap distribute the check-only CLI; `outlint-full` archives use
+the same sources with all CLI features enabled. Regenerate release.yml using
+the pinned cargo-dist version after changing distribution configuration.
 
 Report which checks were actually run.
 

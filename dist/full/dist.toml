@@ -1,0 +1,10 @@
+[package]
+name = "outlint-full"
+version = "0.2.0"
+description = "Outlint with all commands, including Markdown search and read"
+repository = "https://github.com/shangaslammi/outlint"
+homepage = "https://github.com/shangaslammi/outlint"
+license = "MIT OR Apache-2.0"
+binaries = ["outlint"]
+build-command = ["bash", "build.sh"]
+out-dir = "bin"

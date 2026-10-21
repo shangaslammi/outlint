@@ -198,6 +198,10 @@ frontmatter-schema frontmatter 0:26..75 "required: true\n  schema: frontmatter.s
 frontmatter-schema frontmatter-schema-declaration 0:51..74 "frontmatter.schema.json"
 frontmatter-schema frontmatter-schema-document 1:0..118
 frontmatter-schema title 0:85..87 "[]"
+frontmatter-schema-self-reference frontmatter 0:194..249 "schema:\n    $ref: \"#\"\n    unevaluatedProperties:"...
+frontmatter-schema-self-reference frontmatter-schema-declaration 0:206..249 "$ref: \"#\"\n    unevaluatedProperties: false\n"
+frontmatter-schema-self-reference frontmatter-schema-document 0:206..249 "$ref: \"#\"\n    unevaluatedProperties: false\n"
+frontmatter-schema-self-reference title 0:175..178 "\"*\""
 frontmatter-tagged-precision frontmatter 0:38..87 "required: true\n  schema: frontmatter.schema.json"...
 frontmatter-tagged-precision frontmatter-schema-declaration 0:63..86 "frontmatter.schema.json"
 frontmatter-tagged-precision frontmatter-schema-document 1:0..173

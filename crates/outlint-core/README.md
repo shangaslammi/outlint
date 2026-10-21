@@ -242,7 +242,7 @@ every attempted resource in a `LinkedJsonSchemaInput` passed to
 
 ## MSRV
 
-Rust 1.86.
+Rust 1.88.
 
 ## License
 
