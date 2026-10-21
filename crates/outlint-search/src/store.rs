@@ -635,10 +635,11 @@ impl Store {
                 continue;
             }
             for unit in units {
-                let key = unit_key(&file.path, &unit.mdpath);
+                let mdpath = unit.mdpath.to_string();
+                let key = unit_key(&file.path, &mdpath);
                 let mut document = doc!(
                     fields.path => file.path.as_str(),
-                    fields.mdpath => unit.mdpath,
+                    fields.mdpath => mdpath,
                     fields.bytes => unit.bytes,
                     fields.context => unit.context,
                     fields.body => unit.body_text,
@@ -652,7 +653,7 @@ impl Store {
                     document.add_u64(fields.section_bytes, section_bytes);
                 }
                 if let Some(parent_list) = unit.parent_list {
-                    document.add_text(fields.parent_list, parent_list);
+                    document.add_text(fields.parent_list, parent_list.to_string());
                 }
                 writer.add_document(document).map_err(|error| {
                     search_error(

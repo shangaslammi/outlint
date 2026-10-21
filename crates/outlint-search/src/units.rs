@@ -17,12 +17,12 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 /// Link targets, HTML, and comments never reach either representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexUnit {
-    /// Rendered [`CanonicalDocumentPath`] of the node.
-    pub mdpath: String,
-    /// Rendered path of the direct parent list for an item unit; `None` for
+    /// Canonical address of the node.
+    pub mdpath: CanonicalDocumentPath,
+    /// Canonical path of the direct parent list for an item unit; `None` for
     /// every other unit. This links an item to the list unit whose text
     /// contains it without deriving parentage from path spelling.
-    pub parent_list: Option<String>,
+    pub parent_list: Option<CanonicalDocumentPath>,
     /// Length in bytes of the node's full extent: the whole source for the
     /// root, the heading through the last descendant block for a section,
     /// the block itself for a block, or the item itself for a list item.
@@ -88,7 +88,7 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
     // Blocks follow their section in document order, so the last section
     // seen owns every block until the next section step.
     let mut enclosing_section: Option<u64> = None;
-    let mut enclosing_list: Option<String> = None;
+    let mut enclosing_list: Option<CanonicalDocumentPath> = None;
     for (path, node) in paths {
         let (body_text, bytes, section_bytes, snippet_text, is_section, parent_list) = match node {
             DocumentNode::Root(document) => {
@@ -97,7 +97,7 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                     continue;
                 };
                 units.push(IndexUnit {
-                    mdpath: path.to_string(),
+                    mdpath: path,
                     parent_list: None,
                     bytes: source.len() as u64,
                     section_bytes: None,
@@ -123,7 +123,7 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
                 )
             }
             DocumentNode::Block(block) => {
-                enclosing_list = matches!(block, Block::List(_)).then(|| path.to_string());
+                enclosing_list = matches!(block, Block::List(_)).then(|| path.clone());
                 if folds.skipped.contains(&path) {
                     continue;
                 }
@@ -176,12 +176,13 @@ fn units_of(relative_path: &str, source: &str, document: &Document) -> Vec<Index
             }
             _ => continue,
         };
+        let context = context_of(&base_context, &path, &headings, is_section);
         units.push(IndexUnit {
-            mdpath: path.to_string(),
+            mdpath: path,
             parent_list,
             bytes,
             section_bytes,
-            context: context_of(&base_context, &path, &headings, is_section),
+            context,
             body_text,
             snippet_text,
         });
@@ -567,7 +568,7 @@ mod tests {
         .expect("fixture parses");
         let paragraph = units
             .iter()
-            .find(|unit| unit.mdpath == "$/p[0]")
+            .find(|unit| unit.mdpath.to_string() == "$/p[0]")
             .expect("paragraph unit");
         assert_eq!(
             paragraph.body_text,
@@ -582,7 +583,7 @@ mod tests {
     #[test]
     fn index_units_enumerate_root_sections_and_blocks() {
         let units = index_units("docs/Deploy.md", FIXTURE).expect("fixture parses");
-        let mdpaths: Vec<&str> = units.iter().map(|unit| unit.mdpath.as_str()).collect();
+        let mdpaths: Vec<String> = units.iter().map(|unit| unit.mdpath.to_string()).collect();
         assert_eq!(
             mdpaths,
             [
@@ -637,7 +638,11 @@ mod tests {
         assert_eq!(first_item.bytes, "- first step\n".len() as u64);
         assert_eq!(first_item.section_bytes, Some(rollback_bytes));
         assert_eq!(
-            first_item.parent_list.as_deref(),
+            first_item
+                .parent_list
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
             Some("$.rollback-plan/list[0]")
         );
         let second_item = &units[5];
@@ -652,7 +657,7 @@ mod tests {
         let snippet_of = |mdpath: &str| {
             units
                 .iter()
-                .find(|unit| unit.mdpath == mdpath)
+                .find(|unit| unit.mdpath.to_string() == mdpath)
                 .map(|unit| unit.snippet_text.as_str())
                 .expect("unit exists")
         };
@@ -674,18 +679,18 @@ mod tests {
         // An H2 as the only top-level section is not merged into the root.
         let units = index_units("a.md", "## Only\n").expect("parses");
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].mdpath, "$.only");
+        assert_eq!(units[0].mdpath.to_string(), "$.only");
         assert_eq!(units[0].context, "a");
         // A merged title alone gives the root a unit spanning the heading.
         let units = index_units("a.md", "# Only\n").expect("parses");
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].mdpath, "$");
+        assert_eq!(units[0].mdpath.to_string(), "$");
         assert_eq!(units[0].body_text, "Only");
         assert_eq!(units[0].snippet_text, "");
         assert_eq!(units[0].context, "a");
         // A preamble is indexed as its blocks, not as an empty root unit.
         let units = index_units("a.md", "Preamble only.\n").expect("parses");
-        let mdpaths: Vec<&str> = units.iter().map(|unit| unit.mdpath.as_str()).collect();
+        let mdpaths: Vec<String> = units.iter().map(|unit| unit.mdpath.to_string()).collect();
         assert_eq!(mdpaths, ["$/p[0]"]);
     }
 
@@ -695,20 +700,34 @@ mod tests {
         let units = index_units("a.md", source).expect("parses");
         let items: Vec<_> = units
             .iter()
-            .filter(|unit| unit.mdpath.contains("/item["))
+            .filter(|unit| unit.mdpath.to_string().contains("/item["))
             .collect();
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].mdpath, "$/list[0]/item[0]");
+        assert_eq!(items[0].mdpath.to_string(), "$/list[0]/item[0]");
         assert_eq!(items[0].body_text, "first nested detail");
         assert_eq!(items[0].snippet_text, "first nested detail");
         assert_eq!(items[0].bytes, "- first\n  - nested detail\n".len() as u64);
-        assert_eq!(items[1].mdpath, "$/list[0]/item[1]");
+        assert_eq!(items[1].mdpath.to_string(), "$/list[0]/item[1]");
         assert_eq!(items[1].body_text, "second");
-        assert_eq!(items[0].parent_list.as_deref(), Some("$/list[0]"));
-        assert_eq!(items[1].parent_list.as_deref(), Some("$/list[0]"));
+        assert_eq!(
+            items[0]
+                .parent_list
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("$/list[0]")
+        );
+        assert_eq!(
+            items[1]
+                .parent_list
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("$/list[0]")
+        );
         let list = units
             .iter()
-            .find(|unit| unit.mdpath == "$/list[0]")
+            .find(|unit| unit.mdpath.to_string() == "$/list[0]")
             .expect("list unit exists beside its items");
         assert_eq!(list.body_text, "first nested detail second");
         assert_eq!(list.parent_list, None);
@@ -716,7 +735,9 @@ mod tests {
             list.bytes,
             "- first\n  - nested detail\n- second\n-\n".len() as u64
         );
-        assert!(!units.iter().any(|unit| unit.mdpath == "$/list[0]/item[2]"));
+        assert!(!units
+            .iter()
+            .any(|unit| unit.mdpath.to_string() == "$/list[0]/item[2]"));
     }
 
     #[test]
@@ -726,11 +747,11 @@ mod tests {
         let unit = |path: &str| {
             units
                 .iter()
-                .find(|unit| unit.mdpath == path)
+                .find(|unit| unit.mdpath.to_string() == path)
                 .unwrap_or_else(|| panic!("missing {path}"))
         };
 
-        assert!(!units.iter().any(|unit| unit.mdpath == "$/p[0]"));
+        assert!(!units.iter().any(|unit| unit.mdpath.to_string() == "$/p[0]"));
         let table_like_paragraph = unit("$/p[1]");
         assert_eq!(
             table_like_paragraph.body_text,
@@ -741,7 +762,7 @@ mod tests {
             "| Code | Meaning |\n| --- | --- |\n| 0 | success |\n".len() as u64
         );
 
-        assert!(!units.iter().any(|unit| unit.mdpath == "$/p[2]"));
+        assert!(!units.iter().any(|unit| unit.mdpath.to_string() == "$/p[2]"));
         assert_eq!(
             unit("$/list[0]").body_text,
             "Choices: first nested detail second"
@@ -769,12 +790,12 @@ mod tests {
         let units = index_units("a.md", &source).expect("parses");
         let paragraph_unit = units
             .iter()
-            .find(|unit| unit.mdpath == "$/p[0]")
+            .find(|unit| unit.mdpath.to_string() == "$/p[0]")
             .expect("long paragraph remains addressable");
         assert_eq!(paragraph_unit.body_text, paragraph);
         let code = units
             .iter()
-            .find(|unit| unit.mdpath == "$/code[0]")
+            .find(|unit| unit.mdpath.to_string() == "$/code[0]")
             .expect("following code remains addressable");
         assert_eq!(code.body_text, "example = true");
     }
@@ -786,14 +807,14 @@ mod tests {
         assert_eq!(
             units
                 .iter()
-                .find(|unit| unit.mdpath == "$/p[0]")
+                .find(|unit| unit.mdpath.to_string() == "$/p[0]")
                 .map(|unit| unit.body_text.as_str()),
             Some("Quux and zebracorn")
         );
         assert_eq!(
             units
                 .iter()
-                .find(|unit| unit.mdpath == "$/code[0]")
+                .find(|unit| unit.mdpath.to_string() == "$/code[0]")
                 .map(|unit| unit.body_text.as_str()),
             Some("example = true")
         );
@@ -803,11 +824,11 @@ mod tests {
     fn nested_emphasis_inside_one_strong_span_still_folds() {
         let source = "# Title\n\n**Quux and _nested zebracorn_**\n\n```text\nexample = true\n```\n";
         let units = index_units("a.md", source).expect("parses");
-        assert!(!units.iter().any(|unit| unit.mdpath == "$/p[0]"));
+        assert!(!units.iter().any(|unit| unit.mdpath.to_string() == "$/p[0]"));
         assert_eq!(
             units
                 .iter()
-                .find(|unit| unit.mdpath == "$/code[0]")
+                .find(|unit| unit.mdpath.to_string() == "$/code[0]")
                 .map(|unit| unit.body_text.as_str()),
             Some("Quux and nested zebracorn example = true")
         );
