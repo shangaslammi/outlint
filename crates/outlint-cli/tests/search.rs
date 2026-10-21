@@ -383,7 +383,10 @@ fn search_reports_index_creation_and_rebuilds_only_when_they_happen() {
     let directory = TempDir::new("search-index-notes");
     fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
     directory.write("guide.md", "# Guide\n\nNeedle.\n");
-    let index = directory.path().join(".outlint/search");
+    let index = fs::canonicalize(directory.path())
+        .expect("fixture directory canonicalizable")
+        .join(".outlint")
+        .join("search");
 
     let output = run(&directory, &["search", "needle"]);
     assert_eq!(output.status.code(), Some(0));
