@@ -1,5 +1,6 @@
 //! Read output in human, JSON, and compact forms.
 
+use outlint_core::CanonicalDocumentPath;
 use serde_json::json;
 
 use crate::{
@@ -42,7 +43,7 @@ pub(crate) fn human_tree(nodes: &[TreeNode]) -> String {
         .iter()
         .map(|node| {
             (
-                escape_human(&node.mdpath),
+                escape_human(&node.mdpath.to_string()),
                 escape_human(&node.label),
                 node.bytes,
             )
@@ -89,7 +90,7 @@ pub(crate) fn human_error(value: &ReadFailure) -> String {
             escape_human(path),
             escape_human(file),
             escape_human(step),
-            escape_human(resolved),
+            escape_human(&resolved.to_string()),
             human_tree(nodes)
         ),
         ReadFailure::Ambiguous {
@@ -132,7 +133,7 @@ fn json_tree(tree: &ReadTree) -> String {
     write_ordered_json_object(&mut output, |object| {
         object.value("version", &json!(READ_ENVELOPE_VERSION));
         object.value("file", &json!(tree.file));
-        object.value("mdpath", &json!(tree.mdpath));
+        object.value("mdpath", &json!(tree.mdpath.to_string()));
         object.member("nodes", |output| {
             write_ordered_json_array(output, &tree.nodes, write_node_json)
         });
@@ -145,7 +146,7 @@ fn json_content(content: &crate::read::ReadContent) -> String {
     write_ordered_json_object(&mut output, |object| {
         object.value("version", &json!(READ_ENVELOPE_VERSION));
         object.value("file", &json!(content.file));
-        object.value("mdpath", &json!(content.mdpath));
+        object.value("mdpath", &json!(content.mdpath.to_string()));
         object.value("bytes", &json!(content.bytes));
         object.value("content", &json!(content.content));
     });
@@ -154,7 +155,7 @@ fn json_content(content: &crate::read::ReadContent) -> String {
 
 fn write_node_json(output: &mut Vec<u8>, node: &TreeNode) {
     write_ordered_json_object(output, |object| {
-        object.value("mdpath", &json!(node.mdpath));
+        object.value("mdpath", &json!(node.mdpath.to_string()));
         object.value("kind", &json!(node.kind));
         match &node.data {
             TreeNodeData::Heading { level, text } => {
@@ -182,63 +183,62 @@ fn json_error(value: &ReadFailure) -> String {
 }
 
 fn write_error_json(output: &mut Vec<u8>, value: &ReadFailure) {
+    let suggestions = serde_json::Value::Array(
+        failure_suggestions(value)
+            .iter()
+            .map(|path| serde_json::Value::String(path.to_string()))
+            .collect(),
+    );
     write_ordered_json_object(output, |object| match value {
         ReadFailure::Syntax {
             path,
             message,
             offset,
-            suggestions,
+            ..
         } => {
             object.value("kind", &json!("syntax"));
             object.value("path", &json!(path));
             object.value("message", &json!(message));
             object.value("offset", &json!(offset));
-            object.value("suggestions", &json!(suggestions));
+            object.value("suggestions", &suggestions);
         }
         ReadFailure::Unresolved {
             path,
             step,
             resolved,
             nodes,
-            suggestions,
             ..
         } => {
             object.value("kind", &json!("unresolved"));
             object.value("path", &json!(path));
             object.value("step", &json!(step));
-            object.value("resolved", &json!(resolved));
+            object.value("resolved", &json!(resolved.to_string()));
             object.member("nodes", |output| {
                 write_ordered_json_array(output, nodes, write_node_json)
             });
-            object.value("suggestions", &json!(suggestions));
+            object.value("suggestions", &suggestions);
         }
         ReadFailure::Ambiguous {
             path,
             step,
             resolved,
             candidates,
-            suggestions,
             ..
         } => {
             object.value("kind", &json!("ambiguous"));
             object.value("path", &json!(path));
             object.value("step", &json!(step));
-            object.value("resolved", &json!(resolved));
+            object.value("resolved", &json!(resolved.to_string()));
             object.member("candidates", |output| {
                 write_ordered_json_array(output, candidates, write_node_json)
             });
-            object.value("suggestions", &json!(suggestions));
+            object.value("suggestions", &suggestions);
         }
-        ReadFailure::Other {
-            path,
-            message,
-            suggestions,
-            ..
-        } => {
+        ReadFailure::Other { path, message, .. } => {
             object.value("kind", &json!("other"));
             object.value("path", &json!(path));
             object.value("message", &json!(message));
-            object.value("suggestions", &json!(suggestions));
+            object.value("suggestions", &suggestions);
         }
     });
 }
@@ -246,7 +246,7 @@ fn write_error_json(output: &mut Vec<u8>, value: &ReadFailure) {
 fn compact_tree(nodes: &[TreeNode]) -> String {
     let mut output = String::new();
     for node in nodes {
-        output.push_str(&escape_compact(&node.mdpath));
+        output.push_str(&escape_compact(&node.mdpath.to_string()));
         output.push('\t');
         output.push_str(&format_bytes(node.bytes));
         output.push('\t');
@@ -280,7 +280,7 @@ fn compact_error(value: &ReadFailure) -> String {
             escape_compact(path),
             escape_compact(file),
             escape_compact(step),
-            escape_compact(resolved),
+            escape_compact(&resolved.to_string()),
             compact_tree(nodes)
         ),
         ReadFailure::Ambiguous {
@@ -313,7 +313,7 @@ fn compact_error(value: &ReadFailure) -> String {
     output
 }
 
-fn failure_suggestions(value: &ReadFailure) -> &[String] {
+fn failure_suggestions(value: &ReadFailure) -> &[CanonicalDocumentPath] {
     match value {
         ReadFailure::Syntax { suggestions, .. }
         | ReadFailure::Unresolved { suggestions, .. }
@@ -322,10 +322,14 @@ fn failure_suggestions(value: &ReadFailure) -> &[String] {
     }
 }
 
-fn append_suggestions(output: &mut String, suggestions: &[String], escape: fn(&str) -> String) {
+fn append_suggestions(
+    output: &mut String,
+    suggestions: &[CanonicalDocumentPath],
+    escape: fn(&str) -> String,
+) {
     for suggestion in suggestions {
         output.push_str("did you mean ");
-        output.push_str(&escape(suggestion));
+        output.push_str(&escape(&suggestion.to_string()));
         output.push_str("?\n");
     }
 }
@@ -336,10 +340,23 @@ mod tests {
 
     use super::*;
 
+    fn canonical_path(spelling: &str) -> CanonicalDocumentPath {
+        let document = outlint_core::parse_markdown(
+            "## Setup\n\nInstall first.\n\n## Heading\n\nPreview.\n\n## Resolved\n\n## Bad Path\n",
+            outlint_core::MarkdownOptions::default(),
+        )
+        .expect("fixture parses");
+        outlint_core::document_paths(&document)
+            .into_iter()
+            .map(|(path, _)| path)
+            .find(|path| path.to_string() == spelling)
+            .expect("fixture path exists")
+    }
+
     fn nodes() -> Vec<TreeNode> {
         vec![
             TreeNode {
-                mdpath: "$.setup".into(),
+                mdpath: canonical_path("$.setup"),
                 kind: "section".into(),
                 bytes: 3_140,
                 label: "Setup".into(),
@@ -349,7 +366,7 @@ mod tests {
                 },
             },
             TreeNode {
-                mdpath: "$.setup/p[0]".into(),
+                mdpath: canonical_path("$.setup/p[0]"),
                 kind: "p".into(),
                 bytes: 24,
                 label: "p: Install first.".into(),
@@ -372,7 +389,7 @@ mod tests {
         );
         let tree = ReadTree {
             file: "docs/guide.md".into(),
-            mdpath: "$.setup".into(),
+            mdpath: canonical_path("$.setup"),
             nodes: nodes(),
         };
         let rendered = json_tree(&tree);
@@ -392,9 +409,9 @@ mod tests {
             file: "docs/guide.md".into(),
             path: "$.setp".into(),
             step: "setp".into(),
-            resolved: "$".into(),
+            resolved: canonical_path("$"),
             nodes: nodes(),
-            suggestions: vec!["$.setup".into()],
+            suggestions: vec![canonical_path("$.setup")],
         };
         let rendered = json_error(&failure);
         assert_eq!(
@@ -412,7 +429,7 @@ mod tests {
         let controls = "tab\tcr\rlf\nesc\u{1b}slash\\";
         let nodes = vec![
             TreeNode {
-                mdpath: format!("$.heading-{controls}"),
+                mdpath: canonical_path("$.heading"),
                 kind: "section".into(),
                 bytes: 10,
                 label: format!("Heading {controls}"),
@@ -422,7 +439,7 @@ mod tests {
                 },
             },
             TreeNode {
-                mdpath: "$.heading/p[0]".into(),
+                mdpath: canonical_path("$.heading/p[0]"),
                 kind: "p".into(),
                 bytes: 8,
                 label: format!("p: Preview {controls}"),
@@ -433,7 +450,7 @@ mod tests {
         ];
         assert_eq!(
             compact_tree(&nodes),
-            "$.heading-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\t10B\tHeading tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\n\
+            "$.heading\t10B\tHeading tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\n\
              $.heading/p[0]\t8B\tp: Preview tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\n"
         );
 
@@ -441,14 +458,14 @@ mod tests {
             file: format!("docs/{controls}.md"),
             path: format!("$.path-{controls}"),
             step: format!("step-{controls}"),
-            resolved: format!("$.resolved-{controls}"),
+            resolved: canonical_path("$.resolved"),
             nodes,
             suggestions: Vec::new(),
         };
         let rendered = compact_error(&failure);
         assert_eq!(rendered.lines().count(), 3, "{rendered:?}");
         assert!(rendered.starts_with(
-            "outlint: cannot resolve $.path-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\ in docs/tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\.md: step-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\ not found under $.resolved-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\\n"
+            "outlint: cannot resolve $.path-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\ in docs/tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\.md: step-tab\\tcr\\u{d}lf\\nesc\\u{1b}slash\\\\ not found under $.resolved\n"
         ));
     }
 
@@ -488,11 +505,11 @@ mod tests {
     #[test]
     fn human_tree_escapes_terminal_controls() {
         let mut values = nodes();
-        values[0].mdpath = "$.bad\npath".into();
+        values[0].mdpath = canonical_path("$.bad-path");
         values[0].label = "Heading\tlabel\u{202e}".into();
         assert_eq!(
             human_tree(&values),
-            "$.bad\\npath   3.1kB  Heading\\tlabel\\u{202e}\n$.setup/p[0]  24B  p: Install first.\n"
+            "$.bad-path    3.1kB  Heading\\tlabel\\u{202e}\n$.setup/p[0]  24B  p: Install first.\n"
         );
     }
 }

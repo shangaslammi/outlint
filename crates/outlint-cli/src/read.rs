@@ -115,7 +115,7 @@ pub(crate) enum ReadOutput {
 /// A resolved content read, including its canonical address.
 pub(crate) struct ReadContent {
     pub(crate) file: String,
-    pub(crate) mdpath: String,
+    pub(crate) mdpath: CanonicalDocumentPath,
     pub(crate) bytes: u64,
     pub(crate) content: String,
 }
@@ -123,14 +123,14 @@ pub(crate) struct ReadContent {
 /// A resolved tree listing, including the canonical listing base.
 pub(crate) struct ReadTree {
     pub(crate) file: String,
-    pub(crate) mdpath: String,
+    pub(crate) mdpath: CanonicalDocumentPath,
     pub(crate) nodes: Vec<TreeNode>,
 }
 
 /// One canonical tree row and the node-specific machine-readable fields.
 #[derive(Clone)]
 pub(crate) struct TreeNode {
-    pub(crate) mdpath: String,
+    pub(crate) mdpath: CanonicalDocumentPath,
     pub(crate) kind: String,
     pub(crate) bytes: u64,
     pub(crate) label: String,
@@ -158,29 +158,29 @@ pub(crate) enum ReadFailure {
         path: String,
         message: String,
         offset: usize,
-        suggestions: Vec<String>,
+        suggestions: Vec<CanonicalDocumentPath>,
     },
     Unresolved {
         file: String,
         path: String,
         step: String,
-        resolved: String,
+        resolved: CanonicalDocumentPath,
         nodes: Vec<TreeNode>,
-        suggestions: Vec<String>,
+        suggestions: Vec<CanonicalDocumentPath>,
     },
     Ambiguous {
         file: String,
         path: String,
         step: String,
-        resolved: String,
+        resolved: CanonicalDocumentPath,
         candidates: Vec<TreeNode>,
-        suggestions: Vec<String>,
+        suggestions: Vec<CanonicalDocumentPath>,
     },
     Other {
         file: String,
         path: String,
         message: String,
-        suggestions: Vec<String>,
+        suggestions: Vec<CanonicalDocumentPath>,
     },
 }
 
@@ -255,7 +255,7 @@ fn build_content(
     let content = render_content(source, document, path, depth)?;
     Ok(ReadContent {
         file: file.to_owned(),
-        mdpath: canonical.to_string(),
+        mdpath: canonical.clone(),
         bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
         content,
     })
@@ -363,7 +363,7 @@ pub(crate) fn build_tree(
     let nodes = tree_nodes(file_label, source, &entries, base, depth, blocks);
     Ok(ReadTree {
         file: file_label.to_owned(),
-        mdpath: base.to_string(),
+        mdpath: base.clone(),
         nodes,
     })
 }
@@ -510,7 +510,7 @@ fn tree_node(
         DocumentNode::Root(document) => {
             let title = merged_title(document);
             TreeNode {
-                mdpath: path.to_string(),
+                mdpath: path.clone(),
                 kind: "root".to_owned(),
                 bytes,
                 label: title.map_or_else(
@@ -524,7 +524,7 @@ fn tree_node(
             }
         }
         DocumentNode::Section(section) => TreeNode {
-            mdpath: path.to_string(),
+            mdpath: path.clone(),
             kind: "section".to_owned(),
             bytes,
             label: section.heading.diagnostic_text.clone(),
@@ -543,7 +543,7 @@ fn tree_node(
             Block::List(list) => {
                 let items = list.items.iter().count();
                 TreeNode {
-                    mdpath: path.to_string(),
+                    mdpath: path.clone(),
                     kind: "list".to_owned(),
                     bytes,
                     label: format!("list ({items} items)"),
@@ -560,7 +560,7 @@ fn tree_node(
             text_preview_node(path, "item", bytes, preview(item_text(source, item)))
         }
         _ => TreeNode {
-            mdpath: path.to_string(),
+            mdpath: path.clone(),
             kind: "block".to_owned(),
             bytes,
             label: String::new(),
@@ -578,7 +578,7 @@ fn text_preview_node(
     preview: String,
 ) -> TreeNode {
     TreeNode {
-        mdpath: path.to_string(),
+        mdpath: path.clone(),
         kind: kind.to_owned(),
         bytes,
         label: format!("{kind}: {preview}"),
@@ -588,7 +588,7 @@ fn text_preview_node(
 
 fn kind_only_node(path: &CanonicalDocumentPath, kind: &str, bytes: u64) -> TreeNode {
     TreeNode {
-        mdpath: path.to_string(),
+        mdpath: path.clone(),
         kind: kind.to_owned(),
         bytes,
         label: kind.to_owned(),
@@ -700,7 +700,10 @@ const SUGGESTION_LIMIT: usize = 5;
 /// Returns canonical alternatives for a path failure, in document order and
 /// capped so an error remains scannable. This is deliberately a pure
 /// transform of the parsed failure and the document enumeration.
-pub(crate) fn path_suggestions(error: &ReadError, document: &Document) -> Vec<String> {
+pub(crate) fn path_suggestions(
+    error: &ReadError,
+    document: &Document,
+) -> Vec<CanonicalDocumentPath> {
     let entries = document_paths(document);
     let mut suggestions = match error {
         ReadError::Syntax { spelling, .. } => syntax_suggestions(spelling, &entries),
@@ -718,7 +721,7 @@ pub(crate) fn path_suggestions(error: &ReadError, document: &Document) -> Vec<St
 fn syntax_suggestions(
     spelling: &str,
     entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
-) -> Vec<String> {
+) -> Vec<CanonicalDocumentPath> {
     let heading = spelling
         .strip_prefix("$..")
         .or_else(|| spelling.strip_prefix("$."));
@@ -737,8 +740,7 @@ fn syntax_suggestions(
             else {
                 return None;
             };
-            (matches!(node, DocumentNode::Section(_)) && candidate == &slug)
-                .then(|| path.to_string())
+            (matches!(node, DocumentNode::Section(_)) && candidate == &slug).then(|| path.clone())
         })
         .collect()
 }
@@ -748,7 +750,7 @@ fn unresolved_suggestions(
     resolved_steps: usize,
     document: &Document,
     entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
-) -> Vec<String> {
+) -> Vec<CanonicalDocumentPath> {
     let Some(step) = path.sections().get(resolved_steps) else {
         return Vec::new();
     };
@@ -800,7 +802,7 @@ fn exact_slug_suggestions(
     document: &Document,
     entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
     scope: SuggestionScope,
-) -> Vec<String> {
+) -> Vec<CanonicalDocumentPath> {
     entries
         .iter()
         .filter_map(|(candidate, node)| {
@@ -838,7 +840,7 @@ fn apply_resolving_remainder(
     candidate: &CanonicalDocumentPath,
     document: &Document,
     entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
-) -> Option<String> {
+) -> Option<CanonicalDocumentPath> {
     let replaced = path.prefix(resolved_steps.saturating_add(1)).to_string();
     let total_steps = path.sections().len()
         + match path.terminal() {
@@ -859,7 +861,7 @@ fn apply_resolving_remainder(
             continue;
         };
         if let Some(canonical) = canonical_path(entries, target) {
-            return Some(canonical.to_string());
+            return Some(canonical.clone());
         }
     }
     None
@@ -878,7 +880,7 @@ fn ranked_slug_suggestions(
     document: &Document,
     entries: &[(CanonicalDocumentPath, DocumentNode<'_>)],
     scope: SuggestionScope,
-) -> Vec<String> {
+) -> Vec<CanonicalDocumentPath> {
     let sibling_typo_exists = matches!(scope, SuggestionScope::Named)
         && entries.iter().any(|(candidate, node)| {
             let Some((CanonicalSectionStep::Named { slug, .. }, parent)) =
@@ -1053,7 +1055,7 @@ pub(crate) fn describe_error(
                 file: file.to_owned(),
                 path: path.to_string(),
                 step,
-                resolved: deepest.to_string(),
+                resolved: deepest.clone(),
                 nodes,
                 suggestions,
             }
@@ -1102,7 +1104,7 @@ pub(crate) fn describe_error(
                 file: file.to_owned(),
                 path: path.to_string(),
                 step,
-                resolved: deepest.to_string(),
+                resolved: deepest.clone(),
                 candidates,
                 suggestions,
             }
@@ -1333,6 +1335,9 @@ mod tests {
             Err(error) => error,
         };
         path_suggestions(&error, &document)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     #[test]
