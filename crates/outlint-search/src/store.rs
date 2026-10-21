@@ -1073,7 +1073,8 @@ fn load_units(repo: &Path, file: &WalkedFile) -> Load {
             cause: "not valid UTF-8".to_owned(),
         });
     };
-    match index_units(&file.path, &source) {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(&source);
+    match index_units(&file.path, source) {
         Ok(units) => Load::Units(units),
         Err(error) => Load::Skipped(SearchNote {
             path: Some(PathBuf::from(&file.path)),
