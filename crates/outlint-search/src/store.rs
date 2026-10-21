@@ -8,7 +8,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
-    time::UNIX_EPOCH,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use ignore::{Error as WalkError, WalkBuilder};
@@ -68,6 +68,8 @@ pub enum SearchErrorKind {
     WriteFile,
     /// An unusable index directory could not be removed before rebuilding.
     RemoveDirectory,
+    /// An index directory could not be renamed during replacement.
+    RenameDirectory,
     /// A new Tantivy index could not be created.
     CreateIndex,
     /// The index writer could not be opened.
@@ -462,19 +464,100 @@ fn rebuilt_index_note(
     }
 }
 
+fn install_replacement(
+    directory: &Path,
+    new_directory: &Path,
+    old_directory: &Path,
+    expected_marker: &str,
+) -> Result<(Index, Fields), SearchError> {
+    let (schema, _) = build_schema();
+    let index = Index::create_in_dir(new_directory, schema).map_err(|error| {
+        search_error(
+            SearchErrorKind::CreateIndex,
+            Some(new_directory.to_path_buf()),
+            error,
+        )
+    })?;
+    let new_marker = new_directory.join(INDEX_MARKER);
+    fs::write(&new_marker, expected_marker)
+        .map_err(|error| search_error(SearchErrorKind::WriteFile, Some(new_marker), error))?;
+    drop(index);
+
+    let moved_old = directory.exists();
+    if moved_old {
+        fs::rename(directory, old_directory).map_err(|error| {
+            search_error(
+                SearchErrorKind::RenameDirectory,
+                Some(directory.to_path_buf()),
+                error,
+            )
+        })?;
+    }
+    if let Err(error) = fs::rename(new_directory, directory) {
+        let _ = fs::remove_dir_all(new_directory);
+        let destination_exists = directory.exists();
+        let destination_conflict = matches!(
+            error.kind(),
+            io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+        ) || (cfg!(windows)
+            && error.kind() == io::ErrorKind::PermissionDenied);
+        if !destination_conflict || !destination_exists {
+            if moved_old && !destination_exists {
+                let _ = fs::rename(old_directory, directory);
+            }
+            return Err(search_error(
+                SearchErrorKind::RenameDirectory,
+                Some(directory.to_path_buf()),
+                error,
+            ));
+        }
+        // Another rebuild may have installed its index first. Check
+        // it once without starting another rebuild on failure.
+        if fs::read_to_string(directory.join(INDEX_MARKER))
+            .ok()
+            .as_deref()
+            != Some(expected_marker)
+        {
+            return Err(search_error(
+                SearchErrorKind::RenameDirectory,
+                Some(directory.to_path_buf()),
+                error,
+            ));
+        }
+    }
+    let _ = fs::remove_dir_all(old_directory);
+    // Tantivy remembers its directory path, so the temporary handle
+    // cannot be used after the rename.
+    let index = Index::open_in_dir(directory).map_err(|error| {
+        search_error(
+            SearchErrorKind::OpenIndexReader,
+            Some(directory.to_path_buf()),
+            error,
+        )
+    })?;
+    let fields = Fields::of(&index.schema()).map_err(|error| {
+        search_error(
+            SearchErrorKind::OpenIndexReader,
+            Some(directory.to_path_buf()),
+            error,
+        )
+    })?;
+    Ok((index, fields))
+}
+
 impl Store {
     /// Opens the index under `<repo>/.outlint/search/`, or creates it when it
     /// is missing.
     ///
-    /// This operation may delete and rebuild the entire search index
-    /// directory. It does so when the format marker differs from the current
-    /// format, the index cannot be opened, or its schema is unusable. It also
-    /// creates `.outlint/.gitignore` when missing.
+    /// When the format marker differs, the index cannot be opened, or its
+    /// schema is unusable, a replacement is built in a temporary sibling and
+    /// swapped into place with renames before reopening at the final path.
+    /// It also creates `.outlint/.gitignore` when missing.
     ///
     /// # Errors
     ///
     /// Returns a structured error when a directory, metadata file, or index
-    /// cannot be created, removed, or written. On success, notes identify a
+    /// cannot be created, renamed, opened, or written. On success, notes identify a
     /// newly created or rebuilt directory; an ordinary open returns none.
     pub fn open_or_rebuild(scope: &Scope) -> Result<(Self, Vec<SearchNote>), SearchError> {
         let outlint_dir = scope.repo.join(".outlint");
@@ -514,29 +597,47 @@ impl Store {
             }
         }
         let note = rebuilt_index_note(&directory, directory_existed, actual_marker.as_deref());
-        if directory.exists() {
-            fs::remove_dir_all(&directory).map_err(|error| {
-                search_error(
-                    SearchErrorKind::RemoveDirectory,
-                    Some(directory.clone()),
-                    error,
-                )
-            })?;
+        let now = SystemTime::now();
+        if let Ok(entries) = fs::read_dir(&outlint_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if (name.starts_with("search.new-") || name.starts_with("search.old-"))
+                    && entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && entry
+                        .metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| now.duration_since(modified).ok())
+                        .is_some_and(|age| age > Duration::from_secs(60 * 60))
+                {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
+            }
         }
-        fs::create_dir_all(&directory).map_err(|error| {
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let new_directory = outlint_dir.join(format!("search.new-{suffix}"));
+        let old_directory = outlint_dir.join(format!("search.old-{suffix}"));
+        fs::create_dir(&new_directory).map_err(|error| {
             search_error(
                 SearchErrorKind::CreateDirectory,
-                Some(directory.clone()),
+                Some(new_directory.clone()),
                 error,
             )
         })?;
-        let (schema, fields) = build_schema();
-        let index = Index::create_in_dir(&directory, schema).map_err(|error| {
-            search_error(SearchErrorKind::CreateIndex, Some(directory.clone()), error)
-        })?;
-        fs::write(&marker, expected_marker).map_err(|error| {
-            search_error(SearchErrorKind::WriteFile, Some(marker.clone()), error)
-        })?;
+        let replacement =
+            install_replacement(&directory, &new_directory, &old_directory, &expected_marker);
+        if replacement.is_err() {
+            let _ = fs::remove_dir_all(&new_directory);
+        }
+        let (index, fields) = replacement?;
         Ok((
             Self {
                 scope: scope.clone(),

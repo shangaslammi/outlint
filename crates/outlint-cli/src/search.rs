@@ -285,6 +285,9 @@ fn library_error_message(error: &SearchError) -> String {
         SearchErrorKind::RemoveDirectory => {
             format!("cannot remove {}: {}", path(), error.cause)
         }
+        SearchErrorKind::RenameDirectory => {
+            format!("cannot rename {}: {}", path(), error.cause)
+        }
         SearchErrorKind::CreateIndex => format!("cannot create search index: {}", error.cause),
         SearchErrorKind::OpenIndexWriter => {
             format!("cannot open search index for writing: {}", error.cause)

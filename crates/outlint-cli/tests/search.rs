@@ -436,6 +436,65 @@ fn search_reports_index_creation_and_rebuilds_only_when_they_happen() {
 }
 
 #[test]
+fn search_rebuild_swaps_in_a_working_index_without_leaving_siblings() {
+    let directory = TempDir::new("search-index-swap");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write("docs/guide.md", "# Guide\n\nNeedle.\n");
+    let output = run(&directory, &["search", "needle"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    directory.write(
+        ".outlint/search/outlint-index.json",
+        "{\"format\": 1, \"outlint\": \"0.1.0\"}\n",
+    );
+
+    // Refresh and search exercise the handle reopened at the final path.
+    let output = run(&directory, &["search", "needle"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let mut entries: Vec<_> = fs::read_dir(directory.path().join(".outlint"))
+        .expect("cache directory readable")
+        .map(|entry| entry.expect("cache entry readable").file_name())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, [".gitignore", "search"]);
+}
+
+#[test]
+fn search_rebuild_removes_stale_replacement_and_backup_directories() {
+    let directory = TempDir::new("search-index-stale");
+    fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
+    directory.write("docs/guide.md", "# Guide\n\nNeedle.\n");
+    directory.write(".outlint/search/outlint-index.json", "incompatible");
+    directory.write(".outlint/search.new-123-456/meta.json", "unfinished");
+    directory.write(".outlint/search.old-123-456/meta.json", "obsolete");
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_WRITE_ATTRIBUTES and FILE_FLAG_BACKUP_SEMANTICS allow
+        // updating directory timestamps without opening for content writes.
+        options.access_mode(0x100).custom_flags(0x02000000);
+    }
+    let stale_time = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    for name in ["search.new-123-456", "search.old-123-456"] {
+        options
+            .open(directory.path().join(".outlint").join(name))
+            .expect("stale directory opens")
+            .set_modified(stale_time)
+            .expect("stale directory mtime is settable");
+    }
+    let fresh = directory.path().join(".outlint/search.new-123-789");
+    fs::create_dir(&fresh).expect("fresh replacement directory created");
+
+    let output = run(&directory, &["search", "needle"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    for name in ["search.new-123-456", "search.old-123-456"] {
+        assert!(!directory.path().join(".outlint").join(name).exists());
+    }
+    assert!(fresh.is_dir());
+}
+
+#[test]
 fn search_snippets_keep_inline_code_and_adjacent_punctuation() {
     let directory = TempDir::new("search-snippet-fidelity");
     fs::create_dir(directory.path().join(".git")).expect("fake repository marker");
