@@ -1,7 +1,10 @@
 # Outlint Read — Specification
 
-Status: Normative public specification; may change before 1.0. This command
-is optional and provided by the CLI's `read` feature (`full` includes it).
+Status: Normative public specification of an experimental extension of
+Outlint, layered on the validator's document model. This command is outside
+the stability promises of the validator and its specification and may
+change or be removed in any release. It is optional and provided by the
+CLI's `read` feature (`full` includes it).
 Normative keywords MUST / MUST NOT / SHOULD / MAY per RFC 2119.
 
 Sections 1 through 6 are normative. Section 7 is a non-normative example.
@@ -34,9 +37,10 @@ Parsing, resolution, canonical addresses, and source extents MUST follow
 and `-h` / `--help`. Options may precede or follow positional arguments;
 `--` ends option recognition. Values MUST be separate arguments, not
 `--name=value`. `--depth` MUST occur at most once and accept an unsigned
-decimal integer fitting `usize`, including zero; a leading `+` and leading
-zeroes are accepted. Its default is unlimited. Repeated `--tree` and
-`--blocks` are accepted. `--blocks` without `--tree` is a usage error.
+decimal integer up to an implementation-defined maximum, including zero;
+a leading `+` and leading zeroes are accepted. Its default is unlimited.
+Repeated `--tree` and `--blocks` are accepted. `--blocks` without `--tree`
+is a usage error.
 Help MUST print to stdout and exit 0 when encountered before an argument
 error. Unknown options, missing option values, and extra positionals are
 usage errors.

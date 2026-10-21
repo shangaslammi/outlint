@@ -1,7 +1,10 @@
 # Outlint Search — Specification
 
-Status: Normative public specification; may change before 1.0. This command
-is optional and provided by the CLI's `search` feature (`full` includes it).
+Status: Normative public specification of an experimental extension of
+Outlint, layered on the validator's document model. This command is outside
+the stability promises of the validator and its specification and may
+change or be removed in any release. It is optional and provided by the
+CLI's `search` feature (`full` includes it).
 Normative keywords MUST / MUST NOT / SHOULD / MAY per RFC 2119.
 
 Sections 1 through 9 are normative. Section 10 contains non-normative
@@ -58,11 +61,12 @@ canonical addresses of [document-path §5](document-path-spec.md#5-canonical-enu
 
 ## 2. Indexed units and text
 
-2.1. Files MUST be decoded as UTF-8 without removing a leading BOM, and
-parsed using the document model in
-[the schema specification](outlint-spec.md) §1 and default Markdown options
-in its §7. The root merge and addressable nodes MUST follow document-path
-§§1–5. Search MUST NOT load a schema or perform validation.
+2.1. Files MUST be decoded as UTF-8 after removing one leading BOM, if
+present, as in [read §1.1](read-spec.md#1-command-line), and parsed using
+the document model in [the schema specification](outlint-spec.md) §1 and
+default Markdown options in its §7. The root merge and addressable nodes
+MUST follow document-path §§1–5. Search MUST NOT load a schema or perform
+validation.
 
 2.2. Before lead-in folding (§2.5), each of the following MUST contribute
 one unit at its canonical path:
@@ -96,11 +100,11 @@ parsed as a mapping contributes no text.
 
 2.5. A short introductory paragraph ending in `:`, or consisting only of
 emphasis, MUST be searched together with the following sibling block it
-introduces and have no hit of its own. Consecutive introductions MUST prefix that
-block's body and snippet text in source order, separated by spaces. A
-paragraph without a following sibling block remains a unit. A prefix
-attached to a list MUST NOT also prefix its item units. Folding MUST NOT
-change document paths, source ranges, or byte counts.
+introduces and have no hit of its own. Consecutive introductions MUST
+prefix that block's body and snippet text in source order, separated by
+spaces. A paragraph without a following sibling block remains a unit. A
+prefix attached to a list MUST NOT also prefix its item units. Folding
+MUST NOT change document paths, source ranges, or byte counts.
 
 2.6. Each unit also has a context field. The root's context MUST be the
 filename stem only. Other units' contexts MUST be the stem, any merged H1

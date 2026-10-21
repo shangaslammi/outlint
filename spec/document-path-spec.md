@@ -1,8 +1,9 @@
 # Outlint Document Paths — Specification
 
-Status: Normative public specification; the API is provisional and may change
-in a minor release before 1.0. Document paths are provided by `outlint-core`;
-the CLI consumers are optional (`read` and `search` features).
+Status: Normative public specification. Document paths are provisional;
+they currently serve the experimental extensions and may change in a minor
+release before 1.0. Document paths are provided by `outlint-core`; the CLI
+consumers are optional (`read` and `search` features).
 Normative keywords MUST / MUST NOT / SHOULD / MAY per RFC 2119.
 
 Sections 1 through 6 are normative. Section 7 is a non-normative example.
@@ -43,8 +44,8 @@ slug          = [a-z0-9]+(-[a-z0-9]+)*
 
 2.2. Whitespace, escaping, uppercase letters, leading zeroes in indices,
 negative indices, and a positional descendant step MUST NOT be accepted.
-Indices MUST fit the implementation's unsigned pointer-sized integer
-(`usize` in the reference implementation); overflow is a syntax error.
+Indices MUST NOT exceed an implementation-defined maximum index; an index
+above that maximum is a syntax error.
 All indices are zero-based. A terminal MUST end the path; only a list
 terminal may be followed by an item segment.
 
@@ -146,11 +147,10 @@ alone is distinct from canonicalizing a resolved node: it MUST make terminal
 ordinals explicit but MUST retain descendant steps, section ordinals, and
 positional selections. It need not be a canonical address of any node.
 
-5.4. `DocumentPath` represents a selector. `CanonicalDocumentPath` represents
-an enumerated address and MUST NOT be publicly constructible from arbitrary
-parts or parsed text. Converting an enumerated address to a selector MUST
-preserve resolution. These API types and their representation remain
-provisional as stated in this specification's status.
+5.4. A selector may be parsed from input. A canonical address MUST be
+obtained only by enumeration, not constructed from arbitrary parts or
+parsed text. Converting a canonical address to a selector MUST preserve
+resolution.
 
 ## 6. Source extents
 
