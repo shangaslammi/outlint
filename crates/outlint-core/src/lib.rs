@@ -3,6 +3,7 @@
 
 mod case_fold;
 mod document_path;
+mod document_read;
 mod load_result;
 mod loader;
 mod locator;
@@ -19,6 +20,10 @@ pub use document_path::{
     document_paths, heading_slug, merged_title, CanonicalDocumentPath, CanonicalSectionStep,
     DocumentNode, DocumentPath, DocumentPathError, DocumentPathSyntaxError, DocumentPathTerminal,
     HeadingSlug, SectionStep,
+};
+pub use document_read::{
+    document_content, document_tree, DocumentContent, DocumentReadFailure, DocumentTree,
+    DocumentTreeNode, DocumentTreeRow,
 };
 pub use load_result::{
     ByteOffset, CapturePath, ConstraintIndex, ConstraintPath, ContentOwner, ContentRuleIndex,

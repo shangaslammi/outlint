@@ -44,7 +44,9 @@ invariant failure; ordinary CommonMark recovery remains successful.
 `validate` / `PreparedValidator`
 (`validator/`, including `validator/sequence.rs`) map a `Schema` plus a
 `Document` to `Vec<Diagnostic>` using bounded ordered assignment.
-`matcher.rs` and `case_fold.rs` are private helpers.
+`matcher.rs` and `case_fold.rs` are private helpers. The provisional
+`document_read/` API selects content and lists typed document-path rows,
+including failure context and suggestions, without IO or presentation labels.
 
 Preamble blocks and direct list items extend the parsed tree without changing
 schema version 1 or JSON envelope version 2. `Document` and `Section` own
