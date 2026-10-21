@@ -128,6 +128,13 @@ output shape, and the library API may all change in a minor release. See
 
 ### Fixed
 
+- **Frontmatter JSON Schema validation.** A schema with
+  `unevaluatedProperties` or `unevaluatedItems` beside a `$ref` that cycles
+  back to it no longer crashes schema loading. Upgraded the JSON Schema
+  validator to jsonschema 0.58.6, also correcting Draft 2020-12 results for
+  `\s` in `pattern`, ECMA character classes such as `[a&&b]`,
+  `unevaluatedProperties` with literal `if: true` or `if: false`, `$ref` to
+  `$anchor`, and `uniqueItems` with `0` and `-0.0`.
 - **Help indentation.** `--help` output again preserves the indentation of
   option and command lines.
 - **Discovery ignores non-files.** A directory (or other non-regular file)
