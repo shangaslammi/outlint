@@ -4,91 +4,102 @@
 use outlint_search::{SearchLimit, MAX_SEARCH_LIMIT};
 
 pub(crate) fn top_help() -> String {
-    let mut help = "Usage: outlint <command> [options]\n\
-                    \n\
-                    Commands:\n\
-                      check          Validate Markdown documents\n\
-                      schema check   Validate Outlint schema files\n"
-        .to_owned();
+    let mut help = "\
+Usage: outlint <command> [options]
+
+Commands:
+  check          Validate Markdown documents
+  schema check   Validate Outlint schema files
+"
+    .to_owned();
     #[cfg(feature = "search")]
-    help.push_str("search         Search Markdown blocks by keyword\n");
+    help.push_str("  search         Search Markdown blocks by keyword\n");
     #[cfg(feature = "read")]
-    help.push_str("read           Print a Markdown node by document path\n");
+    help.push_str("  read           Print a Markdown node by document path\n");
     help.push_str(
-        "\n\
-         Options:\n\
-           -h, --help     Show help\n\
-           -V, --version  Show version\n",
+        "
+Options:
+  -h, --help     Show help
+  -V, --version  Show version
+",
     );
     help
 }
 
-pub(crate) const CHECK_HELP: &str = "Usage: outlint check <FILE>... [options]\n\
-\n\
-Validate individual Markdown files. Without --schema, each file discovers its\n\
-schema separately: the nearest <stem>.outlint.yml (file name, extension\n\
-removed) or .outlint.yml, specific name first in each ancestor directory.\n\
-Standard input (-) requires --schema.\n\
-\n\
-Options:\n\
-  -s, --schema <SCHEMA>       Use one schema for every input\n\
-      --format human|json     Select output format (default: human)\n\
-      --color auto|always|never\n\
-                              Control human-output color (default: auto)\n\
-  -h, --help                  Show help\n\
-\n\
-Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.\n";
+pub(crate) const CHECK_HELP: &str = "\
+Usage: outlint check <FILE>... [options]
 
-pub(crate) const SCHEMA_HELP: &str = "Usage: outlint schema check <SCHEMA>... [options]\n\
-\n\
-Validate schema syntax, normalization, ids, matchers, cardinalities, constraints,\n\
-and all other schema-load-time checks.\n\
-\n\
-Options:\n\
-      --format human|json     Select output format (default: human)\n\
-      --color auto|always|never\n\
-                              Control human-output color (default: auto)\n\
-  -h, --help                  Show help\n\
-\n\
-Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.\n";
+Validate individual Markdown files. Without --schema, each file discovers its
+schema separately: the nearest <stem>.outlint.yml (file name, extension
+removed) or .outlint.yml, specific name first in each ancestor directory.
+Standard input (-) requires --schema.
+
+Options:
+  -s, --schema <SCHEMA>       Use one schema for every input
+      --format human|json     Select output format (default: human)
+      --color auto|always|never
+                              Control human-output color (default: auto)
+  -h, --help                  Show help
+
+Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.
+";
+
+pub(crate) const SCHEMA_HELP: &str = "\
+Usage: outlint schema check <SCHEMA>... [options]
+
+Validate schema syntax, normalization, ids, matchers, cardinalities, constraints,
+and all other schema-load-time checks.
+
+Options:
+      --format human|json     Select output format (default: human)
+      --color auto|always|never
+                              Control human-output color (default: auto)
+  -h, --help                  Show help
+
+Exit codes: 0 valid, 1 validation diagnostics, 2 usage or operational error.
+";
 
 #[cfg(feature = "search")]
-pub(crate) const SEARCH_HELP: &str = "Usage: outlint search [options] <WORD>...\n\
-\n\
-Search the Markdown files under the search root (the current directory unless\n\
---root is given) and print the best-matching blocks. The index lives under\n\
-.outlint/search/ in the enclosing Git repository, or in the search root when\n\
-there is none. Hit paths are relative to the current directory and can be\n\
-passed directly to `outlint read`.\n\
-\n\
-Options:\n\
-      --root <DIR>            Search the files under DIR instead\n\
-      --limit <N>             Print 1..=1000 hits (default: 10)\n\
-      --format human|json|compact\n\
-                              Select output format (default: human)\n\
-      OUTLINT_FORMAT          Set the default format; --format overrides it\n\
-  -h, --help                  Show help\n\
-\n\
-Exit codes: 0 hits printed, 1 no hits, 2 usage or operational error.\n";
+pub(crate) const SEARCH_HELP: &str = "\
+Usage: outlint search [options] <WORD>...
+
+Search the Markdown files under the search root (the current directory unless
+--root is given) and print the best-matching blocks. The index lives under
+.outlint/search/ in the enclosing Git repository, or in the search root when
+there is none. Hit paths are relative to the current directory and can be
+passed directly to `outlint read`.
+
+Options:
+      --root <DIR>            Search the files under DIR instead
+      --limit <N>             Print 1..=1000 hits (default: 10)
+      --format human|json|compact
+                              Select output format (default: human)
+      OUTLINT_FORMAT          Set the default format; --format overrides it
+  -h, --help                  Show help
+
+Exit codes: 0 hits printed, 1 no hits, 2 usage or operational error.
+";
 
 #[cfg(feature = "read")]
-pub(crate) const READ_HELP: &str = "Usage: outlint read [options] <FILE> [MDPATH]\n\
-\n\
-Print the node of a Markdown file addressed by a document path (default: $,\n\
-the whole file), or list the structure under it. A path not starting with $\n\
-gets one prepended, so .a.b and /p[0] work unquoted.\n\
-\n\
-Options:\n\
-      --tree                  List the paths under the node instead\n\
-      --blocks                With --tree, also list blocks and list items\n\
-      --depth <N>             Include N levels of subsections (default: all)\n\
-      --format human|json|compact\n\
-                              Select output format (default: human)\n\
-      OUTLINT_FORMAT          Set the default format; --format overrides it\n\
-  -h, --help                  Show help\n\
-\n\
-Exit codes: 0 printed, 1 path syntax or resolution error, 2 usage or\n\
-operational error.\n";
+pub(crate) const READ_HELP: &str = "\
+Usage: outlint read [options] <FILE> [MDPATH]
+
+Print the node of a Markdown file addressed by a document path (default: $,
+the whole file), or list the structure under it. A path not starting with $
+gets one prepended, so .a.b and /p[0] work unquoted.
+
+Options:
+      --tree                  List the paths under the node instead
+      --blocks                With --tree, also list blocks and list items
+      --depth <N>             Include N levels of subsections (default: all)
+      --format human|json|compact
+                              Select output format (default: human)
+      OUTLINT_FORMAT          Set the default format; --format overrides it
+  -h, --help                  Show help
+
+Exit codes: 0 printed, 1 path syntax or resolution error, 2 usage or
+operational error.
+";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ValidationFormat {

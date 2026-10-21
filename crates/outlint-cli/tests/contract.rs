@@ -428,6 +428,39 @@ fn usage_directories_encoding_bom_help_and_version_follow_the_contract() {
     let help = run(&directory, &["--help"]);
     assert_eq!(help.status.code(), Some(0));
     assert!(stdout(&help).starts_with("Usage: outlint"));
+    assert!(stdout(&help).contains("\n  check          Validate Markdown documents\n"));
+    let check_help = run(&directory, &["check", "--help"]);
+    assert!(stdout(&check_help)
+        .contains("\n  -s, --schema <SCHEMA>       Use one schema for every input\n"));
+    assert!(stdout(&check_help).contains(
+        "\n      --color auto|always|never\n                              Control human-output color"
+    ));
+    let schema_help = run(&directory, &["schema", "check", "--help"]);
+    assert!(stdout(&schema_help)
+        .contains("\n      --format human|json     Select output format (default: human)\n"));
+
+    #[cfg(feature = "search")]
+    {
+        assert!(stdout(&help).contains("\n  search         Search Markdown blocks by keyword\n"));
+        let search_help = run(&directory, &["search", "--help"]);
+        assert!(stdout(&search_help)
+            .contains("\n      --root <DIR>            Search the files under DIR instead\n"));
+        assert!(stdout(&search_help).contains(
+            "\n      --format human|json|compact\n                              Select output format"
+        ));
+    }
+    #[cfg(feature = "read")]
+    {
+        assert!(
+            stdout(&help).contains("\n  read           Print a Markdown node by document path\n")
+        );
+        let read_help = run(&directory, &["read", "--help"]);
+        assert!(stdout(&read_help)
+            .contains("\n      --tree                  List the paths under the node instead\n"));
+        assert!(stdout(&read_help).contains(
+            "\n      --format human|json|compact\n                              Select output format"
+        ));
+    }
 
     let version = run(&directory, &["--version"]);
     assert_eq!(version.status.code(), Some(0));
