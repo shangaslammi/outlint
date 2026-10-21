@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "outlint"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "outlint-core",
  "outlint-search",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "outlint-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "casefold",
  "jsonschema",
@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "outlint-search"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ignore",
  "outlint-core",

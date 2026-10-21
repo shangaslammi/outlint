@@ -509,9 +509,11 @@ outlint read --format json adr/0008-use-postgres.md .considered-options
 ```
 
 A path that does not resolve exits `1` and lists the sections that are
-available, so the next attempt can be exact. Neither extension is part of
-the schema specification; their output envelopes are version `1` and may
-change before 1.0.
+available, so the next attempt can be exact. The experimental extensions have
+their own [search](spec/search-spec.md) and [read](spec/read-spec.md)
+specifications and share [provisional document paths](spec/document-path-spec.md).
+They remain outside the validator's specification and stability promises;
+their output envelopes are version `1` and may change before 1.0.
 
 ## CI and automation
 
@@ -581,8 +583,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: npx --yes @outlint/cli@0.1.0 schema check .outlint.yml
-      - run: find docs -name '*.md' -print0 | xargs -0 npx --yes @outlint/cli@0.1.0 check
+      - run: npx --yes @outlint/cli@0.2.0 schema check .outlint.yml
+      - run: find docs -name '*.md' -print0 | xargs -0 npx --yes @outlint/cli@0.2.0 check
 ```
 
 `xargs` reports any failing `outlint check` as exit status 123, so the step
@@ -618,13 +620,16 @@ behind the experimental `search` extension.
 - `crates/outlint-search` — full-text indexing backing the `search`
   extension
 - `spec/` — the normative [Outlint specification](spec/outlint-spec.md)
+  plus the experimental [search](spec/search-spec.md) and
+  [read](spec/read-spec.md) specifications and provisional
+  [document paths](spec/document-path-spec.md)
 - `testdata/` — the conformance corpus, reusable by other implementations
   ([README](testdata/README.md))
 - `npm/` — the `@outlint/cli` package
 
 ## Status and stability
 
-Outlint is at version 0.1.x. The validator is the stable focus of the
+Outlint is at version 0.2.x. The validator is the stable focus of the
 project, but this is a 0.x release: expect breaking changes to the schema
 language, the diagnostic set, the JSON shape, and the library API before
 1.0. Schema files keep `version: 1` and the JSON envelope keeps `version: 2`

@@ -1,6 +1,6 @@
 [package]
 name = "outlint-full"
-version = "0.1.0"
+version = "0.2.0"
 description = "Outlint with all commands, including Markdown search and read"
 repository = "https://github.com/shangaslammi/outlint"
 homepage = "https://github.com/shangaslammi/outlint"

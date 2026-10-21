@@ -13,6 +13,7 @@ output shape, and the library API may all change in a minor release. See
 
 ### Changed
 
+- **Minimum supported Rust version.** Raised from Rust 1.86 to 1.88.
 - **Breaking Rust API change:** `parse_markdown` now returns
   `Result<Document, MarkdownParseError>`. Internal source-range, event-nesting,
   builder, and tree failures return an error instead of incomplete document
@@ -22,6 +23,29 @@ output shape, and the library API may all change in a minor release. See
 
 ### Added
 
+- **Experimental search extension.** `outlint search` finds matching Markdown
+  blocks and reports file paths, document paths, snippets, and size hints
+  ([search specification](spec/search-spec.md)). This optional command is
+  layered on the validator's document model, outside the validator's
+  specification and stability promises, and available only in the full
+  edition or with the `search` Cargo feature.
+- **Experimental read extension.** `outlint read` selects source content by
+  document path or lists a document tree, with optional depth limits
+  ([read specification](spec/read-spec.md)). This optional command is
+  layered on the validator's document model, outside the validator's
+  specification and stability promises, and available only in the full
+  edition or with the `read` Cargo feature.
+- **Full release edition.** `outlint-full-<target>` archives and installers
+  include the validator and all experimental extensions; Cargo builds opt
+  in with `--features full` or `--all-features`. The original `outlint`
+  archives and npm package remain check-only. The set of experimental
+  extensions is expected to grow.
+- **Provisional document paths and pure document reads.** `outlint-core`
+  exposes `document_paths`, `DocumentPath`, `document_content`, and
+  `document_tree` for addressing parsed nodes, selecting source content,
+  and listing typed tree rows without IO. These APIs and the shared
+  [document-path specification](spec/document-path-spec.md) are provisional
+  and currently serve the experimental extensions.
 - **Preamble content and direct items.** Section rules and the top level may
   declare an exhaustive `content` grammar over the visible blocks of a
   preamble (`p`, `list`, `any`, or a local `one_of`, with `list_kind`), and a
@@ -104,6 +128,8 @@ output shape, and the library API may all change in a minor release. See
 
 ### Fixed
 
+- **Help indentation.** `--help` output again preserves the indentation of
+  option and command lines.
 - **Discovery ignores non-files.** A directory (or other non-regular file)
   named `.outlint.yml` — or now `<stem>.outlint.yml` — no longer terminates
   schema discovery only to fail when read; it is skipped as if absent and

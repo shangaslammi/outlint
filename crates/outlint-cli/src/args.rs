@@ -66,8 +66,8 @@ Usage: outlint search [options] <WORD>...
 Search the Markdown files under the search root (the current directory unless
 --root is given) and print the best-matching blocks. The index lives under
 .outlint/search/ in the enclosing Git repository, or in the search root when
-there is none. Hit paths are relative to the current directory and can be
-passed directly to `outlint read`.
+there is none. Hit paths are relative to the current directory where possible
+and can be passed directly to `outlint read`.
 
 Options:
       --root <DIR>            Search the files under DIR instead
