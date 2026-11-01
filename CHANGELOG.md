@@ -130,6 +130,10 @@ output shape, and the library API may all change in a minor release. See
 
 ### Fixed
 
+- **Markdown parser dependency.** Require pulldown-cmark 0.13.5, which fixes
+  RUSTSEC-2026-0414. Outlint does not enable the affected wikilink extension.
+- **Windows full-edition packaging.** Release builds select Git Bash instead
+  of the Windows Subsystem for Linux launcher.
 - **Frontmatter JSON Schema validation.** A schema with
   `unevaluatedProperties` or `unevaluatedItems` beside a `$ref` that cycles
   back to it no longer crashes schema loading. Upgraded the JSON Schema

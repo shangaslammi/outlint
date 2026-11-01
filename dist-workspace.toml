@@ -14,6 +14,8 @@ cargo-dist-version = "0.32.0"
 precise-builds = true
 # CI backends to support
 ci = "github"
+# Put Git Bash ahead of the Windows WSL launcher for the full-edition build.
+github-build-setup = "../release-build-setup.yml"
 # The installers to generate for each app
 installers = ["shell", "powershell"]
 # Target platforms to build apps for (Rust target-triple syntax)

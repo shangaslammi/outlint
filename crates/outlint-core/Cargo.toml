@@ -17,7 +17,7 @@ categories = ["text-processing", "parser-implementations", "development-tools"]
 casefold = "0.1"
 jsonschema = { version = "0.58.6", default-features = false, features = ["arbitrary-precision"] }
 num-bigint = "0.5"
-pulldown-cmark = { version = "0.13", default-features = false }
+pulldown-cmark = { version = "0.13.5", default-features = false }
 regex = "1"
 regex-syntax = { version = "=0.8.11", default-features = false, features = ["std", "unicode"] }
 # Pinned exactly: every `0.0.z` release is a breaking change under Cargo's
