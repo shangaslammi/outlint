@@ -9,8 +9,8 @@ use outlint_core::{
 
 use crate::{
     args::{
-        parse_check_args, parse_schema_args, CheckOptions, ColorChoice, OutputFormat, ParseOutcome,
-        SchemaOptions, CHECK_HELP, SCHEMA_HELP, TOP_HELP,
+        parse_check_args, parse_schema_args, top_help, CheckOptions, ColorChoice, ParseOutcome,
+        SchemaOptions, ValidationFormat, CHECK_HELP, SCHEMA_HELP,
     },
     diagnostics::{
         render_document_diagnostic, render_schema_errors, sort_diagnostics, InvocationOutput,
@@ -23,9 +23,15 @@ use crate::{
     write_stderr, write_stdout,
 };
 
-pub(crate) fn run(args: &[String]) -> u8 {
+#[cfg(any(feature = "search", feature = "read"))]
+use crate::args::EnvironmentFormat;
+
+pub(crate) fn run(
+    args: &[String],
+    #[cfg(any(feature = "search", feature = "read"))] environment_format: EnvironmentFormat,
+) -> u8 {
     match args {
-        [arg] if arg == "--help" || arg == "-h" => write_help(TOP_HELP),
+        [arg] if arg == "--help" || arg == "-h" => write_help(&top_help()),
         [arg] if arg == "--version" || arg == "-V" => {
             write_stdout(&format!("outlint {}\n", env!("CARGO_PKG_VERSION")))
         }
@@ -39,6 +45,22 @@ pub(crate) fn run(args: &[String]) -> u8 {
                 Ok(ParseOutcome::Help) => write_help(SCHEMA_HELP),
                 Ok(ParseOutcome::Run(options)) => execute_schema_check(options),
                 Err(message) => usage_error(&message, "outlint schema check --help"),
+            }
+        }
+        #[cfg(feature = "search")]
+        [command, rest @ ..] if command == "search" => {
+            match crate::args::parse_search_args(rest, &environment_format) {
+                Ok(ParseOutcome::Help) => write_help(crate::args::SEARCH_HELP),
+                Ok(ParseOutcome::Run(options)) => crate::search::execute_search(&options),
+                Err(message) => usage_error(&message, "outlint search --help"),
+            }
+        }
+        #[cfg(feature = "read")]
+        [command, rest @ ..] if command == "read" => {
+            match crate::args::parse_read_args(rest, &environment_format) {
+                Ok(ParseOutcome::Help) => write_help(crate::args::READ_HELP),
+                Ok(ParseOutcome::Run(options)) => crate::read::execute_read(&options),
+                Err(message) => usage_error(&message, "outlint read --help"),
             }
         }
         _ => usage_error("invalid or missing command", "outlint --help"),
@@ -275,7 +297,7 @@ fn prepare_validator(loaded: &LoadedSchema, display: &str) -> Result<PreparedVal
         .map_err(|error| format!("cannot prepare schema '{}': {}", display, error.message))
 }
 
-fn finish_invocation(output: InvocationOutput, format: OutputFormat, color: ColorChoice) -> u8 {
+fn finish_invocation(output: InvocationOutput, format: ValidationFormat, color: ColorChoice) -> u8 {
     for error in &output.operational_errors {
         write_stderr(&format!("outlint: {error}\n"));
     }

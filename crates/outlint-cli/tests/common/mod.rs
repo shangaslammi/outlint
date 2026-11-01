@@ -32,6 +32,7 @@
 #![allow(dead_code)]
 
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -84,8 +85,25 @@ impl Drop for TempDir {
 }
 
 pub(crate) fn run(directory: &TempDir, arguments: &[&str]) -> Output {
+    run_in(directory.path(), arguments)
+}
+
+pub(crate) fn run_in(directory: &Path, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_outlint"))
         .args(arguments)
+        .current_dir(directory)
+        .output()
+        .expect("outlint should run")
+}
+
+pub(crate) fn run_with_format_env(
+    directory: &TempDir,
+    arguments: &[&str],
+    value: impl AsRef<OsStr>,
+) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_outlint"))
+        .args(arguments)
+        .env("OUTLINT_FORMAT", value)
         .current_dir(directory.path())
         .output()
         .expect("outlint should run")

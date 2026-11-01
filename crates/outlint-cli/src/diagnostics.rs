@@ -1490,7 +1490,7 @@ mod tests {
         for step in 0..size {
             heap_permutations(indices, size - 1, output);
             let last = size - 1;
-            if size % 2 == 0 {
+            if size.is_multiple_of(2) {
                 indices.swap(step, last);
             } else {
                 indices.swap(0, last);

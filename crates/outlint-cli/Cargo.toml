@@ -19,5 +19,17 @@ name = "outlint"
 path = "src/main.rs"
 
 [dependencies]
-outlint-core = { path = "../outlint-core", version = "0.1.0" }
+outlint-core = { path = "../outlint-core", version = "0.2.0" }
 serde_json = "1"
+outlint-search = { path = "../outlint-search", version = "0.2.0", optional = true }
+
+[features]
+search = ["dep:outlint-search"]
+read = []
+full = ["search", "read"]
+
+[package.metadata.dist]
+# The original archives and npm bootstrap distribute the core linter.
+default-features = false
+all-features = false
+features = []

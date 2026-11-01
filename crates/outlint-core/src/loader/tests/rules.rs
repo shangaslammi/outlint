@@ -1,6 +1,7 @@
 use super::{error_kinds, invalid, source_slice, valid};
+use crate::document_path::heading_slug;
 use crate::loader::load_schema;
-use crate::loader::rules::{auto_id, is_capture_name, parse_repeat, regex_body};
+use crate::loader::rules::{is_capture_name, parse_repeat, regex_body};
 use crate::{
     CaptureName, Cardinality, ConstraintIndex, ConstraintPath, DocumentShape, ExactText,
     InvalidSchema, LoadedSchema, Matcher, OrderEntryPath, OrderIndex, RegexPattern, RuleId,
@@ -182,6 +183,7 @@ sections:
 
 #[test]
 fn auto_ids_discard_decomposed_marks_without_splitting_words() {
+    let auto_id = |text: &str| heading_slug(text).map(|slug| slug.as_str().to_owned());
     assert_eq!(auto_id("Mälardalen"), Some("malardalen".to_owned()));
     assert_eq!(auto_id("nai\u{308}ve café"), Some("naive-cafe".to_owned()));
     assert_eq!(auto_id("a—b"), Some("a-b".to_owned()));

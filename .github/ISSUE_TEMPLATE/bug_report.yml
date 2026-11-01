@@ -22,7 +22,7 @@ body:
     attributes:
       label: outlint version
       description: Output of `outlint --version`, or the commit SHA if you built from source.
-      placeholder: "outlint 0.1.0 (or commit 88c163b)"
+      placeholder: "outlint 0.2.0 (or commit 88c163b)"
     validations:
       required: true
 
