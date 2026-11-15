@@ -6,5 +6,5 @@ repository = "https://github.com/shangaslammi/outlint"
 homepage = "https://github.com/shangaslammi/outlint"
 license = "MIT OR Apache-2.0"
 binaries = ["outlint"]
-build-command = ["bash", "build.sh"]
+build-command = ["sh", "build.sh"]
 out-dir = "bin"

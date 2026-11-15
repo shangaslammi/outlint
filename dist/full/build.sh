@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # cargo-dist calls this once per release target, on that platform's runner.
 release_target="${CARGO_DIST_TARGET:?cargo-dist must select a release target}"
