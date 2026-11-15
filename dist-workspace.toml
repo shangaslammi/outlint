@@ -16,7 +16,9 @@ precise-builds = true
 ci = "github"
 # Release packaging runs only for version tags; regular CI covers PRs.
 pr-run-mode = "skip"
-# Put Git Bash ahead of the Windows WSL launcher for the full-edition build.
+# Put Git's sh on PATH for the full-edition build on Windows. The build
+# command runs `sh`, not `bash`: Windows resolves a bare `bash` to the WSL
+# launcher in System32 before searching PATH.
 github-build-setup = "../release-build-setup.yml"
 # The installers to generate for each app
 installers = ["shell", "powershell"]
@@ -29,3 +31,7 @@ targets = [
     "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-msvc",
 ]
+
+# GitHub retired the macos-14 image that cargo-dist 0.32.0 picks for this target.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"

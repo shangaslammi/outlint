@@ -5,6 +5,12 @@
 
 [advisories]
 version = 2
+ignore = [
+    # pulldown-cmark: quadratic parsing of nested image wikilinks. Only
+    # reachable with `Options::ENABLE_WIKILINKS`, which Outlint never sets
+    # (every parser is built with empty options).
+    { id = "RUSTSEC-2026-0433", reason = "wikilinks extension is never enabled" },
+]
 
 [licenses]
 version = 2
