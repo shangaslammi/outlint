@@ -14,6 +14,8 @@ cargo-dist-version = "0.32.0"
 precise-builds = true
 # CI backends to support
 ci = "github"
+# Release packaging runs only for version tags; regular CI covers PRs.
+pr-run-mode = "skip"
 # Put Git Bash ahead of the Windows WSL launcher for the full-edition build.
 github-build-setup = "../release-build-setup.yml"
 # The installers to generate for each app

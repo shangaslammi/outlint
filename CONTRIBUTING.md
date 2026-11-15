@@ -92,8 +92,10 @@ The workspace has three crates:
 
 Run the checks below before opening a pull request. CI tests check-only and
 full builds on stable across Linux, macOS, and Windows, with formatting,
-Clippy, and rustdoc on Linux. It also tests both builds on Rust 1.88, checks
-the packaged Linux binaries, and runs `cargo deny check`. Commands
+Clippy, and rustdoc on Linux. It also tests both builds on Rust 1.88
+and runs `cargo deny check`. Release archive builds and packaged Linux
+binary checks run only on version tags, through the Release and Distribution
+checks workflows. Commands
 that resolve the Cargo dependency graph use the committed lockfile in CI; the
 local commands below omit `--locked` so Cargo can report an intentionally
 changed lockfile normally.
