@@ -15,7 +15,7 @@ precise-builds = true
 # CI backends to support
 ci = "github"
 # Release packaging runs only for version tags; regular CI covers PRs.
-pr-run-mode = "skip"
+pr-run-mode = "upload"
 # Put Git's sh on PATH for the full-edition build on Windows. The build
 # command runs `sh`, not `bash`: Windows resolves a bare `bash` to the WSL
 # launcher in System32 before searching PATH.
