@@ -15,7 +15,7 @@ categories = ["text-processing", "parser-implementations", "development-tools"]
 
 [dependencies]
 casefold = "0.1"
-jsonschema = { version = "0.58.6", default-features = false, features = ["arbitrary-precision"] }
+jsonschema = { version = "0.60.2", default-features = false, features = ["arbitrary-precision"] }
 num-bigint = "0.5"
 pulldown-cmark = { version = "0.13.5", default-features = false }
 regex = "1"
