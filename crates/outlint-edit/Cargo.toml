@@ -1,0 +1,14 @@
+[package]
+name = "outlint-edit"
+description = "Experimental source-preserving Markdown edits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+outlint-core = { path = "../outlint-core" }
+
+[dev-dependencies]
+proptest = "1"

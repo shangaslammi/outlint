@@ -23,10 +23,14 @@ outlint-core = { path = "../outlint-core", version = "0.2.0" }
 serde_json = "1"
 outlint-search = { path = "../outlint-search", version = "0.2.0", optional = true }
 
+outlint-edit = { path = "../outlint-edit", optional = true }
+tempfile = { version = "3", optional = true }
+
 [features]
 search = ["dep:outlint-search"]
 read = []
-full = ["search", "read"]
+edit = ["dep:outlint-edit", "dep:tempfile"]
+full = ["search", "read", "edit"]
 
 [package.metadata.dist]
 # The original archives and npm bootstrap distribute the core linter.

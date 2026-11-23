@@ -12,6 +12,8 @@ Commands:
   schema check   Validate Outlint schema files
 "
     .to_owned();
+    #[cfg(feature = "edit")]
+    help.push_str("  edit           Splice Markdown by document path (prototype)\n");
     #[cfg(feature = "search")]
     help.push_str("  search         Search Markdown blocks by keyword\n");
     #[cfg(feature = "read")]

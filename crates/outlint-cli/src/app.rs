@@ -31,6 +31,8 @@ pub(crate) fn run(
     #[cfg(any(feature = "search", feature = "read"))] environment_format: EnvironmentFormat,
 ) -> u8 {
     match args {
+        #[cfg(feature = "edit")]
+        [command, rest @ ..] if command == "edit" => crate::edit::run(rest),
         [arg] if arg == "--help" || arg == "-h" => write_help(&top_help()),
         [arg] if arg == "--version" || arg == "-V" => {
             write_stdout(&format!("outlint {}\n", env!("CARGO_PKG_VERSION")))
