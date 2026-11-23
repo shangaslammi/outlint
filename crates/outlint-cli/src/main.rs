@@ -27,17 +27,17 @@ fn main() -> ExitCode {
     ExitCode::from(code)
 }
 
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 fn run_app(args: &[String]) -> u8 {
     app::run(args, read_environment_format())
 }
 
-#[cfg(not(any(feature = "search", feature = "read")))]
+#[cfg(not(any(feature = "search", feature = "read", feature = "edit")))]
 fn run_app(args: &[String]) -> u8 {
     app::run(args)
 }
 
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 fn read_environment_format() -> args::EnvironmentFormat {
     match env::var_os("OUTLINT_FORMAT") {
         None => args::EnvironmentFormat::Unset,

@@ -182,7 +182,7 @@ fn write_json_member(
 /// The validation envelope above has context-dependent ordering rules. The
 /// provisional search and read formats use this smaller writer because every
 /// object in those formats has one explicit declaration order.
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 pub(super) fn write_ordered_json_object(
     output: &mut Vec<u8>,
     members: impl FnOnce(&mut OrderedJsonObject<'_>),
@@ -194,13 +194,13 @@ pub(super) fn write_ordered_json_object(
 }
 
 /// An object writer whose calls define the emitted member order.
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 pub(super) struct OrderedJsonObject<'a> {
     output: &'a mut Vec<u8>,
     written: usize,
 }
 
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 impl OrderedJsonObject<'_> {
     /// Adds one JSON value after the members already written.
     pub(super) fn value(&mut self, key: &str, value: &Value) {
@@ -223,7 +223,7 @@ impl OrderedJsonObject<'_> {
 }
 
 /// Writes an array whose elements are serialized by `write` in slice order.
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 pub(super) fn write_ordered_json_array<T>(
     output: &mut Vec<u8>,
     values: &[T],
@@ -241,13 +241,13 @@ pub(super) fn write_ordered_json_array<T>(
 
 /// Completes an already serialized JSON value as one newline-terminated
 /// invocation document.
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 pub(super) fn finish_json_line(mut output: Vec<u8>) -> String {
     output.push(b'\n');
     String::from_utf8(output).expect("JSON serialization emits UTF-8")
 }
 
-fn diagnostic_json(diagnostic: &RenderedDiagnostic) -> Value {
+pub(crate) fn diagnostic_json(diagnostic: &RenderedDiagnostic) -> Value {
     let mut object = Map::new();
     object.insert("id".into(), json!(diagnostic.id));
     object.insert("message".into(), json!(diagnostic.message));

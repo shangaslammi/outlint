@@ -23,16 +23,17 @@ use crate::{
     write_stderr, write_stdout,
 };
 
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 use crate::args::EnvironmentFormat;
 
 pub(crate) fn run(
     args: &[String],
-    #[cfg(any(feature = "search", feature = "read"))] environment_format: EnvironmentFormat,
+    #[cfg(any(feature = "search", feature = "read", feature = "edit"))]
+    environment_format: EnvironmentFormat,
 ) -> u8 {
     match args {
         #[cfg(feature = "edit")]
-        [command, rest @ ..] if command == "edit" => crate::edit::run(rest),
+        [command, rest @ ..] if command == "edit" => crate::edit::run(rest, &environment_format),
         [arg] if arg == "--help" || arg == "-h" => write_help(&top_help()),
         [arg] if arg == "--version" || arg == "-V" => {
             write_stdout(&format!("outlint {}\n", env!("CARGO_PKG_VERSION")))

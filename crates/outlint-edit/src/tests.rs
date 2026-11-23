@@ -287,7 +287,7 @@ fn section_spelling_and_transparency() {
     );
     assert_eq!(
         one("Title\n=====\n", "$", Op::Rename("New".into())),
-        "# New\n"
+        "New\n=====\n"
     );
     assert_eq!(
         one(
@@ -305,4 +305,120 @@ fn section_spelling_and_transparency() {
         one("- a\n\n  more\n- b\n", "$/list", Op::AppendItem("c".into())),
         "- a\n\n  more\n- b\n- c\n"
     );
+}
+
+#[test]
+fn release_list_gap_and_fenced_bodies() {
+    assert_eq!(
+        one(
+            "### Added\n\n- a\n\n### Fixed\n",
+            "$.added/list",
+            Op::AppendItem("b".into())
+        ),
+        "### Added\n\n- a\n- b\n\n### Fixed\n"
+    );
+    assert_eq!(
+        one(
+            "  ~~~rs\r\na\r\n ~~~~\r\n",
+            "$/code",
+            Op::Replace("x\n".into())
+        ),
+        "  ~~~rs\r\nx\r\n ~~~~\r\n"
+    );
+    for source in ["    a", "~~~\na"] {
+        assert_eq!(
+            edit(source, &[op("$/code", Op::Replace("x\n".into()))]),
+            Err(Error::Target)
+        );
+    }
+    assert_eq!(
+        one("- old", "$/list", Op::Replace("paragraph\n\n- new".into())),
+        "paragraph\n\n- new"
+    );
+}
+
+#[test]
+fn gate_matches_surviving_anchors_once() {
+    let schema=load_schema("version: 1\ntitle: null\nsections:\n  - match: Same\n    repeat: '0..n'\n    content:\n      - block: list\n        repeat: '0..1'\n        items: [{match: ok, repeat: '0..n'}]\n").unwrap().schema;
+    let s = "## Same\n- bad\n\n## Same\n- other\n";
+    let gate = |edits: &[Edit]| {
+        candidate(s, edits)
+            .unwrap()
+            .introduced_diagnostics(&schema)
+            .unwrap()
+    };
+    assert!(gate(&[op("$.same[0]/list", Op::InsertItem(0, "ok".into()))]).is_empty());
+    let new = gate(&[
+        op("$.same[0]/list/item", Op::Delete),
+        op("$.same[1]/list", Op::AppendItem("third".into())),
+    ]);
+    assert_eq!(new.len(), 1);
+    assert_eq!(new[0].id.as_str(), "unexpected-item");
+    let both = "# Bad\n# Bad\n";
+    let schema = load_schema("version: 1\noutline: []\n").unwrap().schema;
+    assert!(
+        candidate(both, &[op("$.bad[1]", Op::Rename("Other".into()))])
+            .unwrap()
+            .introduced_diagnostics(&schema)
+            .unwrap()
+            .is_empty()
+    );
+}
+#[test]
+fn literal_scope_and_structural_verification() {
+    let s = "# A\r\n\r\nold\r\n\r\n## B\r\n\r\nold\r\n";
+    assert_eq!(
+        edit(s, &[op("$", Op::ReplaceText("old".into(), "x".into()))]),
+        Err(Error::TextAmbiguous(2))
+    );
+    assert_eq!(
+        edit(
+            s,
+            &[op("$.b", Op::ReplaceText("absent".into(), "x".into()))]
+        ),
+        Err(Error::TextNotFound)
+    );
+    assert_eq!(
+        one(s, "$.b/p", Op::ReplaceText("old".into(), "x\ny".into())),
+        s.replacen("## B\r\n\r\nold", "## B\r\n\r\nx\r\ny", 1)
+    );
+    assert_eq!(
+        edit(s, &[op("$.b", Op::ReplaceText("old".into(), "# H".into()))]),
+        Err(Error::Payload)
+    );
+}
+
+#[test]
+fn disjoint_literal_and_rename_share_a_heading() {
+    assert_eq!(
+        edit(
+            "# old ###\n",
+            &[
+                op("$", Op::Rename("new".into())),
+                op("$", Op::ReplaceText("###".into(), "####".into()))
+            ]
+        )
+        .unwrap(),
+        "# new ####\n"
+    );
+    assert_eq!(
+        edit(
+            "ababa",
+            &[op("$", Op::ReplaceText("aba".into(), "x".into()))]
+        ),
+        Err(Error::TextAmbiguous(2))
+    );
+}
+
+#[test]
+fn document_voiced_absence_tracks_the_title() {
+    let schema = load_schema("version: 1\ntitle: '*'\nsections: [{match: Needed}]\n")
+        .unwrap()
+        .schema;
+    let c = candidate("intro\n\n# A\n", &[op("$", Op::Delete)]).unwrap();
+    assert!(c
+        .introduced_diagnostics(&schema)
+        .unwrap()
+        .iter()
+        .any(|d| d.id == DiagnosticId::MissingSection));
 }

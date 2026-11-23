@@ -109,7 +109,7 @@ pub(crate) enum ValidationFormat {
     Json,
 }
 
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReadSearchFormat {
     Human,
@@ -121,7 +121,7 @@ pub(crate) enum ReadSearchFormat {
 /// read it. Keeping the decoding result explicit lets commands outside its
 /// scope ignore even a non-Unicode value.
 #[derive(Debug)]
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 pub(crate) enum EnvironmentFormat {
     Unset,
     Value(String),
@@ -432,8 +432,11 @@ fn parse_validation_format(value: String) -> Result<ValidationFormat, String> {
     }
 }
 
-#[cfg(any(feature = "search", feature = "read"))]
-fn parse_read_search_format(value: String, source: &str) -> Result<ReadSearchFormat, String> {
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
+pub(crate) fn parse_read_search_format(
+    value: String,
+    source: &str,
+) -> Result<ReadSearchFormat, String> {
     match value.as_str() {
         "human" => Ok(ReadSearchFormat::Human),
         "json" => Ok(ReadSearchFormat::Json),
@@ -444,8 +447,10 @@ fn parse_read_search_format(value: String, source: &str) -> Result<ReadSearchFor
     }
 }
 
-#[cfg(any(feature = "search", feature = "read"))]
-fn parse_environment_format(environment: &EnvironmentFormat) -> Result<ReadSearchFormat, String> {
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
+pub(crate) fn parse_environment_format(
+    environment: &EnvironmentFormat,
+) -> Result<ReadSearchFormat, String> {
     match environment {
         EnvironmentFormat::Unset => Ok(ReadSearchFormat::Human),
         EnvironmentFormat::Value(value) if value.is_empty() => Ok(ReadSearchFormat::Human),
@@ -466,6 +471,16 @@ fn parse_color(value: String) -> Result<ColorChoice, String> {
         _ => Err(format!(
             "invalid --color value '{value}' (expected auto, always, or never)"
         )),
+    }
+}
+
+#[cfg(any(feature = "read", feature = "edit"))]
+/// Adds the root prefix so `.a.b` and `/p[0]` work unquoted in a shell.
+pub(crate) fn path_spelling(argument: &str) -> String {
+    if argument.starts_with('$') {
+        argument.to_owned()
+    } else {
+        format!("${argument}")
     }
 }
 
