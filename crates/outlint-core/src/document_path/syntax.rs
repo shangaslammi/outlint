@@ -125,10 +125,12 @@ impl<'a> Parser<'a> {
         match self.peek_char() {
             None => Ok(DocumentPath { sections, terminal }),
             Some(character) if terminal.is_none() => Err(self.error(format!(
-                "unexpected {character:?}; expected `.`, `/`, or the end of the path"
+                "unexpected character U+{:04X}. Expected `.`, `/`, or the end of the path",
+                u32::from(character)
             ))),
             Some(character) => Err(self.error(format!(
-                "unexpected {character:?}; expected the end of the path"
+                "unexpected character U+{:04X}. Expected the end of the path",
+                u32::from(character)
             ))),
         }
     }

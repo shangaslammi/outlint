@@ -57,9 +57,9 @@ fn changelog_release_cycle() {
     };
     let mut expected = initial.to_string();
     let steps=[
-        (vec!["insert-section",".unreleased","append-child","Added","--payload","- First entry\n  wrapped."],"## [Unreleased]\n","## [Unreleased]\n\n### Added\n\n- First entry\n  wrapped.\n"),
-        (vec!["append-item",".unreleased.added/list","--payload","Second entry."],"  wrapped.\n","  wrapped.\n- Second entry.\n"),
-        (vec!["insert-section",".unreleased.added","after","Fixed","--payload","- A fix."],"- Second entry.\n","- Second entry.\n\n### Fixed\n\n- A fix.\n"),
+        (vec!["insert-section",".unreleased","append-child","Changed","--payload","- First entry\n  wrapped."],"\n## [0.2.0]","\n### Changed\n\n- First entry\n  wrapped.\n\n## [0.2.0]"),
+        (vec!["append-item",".unreleased.changed/list","--payload","Second entry."],"  wrapped.\n","  wrapped.\n- Second entry.\n"),
+        (vec!["insert-section",".unreleased.changed","after","Fixed","--payload","- A fix."],"- Second entry.\n","- Second entry.\n\n### Fixed\n\n- A fix.\n"),
         (vec!["--script","cut.edit"],"## [Unreleased]\n","## [Unreleased]\n\n## [0.3.0] - 2026-12-01\n"),
         (vec!["replace-text","$","--old","v0.2.0...HEAD","--payload","v0.3.0...HEAD\n[0.3.0]: https://github.com/shangaslammi/outlint/compare/v0.2.0...v0.3.0"],"v0.2.0...HEAD","v0.3.0...HEAD\n[0.3.0]: https://github.com/shangaslammi/outlint/compare/v0.2.0...v0.3.0")
     ];
@@ -144,8 +144,108 @@ fn scripts_resolve_inputs_locally_and_preserve_error_detail() {
     assert_eq!(err["id"], "unresolved-path");
     assert_eq!(err["kind"], "unresolved");
     assert_eq!(err["line"], 2);
+    assert!(err["message"].as_str().unwrap().contains("cannot resolve"));
     assert!(err["suggestions"].is_array());
 }
+
+#[test]
+fn refusals_report_candidate_coordinates_in_all_formats() {
+    let dir = TempDir::new("edit-candidate-location");
+    dir.write("doc.md", "# T\n\n## Unreleased\n");
+    dir.write(
+        "doc.outlint.yml",
+        "version: 1\ntitle: T\nsections: [{match: Unreleased, sections: []}]\n",
+    );
+    for format in ["human", "compact", "json"] {
+        let out = run(
+            &dir,
+            &[
+                "edit",
+                "doc.md",
+                "insert-section",
+                "$.unreleased",
+                "append-child",
+                "Addded",
+                "--payload",
+                "- **X.** y",
+                "--dry-run",
+                "--format",
+                format,
+            ],
+        );
+        assert_eq!(out.status.code(), Some(1));
+        let stderr = common::stderr(&out);
+        match format {
+            "json" => {
+                assert!(stderr.is_empty());
+                let json = common::json_output(&out);
+                let error = &json["error"];
+                assert_eq!(error["id"], "new-diagnostics");
+                assert_eq!(error["diagnostic_source"], "candidate");
+                let diagnostic = &error["diagnostics"][0];
+                assert_eq!(diagnostic["id"], "unexpected-section");
+                assert_eq!(
+                    diagnostic["location"],
+                    serde_json::json!({"line": 5, "column": 1})
+                );
+            }
+            "compact" => {
+                assert!(stdout(&out).is_empty());
+                assert!(
+                    stderr.contains("candidate\tdoc.md\t5\t1\tunexpected-section\t"),
+                    "{stderr}"
+                );
+            }
+            _ => {
+                assert!(stdout(&out).is_empty());
+                assert!(
+                    stderr.contains("doc.md:5:1 (candidate) unexpected-section "),
+                    "{stderr}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        fs::read(dir.path().join("doc.md")).unwrap(),
+        b"# T\n\n## Unreleased\n"
+    );
+}
+
+#[test]
+fn overlapping_literal_matches_have_a_written_refusal() {
+    let dir = TempDir::new("edit-literal-refusal");
+    dir.write("doc.md", "ababa\n");
+    for format in ["human", "compact", "json"] {
+        let out = run(
+            &dir,
+            &[
+                "edit",
+                "doc.md",
+                "replace-text",
+                "$",
+                "--old",
+                "aba",
+                "--payload",
+                "x",
+                "--format",
+                format,
+            ],
+        );
+        assert_eq!(out.status.code(), Some(1));
+        let message = "old text occurs 2 times in `$`";
+        if format == "json" {
+            assert!(common::stderr(&out).is_empty());
+            let json = common::json_output(&out);
+            assert_eq!(json["error"]["id"], "ambiguous-text");
+            assert_eq!(json["error"]["message"], message);
+            assert_eq!(json["error"]["count"], 2);
+        } else {
+            assert!(stdout(&out).is_empty());
+            assert_eq!(common::stderr(&out), format!("ambiguous-text\t{message}\n"));
+        }
+    }
+}
+
 #[test]
 fn forcing_still_validates_and_reports() {
     let dir = TempDir::new("edit-gate");
@@ -167,10 +267,9 @@ fn forcing_still_validates_and_reports() {
     ];
     let out = run(&dir, &args);
     assert!(out.status.success());
-    assert_eq!(
-        common::json_output(&out)["diagnostics"][0]["id"],
-        "unexpected-section"
-    );
+    let json = common::json_output(&out);
+    assert_eq!(json["diagnostic_source"], "candidate");
+    assert_eq!(json["diagnostics"][0]["id"], "unexpected-section");
     dir.write("other.yml", "[");
     assert_eq!(run(&dir, &args).status.code(), Some(2));
     assert_eq!(

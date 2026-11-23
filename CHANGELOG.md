@@ -11,6 +11,15 @@ output shape, and the library API may all change in a minor release. See
 
 ## [Unreleased]
 
+### Added
+
+- **Experimental edit extension.** `outlint edit` previews and applies Markdown
+  edits by document path, with atomic script batches and automatic schema
+  discovery ([edit specification](spec/edit-spec.md)). This optional command is
+  layered on the validator's document model, outside the validator's
+  specification and stability promises, and available only in the full
+  edition or with the `edit` Cargo feature.
+
 ## [0.2.0] - 2026-11-01
 
 ### Changed

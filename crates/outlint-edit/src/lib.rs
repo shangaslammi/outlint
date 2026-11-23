@@ -52,9 +52,9 @@ pub struct Edit {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     /// The scoped literal is absent.
-    TextNotFound,
+    TextNotFound(DocumentPath),
     /// Number of starts matching the scoped literal.
-    TextAmbiguous(usize),
+    TextAmbiguous(DocumentPath, usize),
     /// Core path resolution failed.
     Path(DocumentPathError),
     /// Unsupported target or position.
@@ -65,8 +65,10 @@ pub enum Error {
     ConflictingEdits,
     /// Internal parser or source-range invariant failed.
     Range,
-    /// This prototype supports LF and CRLF.
+    /// A payload contains or introduces a bare carriage return.
     BareCr,
+    /// The source contains a bare carriage return.
+    BareCrSource,
 }
 fn parse(s: &str) -> Result<Document, Error> {
     parse_markdown(s, MarkdownOptions::default()).map_err(|_| Error::Range)
@@ -104,22 +106,32 @@ fn convert(s: &str, e: &str) -> Result<String, Error> {
     }
     Ok(lf.replace('\n', e))
 }
-fn heading(level: u8, text: &str) -> Result<String, Error> {
-    if level > 6 || text.contains(['\r', '\n']) {
+
+fn has_bare_cr(s: &str) -> bool {
+    s.match_indices('\r')
+        .any(|(i, _)| s.as_bytes().get(i + 1) != Some(&b'\n'))
+}
+fn heading_text(
+    level: u8,
+    text: &str,
+    format_heading: impl Fn(&str) -> String,
+) -> Result<String, Error> {
+    if level > 6 {
         return Err(Error::Target);
     }
-    let prefix = "#".repeat(level.into());
-    let matches = |line: &str| -> Result<bool, Error> {
-        Ok(parse(line)?
+    if text.contains(['\r', '\n']) {
+        return Err(Error::Payload);
+    }
+    let matches = |spelling: &str| -> Result<bool, Error> {
+        Ok(parse(&format_heading(spelling))?
             .sections
             .first()
-            .is_some_and(|s| s.heading.text == text))
+            .is_some_and(|s| s.heading.level as u8 == level && s.heading.text == text))
     };
-    let plain = format!("{prefix} {text}");
-    if matches(&plain)? {
-        return Ok(plain);
+    if matches(text)? {
+        return Ok(text.to_owned());
     }
-    let mut escaped = format!("{prefix} ");
+    let mut escaped = String::new();
     for ch in text.chars() {
         if ch.is_ascii_punctuation() {
             escaped.push('\\');
@@ -163,11 +175,7 @@ fn fence(line: &str) -> Option<(char, usize)> {
     let n = raw.chars().take_while(|c| *c == ch).count();
     (matches!(ch, '~' | '`') && n >= 3).then_some((ch, n))
 }
-fn whole_fence(payload: &str) -> Result<bool, Error> {
-    let s = payload
-        .strip_suffix("\r\n")
-        .or_else(|| payload.strip_suffix('\n'))
-        .unwrap_or(payload);
+fn whole_fence(s: &str) -> Result<bool, Error> {
     if s.lines().next().and_then(fence).is_none() {
         return Ok(false);
     }
@@ -233,10 +241,12 @@ impl Context<'_> {
             let mut matches = raw
                 .char_indices()
                 .filter_map(|(i, _)| raw[i..].starts_with(old).then_some(i));
-            let first = matches.next().ok_or(Error::TextNotFound)?;
+            let first = matches
+                .next()
+                .ok_or_else(|| Error::TextNotFound(edit.path.clone()))?;
             let others = matches.count();
             if others > 0 {
-                return Err(Error::TextAmbiguous(others + 1));
+                return Err(Error::TextAmbiguous(edit.path.clone(), others + 1));
             }
             let start = range.start + first;
             return Ok(Plan {
@@ -322,7 +332,10 @@ impl Context<'_> {
                     }
                     _ => return Err(Error::Target),
                 };
-                let mut body = heading(parent + 1, name)?;
+                let level = parent + 1;
+                let prefix = "#".repeat(level.into());
+                let title = heading_text(level, name, |title| format!("{prefix} {title}"))?;
+                let mut body = format!("{prefix} {title}");
                 if !payload.is_empty() {
                     body.push_str(&self.e.repeat(2));
                     body.push_str(&normalize(payload, self.e)?);
@@ -370,7 +383,8 @@ impl Context<'_> {
                     }
                     (Op::Replace(p), Some(DocumentNode::Block(_))) => {
                         plan.body = normalize(p, self.e)?;
-                        if r.token.kind == Kind::Block(BlockKind::Code) && !whole_fence(p)? {
+                        if r.token.kind == Kind::Block(BlockKind::Code) && !whole_fence(&plan.body)?
+                        {
                             return code_body(self.s, r, i, p, self.e);
                         }
                         plan.expected = blocks(&plan.body, d)?;
@@ -432,19 +446,11 @@ impl Context<'_> {
 }
 
 fn rename(s: &str, r: &Row, i: usize, level: u8, text: &str) -> Result<Plan, Error> {
-    let mut plan = Plan {
-        bytes: r.lines.clone(),
-        tokens: i..i + 1,
-        body: heading(level, text)?,
-        expected: vec![],
-        gap: None,
-        list_end: false,
-    };
-    let d = r.token.depth;
     let raw = cut(s, r.lines.clone())?;
     let line = raw.trim_end_matches(['\r', '\n']);
     let opening = line.trim_start_matches(' ');
-    if opening.starts_with('#') && !line.contains('\n') {
+    let (title, opening_space, closing_space) = if opening.starts_with('#') && !line.contains('\n')
+    {
         let hashes = opening.bytes().take_while(|b| *b == b'#').count();
         let rest = opening.get(hashes..).ok_or(Error::Range)?;
         let title_start = line.len() - rest.trim_start_matches([' ', '\t']).len();
@@ -459,46 +465,42 @@ fn rename(s: &str, r: &Row, i: usize, level: u8, text: &str) -> Result<Plan, Err
         } else {
             trimmed.len().max(title_start)
         };
-        let literal = plan.body.split_once(' ').ok_or(Error::Range)?.1;
-        let mut insert = String::new();
-        if rest.is_empty() {
-            insert.push(' ');
+        (
+            title_start..title_end,
+            if rest.is_empty() && !text.is_empty() {
+                " "
+            } else {
+                ""
+            },
+            if !text.is_empty() && line.get(title_end..).is_some_and(|s| s.starts_with('#')) {
+                " "
+            } else {
+                ""
+            },
+        )
+    } else {
+        let (first, underline) = line.split_once('\n').ok_or(Error::Target)?;
+        if underline.contains('\n') {
+            return Err(Error::Target);
         }
-        insert.push_str(literal);
-        if line.get(title_end..).is_some_and(|s| s.starts_with('#')) {
-            insert.push(' ');
-        }
-        plan.body = insert;
-        plan.bytes = r.lines.start + title_start..r.lines.start + title_end;
-        let rebuilt = format!(
-            "{}{}{}",
-            cut(line, 0..title_start)?,
-            plan.body,
-            line.get(title_end..).ok_or(Error::Range)?
-        );
-        plan.expected = fragment(&rebuilt, d, true)?;
-        return Ok(plan);
-    }
-    let (first, underline) = line.split_once('\n').ok_or(Error::Target)?;
-    if underline.contains('\n') {
-        return Err(Error::Target);
-    }
-    let first = first.trim_end_matches('\r');
-    let title = first.trim_matches([' ', '\t']);
-    let offset = first.find(title).unwrap_or(0);
-    plan.bytes = r.lines.start + offset..r.lines.start + offset + title.len();
-    plan.body = text.to_owned();
-    let rebuilt = format!(
-        "{}{}{}",
-        s.get(r.lines.start..plan.bytes.start).ok_or(Error::Range)?,
-        text,
-        s.get(plan.bytes.end..r.lines.end).ok_or(Error::Range)?
-    );
-    plan.expected = fragment(&rebuilt, d, true)?;
-    if !matches!(plan.expected.as_slice(),[t] if t.kind==Kind::Heading(level)) {
-        return Err(Error::Payload);
-    }
-    Ok(plan)
+        let first = first.trim_end_matches('\r');
+        let start = first.len() - first.trim_start_matches([' ', '\t']).len();
+        let end = first.trim_end_matches([' ', '\t']).len();
+        (start..end, "", "")
+    };
+    let before = cut(raw, 0..title.start)?;
+    let after = raw.get(title.end..).ok_or(Error::Range)?;
+    let format_heading =
+        |spelling: &str| format!("{before}{opening_space}{spelling}{closing_space}{after}");
+    let spelling = heading_text(level, text, format_heading)?;
+    Ok(Plan {
+        bytes: r.lines.start + title.start..r.lines.start + title.end,
+        tokens: i..i + 1,
+        body: format!("{opening_space}{spelling}{closing_space}"),
+        expected: fragment(&format_heading(&spelling), r.token.depth, true)?,
+        gap: None,
+        list_end: false,
+    })
 }
 
 fn item_token(body: &str, d: usize) -> Result<Token, Error> {
@@ -633,8 +635,8 @@ fn apply<'a>(s: &str, changes: impl IntoIterator<Item = &'a Change>) -> Result<S
 }
 
 fn prepare(s: &str, edits: &[Edit]) -> Result<(String, Vec<Change>), Error> {
-    if s.replace("\r\n", "").contains('\r') {
-        return Err(Error::BareCr);
+    if has_bare_cr(s) {
+        return Err(Error::BareCrSource);
     }
     let doc = parse(s)?;
     let original = rows(s, &doc)?;
@@ -758,6 +760,9 @@ fn prepare(s: &str, edits: &[Edit]) -> Result<(String, Vec<Change>), Error> {
         });
     }
     let out = apply(&structural, &literals)?;
+    if has_bare_cr(&out) {
+        return Err(Error::BareCr);
+    }
     let after = rows(&out, &parse(&out)?)?;
     if shape.len() != after.len() {
         return Err(Error::Payload);

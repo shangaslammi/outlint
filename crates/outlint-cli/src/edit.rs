@@ -4,6 +4,7 @@ use crate::{
         parse_environment_format, parse_read_search_format, EnvironmentFormat,
         ReadSearchFormat as Format,
     },
+    diagnostics::{render_document_diagnostic, RenderedDiagnostic},
     render::{self, escape_compact, escape_human},
     schema_loading::{find_schema, read_and_load_schema},
 };
@@ -21,15 +22,41 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
-const HELP: &str =
-    "Usage: outlint edit FILE OP PATH [ARGS] [--payload TEXT|- | --payload-file FILE]
-       outlint edit FILE --script FILE|-
-Options: --schema FILE | --ignore-schema, --force, --dry-run, --format human|compact|json
-Operations: rename TITLE, delete, insert-section before|after|append-child TITLE,
-append-block, replace, insert-before, insert-after, append-item, insert-item INDEX.
-replace-text uses --old TEXT|- or --old-file FILE and --payload or --payload-file for new text.
-Scripts use anchored paths, double quotes, @file and <<SENTINEL payloads.
+const HELP: &str = "Usage: outlint edit [OPTIONS] FILE OP PATH [ARGS]
+       outlint edit [OPTIONS] FILE --script FILE|-
+
+Edit one Markdown file by document path. PATH is required. The leading $ may
+be omitted in a single command. Scripts require the leading $ and resolve all
+paths in the original document.
+
+Operations (shown with arguments after PATH):
+  rename TITLE                               Rename a section heading
+  delete                                     Delete a section, block or item
+  insert-section before|after|append-child TITLE
+                                             Insert a section with an optional preamble
+  append-block                               Add one block to a section's preamble
+  replace                                    Replace a block or item
+  insert-before | insert-after               Insert blocks next to a block
+  append-item | insert-item INDEX            Add an item to a list at a zero-based gap
+  replace-text                               Replace literal text within any target
+
+Payloads use --payload TEXT (or - for stdin) or --payload-file FILE.
+Item payloads omit the list marker. For replace-text, supply the old text
+with --old TEXT (or - for stdin) or --old-file FILE.
+The old text must have exactly one start position in the target's extent.
+Overlapping starts count.
+Scripts accept double-quoted text, @file and <<SENTINEL payloads.
+
+Options:
+  --schema FILE     Use FILE in place of the nearest discovered schema
+  --ignore-schema   Disable schema validation for this edit
+  --force           Allow and report new diagnostics
+  --dry-run         Preview a unified diff without writing
+  --format FORMAT   human, compact or json (default from OUTLINT_FORMAT)
+  -h, --help        Show this help
 ";
+const NEW_DIAGNOSTICS_ID: &str = "new-diagnostics";
+const NEW_DIAGNOSTICS_MESSAGE: &str = "the edit introduces schema diagnostics";
 type Failure = Box<dyn std::error::Error>;
 #[derive(Default)]
 struct Options {
@@ -81,9 +108,7 @@ fn options(args: &[String]) -> Result<Options, Failure> {
                     Input::Literal(v)
                 });
             }
-            s if s.starts_with("--") => {
-                return Err(format!("unknown or repeated option {s}").into())
-            }
+            s if s.starts_with('-') => return Err(format!("unknown or repeated option {s}").into()),
             _ => o.pos.push(arg.clone()),
         }
     }
@@ -99,14 +124,14 @@ pub(crate) fn run(args: &[String], env: &EnvironmentFormat) -> u8 {
     let mut fmt = Format::Human;
     let result = (|| {
         let mut o = options(args)?;
-        if o.pos.is_empty() {
-            return Err(HELP.into());
-        }
-        let file = o.pos.remove(0);
         fmt = match o.format {
             Some(f) => f,
             None => parse_environment_format(env)?,
         };
+        if o.pos.is_empty() {
+            return Err("expected a destination file (see outlint edit --help)".into());
+        }
+        let file = o.pos.remove(0);
         execute(&file, o, fmt)
     })();
     match result {
@@ -133,54 +158,77 @@ fn load(name: &str, base: &Path) -> io::Result<String> {
         fs::read_to_string(base.join(name))
     }
 }
-fn refusal(file: &str, fmt: Format, id: &str, mut details: Value, text: &str) -> u8 {
-    details["id"] = json!(id);
-    if fmt == Format::Json {
-        let out = render::edit_json(file, &[("error", details)], None);
-        if crate::write_stdout(&out) != 0 {
-            return 2;
-        }
-    } else {
-        crate::write_stderr(&format!("{id}\t{text}\n"));
+fn refusal(
+    file: &str,
+    fmt: Format,
+    id: &str,
+    message: &str,
+    mut details: Value,
+) -> Result<u8, Failure> {
+    if fmt != Format::Json {
+        return text_refusal(id, &escape(fmt, message));
     }
-    1
+    details["message"] = json!(message);
+    details["id"] = json!(id);
+    let out = render::edit_json(file, &[("error", details)], None);
+    Ok(if crate::write_stdout(&out) == 0 { 1 } else { 2 })
 }
+
+fn text_refusal(id: &str, detail: &str) -> Result<u8, Failure> {
+    writeln!(io::stderr().lock(), "{id}\t{detail}")?;
+    Ok(1)
+}
+
 fn execute(file: &str, o: Options, fmt: Format) -> Result<u8, Failure> {
     let target = Path::new(file);
-    if !fs::symlink_metadata(target)?.is_file() {
-        return Err("destination must be a regular file".into());
+    let metadata = fs::symlink_metadata(target)
+        .map_err(|e| format!("cannot inspect destination {file}: {e}"))?;
+    if !metadata.is_file() {
+        return Err(format!("destination {file} must be a regular file").into());
     }
-    let source = fs::read_to_string(target)?;
+    let source = fs::read_to_string(target)
+        .map_err(|e| format!("cannot read destination {file} as UTF-8: {e}"))?;
     let clean = source.strip_prefix('\u{feff}').unwrap_or(&source);
     let doc = parse_markdown(clean, Default::default())?;
     let cwd = Path::new(".");
     let mut base = cwd;
     let instructions = if let Some(script) = &o.script {
         if !o.pos.is_empty() || o.old.is_some() || o.new.is_some() {
-            return Err(HELP.into());
+            return Err(
+                "--script cannot be combined with a single operation or payload flags".into(),
+            );
         }
-        let s = load(script, cwd)?;
+        let s = load(script, cwd).map_err(|e| format!("cannot read script {script}: {e}"))?;
         if script != "-" {
             base = Path::new(script).parent().unwrap_or(cwd)
         }
         match parse_script(&s, script == "-") {
             Ok(v) => v,
-            Err(e) => {
-                return Ok(refusal(
+            Err(e) if fmt == Format::Json => {
+                return refusal(
                     file,
                     fmt,
                     "invalid-script",
-                    json!({"line":e.line,"column":e.column,"message":e.message}),
-                    &format!("{}:{} {}", e.line, e.column, e.message),
-                ))
+                    &e.message,
+                    json!({"line":e.line,"column":e.column}),
+                )
+            }
+            Err(e) => {
+                let detail = format!("{}:{} {}", e.line, e.column, escape(fmt, &e.message));
+                return text_refusal("invalid-script", &detail);
             }
         }
     } else {
         let [verb, path, args @ ..] = o.pos.as_slice() else {
-            return Err(HELP.into());
+            return Err("expected an operation and document path (see outlint edit --help)".into());
         };
         if (verb == "replace-text") != o.old.is_some() {
-            return Err(HELP.into());
+            return Err(if verb == "replace-text" {
+                "replace-text requires --old or --old-file"
+            } else {
+                "--old and --old-file are only valid for replace-text"
+            }
+            .into());
         }
         let inputs: Vec<_> = o.old.into_iter().chain(o.new).collect();
         if inputs.iter().filter(|i| matches!(i, Input::Stdin)).count() > 1 {
@@ -229,7 +277,9 @@ fn execute(file: &str, o: Options, fmt: Format) -> Result<u8, Failure> {
                 if cmd.line != 0 {
                     text = format!("line {}: {text}", cmd.line)
                 }
-                crate::write_stderr(&format!("{id}\t{text}"));
+                io::stderr()
+                    .lock()
+                    .write_all(format!("{id}\t{text}").as_bytes())?;
                 return Ok(1);
             }
         };
@@ -240,65 +290,102 @@ fn execute(file: &str, o: Options, fmt: Format) -> Result<u8, Failure> {
             .into_iter()
             .map(|i| match i {
                 Input::Literal(s) => Ok(s),
-                Input::File(name) => fs::read_to_string(base.join(name)),
-                Input::Stdin => load("-", base),
+                Input::File(name) => {
+                    let path = base.join(name);
+                    fs::read_to_string(&path)
+                        .map_err(|e| format!("cannot read payload {}: {e}", path.display()))
+                }
+                Input::Stdin => {
+                    load("-", base).map_err(|e| format!("cannot read payload from stdin: {e}"))
+                }
             })
-            .collect::<io::Result<Vec<_>>>()?;
-        let op = operation(&cmd.verb, &cmd.args, &inputs).ok_or(HELP)?;
+            .collect::<Result<Vec<_>, _>>()?;
+        let op = operation(&cmd.verb, &cmd.args, &inputs).ok_or_else(|| {
+            format!(
+                "invalid arguments for {} (see outlint edit --help)",
+                cmd.verb
+            )
+        })?;
         edits.push(Edit { path, op });
     }
     let c = match candidate(&source, &edits) {
         Ok(c) => c,
         Err(e) => {
-            let mut detail = json!({});
-            let id = match e {
-                Error::Payload | Error::BareCr => "invalid-payload",
-                Error::Target => "invalid-target",
-                Error::ConflictingEdits => "conflicting-edits",
-                Error::TextNotFound => "text-not-found",
-                Error::TextAmbiguous(n) => {
-                    detail["count"] = json!(n);
-                    "ambiguous-text"
+            let (id, message, detail) = match e {
+                Error::Payload => (
+                    "invalid-payload",
+                    "the payload or resulting Markdown does not have the required structure".into(),
+                    json!({}),
+                ),
+                Error::BareCr => (
+                    "invalid-payload",
+                    "the payload or candidate contains a carriage return without a following line feed"
+                        .into(),
+                    json!({}),
+                ),
+                Error::Target => (
+                    "invalid-target",
+                    "the selected node or position does not support the requested operation".into(),
+                    json!({}),
+                ),
+                Error::ConflictingEdits => (
+                    "conflicting-edits",
+                    "the operations edit overlapping source spans".into(),
+                    json!({}),
+                ),
+                Error::TextNotFound(path) => (
+                    "text-not-found",
+                    format!("old text does not occur in `{path}`"),
+                    json!({}),
+                ),
+                Error::TextAmbiguous(path, count) => (
+                    "ambiguous-text",
+                    format!("old text occurs {count} times in `{path}`"),
+                    json!({"count": count}),
+                ),
+                Error::BareCrSource => {
+                    let message = "contains a carriage return without a following line feed";
+                    return Err(format!("destination {file} {message}").into());
                 }
-                _ => return Err(format!("edit computation failed: {e:?}").into()),
+                Error::Path(error) => return Err(error.to_string().into()),
+                Error::Range => {
+                    return Err(
+                        "cannot compute the edit because Markdown parsing or source ranges were inconsistent".into(),
+                    )
+                }
             };
-            return Ok(refusal(file, fmt, id, detail, &format!("{e:?}")));
+            return refusal(file, fmt, id, &message, detail);
         }
     };
     let mut diagnostics = vec![];
     if let Some(loaded) = loaded {
         for d in c.introduced_diagnostics(&loaded.schema)? {
-            diagnostics.push(render::json::diagnostic_json(
-                &crate::diagnostics::render_document_diagnostic(file, &d, &loaded),
-            ));
+            diagnostics.push(render_document_diagnostic(file, &d, &loaded));
         }
     }
-    if !diagnostics.is_empty() {
-        let summary = diagnostics
-            .iter()
-            .map(|d| {
-                format!(
-                    "{}:{} {} {}",
-                    escape(fmt, file),
-                    d["line"],
-                    d["id"].as_str().unwrap_or(""),
-                    escape(fmt, d["message"].as_str().unwrap_or(""))
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+    if !diagnostics.is_empty() && fmt != Format::Json {
+        let mut stderr = io::stderr().lock();
         if !o.force {
-            return Ok(refusal(
+            writeln!(stderr, "{NEW_DIAGNOSTICS_ID}\t{NEW_DIAGNOSTICS_MESSAGE}")?;
+        }
+        for d in &diagnostics {
+            writeln!(stderr, "{}", candidate_diagnostic_text(d, fmt))?;
+        }
+    }
+    if !diagnostics.is_empty() && !o.force {
+        if fmt == Format::Json {
+            return refusal(
                 file,
                 fmt,
-                "new-diagnostics",
-                json!({"diagnostics":diagnostics}),
-                &summary,
-            ));
+                NEW_DIAGNOSTICS_ID,
+                NEW_DIAGNOSTICS_MESSAGE,
+                json!({
+                    "diagnostic_source": "candidate",
+                    "diagnostics": diagnostic_values(&diagnostics),
+                }),
+            );
         }
-        if fmt != Format::Json {
-            crate::write_stderr(&format!("{summary}\n"))
-        }
+        return Ok(1);
     }
     let changed = source != c.text();
     let result = if changed { "changed" } else { "unchanged" };
@@ -319,21 +406,24 @@ fn execute(file: &str, o: Options, fmt: Format) -> Result<u8, Failure> {
     if changed && !o.dry {
         let mut temp = NamedTempFile::new_in(target.parent().unwrap_or(cwd))?;
         temp.write_all(c.text().as_bytes())?;
-        temp.as_file()
-            .set_permissions(fs::metadata(target)?.permissions())?;
-        temp.persist(target)?;
+        temp.as_file().set_permissions(metadata.permissions())?;
+        temp.into_temp_path().persist(target)?;
     }
     let out = if fmt == Format::Json {
         let mut fields = vec![
             ("result", json!(result)),
             ("paths", json!(paths)),
-            ("schema", json!(schema)),
+            (
+                "schema",
+                json!(schema.as_deref().map(Path::to_string_lossy)),
+            ),
         ];
         if let Some(p) = preview {
             fields.push(("diff", json!(p)))
         }
         if !diagnostics.is_empty() {
-            fields.push(("diagnostics", json!(diagnostics)))
+            fields.push(("diagnostic_source", json!("candidate")));
+            fields.push(("diagnostics", json!(diagnostic_values(&diagnostics))));
         }
         render::edit_json(file, &fields, None)
     } else if let Some(p) = preview {
@@ -346,6 +436,24 @@ fn execute(file: &str, o: Options, fmt: Format) -> Result<u8, Failure> {
         )
     };
     Ok(crate::write_stdout(&out))
+}
+
+fn candidate_diagnostic_text(d: &RenderedDiagnostic, fmt: Format) -> String {
+    let file = escape(fmt, &d.source_path);
+    let message = escape(fmt, &d.message);
+    let (line, column, id) = (d.line, d.column, &d.id);
+    if fmt == Format::Compact {
+        format!("candidate\t{file}\t{line}\t{column}\t{id}\t{message}")
+    } else {
+        format!("{file}:{line}:{column} (candidate) {id} {message}")
+    }
+}
+
+fn diagnostic_values(diagnostics: &[RenderedDiagnostic]) -> Vec<Value> {
+    diagnostics
+        .iter()
+        .map(render::json::diagnostic_json)
+        .collect()
 }
 // A single contiguous change with up to three equal context lines on each side.
 fn diff(file: &str, a: &str, b: &str) -> String {

@@ -395,14 +395,14 @@ language, and the diagnostics are what the specification defines and what
 the stability promises below cover. Extensions are optional commands layered
 on the validator's document model. They are experimental, outside those
 promises, shipped only in the full edition and behind Cargo features of the
-`outlint` crate, and the set is expected to grow. Two exist today.
+`outlint` crate, and the set is expected to grow.
 
-Both are aimed at people and AI agents working in large Markdown corpora:
-find the one block that matters, then fetch exactly that section by address
-instead of reading whole files. An agent can locate a paragraph in a 164 kB
-specification and read 249 bytes. Both share `--format human|json|compact`;
-the `OUTLINT_FORMAT` environment variable sets the default, so an agent
-harness can export `OUTLINT_FORMAT=compact` once.
+The commands let people and AI agents find, read, and edit a specific
+part of a Markdown document by address. An agent can locate a paragraph
+in a 164 kB specification and read 249 bytes. All three share
+`--format human|json|compact`. The `OUTLINT_FORMAT` environment variable
+sets the default, so an agent harness can export `OUTLINT_FORMAT=compact`
+once.
 
 ### search
 
@@ -509,11 +509,31 @@ outlint read --format json adr/0008-use-postgres.md .considered-options
 ```
 
 A path that does not resolve exits `1` and lists the sections that are
-available, so the next attempt can be exact. The experimental extensions have
-their own [search](spec/search-spec.md) and [read](spec/read-spec.md)
-specifications and share [provisional document paths](spec/document-path-spec.md).
-They remain outside the validator's specification and stability promises;
-their output envelopes are version `1` and may change before 1.0.
+available, so the next attempt can be exact.
+
+### edit
+
+`outlint edit <FILE> <OP> <MDPATH>` previews or applies a Markdown edit
+using a document path from `read` or `search`. It can rename, insert, and
+delete sections, edit preamble blocks and list items, or replace a unique
+literal within the selected source extent. Use `--dry-run` to review a
+unified diff before applying it:
+
+```sh
+outlint edit guide.md append-item '$.setup/list[0]' --payload 'Run **outlint check**.' --dry-run
+```
+
+`--script FILE` batches edits against the original document and applies
+them together. Edit discovers the nearest schema as `check` does and
+refuses new diagnostics. Use `--schema FILE` to select a schema,
+`--force` to allow and report new diagnostics, or `--ignore-schema` to
+edit without a schema gate. Diagnostic locations from the gate refer to
+the proposed text.
+
+The [search](spec/search-spec.md), [read](spec/read-spec.md), and
+[edit](spec/edit-spec.md) specifications share
+[provisional document paths](spec/document-path-spec.md).
+Each extension has its own version-`1` JSON envelope.
 
 ## CI and automation
 

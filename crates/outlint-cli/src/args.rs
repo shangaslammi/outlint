@@ -13,7 +13,9 @@ Commands:
 "
     .to_owned();
     #[cfg(feature = "edit")]
-    help.push_str("  edit           Splice Markdown by document path (prototype)\n");
+    help.push_str(
+        "  edit           Preview or apply Markdown edits by document path (experimental)\n",
+    );
     #[cfg(feature = "search")]
     help.push_str("  search         Search Markdown blocks by keyword\n");
     #[cfg(feature = "read")]

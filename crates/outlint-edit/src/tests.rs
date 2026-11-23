@@ -290,6 +290,10 @@ fn section_spelling_and_transparency() {
         "New\n=====\n"
     );
     assert_eq!(
+        one("  Title  \r\n=====\r\n", "$", Op::Rename("*new*".into())),
+        "  \\*new\\*  \r\n=====\r\n"
+    );
+    assert_eq!(
         one(
             "# T\n\n<!-- keep -->\n\n## C",
             "$",
@@ -332,6 +336,14 @@ fn release_list_gap_and_fenced_bodies() {
         );
     }
     assert_eq!(
+        one(
+            "~~~old\na\n~~~\n",
+            "$/code",
+            Op::Replace("```new\nx\n```\n\n".into())
+        ),
+        "```new\nx\n```\n"
+    );
+    assert_eq!(
         one("- old", "$/list", Op::Replace("paragraph\n\n- new".into())),
         "paragraph\n\n- new"
     );
@@ -363,20 +375,31 @@ fn gate_matches_surviving_anchors_once() {
             .unwrap()
             .is_empty()
     );
+    let bad = "# Bad\n";
+    let c = candidate(
+        bad,
+        &[
+            op("$", Op::ReplaceText("# Bad".into(), "# Bad".into())),
+            op("$", Op::AppendBlock("New paragraph.".into())),
+        ],
+    )
+    .unwrap();
+    assert_ne!(c.text(), bad);
+    assert!(c.introduced_diagnostics(&schema).unwrap().is_empty());
 }
 #[test]
 fn literal_scope_and_structural_verification() {
     let s = "# A\r\n\r\nold\r\n\r\n## B\r\n\r\nold\r\n";
     assert_eq!(
         edit(s, &[op("$", Op::ReplaceText("old".into(), "x".into()))]),
-        Err(Error::TextAmbiguous(2))
+        Err(Error::TextAmbiguous(DocumentPath::root(), 2))
     );
     assert_eq!(
         edit(
             s,
             &[op("$.b", Op::ReplaceText("absent".into(), "x".into()))]
         ),
-        Err(Error::TextNotFound)
+        Err(Error::TextNotFound(DocumentPath::parse("$.b").unwrap()))
     );
     assert_eq!(
         one(s, "$.b/p", Op::ReplaceText("old".into(), "x\ny".into())),
@@ -385,6 +408,13 @@ fn literal_scope_and_structural_verification() {
     assert_eq!(
         edit(s, &[op("$.b", Op::ReplaceText("old".into(), "# H".into()))]),
         Err(Error::Payload)
+    );
+    assert_eq!(
+        edit(
+            "old\r\n",
+            &[op("$", Op::ReplaceText("\n".into(), "".into()))]
+        ),
+        Err(Error::BareCr)
     );
 }
 
@@ -406,7 +436,7 @@ fn disjoint_literal_and_rename_share_a_heading() {
             "ababa",
             &[op("$", Op::ReplaceText("aba".into(), "x".into()))]
         ),
-        Err(Error::TextAmbiguous(2))
+        Err(Error::TextAmbiguous(DocumentPath::root(), 2))
     );
 }
 

@@ -9,8 +9,9 @@ expect breaking changes before 1.0.
     crates/outlint-core    schema model, schema loader, validator (library)
     crates/outlint-cli     the `outlint` binary
     crates/outlint-search  indexing for the experimental search extension
+    crates/outlint-edit    pure Markdown editing and schema gating
     spec/outlint-spec.md   the specification (normative)
-    spec/*-spec.md         search and read (experimental extensions),
+    spec/*-spec.md         search, read, and edit (experimental extensions),
                            document paths (provisional)
     testdata/              conformance corpus, shared by all implementations
     npm/outlint/           npm distribution packaging
@@ -50,6 +51,10 @@ invariant failure; ordinary CommonMark recovery remains successful.
 `matcher.rs` and `case_fold.rs` are private helpers. The provisional
 `document_read/` API selects content and lists typed document-path rows,
 including failure context and suggestions, without IO or presentation labels.
+The optional `outlint-edit` crate plans Markdown edits against concrete
+document paths, verifies the resulting structure, and compares schema
+diagnostics. The CLI loads payloads and schemas and handles preview and
+atomic file replacement.
 
 Preamble blocks and direct list items extend the parsed tree without changing
 schema version 1 or JSON envelope version 2. `Document` and `Section` own
@@ -97,10 +102,10 @@ JSON output is the full diagnostic shape; the conformance corpus's
 `expected.json` records only portable `{id, target}` entries. The two
 diverge deliberately — do not "align" them.
 
-Experimental `search` and `read` subcommands are optional, behind Cargo
-features and shipped only in the full edition. Their contracts are in
-`spec/search-spec.md` and `spec/read-spec.md`, outside the validator's
-specification and stability promises.
+Experimental `search`, `read`, and `edit` subcommands are optional, behind
+Cargo features and shipped only in the full edition. Their contracts are in
+`spec/search-spec.md`, `spec/read-spec.md`, and `spec/edit-spec.md`, outside
+the validator's specification and stability promises.
 
 MSRV is declared: `rust-version = "1.88"` in `[workspace.package]`, with
 pinned CI jobs testing both check-only and full-feature builds on it.
@@ -125,8 +130,8 @@ Absent by design, do not add speculatively:
   documented npm bootstrap from acquiring and caching the released native
   binary before validation begins.
 - Unsupported syntax has no semantics: correspondence/selection,
-  paragraph/lead text, link definitions, editing/concrete edit paths, task
-  state, matchable quote/code/HTML/break/table predicates and GFM tables,
+  paragraph/lead text, link-definition nodes, task state, matchable
+  quote/code/HTML/break/table predicates and GFM tables,
   nested item/cell validation, item captures/order, content/item
   guards/extras/unordered scopes/phases/constraints, meaningful-item
   predicates, equal/subset value selection, sequence contiguity, capture
@@ -235,8 +240,8 @@ this size.
 The core linter (`outlint check`, `outlint schema check`, and `outlint-core`)
 uses no Cargo features and must remain buildable and testable without any.
 Additional functionality layered on linting is opt-in on the `outlint` CLI
-crate: currently `search`, `read`, and their `full` shorthand. Build and test
-that functionality with `--all-features` or `--features full`.
+crate: currently `search`, `read`, `edit`, and their `full` shorthand. Build
+and test that functionality with `--all-features` or `--features full`.
 
 ## Tests
 
@@ -276,7 +281,7 @@ it locally only when touching dependencies. If a check here starts catching
 things CI misses, add it to CI.
 
 The featureless commands above protect the core-linter contract; the explicit
-full-feature commands cover the optional search and read functionality.
+full-feature commands cover the optional search, read, and edit functionality.
 
 If a change touches release packaging, keep `npm/outlint/package.json`
 `version` and `dist/full/dist.toml` package `version` in sync with

@@ -140,6 +140,13 @@ pub(crate) fn edit_json(
             object.member("error", |out| {
                 json::write_ordered_json_object(out, |error| {
                     error.value("id", &json!(id));
+                    if matches!(
+                        failure,
+                        outlint_core::DocumentReadFailure::Unresolved { .. }
+                            | outlint_core::DocumentReadFailure::Ambiguous { .. }
+                    ) {
+                        error.value("message", &json!(failure.to_string()));
+                    }
                     if line > 0 {
                         error.value("line", &json!(line))
                     }

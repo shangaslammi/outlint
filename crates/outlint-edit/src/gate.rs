@@ -11,7 +11,9 @@ pub struct Candidate<'a> {
 /// Plan once so preview, validation and writing use the same bytes.
 pub fn candidate<'a>(source: &'a str, edits: &[Edit]) -> Result<Candidate<'a>, Error> {
     let clean = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let (mut text, changes) = prepare(clean, edits)?;
+    let (mut text, mut changes) = prepare(clean, edits)?;
+    // A byte-identical replacement leaves any diagnostic anchor inside it in place.
+    changes.retain(|change| clean.get(change.range.clone()) != Some(&change.replacement));
     if clean.len() != source.len() {
         text.insert(0, '\u{feff}')
     }
@@ -44,7 +46,11 @@ impl Candidate<'_> {
             Ok::<_, String>((v.validate(&doc).map_err(|e| e.to_string())?, doc))
         };
         let (mut before, old_doc) = validate(self.original)?;
-        let (after, new_doc) = validate(self.text.strip_prefix('\u{feff}').unwrap_or(&self.text))?;
+        let edited = self.text.strip_prefix('\u{feff}').unwrap_or(&self.text);
+        if edited == self.original {
+            return Ok(Vec::new());
+        }
+        let (after, new_doc) = validate(edited)?;
         let list_owners = |doc: &Document| {
             let mut owners = BTreeMap::new();
             for (_, node) in document_paths(doc) {
