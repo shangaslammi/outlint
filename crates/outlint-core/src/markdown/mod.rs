@@ -9,6 +9,7 @@ mod error;
 pub use error::MarkdownParseError;
 mod frontmatter;
 mod lines;
+pub use lines::markdown_line_ending;
 mod model;
 
 #[cfg(test)]
@@ -18,7 +19,7 @@ pub use model::{
     Block, BlockKind, BlockLocation, Document, DocumentFrontmatter, FrontmatterAnchor,
     FrontmatterAnchors, FrontmatterLocation, Heading, HeadingLocation, ItemLocation, ItemText,
     LeafBlock, ListBlock, ListItem, ListKind, MarkdownOptions, Preamble, Section,
-    SuppressedDiagnostic, Suppressions,
+    SuppressedDiagnostic, SuppressionDirective, Suppressions,
 };
 
 use body::ParsedBody;
@@ -64,6 +65,7 @@ pub fn parse_markdown(
         preamble,
         sections,
         file_suppressions,
+        suppression_directives,
     } = body::parse(source, &parser_source, options, &line_index)?;
 
     Ok(Document {
@@ -71,5 +73,6 @@ pub fn parse_markdown(
         preamble,
         sections,
         file_suppressions,
+        suppression_directives,
     })
 }

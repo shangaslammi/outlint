@@ -910,7 +910,7 @@ impl<'a> Validator<'a> {
             let ordinal = *ordinals
                 .get(block_index)
                 .ok_or(RunError::InconsistentPlan)?;
-            let kind = block_kind_label(super::content::block_kind(block));
+            let kind = block_kind_label(block.kind());
             self.emit_block(
                 if misplaced {
                     DiagnosticId::MisplacedBlock
@@ -1896,7 +1896,7 @@ impl<'a> Validator<'a> {
                 id,
                 target: DiagnosticTarget::Block {
                     parent,
-                    block: super::content::block_kind(block),
+                    block: block.kind(),
                     index,
                 },
                 location,
@@ -2151,14 +2151,15 @@ fn item_location(location: &ItemLocation) -> DiagnosticLocation {
 }
 
 fn block_metadata(block: &Block) -> (DiagnosticLocation, &Suppressions) {
-    match block {
-        Block::Paragraph(block)
-        | Block::Quote(block)
-        | Block::Code(block)
-        | Block::Html(block)
-        | Block::Break(block) => (block_location(&block.location), &block.suppressions),
-        Block::List(block) => (block_location(&block.location), &block.suppressions),
-    }
+    let location = match block {
+        Block::Paragraph(leaf)
+        | Block::Quote(leaf)
+        | Block::Code(leaf)
+        | Block::Html(leaf)
+        | Block::Break(leaf) => &leaf.location,
+        Block::List(list) => &list.location,
+    };
+    (block_location(location), block.suppressions())
 }
 
 fn appended_path(parent: &HeaderPath, child: &str) -> HeaderPath {

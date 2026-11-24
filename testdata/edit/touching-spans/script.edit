@@ -1,0 +1,7 @@
+replace $/quote "replacement"
+insert-before $/quote <<TEXT
+
+
+first
+TEXT
+insert-after $/p "second"

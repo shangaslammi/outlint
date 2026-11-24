@@ -22,8 +22,8 @@ pub use document_path::{
     HeadingSlug, SectionStep,
 };
 pub use document_read::{
-    document_content, document_tree, DocumentContent, DocumentReadFailure, DocumentTree,
-    DocumentTreeNode, DocumentTreeRow,
+    document_content, document_tree, resolve_document_target, DocumentContent, DocumentReadFailure,
+    DocumentTree, DocumentTreeNode, DocumentTreeRow,
 };
 pub use load_result::{
     ByteOffset, CapturePath, ConstraintIndex, ConstraintPath, ContentOwner, ContentRuleIndex,
@@ -39,10 +39,11 @@ pub use loader::{
     load_schema_with_label, load_schema_with_resources,
 };
 pub use markdown::{
-    parse_markdown, Block, BlockKind, BlockLocation, Document, DocumentFrontmatter,
-    FrontmatterAnchor, FrontmatterAnchors, FrontmatterLocation, Heading, HeadingLocation,
-    ItemLocation, ItemText, LeafBlock, ListBlock, ListItem, ListKind, MarkdownOptions,
-    MarkdownParseError, Preamble, Section, SuppressedDiagnostic, Suppressions,
+    markdown_line_ending, parse_markdown, Block, BlockKind, BlockLocation, Document,
+    DocumentFrontmatter, FrontmatterAnchor, FrontmatterAnchors, FrontmatterLocation, Heading,
+    HeadingLocation, ItemLocation, ItemText, LeafBlock, ListBlock, ListItem, ListKind,
+    MarkdownOptions, MarkdownParseError, Preamble, Section, SuppressedDiagnostic,
+    SuppressionDirective, Suppressions,
 };
 pub use schema::{
     AtLeastTwo, BlockMatcher, BoundRuleStep, CanonicalFloat, CanonicalInteger, CaptureName,

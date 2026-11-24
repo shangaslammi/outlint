@@ -3,7 +3,7 @@
 Status: Normative public specification. Document paths are provisional;
 they currently serve the experimental extensions and may change in a minor
 release before 1.0. Document paths are provided by `outlint-core`; the CLI
-consumers are optional (`read` and `search` features).
+consumers are optional (`read`, `search`, and `edit` features).
 Normative keywords MUST / MUST NOT / SHOULD / MAY per RFC 2119.
 
 Sections 1 through 6 are normative. Section 7 is a non-normative example.
@@ -19,10 +19,10 @@ not address schema rules or use the schema-reference language of that
 specification's §4. Nested blocks and item contents have no separate paths.
 
 1.2. Parsing options determine the input tree and heading text. The CLI's
-`read` and `search` commands MUST use the default Markdown parsing options
-described in the schema specification §7. Heading markup is therefore
-stripped as described in its §1.3. Matching case folding is not an additional
-step in document-path generation.
+`read`, `search`, and `edit` commands MUST use the default Markdown
+parsing options described in the schema specification §7 for document
+paths. Heading markup is therefore stripped as described in its §1.3.
+Matching case folding is not an additional step in document-path generation.
 
 ## 2. Input grammar
 
@@ -51,8 +51,9 @@ terminal may be followed by an item segment.
 
 2.3. An omitted block, list, or item ordinal MUST mean index zero, even
 when several nodes of that kind exist. An omitted named-section ordinal
-instead requires a unique match (§4). The core parser requires `$`;
-`read` additionally accepts the abbreviation defined in [read §1](read-spec.md#1-command-line).
+instead requires a unique match (§4). The core parser requires `$`.
+`read` accepts the abbreviation defined in [read §1](read-spec.md#1-command-line),
+as does `edit` in [single-operation mode](edit-spec.md#1-command-line).
 
 ## 3. Heading slugs
 

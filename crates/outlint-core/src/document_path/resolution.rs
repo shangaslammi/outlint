@@ -149,17 +149,6 @@ pub fn merged_title(document: &Document) -> Option<&Section> {
     }
 }
 
-pub(super) fn block_kind(block: &Block) -> BlockKind {
-    match block {
-        Block::Paragraph(_) => BlockKind::Paragraph,
-        Block::List(_) => BlockKind::List,
-        Block::Quote(_) => BlockKind::Quote,
-        Block::Code(_) => BlockKind::Code,
-        Block::Html(_) => BlockKind::Html,
-        Block::Break(_) => BlockKind::Break,
-    }
-}
-
 /// The node whose child sections and preamble the next step is applied to.
 pub(super) enum Parent<'d> {
     /// The root, together with the H1 merged into it when there is one.
@@ -283,5 +272,5 @@ fn select_block<'d>(
     kind: BlockKind,
     index: usize,
 ) -> Option<&'d Block> {
-    blocks.filter(|block| block_kind(block) == kind).nth(index)
+    blocks.filter(|block| block.kind() == kind).nth(index)
 }

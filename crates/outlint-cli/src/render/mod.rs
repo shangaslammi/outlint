@@ -1,21 +1,21 @@
 //! Output rendering: dispatch between the human and JSON formats.
 
 mod human;
-mod json;
-#[cfg(feature = "read")]
+pub(crate) mod json;
+#[cfg(any(feature = "read", feature = "edit"))]
 pub(crate) mod read;
 #[cfg(feature = "search")]
 pub(crate) mod search;
 
 use crate::{args::ValidationFormat, diagnostics::ValidationResult};
 
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 const KILOBYTE: u64 = 1_000;
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 const MEGABYTE: u64 = 1_000_000;
 
 /// Formats a byte count consistently across search and read presentations.
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 pub(crate) fn format_bytes(bytes: u64) -> String {
     let tenths = |unit: u64| bytes.saturating_add(unit / 20) / (unit / 10);
     if bytes < KILOBYTE {
@@ -91,7 +91,7 @@ fn escape_human_quoted(value: &str) -> String {
 /// Escapes a compact-format field without introducing tabs, line endings, or
 /// invisible control characters. Backslashes are doubled so escapes remain
 /// reversible.
-#[cfg(any(feature = "search", feature = "read"))]
+#[cfg(any(feature = "search", feature = "read", feature = "edit"))]
 pub(crate) fn escape_compact(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -121,7 +121,44 @@ pub(crate) fn render(
     }
 }
 
-#[cfg(all(test, any(feature = "search", feature = "read")))]
+/// Versioned edit response. Read and edit serialize the same selector-recovery fields.
+#[cfg(feature = "edit")]
+pub(crate) fn edit_json(
+    file: &str,
+    fields: &[(&str, serde_json::Value)],
+    failure: Option<(&outlint_core::DocumentReadFailure, &str, Option<usize>)>,
+) -> String {
+    use serde_json::json;
+    let mut out = Vec::new();
+    json::write_ordered_json_object(&mut out, |object| {
+        object.value("version", &json!(1));
+        object.value("file", &json!(file));
+        for (name, value) in fields {
+            object.value(name, value)
+        }
+        if let Some((failure, id, line)) = failure {
+            object.member("error", |out| {
+                json::write_ordered_json_object(out, |error| {
+                    error.value("id", &json!(id));
+                    if matches!(
+                        failure,
+                        outlint_core::DocumentReadFailure::Unresolved { .. }
+                            | outlint_core::DocumentReadFailure::Ambiguous { .. }
+                    ) {
+                        error.value("message", &json!(failure.to_string()));
+                    }
+                    if let Some(line) = line {
+                        error.value("line", &json!(line))
+                    }
+                    read::write_failure_members(error, failure)
+                })
+            });
+        }
+    });
+    json::finish_json_line(out)
+}
+
+#[cfg(all(test, any(feature = "search", feature = "read", feature = "edit")))]
 mod tests {
     use super::{escape_compact, format_bytes};
 

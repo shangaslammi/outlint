@@ -79,12 +79,13 @@ cargo build --workspace
 cargo run -p outlint -- check README.md --schema path/to/schema.outlint.yml
 ```
 
-The workspace has three crates:
+The workspace has four crates:
 
 - `crates/outlint-core` — schema model, loader, Markdown outline parser, and
   validator. A pure library: no filesystem, no environment, no printing.
 - `crates/outlint-cli` — the `outlint` binary. The IO shell: reads argv, reads
   files, calls core, formats output, picks the exit code.
+- `crates/outlint-edit` — pure document-path editing and script parsing.
 - `crates/outlint-search` — Markdown search and its local index, used by the
   CLI's optional `search` feature.
 
@@ -226,6 +227,16 @@ Review priority is correctness against the specification first, then API
 design, then maintainability. Cite the specification section a behavior claim
 rests on. Passing tests are necessary, not sufficient — the corpus has to
 actually cover the new behavior.
+
+## Crate releases
+
+In a clean Cargo home, run `cargo fetch --locked` and then verify all crates
+together with `cargo package --locked --offline --workspace --features outlint/full`.
+The clean cache lets Cargo use the staged workspace packages even when the
+registry already has a dependency with the workspace version.
+Publish `outlint-core` first, then `outlint-edit` and `outlint-search`, and
+finally `outlint`. The CLI's optional dependencies use the same workspace
+version even when publishing the check-only build.
 
 ## License
 

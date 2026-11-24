@@ -1,0 +1,2 @@
+delete $/p[1]
+insert-after $/p[1] "x"

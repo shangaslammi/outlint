@@ -872,8 +872,11 @@ name = "outlint"
 version = "0.2.0"
 dependencies = [
  "outlint-core",
+ "outlint-edit",
  "outlint-search",
  "serde_json",
+ "tempfile",
+ "winapi-util",
 ]
 
 [[package]]
@@ -893,6 +896,14 @@ dependencies = [
  "serde_json",
  "serde_json_path",
  "unicode-normalization",
+]
+
+[[package]]
+name = "outlint-edit"
+version = "0.2.0"
+dependencies = [
+ "outlint-core",
+ "proptest",
 ]
 
 [[package]]

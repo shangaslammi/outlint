@@ -1,0 +1,2 @@
+delete $/p[1]
+delete $/p[2]

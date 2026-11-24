@@ -1,0 +1,2 @@
+replace $/list "- new"
+insert-item $/list 0 "x"

@@ -196,6 +196,15 @@ pub(super) fn normalize_bare_cr(source: &str) -> Cow<'_, str> {
     )
 }
 
+/// The line ending `source` uses: `\r\n` when its first `\n` is preceded by
+/// `\r`, else `\n` (also for a source without any newline).
+pub fn markdown_line_ending(source: &str) -> &'static str {
+    match source.find('\n') {
+        Some(index) if source.get(..index).is_some_and(|head| head.ends_with('\r')) => "\r\n",
+        _ => "\n",
+    }
+}
+
 #[cfg(test)]
 mod failure_tests {
     use super::*;

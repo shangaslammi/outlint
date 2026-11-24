@@ -229,6 +229,18 @@ fn decode_utf8(mut bytes: Vec<u8>) -> Result<String, String> {
 }
 
 pub(crate) fn discover_schema(document: &Path) -> Result<PathBuf, String> {
+    find_schema(document)?.ok_or_else(|| {
+        let specific = document
+            .file_stem()
+            .map(|stem| format!("{}.outlint.yml or ", stem.to_string_lossy()))
+            .unwrap_or_default();
+        format!(
+            "no {specific}.outlint.yml found for Markdown input '{}'",
+            path_display(document)
+        )
+    })
+}
+pub(crate) fn find_schema(document: &Path) -> Result<Option<PathBuf>, String> {
     let absolute = if document.is_absolute() {
         document.to_path_buf()
     } else {
@@ -253,7 +265,7 @@ pub(crate) fn discover_schema(document: &Path) -> Result<PathBuf, String> {
             // Only a regular file participates (spec section 11.2): a
             // directory named like a schema is skipped as if absent.
             match std::fs::metadata(&candidate) {
-                Ok(metadata) if metadata.is_file() => return Ok(candidate),
+                Ok(metadata) if metadata.is_file() => return Ok(Some(candidate)),
                 Ok(_) => {}
                 Err(error)
                     if matches!(
@@ -270,15 +282,7 @@ pub(crate) fn discover_schema(document: &Path) -> Result<PathBuf, String> {
         }
         directory = candidate_directory.parent();
     }
-    let expected = names
-        .iter()
-        .map(|name| name.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(" or ");
-    Err(format!(
-        "no {expected} found for Markdown input '{}'",
-        path_display(document)
-    ))
+    Ok(None)
 }
 
 pub(crate) fn display_path(path: &Path) -> String {

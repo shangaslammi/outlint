@@ -60,6 +60,25 @@ pub fn document_tree(
         .map_err(|error| Box::new(describe_error(&error, source, document)))
 }
 
+/// Resolves a selector with read's recovery context and returns its canonical
+/// spelling along with the resolved node.
+/// The source must be BOM-stripped and correspond to that snapshot.
+/// This API is provisional and may change in a minor release before 1.0.
+pub fn resolve_document_target<'d>(
+    source: &str,
+    document: &'d Document,
+    spelling: &str,
+) -> Result<(CanonicalDocumentPath, DocumentNode<'d>), Box<DocumentReadFailure>> {
+    let result = (|| {
+        let path = parse_path(spelling)?;
+        let node = resolve_node(document, &path)?;
+        let entries = document_paths(document);
+        let canonical = canonical_path(&entries, node).ok_or_else(|| missing_canonical(&path))?;
+        Ok((canonical.clone(), node))
+    })();
+    result.map_err(|error| Box::new(describe_error(&error, source, document)))
+}
+
 /// Why a document path could not be read; enriched by [`describe_error`]
 /// before presentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +153,7 @@ fn render_content(
         }
         _ => slices.push(extent_slice(source, node)),
     }
-    Ok(join_slices(&slices, line_ending(source)))
+    Ok(join_slices(&slices, crate::markdown_line_ending(source)))
 }
 
 fn build_content(
@@ -212,15 +231,6 @@ fn join_slices(slices: &[&str], ending: &str) -> String {
         output.push_str(ending);
     }
     output
-}
-
-/// The line ending `source` uses: `\r\n` when its first `\n` is preceded by
-/// `\r`, else `\n` (also for a source without any newline).
-fn line_ending(source: &str) -> &'static str {
-    match source.find('\n') {
-        Some(index) if source.get(..index).is_some_and(|head| head.ends_with('\r')) => "\r\n",
-        _ => "\n",
-    }
 }
 
 /// Strips every complete trailing line ending, of either kind, from `text`.

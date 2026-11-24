@@ -612,12 +612,15 @@ proptest! {
     ) {
         let paragraph = format!("é{paragraph_tail}");
         let item = format!("界{item_tail}");
+        let directive = "<!-- outlint-disable unexpected-block -->";
         let source = format!(
-            "---\r\nname: 界\r---\n\n<!-- transparent -->\r{}{paragraph}\r\n\r  > quote 界\n\r\n   12. {item}\r\r# 標題\r\nsetext é\r---\r\n",
-            " ".repeat(indent),
+            "---\r\nname: 界\r---\n\n<!-- transparent -->\r{pad}{directive} \t\r{pad}{paragraph}\r\n\r  > quote 界\n\r\n   12. {item}\r\r# 標題\r\nsetext é\r---\r\n",
+            pad = " ".repeat(indent),
         );
         let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let root = document.preamble.as_slice();
+        prop_assert!(matches!(document.suppression_directives.as_slice(), [d] if d.standalone && !d.file_wide));
+        prop_assert!(root.first().is_some_and(|block| block.suppressions().contains("unexpected-block")));
         prop_assert_eq!(
             root.iter().map(block_kind).collect::<Vec<_>>(),
             [
@@ -890,4 +893,43 @@ fn arbitrary_frontmatter_documents_reach_textless_entries() {
         required >= SAMPLES,
         "only {required} written entries were required to keep an anchor"
     );
+}
+
+proptest! {
+    #[test]
+    fn atx_title_range_agrees_with_parsed_source_text(
+        indent in 0usize..4,
+        level in 1usize..7,
+        title in "[a-zé界]{1,12}",
+        closing_gap in prop_oneof![Just(" "), Just("\t"), Just("\t ")],
+        closing_hashes in 1usize..8,
+        ending in prop_oneof![Just("\n"), Just("\r\n"), Just("\r")],
+    ) {
+        let hashes = "#".repeat(closing_hashes);
+        let line = format!("{}{}  {title}{closing_gap}{hashes}  ", " ".repeat(indent), "#".repeat(level));
+        let expected = if closing_gap.ends_with(' ') { title } else { format!("{title}{closing_gap}{hashes}") };
+        let doc = parse_markdown(&format!("{line}{ending}"), MarkdownOptions::default()).unwrap();
+        let heading = &doc.sections[0].heading;
+        let range = heading.location.title_range.unwrap();
+        prop_assert_eq!(heading.level as usize, level);
+        prop_assert_eq!(line.get(range.start.0..range.end.0), Some(expected.as_str()));
+        prop_assert_eq!(&heading.source_text, &expected);
+    }
+}
+
+proptest! {
+    #[test]
+    fn single_line_setext_title_ranges_preserve_source_coordinates(
+        indent in 0usize..4,
+        title in "[a-zé界]{1,12}",
+        ending in prop_oneof![Just("\n"), Just("\r\n"), Just("\r")],
+    ) {
+        let source = format!("lead{ending}{ending}{}{title}  {ending}===={ending}", " ".repeat(indent));
+        let doc = parse_markdown(&source, MarkdownOptions::default()).unwrap();
+        let heading = &doc.sections[0].heading;
+        let range = heading.location.title_range.unwrap();
+        prop_assert_eq!(range.start.0, 4 + ending.len() * 2 + indent);
+        prop_assert_eq!(source.get(range.start.0..range.end.0), Some(title.as_str()));
+        prop_assert_eq!(&heading.source_text, &title);
+    }
 }

@@ -16,7 +16,7 @@ cargo install outlint
 ```
 
 This builds the check-only edition. Use `cargo install outlint --locked --all-features`
-for all commands, including `search` and `read`. GitHub Releases also provide
+for all commands, including `search`, `read`, and `edit`. GitHub Releases also provide
 `outlint-<target>` check-only archives and `outlint-full-<target>` full archives,
 with separate shell and PowerShell installers. Both editions install an
 executable named `outlint`.

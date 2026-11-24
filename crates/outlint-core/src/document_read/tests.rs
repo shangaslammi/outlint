@@ -236,3 +236,18 @@ fn suggestions_are_capped_and_absent_for_unhelpful_failures() {
     assert!(suggestions_for(FIXTURE, "$.setup/list[8]").is_empty());
     assert!(suggestions_for(FIXTURE, "$.faq.question").is_empty());
 }
+
+#[test]
+fn resolving_an_edit_target_returns_the_node_and_shared_failure_context() {
+    let source = "# Root\n\n## Child\n\ntext\n";
+    let doc = crate::parse_markdown(source, crate::MarkdownOptions::default()).unwrap();
+    let (path, node) = super::resolve_document_target(source, &doc, "$.child/p").unwrap();
+    assert_eq!(path.to_string(), "$.child/p[0]");
+    assert!(matches!(
+        node,
+        crate::DocumentNode::Block(crate::Block::Paragraph(_))
+    ));
+    let target = super::resolve_document_target(source, &doc, "$.child/p[4]").unwrap_err();
+    let read = super::document_tree(source, &doc, "$.child/p[4]", None, true).unwrap_err();
+    assert_eq!(target, read);
+}

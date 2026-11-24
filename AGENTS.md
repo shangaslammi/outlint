@@ -8,9 +8,10 @@ expect breaking changes before 1.0.
 
     crates/outlint-core    schema model, schema loader, validator (library)
     crates/outlint-cli     the `outlint` binary
+    crates/outlint-edit    pure planning and verification for experimental edits
     crates/outlint-search  indexing for the experimental search extension
     spec/outlint-spec.md   the specification (normative)
-    spec/*-spec.md         search and read (experimental extensions),
+    spec/*-spec.md         search, read, and edit (experimental extensions),
                            document paths (provisional)
     testdata/              conformance corpus, shared by all implementations
     npm/outlint/           npm distribution packaging
@@ -50,6 +51,11 @@ invariant failure; ordinary CommonMark recovery remains successful.
 `matcher.rs` and `case_fold.rs` are private helpers. The provisional
 `document_read/` API selects content and lists typed document-path rows,
 including failure context and suggestions, without IO or presentation labels.
+The optional engine in `crates/outlint-edit` parses edit scripts, plans
+Markdown edits against concrete document paths, and verifies the resulting
+structure. The CLI uses its candidate and node correspondence to compare
+diagnostics. The CLI also loads payloads and schemas and handles preview
+and atomic file replacement.
 
 Preamble blocks and direct list items extend the parsed tree without changing
 schema version 1 or JSON envelope version 2. `Document` and `Section` own
@@ -97,10 +103,10 @@ JSON output is the full diagnostic shape; the conformance corpus's
 `expected.json` records only portable `{id, target}` entries. The two
 diverge deliberately — do not "align" them.
 
-Experimental `search` and `read` subcommands are optional, behind Cargo
-features and shipped only in the full edition. Their contracts are in
-`spec/search-spec.md` and `spec/read-spec.md`, outside the validator's
-specification and stability promises.
+Experimental `search`, `read`, and `edit` subcommands are optional, behind
+Cargo features and shipped only in the full edition. Their contracts are in
+`spec/search-spec.md`, `spec/read-spec.md`, and `spec/edit-spec.md`, outside
+the validator's specification and stability promises.
 
 MSRV is declared: `rust-version = "1.88"` in `[workspace.package]`, with
 pinned CI jobs testing both check-only and full-feature builds on it.
@@ -125,8 +131,8 @@ Absent by design, do not add speculatively:
   documented npm bootstrap from acquiring and caching the released native
   binary before validation begins.
 - Unsupported syntax has no semantics: correspondence/selection,
-  paragraph/lead text, link definitions, editing/concrete edit paths, task
-  state, matchable quote/code/HTML/break/table predicates and GFM tables,
+  paragraph/lead text, link-definition nodes, task state, matchable
+  quote/code/HTML/break/table predicates and GFM tables,
   nested item/cell validation, item captures/order, content/item
   guards/extras/unordered scopes/phases/constraints, meaningful-item
   predicates, equal/subset value selection, sequence contiguity, capture
@@ -224,7 +230,13 @@ Current in core: `saphyr-parser` (the YAML parser — pure Rust, pinned
 exactly because every `0.0.z` release is a breaking change under Cargo's
 semver rules), `serde`/`serde_json`, `jsonschema`, `regex`,
 `pulldown-cmark`, `casefold`, `num-bigint`, `unicode-normalization`.
-The CLI adds only `serde_json`. YAML is read directly from
+The check-only CLI adds only `serde_json`. The optional edit shell uses
+`tempfile` for exclusive same-directory temporary file creation, automatic
+cleanup on failed writes or replacement, and portable atomic persistence.
+On Windows it uses `winapi-util` for a safe link-count query because stable
+std does not expose that metadata there. `outlint-edit` uses the workspace's
+existing `proptest` dev dependency to exercise edit boundary preservation.
+YAML is read directly from
 `saphyr-parser` events; if the loader needs a different YAML crate,
 raise it rather than working around it.
 
@@ -235,8 +247,8 @@ this size.
 The core linter (`outlint check`, `outlint schema check`, and `outlint-core`)
 uses no Cargo features and must remain buildable and testable without any.
 Additional functionality layered on linting is opt-in on the `outlint` CLI
-crate: currently `search`, `read`, and their `full` shorthand. Build and test
-that functionality with `--all-features` or `--features full`.
+crate: currently `search`, `read`, `edit`, and their `full` shorthand. Build
+and test that functionality with `--all-features` or `--features full`.
 
 ## Tests
 
@@ -276,7 +288,7 @@ it locally only when touching dependencies. If a check here starts catching
 things CI misses, add it to CI.
 
 The featureless commands above protect the core-linter contract; the explicit
-full-feature commands cover the optional search and read functionality.
+full-feature commands cover the optional search, read, and edit functionality.
 
 If a change touches release packaging, keep `npm/outlint/package.json`
 `version` and `dist/full/dist.toml` package `version` in sync with
@@ -284,6 +296,12 @@ If a change touches release packaging, keep `npm/outlint/package.json`
 and npm bootstrap distribute the check-only CLI; `outlint-full` archives use
 the same sources with all CLI features enabled. Regenerate release.yml using
 the pinned cargo-dist version after changing distribution configuration.
+
+CI fetches dependencies in a clean Cargo home, then verifies the packages
+together with `cargo package --locked --offline --workspace --features outlint/full`
+so cached registry releases cannot shadow the workspace packages. Publish
+`outlint-core` first, then `outlint-edit` and `outlint-search`, then the
+`outlint` CLI.
 
 Report which checks were actually run.
 

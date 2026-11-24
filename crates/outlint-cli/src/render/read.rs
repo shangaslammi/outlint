@@ -3,12 +3,16 @@
 use std::borrow::Cow;
 
 use outlint_core::{
-    BlockKind, CanonicalDocumentPath, DocumentContent, DocumentReadFailure as ReadFailure,
-    DocumentTree as ReadTree, DocumentTreeNode as TreeNodeData, DocumentTreeRow as TreeNode,
+    BlockKind, CanonicalDocumentPath, DocumentReadFailure as ReadFailure,
+    DocumentTreeNode as TreeNodeData, DocumentTreeRow as TreeNode,
 };
 use serde_json::json;
 
-use crate::{args::ReadSearchFormat, read::ReadOutput};
+use crate::args::ReadSearchFormat;
+#[cfg(feature = "read")]
+use crate::read::ReadOutput;
+#[cfg(feature = "read")]
+use outlint_core::{DocumentContent, DocumentTree as ReadTree};
 
 use super::{
     escape_compact, escape_human, format_bytes,
@@ -18,6 +22,7 @@ use super::{
 const READ_ENVELOPE_VERSION: u64 = 1;
 
 /// Renders a resolved read result in the selected format.
+#[cfg(feature = "read")]
 pub(crate) fn output(value: &ReadOutput, file: &str, format: ReadSearchFormat) -> String {
     match (value, format) {
         (ReadOutput::Content(content), ReadSearchFormat::Human | ReadSearchFormat::Compact) => {
@@ -155,6 +160,7 @@ fn human_error(value: &ReadFailure, file: &str) -> String {
     output
 }
 
+#[cfg(feature = "read")]
 fn json_tree(tree: &ReadTree, file: &str) -> String {
     let mut output = Vec::new();
     // Read objects follow their documented wire order; do not route these
@@ -170,6 +176,7 @@ fn json_tree(tree: &ReadTree, file: &str) -> String {
     finish_json_line(output)
 }
 
+#[cfg(feature = "read")]
 fn json_content(content: &DocumentContent, file: &str) -> String {
     let mut output = Vec::new();
     write_ordered_json_object(&mut output, |object| {
@@ -214,19 +221,24 @@ fn json_error(value: &ReadFailure) -> String {
     let mut output = Vec::new();
     write_ordered_json_object(&mut output, |object| {
         object.value("version", &json!(READ_ENVELOPE_VERSION));
-        object.member("error", |output| write_error_json(output, value));
+        object.member("error", |output| {
+            write_ordered_json_object(output, |object| write_failure_members(object, value))
+        });
     });
     finish_json_line(output)
 }
 
-fn write_error_json(output: &mut Vec<u8>, value: &ReadFailure) {
+pub(super) fn write_failure_members(
+    object: &mut super::json::OrderedJsonObject<'_>,
+    value: &ReadFailure,
+) {
     let suggestions = serde_json::Value::Array(
         failure_suggestions(value)
             .iter()
             .map(|path| serde_json::Value::String(path.to_string()))
             .collect(),
     );
-    write_ordered_json_object(output, |object| match value {
+    match value {
         ReadFailure::Syntax {
             path,
             message,
@@ -282,7 +294,7 @@ fn write_error_json(output: &mut Vec<u8>, value: &ReadFailure) {
             object.value("message", &json!(other.to_string()));
             object.value("suggestions", &suggestions);
         }
-    });
+    }
 }
 
 fn compact_tree(nodes: &[TreeNode], file: &str) -> String {
@@ -371,9 +383,9 @@ fn append_suggestions(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "read"))]
 mod tests {
-    use crate::read::path_spelling;
+    use crate::args::path_spelling;
     use outlint_core::{
         document_content, document_tree, parse_markdown, ByteOffset, Document, DocumentPath,
         HeaderLevel, MarkdownOptions,

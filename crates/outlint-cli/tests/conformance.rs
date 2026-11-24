@@ -38,6 +38,7 @@ fn shared_testdata_corpus_conforms_through_the_cli_binary() {
                 .is_dir()
         })
         .map(|entry| entry.path())
+        .filter(|path| path != &root.join("edit"))
         .collect::<Vec<_>>();
     fixture_dirs.sort();
     assert!(!fixture_dirs.is_empty(), "the conformance corpus is empty");

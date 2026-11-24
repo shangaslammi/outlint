@@ -31,7 +31,7 @@ pub(crate) fn execute_read(options: &ReadOptions) -> u8 {
             );
         }
     };
-    let path = path_spelling(options.path.as_deref().unwrap_or("$"));
+    let path = crate::args::path_spelling(options.path.as_deref().unwrap_or("$"));
     let result = if options.tree {
         document_tree(&source, &document, &path, options.depth, options.blocks)
             .map(ReadOutput::Tree)
@@ -74,13 +74,4 @@ fn operational_error(message: &str, format: ReadSearchFormat) -> u8 {
 pub(crate) enum ReadOutput {
     Content(DocumentContent),
     Tree(DocumentTree),
-}
-
-/// Adds the root prefix so `.a.b` and `/p[0]` work unquoted in a shell.
-pub(crate) fn path_spelling(argument: &str) -> String {
-    if argument.starts_with('$') {
-        argument.to_owned()
-    } else {
-        format!("${argument}")
-    }
 }
