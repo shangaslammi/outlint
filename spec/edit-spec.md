@@ -352,9 +352,13 @@ for selection, escaping, no color, and JSON framing. Successful human
 apply prints the escaped filename, one space, and `changed` or
 `unchanged`. Compact apply uses a tab between the two fields. Each ends
 with LF. Successful text preview prints a unified diff, or empty stdout
-when unchanged. The diff body preserves line bytes and marks a missing
-final newline. Only variable filenames in the headers are escaped. Diff
-hunk selection and context length are implementation-defined.
+when unchanged. The preview compares the complete original and candidate
+byte sequences by line. Its headers are `--- a/PATH` and `+++ b/PATH`,
+with `PATH` displayed as given using the selected format's escaping. A
+tab delimits a path containing spaces. Each hunk includes up to three
+lines of context on either side, and changes separated by at most six
+unchanged lines share a hunk. The diff body preserves line endings and
+marks a missing final newline with `\ No newline at end of file`.
 
 7.2. A successful JSON response has these members in order: `version`
 (integer 1), `file`, `result` (`changed` or `unchanged`), `paths`
@@ -434,8 +438,8 @@ outlint edit guide.md append-item '$.setup/list[0]' --payload 'Run **outlint che
 ```
 
 ```diff
---- guide.md
-+++ guide.md
+--- a/guide.md
++++ b/guide.md
 @@ -3,3 +3,4 @@
  ## Setup
  - Install Outlint.

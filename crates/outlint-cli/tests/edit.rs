@@ -1,15 +1,15 @@
 #![cfg(feature = "edit")]
 mod common;
 use common::{run, stdout, TempDir};
-use std::fs;
+use std::{fs, io::ErrorKind, process::Command};
 #[test]
 fn preview_apply_and_rejection() {
     let dir = TempDir::new("edit");
-    dir.write("doc.md", "old");
+    dir.write("doc with spaces.md", "old");
     dir.write("payload", "new\n");
     let args = [
         "edit",
-        "doc.md",
+        "doc with spaces.md",
         "replace",
         "$/p",
         "--payload-file",
@@ -17,20 +17,148 @@ fn preview_apply_and_rejection() {
     ];
     let preview = run(&dir, &[&args[..], &["--dry-run"]].concat());
     assert!(preview.status.success());
-    assert_eq!(stdout(&preview),"--- doc.md\n+++ doc.md\n@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n");
-    let file = dir.path().join("doc.md");
+    assert_eq!(
+        stdout(&preview),
+        concat!(
+            "--- a/doc with spaces.md\t\n+++ b/doc with spaces.md\t\n@@ -1 +1 @@\n",
+            "-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n"
+        )
+    );
+    let file = dir.path().join("doc with spaces.md");
     assert_eq!(fs::read_to_string(&file).unwrap(), "old");
     assert!(run(&dir, &args).status.success());
     assert_eq!(
         run(
             &dir,
-            &["edit", "doc.md", "replace", "$/p", "--payload", "# heading"]
+            &[
+                "edit",
+                "doc with spaces.md",
+                "replace",
+                "$/p",
+                "--payload",
+                "# heading"
+            ]
         )
         .status
         .code(),
         Some(1)
     );
     assert_eq!(fs::read_to_string(file).unwrap(), "new");
+}
+
+#[test]
+fn changelog_release_cut_preview_round_trips() {
+    let dir = TempDir::new("changelog-cut-preview");
+    let initial = include_str!("../../../CHANGELOG.md");
+    dir.write("CHANGELOG.md", initial);
+    dir.write(
+        "CHANGELOG.outlint.yml",
+        include_str!("../../../CHANGELOG.outlint.yml"),
+    );
+    dir.write(
+        "cut.edit",
+        r#"rename $.unreleased "[0.3.0] - 2026-12-01"
+insert-section $.unreleased before "[Unreleased]"
+replace-text $ <<OLD <<NEW
+[Unreleased]: https://github.com/shangaslammi/outlint/compare/v0.2.0...HEAD
+OLD
+[Unreleased]: https://github.com/shangaslammi/outlint/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/shangaslammi/outlint/compare/v0.2.0...v0.3.0
+NEW
+"#,
+    );
+    let args = [
+        "edit",
+        "CHANGELOG.md",
+        "--script",
+        "cut.edit",
+        "--format",
+        "human",
+    ];
+    let output = run(&dir, &[&args[..], &["--dry-run"]].concat());
+    assert!(output.status.success(), "{}", common::stderr(&output));
+    let preview = stdout(&output);
+    let old_start = initial.lines().count() - 5;
+    let new_start = old_start + 2;
+    assert_eq!(
+        preview,
+        format!(
+            concat!(
+                "--- a/CHANGELOG.md\n",
+                "+++ b/CHANGELOG.md\n",
+                "@@ -11,6 +11,8 @@\n",
+                " \n",
+                " ## [Unreleased]\n",
+                " \n",
+                "+## [0.3.0] - 2026-12-01\n",
+                "+\n",
+                " ### Added\n",
+                " \n",
+                " - **Experimental edit extension.** `outlint edit` previews and applies Markdown\n",
+                "@@ -{},6 +{},7 @@\n",
+                " - **Dual licensing** under [MIT](LICENSE-MIT) or\n",
+                "   [Apache-2.0](LICENSE-APACHE), and a declared MSRV of Rust 1.86 tested in CI.\n",
+                " \n",
+                "-[Unreleased]: https://github.com/shangaslammi/outlint/compare/v0.2.0...HEAD\n",
+                "+[Unreleased]: https://github.com/shangaslammi/outlint/compare/v0.3.0...HEAD\n",
+                "+[0.3.0]: https://github.com/shangaslammi/outlint/compare/v0.2.0...v0.3.0\n",
+                " [0.2.0]: https://github.com/shangaslammi/outlint/compare/v0.1.0...v0.2.0\n",
+                " [0.1.0]: https://github.com/shangaslammi/outlint/releases/tag/v0.1.0\n",
+            ),
+            old_start, new_start,
+        )
+    );
+
+    let file = dir.path().join("CHANGELOG.md");
+    assert_eq!(fs::read(&file).unwrap(), initial.as_bytes());
+    let applied = run(&dir, &args);
+    assert!(applied.status.success(), "{}", common::stderr(&applied));
+    let written = fs::read(&file).unwrap();
+
+    dir.write("CHANGELOG.md", initial);
+    dir.write("release.patch", preview);
+    // Use Git's patch parser when installed. The fallback only needs to
+    // interpret the two LF-terminated, nonempty ranges asserted above.
+    let patched = match Command::new("git")
+        .args(["apply", "--whitespace=nowarn", "release.patch"])
+        .current_dir(dir.path())
+        .output()
+    {
+        Ok(git) => {
+            assert!(git.status.success(), "{}", common::stderr(&git));
+            fs::read(&file).unwrap()
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            apply_release_hunks(initial, preview).into_bytes()
+        }
+        Err(error) => panic!("cannot run git apply: {error}"),
+    };
+    assert_eq!(patched, written);
+}
+
+fn apply_release_hunks(original: &str, preview: &str) -> String {
+    let mut remaining = original.split_inclusive('\n');
+    let mut consumed = 0;
+    let mut patched = String::new();
+    for record in preview.split_inclusive('\n').skip(2) {
+        if let Some(range) = record.strip_prefix("@@ -") {
+            let (start, _) = range.split_once(',').unwrap();
+            let offset = start.parse::<usize>().unwrap() - 1;
+            patched.extend(remaining.by_ref().take(offset - consumed));
+            consumed = offset;
+        } else {
+            let (prefix, line) = record.split_at(1);
+            if prefix != "+" {
+                assert_eq!(remaining.next(), Some(line));
+                consumed += 1;
+            }
+            if prefix != "-" {
+                patched.push_str(line);
+            }
+        }
+    }
+    patched.extend(remaining);
+    patched
 }
 
 #[test]
@@ -754,7 +882,7 @@ fn suppression_occurrences_are_reported_and_force_can_admit_them() {
                 } else {
                     " (candidate) added-suppression "
                 }));
-                assert_eq!(stdout(&result).starts_with("--- doc.md\n"), force);
+                assert_eq!(stdout(&result).starts_with("--- a/doc.md\n"), force);
             }
             assert_eq!(
                 fs::read(dir.path().join("doc.md")).unwrap(),
