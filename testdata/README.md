@@ -1,9 +1,8 @@
 # Outlint conformance fixtures
 
-Each **immediate child directory** of `testdata/` is one reusable,
-implementation-independent fixture, and the runner discovers every one of them
-automatically. Files sitting at the root of `testdata/` are not fixtures and
-are never executed — this file among them. A fixture directory contains:
+The validator runner discovers one reusable, implementation-independent fixture
+in each immediate child directory of `testdata/` except `edit/`. Files at the
+root of `testdata/` are supporting material. A validator fixture contains:
 
 - `schema.outlint.yml`, the schema to load;
 - one or more Markdown documents (`*.md`) to validate;
@@ -268,3 +267,14 @@ cardinality refinements, integer coercion, or numbering.
 | `madr-m18-more-information-content` | MADR More Information requires one or more paragraphs or lists in any order and no child headings; code alone is rejected | §2.5, §3.9, §6.1–§6.2 |
 | `kac-k02-title-introduction` | Keep a Changelog requires one or more introduction paragraphs under its title while retaining the release-heading grammar | §1.1, §2, §2.5, §3.9, §6.1–§6.2 |
 | `kac-k08-category-list` | Every present Keep a Changelog category owns exactly one syntactic bullet list and no child headings, independently in each release scope | §1.7–§1.8, §2.5, §3.9, §6.1–§6.2 |
+
+
+## Edit fixtures
+
+Each directory under `testdata/edit/` holds one edit batch. The full-feature
+CLI tests run the script against a copy of `input.md`. A fixture supplies
+`script.edit` and, when schema discovery is part of the case, `input.outlint.yml`.
+For success, `expected.md` gives the exact file bytes after the edit, including
+line endings and any final blank lines. For refusal, `expected.json` gives
+the error id, optionally the instruction lines and the candidate diagnostic ids.
+The runner also checks that a refused batch leaves the input bytes in place.

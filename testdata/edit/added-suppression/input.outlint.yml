@@ -1,0 +1,3 @@
+version: 1
+title: T
+sections: [{match: Good, repeat: "0..n", sections: []}]

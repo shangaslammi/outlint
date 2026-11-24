@@ -90,7 +90,7 @@ fn block_neighbors_and_section_anchors() {
     let empty = "# T\n## C";
     assert_eq!(
         one(empty, "$", Op::AppendBlock("body".into())),
-        "# T\n\nbody\n\n## C"
+        "# T\nbody\n## C"
     );
     assert_eq!(
         one(
@@ -102,12 +102,12 @@ fn block_neighbors_and_section_anchors() {
                 preamble: Some("body".into())
             }
         ),
-        "# T\n## C\n\n## D\n\nbody"
+        "# T\n## C\n## D\n\nbody"
     );
     assert_eq!(one(empty, "$.c", Op::Delete), "# T\n");
     for (place, expected) in [
-        (Placement::Before, "# T\n\n## D\n\n## C"),
-        (Placement::After, "# T\n## C\n\n## D"),
+        (Placement::Before, "# T\n## D\n## C"),
+        (Placement::After, "# T\n## C\n## D"),
     ] {
         assert_eq!(
             one(
@@ -154,16 +154,11 @@ fn whole_block_payloads_and_eof() {
     );
 }
 #[test]
-fn rejects_payloads_that_change_neighbors() {
-    for (source, path, operation) in [
-        ("- one", "$/list", Op::InsertAfter("- two".into())),
-        ("> a\n***\nlazy", "$/break", Op::Delete),
-    ] {
-        assert_eq!(
-            edit(source, &[op(path, operation)]),
-            Err("candidate-structure")
-        );
-    }
+fn a_separate_inserted_list_cannot_merge_with_its_neighbor() {
+    assert_eq!(
+        edit("- one", &[op("$/list", Op::InsertAfter("- two".into()))]),
+        Err("candidate-structure")
+    );
 }
 
 #[test]
@@ -266,7 +261,7 @@ fn section_spelling_and_transparency() {
     );
     assert_eq!(
         one("# T\n## C\n\n<!-- tail -->\n", "$.c", Op::Delete),
-        "# T\n<!-- tail -->\n"
+        "# T\n\n<!-- tail -->\n"
     );
     assert_eq!(
         one("- a\n\n  more\n- b\n", "$/list", Op::AppendItem("c".into())),
@@ -312,57 +307,6 @@ fn release_list_gap_and_fenced_bodies() {
     );
 }
 
-#[test]
-fn gate_matches_surviving_anchors_once() {
-    let schema=load_schema("version: 1\ntitle: null\nsections:\n  - match: Same\n    repeat: '0..n'\n    content:\n      - block: list\n        repeat: '0..1'\n        items: [{match: ok, repeat: '0..n'}]\n").unwrap().schema;
-    let s = "## Same\n- bad\n\n## Same\n- other\n";
-    let gate = |edits: &[Edit]| {
-        candidate(s, edits)
-            .unwrap()
-            .introduced_diagnostics(&schema)
-            .unwrap()
-    };
-    assert!(gate(&[op(
-        "$.same[0]/list",
-        Op::InsertItem {
-            index: 0,
-            payload: "ok".into()
-        }
-    )])
-    .is_empty());
-    let new = gate(&[
-        op("$.same[0]/list/item", Op::Delete),
-        op("$.same[1]/list", Op::AppendItem("third".into())),
-    ]);
-    assert_eq!(new.len(), 1);
-    assert_eq!(new[0].id.as_str(), "unexpected-item");
-    let both = "# Bad\n# Bad\n";
-    let schema = load_schema("version: 1\noutline: []\n").unwrap().schema;
-    assert!(
-        candidate(both, &[op("$.bad[1]", Op::Rename("Other".into()))])
-            .unwrap()
-            .introduced_diagnostics(&schema)
-            .unwrap()
-            .is_empty()
-    );
-    let bad = "# Bad\n";
-    let c = candidate(
-        bad,
-        &[
-            op(
-                "$",
-                Op::ReplaceText {
-                    old: "# Bad".into(),
-                    new: "# Bad".into(),
-                },
-            ),
-            op("$", Op::AppendBlock("New paragraph.".into())),
-        ],
-    )
-    .unwrap();
-    assert_ne!(c.text, bad);
-    assert!(c.introduced_diagnostics(&schema).unwrap().is_empty());
-}
 #[test]
 fn literal_scope_and_structural_verification() {
     let s = "# A\r\n\r\nold\r\n\r\n## B\r\n\r\nold\r\n";
@@ -453,51 +397,6 @@ fn disjoint_literal_and_rename_share_a_heading() {
 }
 
 #[test]
-fn document_voiced_absence_tracks_the_title() {
-    let schema = load_schema("version: 1\ntitle: '*'\nsections: [{match: Needed}]\n")
-        .unwrap()
-        .schema;
-    let c = candidate("intro\n\n# A\n", &[op("$", Op::Delete)]).unwrap();
-    assert!(c
-        .introduced_diagnostics(&schema)
-        .unwrap()
-        .iter()
-        .any(|d| d.id == DiagnosticId::MissingSection));
-}
-
-#[test]
-fn missing_item_tracks_a_list_when_its_first_marker_changes() {
-    let schema = load_schema(
-        "version: 1\ntitle: T\ncontent:\n  - block: list\n    items: [{match: needed}]\n",
-    )
-    .unwrap()
-    .schema;
-    let source = "# T\n\n- first\n- second\n";
-    let before = validate(&schema, &parse(source).unwrap()).unwrap();
-    assert!(before.iter().any(|d| d.id == DiagnosticId::MissingItem));
-
-    let edited = candidate(source, &[op("$/list/item[0]", Op::Delete)]).unwrap();
-    assert_eq!(edited.text, "# T\n- second\n");
-    assert!(edited.introduced_diagnostics(&schema).unwrap().is_empty());
-}
-
-#[test]
-fn adjacent_deletes_share_separator_lines() {
-    for (source, paths, expected) in [
-        ("a\n\nb\n\nc\n", ["$/p[1]", "$/p[2]"], "a\n\n"),
-        ("- a\n\n- b\n", ["$/list/item[0]", "$/list/item[1]"], ""),
-        (
-            "# T\n\n## A\n\n## B\n\n## C\n",
-            ["$.c", "$.b"],
-            "# T\n\n## A\n\n",
-        ),
-    ] {
-        let edits = paths.map(|path| op(path, Op::Delete));
-        assert_eq!(edit(source, &edits).unwrap(), expected);
-    }
-}
-
-#[test]
 fn inserting_into_a_deleted_or_replaced_node_conflicts_at_both_edges() {
     for index in [0, 2] {
         let source = "para\n\n- a\n- b\n";
@@ -544,49 +443,8 @@ fn inserting_into_a_deleted_or_replaced_node_conflicts_at_both_edges() {
 }
 
 #[test]
-fn literal_gate_uses_the_same_heading_and_title_for_equivalent_candidates() {
-    let schema = load_schema("version: 1\ntitle: '*'\nsections: [{match: Good}]\n")
-        .unwrap()
-        .schema;
-    let source = "# Title\n\n## Bad\n";
-    let original = parse(source).unwrap();
-    let original_diagnostics = validate(&schema, &original).unwrap();
-    assert!(original_diagnostics
-        .iter()
-        .any(|d| d.id == DiagnosticId::UnexpectedSection));
-    assert!(original_diagnostics
-        .iter()
-        .any(|d| d.id == DiagnosticId::MissingSection));
-    for (old, new) in [
-        ("## Bad", "## Worse"),
-        ("Bad", "Worse"),
-        ("# Title", "# New"),
-        ("Title", "New"),
-    ] {
-        let edits = [op(
-            "$",
-            Op::ReplaceText {
-                old: old.into(),
-                new: new.into(),
-            },
-        )];
-        let candidate = candidate(source, &edits).unwrap();
-        assert!(
-            candidate
-                .introduced_diagnostics(&schema)
-                .unwrap()
-                .is_empty(),
-            "{old:?}"
-        );
-    }
-}
-
-#[test]
 fn inserting_before_suppressed_nodes_keeps_the_directive_attached() {
     let source = "# T\n\n<!-- outlint-disable unexpected-section -->\n## Bad\n";
-    let schema = load_schema("version: 1\ntitle: T\nsections: [{match: Good, repeat: '0..n'}]\n")
-        .unwrap()
-        .schema;
     for action in [
         op(
             "$.bad",
@@ -602,12 +460,11 @@ fn inserting_before_suppressed_nodes_keeps_the_directive_attached() {
         assert!(edited
             .text
             .contains("<!-- outlint-disable unexpected-section -->\n## Bad"));
-        assert!(edited.introduced_diagnostics(&schema).unwrap().is_empty());
     }
     let source = "<!-- outlint-disable unexpected-block -->\n> old\n";
     assert_eq!(
         one(source, "$/quote", Op::InsertBefore("new".into())),
-        "new\n\n<!-- outlint-disable unexpected-block -->\n> old\n"
+        "new\n<!-- outlint-disable unexpected-block -->\n> old\n"
     );
 }
 
@@ -645,5 +502,397 @@ fn rename_uses_the_core_atx_title_boundaries() {
     assert_eq!(
         edit("two\nlines\n=====\n", &[op("$", Op::Rename("New".into()))]),
         Err("target")
+    );
+}
+
+#[test]
+fn insertion_order_follows_the_hierarchy_in_both_script_orders() {
+    let source = "# T\n\n## A\n\npara\n\n## B\n";
+    let append = || op("$.a", Op::AppendBlock("y".into()));
+    let after = || op("$.a/p", Op::InsertAfter("y".into()));
+    let sibling = || section("$.a", Placement::After, "Z");
+    let child = || section("$.a", Placement::AppendChild, "K");
+    for (source, mut edits, expected) in [
+        (
+            source,
+            [sibling(), after()],
+            "# T\n\n## A\n\npara\n\ny\n\n## Z\n\n## B\n",
+        ),
+        (
+            source,
+            [sibling(), append()],
+            "# T\n\n## A\n\npara\n\ny\n\n## Z\n\n## B\n",
+        ),
+        (
+            source,
+            [sibling(), child()],
+            "# T\n\n## A\n\npara\n\n### K\n\n## Z\n\n## B\n",
+        ),
+        (
+            source,
+            [child(), after()],
+            "# T\n\n## A\n\npara\n\ny\n\n### K\n\n## B\n",
+        ),
+        (
+            "## A\n## B\n",
+            [section("$.b", Placement::Before, "N"), append()],
+            "## A\ny\n## N\n## B\n",
+        ),
+        (
+            "# T\n\n## A\n\npara\n",
+            [section("$", Placement::AppendChild, "Z"), after()],
+            "# T\n\n## A\n\npara\n\ny\n\n## Z\n",
+        ),
+        (
+            "- a\n",
+            [
+                op("$/list", Op::InsertAfter("para".into())),
+                op("$/list", Op::AppendItem("x".into())),
+            ],
+            "- a\n- x\n\npara\n",
+        ),
+    ] {
+        assert_eq!(edit(source, &edits), Ok(expected.into()), "{edits:?}");
+        edits.reverse();
+        assert_eq!(edit(source, &edits), Ok(expected.into()), "{edits:?}");
+    }
+}
+
+#[test]
+fn equivalent_slots_preserve_script_order() {
+    let source = "# T\n\n## A\n\npara\n\n## B\n";
+    let mut edits = [
+        op("$.a", Op::AppendBlock("first".into())),
+        op("$.a/p", Op::InsertAfter("second".into())),
+        section("$.b", Placement::Before, "N"),
+        section("$.a", Placement::After, "Z"),
+    ];
+    assert_eq!(
+        edit(source, &edits),
+        Ok("# T\n\n## A\n\npara\n\nfirst\n\nsecond\n\n## N\n\n## Z\n\n## B\n".into())
+    );
+    edits.reverse();
+    assert_eq!(
+        edit(source, &edits),
+        Ok("# T\n\n## A\n\npara\n\nsecond\n\nfirst\n\n## Z\n\n## N\n\n## B\n".into())
+    );
+}
+
+#[test]
+fn script_order_within_one_slot_can_request_unrepresentable_parentage() {
+    let source = "# T\n### A\n## B\n";
+    let mut edits = [
+        section("$.b", Placement::Before, "N"),
+        section("$.a", Placement::After, "Z"),
+    ];
+    assert_eq!(edit(source, &edits), Err("candidate-structure"));
+    edits.reverse();
+    assert_eq!(
+        edit(source, &edits),
+        Ok("# T\n### A\n### Z\n## N\n## B\n".into())
+    );
+}
+
+#[test]
+fn deletions_compose_with_beside_insertions_and_never_consume_the_list_separator() {
+    for (source, mut edits, expected) in [
+        (
+            "a\n\nb\n",
+            vec![
+                op("$/p[1]", Op::Delete),
+                op("$/p[1]", Op::InsertBefore("x".into())),
+            ],
+            "a\n\nx\n",
+        ),
+        (
+            "# T\n\n## A\n\n## B\n",
+            vec![op("$.a", Op::Delete), section("$.a", Placement::After, "X")],
+            "# T\n\n## X\n\n## B\n",
+        ),
+        (
+            "# T\n\n## A\n\n## B\n",
+            vec![
+                op("$.b", Op::Delete),
+                section("$.b", Placement::Before, "X"),
+            ],
+            "# T\n\n## A\n\n## X\n",
+        ),
+        (
+            "## H\n\n- Alpha\n- Alpha\n",
+            vec![
+                op("$.h/list/item[0]", Op::Delete),
+                op(
+                    "$.h/list",
+                    Op::InsertItem {
+                        index: 0,
+                        payload: "Alpha".into(),
+                    },
+                ),
+            ],
+            "## H\n\n- Alpha\n- Alpha\n",
+        ),
+        (
+            "para\n\n- a\n- b\n",
+            vec![
+                op("$/list", Op::Delete),
+                op("$/list", Op::InsertBefore("x".into())),
+                op("$/list", Op::InsertAfter("y".into())),
+            ],
+            "para\n\nx\n\ny\n",
+        ),
+        (
+            "x\n\n- a\n- b\n\ny\n",
+            vec![op("$/list/item[1]", Op::Delete)],
+            "x\n\n- a\n\ny\n",
+        ),
+        (
+            "x\n\n2. a\n3. b\n",
+            vec![op("$/list/item[0]", Op::Delete)],
+            "x\n\n3. b\n",
+        ),
+        (
+            "x\n\n- a\n- b\n\npara\n",
+            vec![
+                op("$/list/item[0]", Op::Delete),
+                op("$/list/item[1]", Op::Delete),
+            ],
+            "x\n\npara\n",
+        ),
+        (
+            "a\n\n```\ncode\n```\nb\n",
+            vec![op("$/code", Op::Delete)],
+            "a\n\nb\n",
+        ),
+    ] {
+        assert_eq!(edit(source, &edits), Ok(expected.into()), "{edits:?}");
+        edits.reverse();
+        assert_eq!(edit(source, &edits), Ok(expected.into()), "{edits:?}");
+    }
+}
+
+#[test]
+fn existing_suppressed_first_item_refuses_insertion_at_gap_zero() {
+    assert_eq!(
+        edit(
+            "x\n\n<!-- outlint-disable unexpected-item -->\n- a\n- b\n",
+            &[op(
+                "$/list",
+                Op::InsertItem {
+                    index: 0,
+                    payload: "c".into()
+                }
+            )]
+        ),
+        Err("target")
+    );
+}
+
+#[test]
+fn conflicting_renames_of_an_empty_title_do_not_reach_assembly() {
+    assert_eq!(
+        edit(
+            "#",
+            &[
+                op("$", Op::Rename("first".into())),
+                op("$", Op::Rename("second".into()))
+            ]
+        ),
+        Err("conflict")
+    );
+    assert_eq!(
+        edit(
+            "#",
+            &[
+                op("$", Op::Rename("title".into())),
+                op("$", Op::AppendBlock("body".into()))
+            ]
+        ),
+        Ok("# title\nbody".into())
+    );
+}
+
+fn section(path: &str, placement: Placement, title: &str) -> Edit {
+    op(
+        path,
+        Op::InsertSection {
+            placement,
+            title: title.into(),
+            preamble: None,
+        },
+    )
+}
+
+#[test]
+fn comments_at_item_indentation_follow_their_suppressed_item() {
+    let source = "- a\n  <!-- outlint-disable unexpected-item -->\n  <!-- outlint-disable misplaced-item -->\n- b\n- c\n";
+    let document = parse(source).unwrap();
+    let Some(Block::List(list)) = document.preamble.iter().next() else {
+        panic!("expected a list");
+    };
+    assert!(list.items.rest[0].suppressions.contains("misplaced-item"));
+    assert_eq!(one(source, "$/list/item[1]", Op::Delete), "- a\n- c\n");
+}
+
+proptest! {
+    #[test]
+    fn generated_batches_preserve_bytes_and_put_nodes_in_expected_parents(
+        selection in prop::collection::btree_map(0usize..12, any::<u16>(), 2..7),
+        ending in prop_oneof![Just("\n"), Just("\r\n")],
+        gap_lines in 1usize..4,
+        loose in any::<bool>(),
+        trailing in 0usize..3,
+        word in "[a-z]{1,8}",
+    ) {
+        let chosen = |id| selection.contains_key(&id);
+        let gap = format!("{ending} \t{ending}{}", ending.repeat(gap_lines - 1));
+        let inter_item = if loose { gap.as_str() } else { ending };
+        let alpha = format!("Alpha {word}");
+        let mut source = ["# T", "lead  ", "## A", &alpha, "beta", "- one"].join(&gap);
+        source.push_str(inter_item);
+        source.push_str("- two");
+        for line in ["### Old", "## B", "end\t"] {
+            source.push_str(&gap);
+            source.push_str(line);
+        }
+        source.push_str(&ending.repeat(trailing + 1));
+        let operation = |id| match id {
+            0 => op("$.a/p[0]", Op::Delete),
+            1 => op("$.a/p[0]", Op::InsertAfter("extra".into())),
+            2 => op("$.a/p[1]", Op::Replace("replacement".into())),
+            3 => op("$.a/list/item[0]", Op::Delete),
+            4 => op("$.a/list", Op::AppendItem("three".into())),
+            5 => op("$.a", Op::AppendBlock("tail".into())),
+            6 => section("$.a", Placement::AppendChild, "New"),
+            7 => section("$.a", Placement::After, "Next"),
+            8 => op("$.a.old", Op::Delete),
+            9 => op("$.b", Op::Rename("Renamed".into())),
+            10 => op("$.a/p[1]", Op::InsertBefore("before beta".into())),
+            11 => op("$.a/list", Op::Delete),
+            _ => unreachable!(),
+        };
+        let mut script: Vec<_> = selection.keys().copied().collect();
+        script.sort_by_key(|id| selection[id]);
+        let mut reordered = script.clone();
+        reordered.reverse();
+        // Both address the seam between the two paragraphs.
+        if let (Some(a), Some(b)) = (script.iter().position(|id| *id == 1), script.iter().position(|id| *id == 10)) {
+            reordered.swap(script.len() - 1 - a, script.len() - 1 - b);
+        }
+        let normal = edit(&source, &script.iter().copied().map(operation).collect::<Vec<_>>());
+        let reverse = edit(&source, &reordered.into_iter().map(operation).collect::<Vec<_>>());
+        prop_assert_eq!(&normal, &reverse);
+        if chosen(11) && (chosen(3) || chosen(4)) {
+            prop_assert_eq!(normal, Err("conflict"));
+        } else {
+            let mut lines = vec![("# T", None), ("lead  ", Some("# T")), ("## A", Some("# T"))];
+            if !chosen(0) {
+                lines.push((&alpha, Some("## A")));
+            }
+            for id in &script {
+                match id {
+                    1 => lines.push(("extra", Some("## A"))),
+                    10 => lines.push(("before beta", Some("## A"))),
+                    _ => {}
+                }
+            }
+            lines.push((if chosen(2) { "replacement" } else { "beta" }, Some("## A")));
+            if !chosen(11) {
+                if !chosen(3) {
+                    lines.push(("- one", Some("list")));
+                }
+                lines.push(("- two", Some("list")));
+                if chosen(4) {
+                    lines.push(("- three", Some("list")));
+                }
+            }
+            if chosen(5) {
+                lines.push(("tail", Some("## A")));
+            }
+            if !chosen(8) {
+                lines.push(("### Old", Some("## A")));
+            }
+            if chosen(6) {
+                lines.push(("### New", Some("## A")));
+            }
+            if chosen(7) {
+                lines.push(("## Next", Some("# T")));
+            }
+            let b = if chosen(9) { "## Renamed" } else { "## B" };
+            lines.extend([(b, Some("# T")), ("end\t", Some(b))]);
+            let mut exact = String::new();
+            let mut inside_list = false;
+            for (line, parent) in &lines {
+                let item = *parent == Some("list");
+                if !exact.is_empty() {
+                    exact.push_str(if item && inside_list { inter_item } else { &gap });
+                }
+                exact.push_str(line);
+                inside_list = item;
+            }
+            exact.push_str(&ending.repeat(trailing + 1));
+            let text = normal.unwrap();
+            prop_assert_eq!(&text, &exact);
+            let parsed = parse(&text).unwrap();
+            let rows = model::rows(&text, &parsed).unwrap();
+            let actual: Vec<_> = rows.iter().filter(|row| !model::is_list(row.token.kind)).map(|row| {
+                let parent = row.token.parent.map(|index| {
+                    let token = &rows[index].token;
+                    if model::is_list(token.kind) { "list" } else { token.spelling.as_str() }
+                });
+                (row.token.spelling.as_str(), parent)
+            }).collect();
+            prop_assert_eq!(actual, lines);
+        }
+    }
+}
+
+#[test]
+fn replacing_an_item_keeps_its_marker_and_padding() {
+    assert_eq!(
+        one(
+            "09)   old\n10)  other\n",
+            "$/list/item[0]",
+            Op::Replace("new\n- nested".into())
+        ),
+        "09)   new\n      - nested\n10)  other\n"
+    );
+}
+
+#[test]
+fn deleting_the_first_node_keeps_only_the_original_file_prefix() {
+    assert_eq!(one(" \t\na\n\n\nb\n", "$/p", Op::Delete), " \t\nb\n");
+}
+
+#[test]
+fn an_append_block_payload_can_contain_multiple_visible_blocks() {
+    assert_eq!(
+        one(
+            "# T\n\n## Child\n",
+            "$",
+            Op::AppendBlock("first\n\n> second".into())
+        ),
+        "# T\n\nfirst\n\n> second\n\n## Child\n"
+    );
+}
+
+#[test]
+fn a_whitespace_only_gap_does_not_terminate_the_inserted_paragraph() {
+    let source = "a\n  \n\t\nb\n";
+    let expected = "a\n  \n\t\ny\n  \n\t\nb\n";
+    assert_eq!(one(source, "$/p[0]", Op::InsertAfter("y".into())), expected);
+    assert_eq!(
+        one(source, "$/p[1]", Op::InsertBefore("y".into())),
+        expected
+    );
+}
+
+#[test]
+fn replacement_retains_its_existing_gap() {
+    assert_eq!(
+        edit(
+            "a\n> b\n",
+            &[op("$/quote", Op::Replace("paragraph".into()))]
+        ),
+        Err("candidate-structure")
     );
 }

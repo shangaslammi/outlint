@@ -10,11 +10,12 @@ use crate::{
 };
 use outlint_core::DocumentReadFailure;
 mod destination;
-mod engine;
-mod script;
-use destination::Destination;
-use engine::{candidate, Edit, Error, Op, Refusal};
-use script::{operation, parse_script, Input, Instruction, ScriptError};
+mod gate;
+use destination::{Destination, DestinationError};
+use outlint_edit::{
+    candidate, diff, operation, parse_script, Edit, Error, Input, Instruction, Op, Refusal,
+    ScriptError,
+};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -34,7 +35,7 @@ Operations (shown with arguments after PATH):
   delete                                     Delete a section, block or item
   insert-section before|after|append-child TITLE
                                              Insert a section with an optional preamble
-  append-block                               Add one block to a section's preamble
+  append-block                               Add blocks to a section's preamble
   replace                                    Replace a block or item
   insert-before | insert-after               Insert blocks next to a block
   append-item | insert-item INDEX            Add an item to a list at a zero-based gap
@@ -57,7 +58,7 @@ Options:
   -h, --help        Show this help
 ";
 const NEW_DIAGNOSTICS_ID: &str = "new-diagnostics";
-const NEW_DIAGNOSTICS_MESSAGE: &str = "the edit introduces schema diagnostics";
+const NEW_DIAGNOSTICS_MESSAGE: &str = "the edit introduces diagnostics";
 type Failure = Box<dyn std::error::Error>;
 #[derive(Default)]
 struct Options {
@@ -227,35 +228,34 @@ fn instructions(
     Ok((parse_script(&bytes, script == "-"), base))
 }
 
-impl<T> Op<T> {
-    fn map_inputs<U, E>(self, mut load: impl FnMut(T) -> Result<U, E>) -> Result<Op<U>, E> {
-        Ok(match self {
-            Self::ReplaceText { old, new } => Op::ReplaceText {
-                old: load(old)?,
-                new: load(new)?,
-            },
-            Self::Rename(title) => Op::Rename(title),
-            Self::Delete => Op::Delete,
-            Self::InsertSection {
-                placement,
-                title,
-                preamble,
-            } => Op::InsertSection {
-                placement,
-                title,
-                preamble: preamble.map(load).transpose()?,
-            },
-            Self::AppendBlock(payload) => Op::AppendBlock(load(payload)?),
-            Self::Replace(payload) => Op::Replace(load(payload)?),
-            Self::InsertBefore(payload) => Op::InsertBefore(load(payload)?),
-            Self::InsertAfter(payload) => Op::InsertAfter(load(payload)?),
-            Self::AppendItem(payload) => Op::AppendItem(load(payload)?),
-            Self::InsertItem { index, payload } => Op::InsertItem {
-                index,
-                payload: load(payload)?,
-            },
-        })
-    }
+fn load_operation(op: Op<Input>, base: &Path) -> Result<Op, Failure> {
+    let load = |input| load_input(input, base);
+    Ok(match op {
+        Op::ReplaceText { old, new } => Op::ReplaceText {
+            old: load(old)?,
+            new: load(new)?,
+        },
+        Op::Rename(title) => Op::Rename(title),
+        Op::Delete => Op::Delete,
+        Op::InsertSection {
+            placement,
+            title,
+            preamble,
+        } => Op::InsertSection {
+            placement,
+            title,
+            preamble: preamble.map(load).transpose()?,
+        },
+        Op::AppendBlock(payload) => Op::AppendBlock(load(payload)?),
+        Op::Replace(payload) => Op::Replace(load(payload)?),
+        Op::InsertBefore(payload) => Op::InsertBefore(load(payload)?),
+        Op::InsertAfter(payload) => Op::InsertAfter(load(payload)?),
+        Op::AppendItem(payload) => Op::AppendItem(load(payload)?),
+        Op::InsertItem { index, payload } => Op::InsertItem {
+            index,
+            payload: load(payload)?,
+        },
+    })
 }
 
 fn load_input(input: Input, base: &Path) -> Result<String, Failure> {
@@ -390,8 +390,13 @@ fn path_refusal(
 
 fn execute(file: &str, mut o: Options, fmt: Format) -> Result<u8, Failure> {
     let target = Path::new(file);
-    let destination = Destination::read(target)
-        .map_err(|error| format!("cannot open destination {file} as UTF-8: {error}"))?;
+    let destination = Destination::read(target).map_err(|error| match error {
+        DestinationError::ReadOnly => format!("destination {file} is read-only"),
+        DestinationError::HardLinked => format!("destination {file} has more than one hard link"),
+        DestinationError::Open(error) => {
+            format!("cannot open destination {file} as UTF-8: {error}")
+        }
+    })?;
     let (instructions, base) = instructions(&mut o)?;
     let instructions = match instructions {
         Ok(instructions) => instructions,
@@ -425,9 +430,7 @@ fn execute(file: &str, mut o: Options, fmt: Format) -> Result<u8, Failure> {
         .map(|instruction| {
             Ok(Edit {
                 path: instruction.path,
-                op: instruction
-                    .op
-                    .map_inputs(|input| load_input(input, &base))?,
+                op: load_operation(instruction.op, &base)?,
             })
         })
         .collect::<Result<Vec<_>, Failure>>()?;
@@ -443,16 +446,36 @@ fn execute(file: &str, mut o: Options, fmt: Format) -> Result<u8, Failure> {
         find_schema(target)?
     };
     let schema_label = schema.as_deref().map(display_path);
-    let diagnostics = if let Some((path, name)) = schema.as_deref().zip(schema_label.as_deref()) {
+    let mut diagnostics = if let Some((path, name)) = schema.as_deref().zip(schema_label.as_deref())
+    {
         let loaded = read_and_load_schema(path, name)?
             .map_err(|invalid| format!("invalid schema {name}: {invalid}"))?;
-        c.introduced_diagnostics(&loaded.schema)?
+        gate::introduced_diagnostics(&c, &loaded.schema)?
             .iter()
             .map(|diagnostic| render_document_diagnostic(file, diagnostic, &loaded))
             .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
+    diagnostics.extend(gate::added_suppressions(&c).into_iter().map(|directive| {
+        let scope = if directive.file_wide {
+            "file-wide"
+        } else {
+            "inline"
+        };
+        RenderedDiagnostic {
+            id: "added-suppression".into(),
+            message: format!("the edit adds a {scope} suppression comment"),
+            source_path: file.into(),
+            line: directive.line,
+            column: directive.column,
+            target: Some(crate::diagnostics::RenderedTarget::Document),
+            schema_node: None,
+            schema_location: None,
+            involved_headers: Vec::new(),
+            references: Vec::new(),
+        }
+    }));
     if !diagnostics.is_empty() && fmt != Format::Json {
         if !o.force {
             crate::write_stderr(&format!(
@@ -541,47 +564,4 @@ fn diagnostic_values(diagnostics: &[RenderedDiagnostic]) -> Vec<Value> {
         .iter()
         .map(render::json::diagnostic_json)
         .collect()
-}
-// A single contiguous change with up to three equal context lines on each side.
-fn diff(file: &str, a: &str, b: &str) -> String {
-    if a == b {
-        return String::new();
-    }
-    let a: Vec<_> = a.split_inclusive('\n').collect();
-    let b: Vec<_> = b.split_inclusive('\n').collect();
-    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    let suffix = a[prefix..]
-        .iter()
-        .rev()
-        .zip(b[prefix..].iter().rev())
-        .take_while(|(x, y)| x == y)
-        .count();
-    let start = prefix.saturating_sub(3);
-    let end_a = a.len() - suffix;
-    let end_b = b.len() - suffix;
-    let context = suffix.min(3);
-    let range = |end: usize| {
-        let count = end + context - start;
-        format!("{},{}", start + usize::from(count > 0), count)
-    };
-    let mut out = format!(
-        "--- {file}\n+++ {file}\n@@ -{} +{} @@\n",
-        range(end_a),
-        range(end_b)
-    );
-    for (prefix, lines) in [
-        (' ', &a[start..prefix]),
-        ('-', &a[prefix..end_a]),
-        ('+', &b[prefix..end_b]),
-        (' ', &a[end_a..end_a + context]),
-    ] {
-        for line in lines {
-            out.push(prefix);
-            out.push_str(line);
-            if !line.ends_with('\n') {
-                out.push_str("\n\\ No newline at end of file\n");
-            }
-        }
-    }
-    out
 }

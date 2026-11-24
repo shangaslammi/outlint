@@ -13,7 +13,7 @@ use super::lines::{
 use super::model::{
     Block, BlockKind, BlockLocation, Heading, HeadingLocation, ItemLocation, ItemText, LeafBlock,
     ListBlock, ListItem, ListKind, MarkdownOptions, Preamble, Section, SuppressedDiagnostic,
-    Suppressions,
+    SuppressionDirective, Suppressions,
 };
 use crate::NonEmpty;
 
@@ -25,11 +25,13 @@ pub(super) struct ParsedBody {
     pub(super) sections: Vec<Section>,
     /// Diagnostic ids disabled everywhere in this document.
     pub(super) file_suppressions: Suppressions,
+    pub(super) suppression_directives: Vec<SuppressionDirective>,
 }
 
 struct ScannedBody {
     headings: Vec<HeadingRecord>,
     file_suppressions: Suppressions,
+    suppression_directives: Vec<SuppressionDirective>,
     root_preamble: Vec<Block>,
     #[cfg(test)]
     reference_definitions: BTreeMap<String, std::ops::Range<usize>>,
@@ -170,6 +172,7 @@ pub(super) fn parse(
     let ScannedBody {
         headings,
         file_suppressions,
+        suppression_directives,
         root_preamble,
         #[cfg(test)]
         reference_definitions,
@@ -182,6 +185,7 @@ pub(super) fn parse(
         preamble: Preamble::from_blocks(root_preamble),
         sections,
         file_suppressions,
+        suppression_directives,
     })
 }
 
@@ -224,6 +228,7 @@ fn scan_event_stream<'a>(
     let mut root_preamble = PreambleBuilder::new();
     let mut owner = Owner::Root;
     let mut file_suppressions = Suppressions::default();
+    let mut suppression_directives = Vec::new();
     let mut line_suppressions = BTreeMap::new();
     let mut active_heading: Option<HeadingBuilder> = None;
     let mut active_direct_block: Option<BlockBuilder> = None;
@@ -378,6 +383,7 @@ fn scan_event_stream<'a>(
                     line_index,
                     &mut file_suppressions,
                     &mut line_suppressions,
+                    &mut suppression_directives,
                 )?;
                 if let Some(list) = active_direct_list.as_mut() {
                     if list.active_item.is_none() {
@@ -420,6 +426,7 @@ fn scan_event_stream<'a>(
     Ok(ScannedBody {
         headings,
         file_suppressions,
+        suppression_directives,
         root_preamble,
         #[cfg(test)]
         reference_definitions: BTreeMap::new(),
@@ -1173,7 +1180,7 @@ impl HeadingBuilder {
         let line_start = lines.line_start(line)?;
         let line_end = lines.line_end(line)?;
         let source_block = source.get(safe_range.clone()).ok_or(ParseError::RANGE)?;
-        let source_text = extract_heading_source(source_block)?;
+        let (source_text, title) = extract_heading_source(source_block)?;
         let text = if options.strip_inline_markup {
             self.diagnostic_text.clone()
         } else {
@@ -1193,6 +1200,9 @@ impl HeadingBuilder {
             location: HeadingLocation {
                 range: text_range(safe_range.start, safe_range.end),
                 line_range: text_range(line_start, line_end),
+                title_range: title.map(|span| {
+                    text_range(safe_range.start + span.start, safe_range.start + span.end)
+                }),
                 line: line as u64,
                 column: byte_column(line_start, safe_range.start)?,
             },
@@ -1259,10 +1269,7 @@ fn atx_opening(line: &str) -> Option<(HeaderLevel, &str)> {
     (rest.is_empty() || rest.starts_with(' ')).then_some((level, rest))
 }
 
-/// Returns the level and byte range of the title in one ATX heading line,
-/// excluding the opening marker, surrounding whitespace and closing hashes.
-/// Pass a line without its terminator.
-pub fn atx_heading(line: &str) -> Option<(HeaderLevel, std::ops::Range<usize>)> {
+fn atx_heading(line: &str) -> Option<(HeaderLevel, std::ops::Range<usize>)> {
     let (level, rest) = atx_opening(line)?;
     let content = rest.trim_end();
     let before_hashes = content.trim_end_matches('#');
@@ -1286,20 +1293,29 @@ fn convert_level(level: HeadingLevel) -> HeaderLevel {
     }
 }
 
-fn extract_heading_source(block: &str) -> Result<String, ParseError> {
+fn extract_heading_source(
+    block: &str,
+) -> Result<(String, Option<std::ops::Range<usize>>), ParseError> {
     let mut lines = physical_lines(block)?;
-    let first_line = lines.first().copied().ok_or(ParseError::RANGE)?;
-    if let Some((_, title)) = atx_heading(first_line) {
-        return first_line
-            .get(title)
-            .map(str::to_owned)
-            .ok_or(ParseError::RANGE);
-    }
-
-    if lines.last().is_some_and(|line| is_setext_underline(line)) {
+    let first = lines.first().copied().ok_or(ParseError::RANGE)?;
+    let title = if let Some((_, title)) = atx_heading(first) {
+        Some(title)
+    } else if lines.last().is_some_and(|line| is_setext_underline(line)) {
         lines.pop();
+        (lines.len() == 1).then(|| {
+            let start = first.len() - first.trim_start().len();
+            start..start + first.trim().len()
+        })
+    } else {
+        None
+    };
+
+    if let Some(title) = title {
+        let text = first.get(title.clone()).ok_or(ParseError::RANGE)?;
+        Ok((text.to_owned(), Some(title)))
+    } else {
+        Ok((lines.join("\n").trim().to_owned(), None))
     }
-    Ok(lines.join("\n").trim().to_owned())
 }
 
 fn is_setext_underline(line: &str) -> bool {
@@ -1386,6 +1402,7 @@ fn collect_suppressions(
     lines: &LineIndex,
     file: &mut Suppressions,
     per_line: &mut BTreeMap<usize, Suppressions>,
+    directives: &mut Vec<SuppressionDirective>,
 ) -> Result<(), ParseError> {
     let safe_range = source_range(source, range)?;
     let raw_html = source.get(safe_range.clone()).ok_or(ParseError::RANGE)?;
@@ -1414,11 +1431,6 @@ fn collect_suppressions(
         let Some((file_wide, suppressions)) = parse_suppression(comment) else {
             continue;
         };
-        if file_wide {
-            file.0.extend(suppressions.0);
-            continue;
-        }
-
         let absolute_start = base_offset
             .checked_add(comment_start)
             .ok_or(ParseError::RANGE)?;
@@ -1428,9 +1440,22 @@ fn collect_suppressions(
             .ok_or(ParseError::RANGE)?
             .trim()
             == comment;
-        if is_entire_line {
-            per_line.entry(line).or_default().0.extend(suppressions.0);
+        if file_wide {
+            file.0.extend(suppressions.0.iter().cloned());
+        } else if is_entire_line {
+            per_line
+                .entry(line)
+                .or_default()
+                .0
+                .extend(suppressions.0.iter().cloned());
         }
+        directives.push(SuppressionDirective {
+            range: text_range(absolute_start, base_offset + comment_end),
+            line: line as u64,
+            column: byte_column(lines.line_start(line)?, absolute_start)?,
+            file_wide,
+            ids: suppressions,
+        });
     }
     Ok(())
 }

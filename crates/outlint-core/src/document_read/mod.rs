@@ -61,20 +61,19 @@ pub fn document_tree(
 }
 
 /// Resolves a selector with read's recovery context and returns its canonical
-/// spelling along with the resolved node. Reuse an enumeration of the same
-/// document when resolving several selectors against one snapshot.
+/// spelling along with the resolved node.
 /// The source must be BOM-stripped and correspond to that snapshot.
 /// This API is provisional and may change in a minor release before 1.0.
 pub fn resolve_document_target<'d>(
     source: &str,
     document: &'d Document,
-    entries: &[(CanonicalDocumentPath, DocumentNode<'d>)],
     spelling: &str,
 ) -> Result<(CanonicalDocumentPath, DocumentNode<'d>), Box<DocumentReadFailure>> {
     let result = (|| {
         let path = parse_path(spelling)?;
         let node = resolve_node(document, &path)?;
-        let canonical = canonical_path(entries, node).ok_or_else(|| missing_canonical(&path))?;
+        let entries = document_paths(document);
+        let canonical = canonical_path(&entries, node).ok_or_else(|| missing_canonical(&path))?;
         Ok((canonical.clone(), node))
     })();
     result.map_err(|error| Box::new(describe_error(&error, source, document)))

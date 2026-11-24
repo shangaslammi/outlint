@@ -33,7 +33,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo package --locked -p outlint
+      - name: Verify workspace packages
+        # A previously published package at the same version can shadow a staged sibling.
+        env:
+          CARGO_HOME: ${{ runner.temp }}/outlint-package-cargo
+          CARGO_TARGET_DIR: ${{ runner.temp }}/outlint-package-target
+        run: |
+          cargo fetch --locked
+          cargo package --locked --offline --workspace --features outlint/full
 
   doc:
     runs-on: ubuntu-latest

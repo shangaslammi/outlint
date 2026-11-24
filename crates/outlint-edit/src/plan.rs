@@ -1,83 +1,109 @@
 //! Plan each operation against an already resolved target.
 use super::{
     convert, cut,
-    model::{fragment, line_span, owned_start, rows, Kind, Row, Token},
+    model::{blank, blank_start, fragment, rows, Kind, Row, Token},
     parse, Error,
 };
 use outlint_core::*;
 use std::ops::Range;
 
+/// Position of a new section relative to its original target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::edit) enum Placement {
+pub enum Placement {
+    /// Before the target and its descendants, at the same level.
     Before,
+    /// After the entire target subtree, at the same level.
     After,
+    /// After existing children, one level deeper than the target.
     AppendChild,
 }
 
+/// A typed operation whose payloads have a caller-selected representation.
 #[derive(Debug, PartialEq, Eq)]
-pub(in crate::edit) enum Op<T = String> {
+pub enum Op<T = String> {
+    /// Replace a unique literal occurrence in the target extent.
     ReplaceText {
+        /// Nonempty text to match literally.
         old: T,
+        /// Replacement spelling, which may be empty.
         new: T,
     },
+    /// Replace the spelling of a section title.
     Rename(String),
+    /// Remove the target’s owned span.
     Delete,
+    /// Create a section and an optional preamble.
     InsertSection {
+        /// Sibling or child slot relative to the target.
         placement: Placement,
+        /// Single-line inline Markdown.
         title: String,
+        /// Optional Markdown blocks before any child sections.
         preamble: Option<T>,
     },
+    /// Append one or more visible blocks to a preamble.
     AppendBlock(T),
+    /// Replace a block or direct item and retain its gap.
     Replace(T),
+    /// Insert one or more visible blocks before a block.
     InsertBefore(T),
+    /// Insert one or more visible blocks after a block.
     InsertAfter(T),
+    /// Insert an item after the last direct item in a list.
     AppendItem(T),
+    /// Insert an item at an original zero-based list gap.
     InsertItem {
+        /// Original gap index, through the original item count.
         index: usize,
+        /// Item content without an outer marker.
         payload: T,
     },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Spacing {
-    Block,
-    Item { loose: bool, at_end: bool },
-}
-
 pub(super) enum Action {
     Literal,
     Delete,
     Replace,
+    Rewrite,
     Rename,
-    Insert {
-        into: Option<usize>,
-        spacing: Spacing,
-    },
+    Insert(Slot),
+}
+
+/// The boundary immediately after this slot, and the parent whose children it accepts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct Slot {
+    pub boundary: usize,
+    pub index: usize,
+    pub parent: Option<usize>,
 }
 
 pub(super) struct Plan {
     pub bytes: Range<usize>,
+    pub owned: Range<usize>,
     pub tokens: Range<usize>,
     pub expected: Vec<Token>,
     pub body: String,
     pub action: Action,
+    pub gap: Range<usize>,
 }
 
 impl Plan {
     fn insert(
         offset: usize,
-        index: usize,
+        slot: Slot,
         body: String,
         expected: Vec<Token>,
-        into: Option<usize>,
-        spacing: Spacing,
+        gap: Range<usize>,
     ) -> Self {
         Self {
             bytes: offset..offset,
-            tokens: index..index,
-            expected,
+            owned: offset..offset,
+            tokens: slot.index..slot.index,
             body,
-            action: Action::Insert { into, spacing },
+            expected,
+            action: Action::Insert(slot),
+            gap,
         }
     }
 }
@@ -98,6 +124,34 @@ struct Located<'a> {
 impl Located<'_> {
     fn tokens(self) -> Range<usize> {
         self.index..self.row.subtree_end
+    }
+
+    fn before(self) -> Slot {
+        Slot {
+            boundary: self.row.open,
+            index: self.index,
+            parent: self.row.token.parent,
+        }
+    }
+
+    fn after(self) -> Slot {
+        Slot {
+            boundary: self.row.close + 1,
+            index: self.row.subtree_end,
+            parent: self.row.token.parent,
+        }
+    }
+
+    fn inside_end(self) -> Slot {
+        Slot {
+            boundary: self.row.close,
+            index: self.row.subtree_end,
+            parent: Some(self.index),
+        }
+    }
+
+    fn gap(self) -> Range<usize> {
+        self.row.gap_start..self.row.body_start
     }
 }
 
@@ -136,7 +190,7 @@ impl Context<'_> {
                 title,
                 preamble.as_deref().unwrap_or(""),
             ),
-            (Op::Delete, _, Some(target)) => Ok(Self::delete(target)),
+            (Op::Delete, _, Some(target)) => Ok(self.delete(target)),
             (Op::Rename(title), Some(DocumentNode::Section(section)), Some(target)) => {
                 self.rename(&section.heading, target, title)
             }
@@ -205,6 +259,8 @@ impl Context<'_> {
         }
         Ok(Plan {
             bytes: start..start + old.len(),
+            owned: start..start + old.len(),
+            gap: 0..0,
             tokens: 0..0,
             expected: vec![],
             body: convert(new, self.ending)?,
@@ -221,25 +277,66 @@ impl Context<'_> {
         let child = section
             .map_or(self.doc.sections.as_slice(), |section| &section.children)
             .first();
-        let (offset, index) = if let Some(child) = child {
+        let (offset, slot, gap) = if let Some(child) = child {
             let child = self.locate(DocumentNode::Section(child))?;
-            (child.row.owned_start, child.index)
+            let slot = Slot {
+                boundary: child.row.open - 1,
+                ..child.before()
+            };
+            (child.row.gap_start, slot, child.gap())
         } else if let Some(target) = target {
-            (target.row.subtree_lines_end, target.row.subtree_end)
+            let slot = Slot {
+                boundary: target.row.preamble_close,
+                ..target.inside_end()
+            };
+            (target.row.end, slot, self.neighbour_gap(slot.index, target))
         } else {
-            (self.source.len(), self.rows.len())
+            let (offset, slot, gap) = self.root_end();
+            (
+                offset,
+                Slot {
+                    boundary: slot.boundary - 1,
+                    ..slot
+                },
+                gap,
+            )
         };
         let body = block_body(payload, self.ending)?;
-        let depth = target.map_or(0, |target| target.row.token.depth + 1);
-        let expected = one_block(&body, depth)?;
-        Ok(Plan::insert(
+        let expected = blocks(&body)?;
+        Ok(Plan::insert(offset, slot, body, expected, gap))
+    }
+
+    fn root_end(&self) -> (usize, Slot, Range<usize>) {
+        let index = self.rows.len();
+        let offset = blank_start(self.source);
+        let last = self
+            .rows
+            .iter()
+            .rev()
+            .find(|row| row.token.parent.is_none());
+        let boundary = last.map_or(1, |row| {
+            row.close + 1 + usize::from(!matches!(row.token.kind, Kind::Heading(_)))
+        });
+        let gap = last.map_or(0..0, |row| row.gap_start..row.body_start);
+        (
             offset,
-            index,
-            body,
-            expected,
-            target.map(|target| target.index),
-            Spacing::Block,
-        ))
+            Slot {
+                boundary,
+                index,
+                parent: None,
+            },
+            gap,
+        )
+    }
+
+    fn neighbour_gap(&self, index: usize, target: Located<'_>) -> Range<usize> {
+        // Among equal-byte slots a following node supplies its separator.
+        // At EOF or across transparent source, use the last neighbour in the target's subtree.
+        self.rows
+            .get(index)
+            .filter(|next| next.gap_start == target.row.end)
+            .or_else(|| self.rows.get(target.row.subtree_end - 1))
+            .map_or_else(|| target.gap(), |row| row.gap_start..row.body_start)
     }
 
     fn insert_section(
@@ -250,32 +347,38 @@ impl Context<'_> {
         title: &str,
         preamble: &str,
     ) -> Result<Plan, Error> {
-        let (offset, index, depth, level, into) = match (placement, target) {
-            (Placement::AppendChild, None) => (self.source.len(), self.rows.len(), 0, 1, None),
+        let (offset, slot, level, gap) = match (placement, target) {
+            (Placement::AppendChild, None) => {
+                let (offset, slot, gap) = self.root_end();
+                (offset, slot, 1, gap)
+            }
             (placement, Some(target)) => {
                 let Kind::Heading(level) = target.row.token.kind else {
-                    return Err(Error::Range);
+                    return Err(Error::Target);
                 };
-                let depth = target.row.token.depth;
                 let level = level as u8;
                 match placement {
-                    Placement::AppendChild => (
-                        target.row.subtree_lines_end,
-                        target.row.subtree_end,
-                        depth + 1,
-                        level + 1,
-                        Some(target.index),
-                    ),
-                    Placement::Before if !root => {
-                        (target.row.owned_start, target.index, depth, level, None)
+                    Placement::AppendChild => {
+                        let slot = target.inside_end();
+                        (
+                            target.row.end,
+                            slot,
+                            level + 1,
+                            self.neighbour_gap(slot.index, target),
+                        )
                     }
-                    Placement::After if !root => (
-                        target.row.subtree_lines_end,
-                        target.row.subtree_end,
-                        depth,
-                        level,
-                        None,
-                    ),
+                    Placement::Before if !root => {
+                        (target.row.gap_start, target.before(), level, target.gap())
+                    }
+                    Placement::After if !root => {
+                        let slot = target.after();
+                        (
+                            target.row.end,
+                            slot,
+                            level,
+                            self.neighbour_gap(slot.index, target),
+                        )
+                    }
                     _ => return Err(Error::Target),
                 }
             }
@@ -289,20 +392,36 @@ impl Context<'_> {
             body.push_str(&self.ending.repeat(2));
             body.push_str(&preamble);
         }
-        let expected = heading_tokens(&body, depth, level, title)?;
-        Ok(Plan::insert(
-            offset,
-            index,
-            body,
-            expected,
-            into,
-            Spacing::Block,
-        ))
+        let expected = heading_tokens(&body, level, title)?;
+        Ok(Plan::insert(offset, slot, body, expected, gap))
     }
 
-    fn delete(target: Located<'_>) -> Plan {
+    fn first_item_list(&self, target: Located<'_>) -> Option<&Row> {
+        target
+            .row
+            .token
+            .parent
+            .filter(|parent| target.row.token.kind == Kind::Item && *parent + 1 == target.index)
+            .and_then(|parent| self.rows.get(parent))
+    }
+
+    fn owned(&self, target: Located<'_>) -> Range<usize> {
+        // The outer list gap and comment are emitted with its first item.
+        let start = self
+            .first_item_list(target)
+            .map_or(target.row.gap_start, |list| list.body_start);
+        start..target.row.end
+    }
+
+    fn delete(&self, target: Located<'_>) -> Plan {
+        let bytes = self.owned(target);
+        let gap = self
+            .first_item_list(target)
+            .map_or_else(|| target.gap(), |list| list.gap_start..list.body_start);
         Plan {
-            bytes: target.row.owned_start..target.row.subtree_lines_end,
+            owned: bytes.clone(),
+            gap,
+            bytes,
             tokens: target.tokens(),
             expected: vec![],
             body: String::new(),
@@ -313,49 +432,31 @@ impl Context<'_> {
     fn rename(&self, heading: &Heading, target: Located<'_>, title: &str) -> Result<Plan, Error> {
         check_title(title)?;
         let raw = cut(self.source, target.row.lines.clone())?;
-        let line = raw.trim_end_matches(['\r', '\n']);
-        let (span, opening_space, closing_space) = if let Some((_, span)) = atx_heading(line) {
-            let before = cut(line, 0..span.start)?;
-            let suffix = line.get(span.end..).ok_or(Error::Range)?;
-            (
-                span,
-                if !title.is_empty() && before.ends_with('#') {
-                    " "
-                } else {
-                    ""
-                },
-                if !title.is_empty() && suffix.starts_with('#') {
-                    " "
-                } else {
-                    ""
-                },
-            )
-        } else {
-            let (first, underline) = line.split_once('\n').ok_or(Error::Target)?;
-            if underline.contains('\n') {
-                return Err(Error::Target);
-            }
-            let first = first.trim_end_matches('\r');
-            (
-                first.len() - first.trim_start().len()..first.trim_end().len(),
-                "",
-                "",
-            )
-        };
+        let title_range = heading.location.title_range.ok_or(Error::Target)?;
+        let span = title_range.start.0 - target.row.lines.start
+            ..title_range.end.0 - target.row.lines.start;
         let before = cut(raw, 0..span.start)?;
         let after = raw.get(span.end..).ok_or(Error::Range)?;
+        let opening_space = if !title.is_empty() && span.is_empty() && before.ends_with('#') {
+            " "
+        } else {
+            ""
+        };
+        let closing_space = if !title.is_empty() && span.is_empty() && after.starts_with('#') {
+            " "
+        } else {
+            ""
+        };
         let body = format!("{opening_space}{title}{closing_space}");
-        let mut expected = heading_tokens(
-            &format!("{before}{body}{after}"),
-            target.row.token.depth,
-            heading.level,
-            title,
-        )?;
+        let mut expected = heading_tokens(&format!("{before}{body}{after}"), heading.level, title)?;
         if let Some(token) = expected.first_mut() {
             token.suppressions = target.row.token.suppressions.clone();
         }
+        let bytes = title_range.start.0..title_range.end.0;
         Ok(Plan {
-            bytes: target.row.lines.start + span.start..target.row.lines.start + span.end,
+            owned: bytes.clone(),
+            bytes,
+            gap: 0..0,
             tokens: target.index..target.index + 1,
             expected,
             body,
@@ -370,20 +471,14 @@ impl Context<'_> {
         payload: &str,
     ) -> Result<Plan, Error> {
         let body = block_body(payload, self.ending)?;
-        let expected = blocks(&body, target.row.token.depth)?;
-        let (offset, index) = if before {
-            (target.row.owned_start, target.index)
+        let expected = blocks(&body)?;
+        let (offset, slot, gap) = if before {
+            (target.row.gap_start, target.before(), target.gap())
         } else {
-            (target.row.lines.end, target.row.subtree_end)
+            let slot = target.after();
+            (target.row.end, slot, self.neighbour_gap(slot.index, target))
         };
-        Ok(Plan::insert(
-            offset,
-            index,
-            body,
-            expected,
-            None,
-            Spacing::Block,
-        ))
+        Ok(Plan::insert(offset, slot, body, expected, gap))
     }
 
     fn replace_block(
@@ -396,8 +491,8 @@ impl Context<'_> {
         if block.kind() == BlockKind::Code && !whole_fence(&body)? {
             return self.replace_code_body(target, payload);
         }
-        let prefix = cut(self.source, target.row.owned_start..target.row.lines.start)?;
-        let expected = blocks(&format!("{prefix}{body}"), target.row.token.depth)?;
+        let prefix = cut(self.source, target.row.body_start..target.row.lines.start)?;
+        let expected = blocks(&format!("{prefix}{body}"))?;
         self.replace_lines(target, body, expected)
     }
 
@@ -407,8 +502,8 @@ impl Context<'_> {
         target: Located<'_>,
         payload: &str,
     ) -> Result<Plan, Error> {
-        let body = self.item_body(item, payload)?;
-        let mut expected = item_token(&body, target.row.token.depth)?;
+        let body = self.item_body(item, payload, true)?;
+        let mut expected = item_token(&body)?;
         expected.suppressions = target.row.token.suppressions.clone();
         self.replace_lines(target, body, vec![expected])
     }
@@ -419,12 +514,14 @@ impl Context<'_> {
         mut body: String,
         expected: Vec<Token>,
     ) -> Result<Plan, Error> {
-        let bytes = target.row.lines.clone();
+        let bytes = target.row.lines.start..target.row.end;
         if cut(self.source, bytes.clone())?.ends_with('\n') {
             body.push_str(self.ending);
         }
         Ok(Plan {
             bytes,
+            owned: self.owned(target),
+            gap: target.gap(),
             tokens: target.tokens(),
             expected,
             body,
@@ -449,39 +546,85 @@ impl Context<'_> {
             .iter()
             .nth(index.min(len - 1))
             .ok_or(Error::Range)?;
-        let offset = if at_end {
-            target.row.lines.end
+        let row_index = target.index + 1 + index;
+        let (offset, slot, gap) = if index == 0 {
+            if target.row.body_start != target.row.lines.start {
+                return Err(Error::Target);
+            }
+            let first = self.rows.get(row_index).ok_or(Error::Range)?;
+            let gap = self
+                .rows
+                .get(row_index + 1)
+                .filter(|row| row.token.parent == Some(target.index))
+                .map_or(0..0, |row| row.gap_start..row.body_start);
+            (
+                target.row.gap_start,
+                Slot {
+                    boundary: first.open,
+                    index: row_index,
+                    parent: Some(target.index),
+                },
+                gap,
+            )
+        } else if at_end {
+            let last = self.rows.get(row_index - 1).ok_or(Error::Range)?;
+            (
+                target.row.end,
+                target.inside_end(),
+                last.gap_start..last.body_start,
+            )
         } else {
-            let start = line_span(self.source, reference.location.range)?.start;
-            owned_start(self.source, start, &reference.suppressions)
+            let row = self.rows.get(row_index).ok_or(Error::Range)?;
+            (
+                row.gap_start,
+                Located {
+                    index: row_index,
+                    row,
+                }
+                .before(),
+                row.gap_start..row.body_start,
+            )
         };
-        let items = self
-            .rows
-            .get(target.index + 1..target.row.subtree_end)
-            .ok_or(Error::Range)?;
-        let loose = items
-            .iter()
-            .zip(items.iter().skip(1))
-            .any(|(left, right)| left.lines.end < right.owned_start);
-        let body = self.item_body(reference, payload)?;
-        let expected = vec![item_token(&body, target.row.token.depth + 1)?];
-        Ok(Plan::insert(
-            offset,
-            target.index + 1 + index,
-            body,
-            expected,
-            Some(target.index),
-            Spacing::Item { loose, at_end },
-        ))
+        let body = self.item_body(reference, payload, false)?;
+        let expected = vec![item_token(&body)?];
+        Ok(Plan::insert(offset, slot, body, expected, gap))
     }
 
-    fn item_body(&self, item: &ListItem, payload: &str) -> Result<String, Error> {
-        let raw = cut(self.source, line_span(self.source, item.location.range)?)?;
-        let indented = raw.trim_start_matches(' ');
-        let digits = indented.bytes().take_while(u8::is_ascii_digit).count();
-        let end = raw.len() - indented.len() + digits + 1;
-        let prefix = cut(raw, 0..end)?;
-        let pad = " ".repeat(prefix.len() + 1);
+    fn item_body(
+        &self,
+        item: &ListItem,
+        payload: &str,
+        retain_padding: bool,
+    ) -> Result<String, Error> {
+        let start = item.location.range.start.0;
+        let marker = self.source.get(start..).ok_or(Error::Range)?;
+        let digits = marker.bytes().take_while(u8::is_ascii_digit).count();
+        let marker_end = start + digits + 1;
+        let prefix = cut(self.source, item.location.line_range.start.0..marker_end)?;
+        let padding = if retain_padding {
+            let rest = cut(self.source, marker_end..item.location.line_range.end.0)?;
+            let size = rest
+                .bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            cut(rest, 0..size)?
+        } else {
+            ""
+        };
+        let first_pad = if padding.is_empty() { " " } else { padding };
+        let content_col = first_pad.bytes().fold(prefix.len(), |col, byte| {
+            if byte == b'\t' {
+                col + (4 - col % 4)
+            } else {
+                col + 1
+            }
+        });
+        // Padding wider than four columns leaves indented content after one separator.
+        let pad = " ".repeat(if content_col - prefix.len() > 4 {
+            prefix.len() + 1
+        } else {
+            content_col
+        });
         let payload = convert(payload, self.ending)?;
         let mut body = prefix.to_owned();
         for (index, line) in payload
@@ -493,8 +636,10 @@ impl Context<'_> {
                 body.push_str(self.ending);
             }
             if !line.is_empty() {
-                body.push_str(if index == 0 { " " } else { &pad });
+                body.push_str(if index == 0 { first_pad } else { &pad });
                 body.push_str(line);
+            } else if index == 0 {
+                body.push_str(padding);
             }
         }
         Ok(body)
@@ -509,20 +654,19 @@ impl Context<'_> {
         {
             return Err(Error::Payload);
         }
-        let mut expected = one_block(
-            &format!("{}{body}{}", fenced.opening, fenced.closing),
-            target.row.token.depth,
-        )?;
+        let mut expected = one_block(&format!("{}{body}{}", fenced.opening, fenced.closing))?;
         if let Some(token) = expected.first_mut() {
             token.suppressions = target.row.token.suppressions.clone();
         }
         Ok(Plan {
             bytes: target.row.lines.start + fenced.opening.len()
                 ..target.row.lines.start + fenced.closing_start,
+            owned: self.owned(target),
+            gap: 0..0,
             tokens: target.tokens(),
             expected,
             body,
-            action: Action::Replace,
+            action: Action::Rewrite,
         })
     }
 }
@@ -534,12 +678,7 @@ fn check_title(title: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn heading_tokens(
-    body: &str,
-    depth: usize,
-    level: HeaderLevel,
-    title: &str,
-) -> Result<Vec<Token>, Error> {
+fn heading_tokens(body: &str, level: HeaderLevel, title: &str) -> Result<Vec<Token>, Error> {
     let doc = parse(body)?;
     let [section] = doc.sections.as_slice() else {
         return Err(Error::Payload);
@@ -551,19 +690,11 @@ fn heading_tokens(
     {
         return Err(Error::Payload);
     }
-    rows(body, &doc)?
-        .into_iter()
-        .map(|row| {
-            let mut token = row.token;
-            token.depth += depth;
-            Ok(token)
-        })
-        .collect()
+    Ok(rows(body, &doc)?.into_iter().map(|row| row.token).collect())
 }
 
 fn block_body(payload: &str, ending: &str) -> Result<String, Error> {
     let mut converted = convert(payload, ending)?;
-    let blank = |line: &str| line.trim_matches([' ', '\t', '\r', '\n']).is_empty();
     let start = converted
         .split_inclusive('\n')
         .take_while(|line| blank(line))
@@ -581,8 +712,8 @@ fn block_body(payload: &str, ending: &str) -> Result<String, Error> {
     Ok(converted)
 }
 
-fn blocks(body: &str, depth: usize) -> Result<Vec<Token>, Error> {
-    let tokens = fragment(body, depth)?;
+fn blocks(body: &str) -> Result<Vec<Token>, Error> {
+    let tokens = fragment(body)?;
     if tokens.is_empty()
         || tokens
             .iter()
@@ -593,19 +724,19 @@ fn blocks(body: &str, depth: usize) -> Result<Vec<Token>, Error> {
     Ok(tokens)
 }
 
-fn one_block(body: &str, depth: usize) -> Result<Vec<Token>, Error> {
-    let tokens = blocks(body, depth)?;
+fn one_block(body: &str) -> Result<Vec<Token>, Error> {
+    let tokens = blocks(body)?;
     if tokens.iter().skip(1).any(|token| token.kind != Kind::Item) {
         return Err(Error::Payload);
     }
     Ok(tokens)
 }
 
-fn item_token(body: &str, depth: usize) -> Result<Token, Error> {
-    let tokens = one_block(body, 0)?;
+fn item_token(body: &str) -> Result<Token, Error> {
+    let tokens = one_block(body)?;
     match tokens.as_slice() {
         [_, token] if token.kind == Kind::Item => Ok(Token {
-            depth,
+            parent: None,
             ..token.clone()
         }),
         _ => Err(Error::Payload),
@@ -662,5 +793,38 @@ fn closed_fence(source: &str) -> Option<Fence<'_>> {
 
 fn whole_fence(body: &str) -> Result<bool, Error> {
     Ok(closed_fence(body).is_some()
-        && matches!(fragment(body, 0)?.as_slice(), [token] if token.kind == Kind::Block(BlockKind::Code) && token.spelling == body))
+        && matches!(fragment(body)?.as_slice(), [token] if token.kind == Kind::Block(BlockKind::Code) && token.spelling == body))
+}
+impl<T> Op<T> {
+    pub(super) fn map_inputs<U, E>(
+        self,
+        mut load: impl FnMut(T) -> Result<U, E>,
+    ) -> Result<Op<U>, E> {
+        Ok(match self {
+            Self::ReplaceText { old, new } => Op::ReplaceText {
+                old: load(old)?,
+                new: load(new)?,
+            },
+            Self::Rename(title) => Op::Rename(title),
+            Self::Delete => Op::Delete,
+            Self::InsertSection {
+                placement,
+                title,
+                preamble,
+            } => Op::InsertSection {
+                placement,
+                title,
+                preamble: preamble.map(load).transpose()?,
+            },
+            Self::AppendBlock(payload) => Op::AppendBlock(load(payload)?),
+            Self::Replace(payload) => Op::Replace(load(payload)?),
+            Self::InsertBefore(payload) => Op::InsertBefore(load(payload)?),
+            Self::InsertAfter(payload) => Op::InsertAfter(load(payload)?),
+            Self::AppendItem(payload) => Op::AppendItem(load(payload)?),
+            Self::InsertItem { index, payload } => Op::InsertItem {
+                index,
+                payload: load(payload)?,
+            },
+        })
+    }
 }

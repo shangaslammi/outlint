@@ -1,0 +1,20 @@
+[package]
+name = "outlint-edit"
+description = "Pure document-path editing of Markdown documents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/outlint-edit"
+readme = "README.md"
+keywords = ["markdown", "editing", "outline", "splice", "text"]
+categories = ["text-processing", "development-tools"]
+
+[dependencies]
+outlint-core = { path = "../outlint-core", version = "0.2.0" }
+
+[dev-dependencies]
+proptest = "1"

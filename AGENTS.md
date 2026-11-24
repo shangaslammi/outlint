@@ -8,6 +8,7 @@ expect breaking changes before 1.0.
 
     crates/outlint-core    schema model, schema loader, validator (library)
     crates/outlint-cli     the `outlint` binary
+    crates/outlint-edit    pure planning and verification for experimental edits
     crates/outlint-search  indexing for the experimental search extension
     spec/outlint-spec.md   the specification (normative)
     spec/*-spec.md         search, read, and edit (experimental extensions),
@@ -50,10 +51,11 @@ invariant failure; ordinary CommonMark recovery remains successful.
 `matcher.rs` and `case_fold.rs` are private helpers. The provisional
 `document_read/` API selects content and lists typed document-path rows,
 including failure context and suggestions, without IO or presentation labels.
-The optional edit engine in `crates/outlint-cli/src/edit/engine/` plans
-Markdown edits against concrete document paths, verifies the resulting
-structure, and compares schema diagnostics. The surrounding CLI code loads
-payloads and schemas and handles preview and atomic file replacement.
+The optional engine in `crates/outlint-edit` parses edit scripts, plans
+Markdown edits against concrete document paths, and verifies the resulting
+structure. The CLI uses its candidate and node correspondence to compare
+diagnostics. The CLI also loads payloads and schemas and handles preview
+and atomic file replacement.
 
 Preamble blocks and direct list items extend the parsed tree without changing
 schema version 1 or JSON envelope version 2. `Document` and `Section` own
@@ -232,7 +234,7 @@ The check-only CLI adds only `serde_json`. The optional edit shell uses
 `tempfile` for exclusive same-directory temporary file creation, automatic
 cleanup on failed writes or replacement, and portable atomic persistence.
 On Windows it uses `winapi-util` for a safe link-count query because stable
-std does not expose that metadata there. The CLI uses the workspace's
+std does not expose that metadata there. `outlint-edit` uses the workspace's
 existing `proptest` dev dependency to exercise edit boundary preservation.
 YAML is read directly from
 `saphyr-parser` events; if the loader needs a different YAML crate,
@@ -294,6 +296,12 @@ If a change touches release packaging, keep `npm/outlint/package.json`
 and npm bootstrap distribute the check-only CLI; `outlint-full` archives use
 the same sources with all CLI features enabled. Regenerate release.yml using
 the pinned cargo-dist version after changing distribution configuration.
+
+CI fetches dependencies in a clean Cargo home, then verifies the packages
+together with `cargo package --locked --offline --workspace --features outlint/full`
+so cached registry releases cannot shadow the workspace packages. Publish
+`outlint-core` first, then `outlint-edit` and `outlint-search`, then the
+`outlint` CLI.
 
 Report which checks were actually run.
 

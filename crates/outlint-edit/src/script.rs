@@ -1,28 +1,42 @@
 //! Pure edit instruction grammar. The shell loads referenced inputs separately.
-use super::engine::{Op, Placement};
+use super::{Op, Placement};
 
+/// An input described by a script or flag, before the caller performs any IO.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Input {
+pub enum Input {
+    /// Read the single permitted standard input stream.
     Stdin,
+    /// Use an already available word or heredoc.
     Literal(String),
+    /// Read a file relative to the script’s directory.
     File(String),
 }
 
+/// A selector and typed operation with unresolved input sources.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Instruction {
+pub struct Instruction {
+    /// One-based line for a script instruction, absent for a flag-mode operation.
     pub line: Option<usize>,
+    /// Selector spelling to resolve against the original document.
     pub path: String,
+    /// Operation whose input positions are already checked.
     pub op: Op<Input>,
 }
 
+/// First script grammar failure in instruction order.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct ScriptError {
+pub struct ScriptError {
+    /// One-based instruction line, including for heredoc failures.
     pub line: usize,
+    /// One-based byte column on the instruction line.
     pub column: usize,
+    /// Grammar detail suitable for a caller’s refusal output.
     pub message: String,
 }
 
-pub(super) fn operation<T>(verb: &str, args: &[&str], inputs: Vec<T>) -> Option<Op<T>> {
+/// Checks the verb signature shared by the script and flag grammars.
+/// Inputs are supplied in operand order.
+pub fn operation<T>(verb: &str, args: &[&str], inputs: Vec<T>) -> Option<Op<T>> {
     let count = inputs.len();
     let mut inputs = inputs.into_iter();
     Some(match (verb, args, count) {
@@ -123,11 +137,9 @@ fn instruction_line(raw: &str) -> &str {
         .or_else(|| raw.strip_suffix('\n'))
         .unwrap_or(raw)
 }
-/// Parse the whole batch before opening any payload sources.
-pub(super) fn parse_script(
-    source: &str,
-    stdin_script: bool,
-) -> Result<Vec<Instruction>, ScriptError> {
+/// Parses the whole batch before the caller reads any payload source.
+/// Set `stdin_script` when the script itself consumes stdin.
+pub fn parse_script(source: &str, stdin_script: bool) -> Result<Vec<Instruction>, ScriptError> {
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let mut lines = source.split_inclusive('\n').enumerate();
     let mut used_stdin = stdin_script;

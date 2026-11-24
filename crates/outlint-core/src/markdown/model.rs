@@ -36,6 +36,8 @@ pub struct Document {
     pub sections: Vec<Section>,
     /// Diagnostic ids disabled everywhere in this document.
     pub file_suppressions: Suppressions,
+    /// Parsed suppression comments in source order, including repeated directives.
+    pub suppression_directives: Vec<SuppressionDirective>,
 }
 
 /// Frontmatter extracted from the first lines of a Markdown document.
@@ -327,12 +329,30 @@ pub struct HeadingLocation {
     pub range: TextRange,
     /// Half-open byte range of the first source line used for anchoring.
     pub line_range: TextRange,
+    /// The editable title spelling of an ATX or single-line Setext heading.
+    /// Empty ATX titles have a zero-width range. Multiline Setext titles have no range.
+    pub title_range: Option<TextRange>,
     /// One-based source line containing the heading text or ATX marker.
     pub line: u64,
     /// One-based byte column of the heading text or ATX marker.
     ///
     /// Markdown indentation is ASCII, so this is also the character column.
     pub column: u64,
+}
+
+/// One parsed suppression comment, even when it duplicates an existing directive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuppressionDirective {
+    /// The comment bytes, excluding surrounding indentation and line endings.
+    pub range: TextRange,
+    /// The one-based source line of the opening delimiter.
+    pub line: u64,
+    /// The one-based byte column of the opening delimiter.
+    pub column: u64,
+    /// Whether the directive applies to the whole document.
+    pub file_wide: bool,
+    /// The diagnostic identifiers named by this comment.
+    pub ids: Suppressions,
 }
 
 /// A diagnostic identifier named by an Outlint suppression directive.

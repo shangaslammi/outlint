@@ -108,23 +108,47 @@ refusal and includes the instruction line.
 
 ## 3. Operations and source ownership
 
-3.1. Source outside the edited byte spans is preserved verbatim.
+3.1. An edit computes owned source spans from the original document.
+Spans are half-open and use physical lines, including a line's terminator
+when present. Sibling spans are disjoint. Container spans include their
+descendants. Read extents remain as defined by the document-path specification.
 
 | Target | Physical source owned by the target |
 | --- | --- |
-| Section | The physical heading lines through the last content line of its subtree. |
-| Direct block | Its first through last physical lines, including any nested source. |
-| Direct list item | Its marker line through its last physical content line, including nested source. |
+| Section | Its leading gap, attached suppression lines, heading lines, and descendants through the end of its last child or preamble block. |
+| Direct block other than a list | Its leading gap, attached suppression lines, and all its physical lines, including nested source. |
+| List | Its outer leading gap, the attached suppression lines above its first marker, and the spans of its direct items. |
+| Direct list item | Its marker line and all content lines, including nested source. A tight item has no leading gap. In a loose list, each item after the first owns the blank-line run before it, if present. An attached suppression run follows the item it precedes, including when indented as part of the preceding item. The first item's attached suppression run is also at the start of the list body. |
 
-Each of these spans includes its last line's terminator if present. If an
-inline suppression comment is attached to the first line under the
-validator's suppression rules, that comment line belongs to the target
-for deletion and for insertion before it. Rename and block or item replacement
-edit the content while retaining the preceding comment line. Deletion may
-also consume one adjacent blank line containing only spaces or tabs,
-preferring a following blank line. When adjacent deletes select the same
-blank line, it is removed once. Other transparent content outside the
-span is preserved.
+A leading gap is the entire contiguous run of blank lines, including
+space- or tab-only lines, immediately before the node and its attached
+suppression lines. When an inline suppression is attached to a node under
+validator §6.3, the node owns the entire contiguous run of standalone
+inline suppression comments ending on the previous line. Other transparent
+source outside the span remains verbatim. A gap cannot extend across a
+transparent comment or reference definition. Leading blank lines at file
+start and blank lines trailing at EOF are unowned and stay verbatim. The
+root's frontmatter also remains outside structural edits.
+
+The first node at file start and the first item in a list have no leading
+gap. If that node is deleted, the first surviving node in the sequence
+loses its leading gap. The outer gap of a surviving list stays with the
+list. Deleting every item removes the list and its outer gap. A loose
+list can become tight when its separating blank lines are deleted.
+
+Deletion removes the owned span and replacement retains its gap and
+attached suppression lines. An insertion before a node goes at the start
+of its span. An insertion after a node goes at the end of its span.
+Inserted content carries a copy of a neighbouring gap. At the start of a
+sequence the copied gap follows the first inserted node. Consecutive inserts may
+each copy the same gap. A copied gap is widened when the new neighbours
+need a separator. If deletion leaves the successor with too small a gap,
+retain a sufficient gap from the deleted span when available, or synthesize
+the separator. For example, deleting a code block or thematic break
+between paragraphs must keep the paragraphs distinct. A separator includes
+the terminator of the preceding line before any whitespace-only blank line.
+Structural verification can still refuse a seam that Markdown cannot
+express as the requested nodes.
 
 3.2. Payload text, and both operands of `replace-text`, use the document's
 line-ending style selected as in [read §2.3](read-spec.md#2-content-mode).
@@ -142,9 +166,9 @@ rules and the structural guarantees in §4.
 | Operation | Source ownership and result |
 | --- | --- |
 | `rename TITLE` | Replaces the title spelling of a single-line ATX or Setext heading, preserving its level and style, including a Setext underline. Existing indentation, surrounding spacing, closing hashes, and terminators are kept. Spaces may be synthesized when adding a title to an empty ATX heading. A multiline Setext heading is an invalid target. |
-| `delete` | Removes the section's physical line span and adjacent blank line as in §3.1, including descendants and any transparent content inside the span. |
+| `delete` | Removes the section's owned span (§3.1), including descendants and any transparent content inside the span. |
 | `insert-section PLACEMENT TITLE` | Inserts an ATX section before or after the target's subtree at the target heading's level, or as its last child one level deeper. A virtual parent is level zero. Level seven is unavailable. An optional payload is the new section's preamble Markdown and may contain multiple blocks, but no child heading. |
-| `append-block` | Inserts one visible direct block before the first child and its attached suppression comment, or after the target's last line if it has no children. |
+| `append-block` | Inserts one or more visible direct blocks in the preamble's last slot, before the first child's owned span if present. |
 
 A title is a single line of inline Markdown, inserted as supplied. It must
 form the heading's title in the selected heading syntax. Escape Markdown
@@ -152,22 +176,25 @@ punctuation in the supplied title when needed, for example to keep
 trailing hashes as ATX title text. Inline rendering, including link
 references, uses the candidate's surrounding document.
 When the sole H1 is merged into `$`, these operations use that H1 as the
-physical target, leaving any source before it outside its span except for
-the adjacent-blank deletion rule. Without a merged H1, `append-block`
-uses the virtual root's preamble (EOF if there are no sections), and
-`insert-section append-child` adds a level-one section at EOF. A virtual
-root cannot be renamed or deleted. Sibling placement at `$` is unavailable.
+physical target. Source before that heading's owned span stays in place.
+Without a merged H1, `append-block` uses the virtual root's preamble. With no sections, it appends at the end
+of the source before any trailing blank lines. The virtual root's
+`insert-section append-child` adds a level-one section at the end of the
+source before any trailing blank lines. A virtual root cannot be renamed
+or deleted. Sibling placement at `$` is unavailable.
 
 3.4. Operations on a visible direct block (`p`, `list`, `code`,
-`quote`, `html`, or `break`) use its physical line span.
+`quote`, `html`, or `break`) use its owned span.
 
 | Operation | Source ownership and result |
 | --- | --- |
-| `delete` | Removes the block, including its nested source, with the adjacent-blank rule in §3.1. |
+| `delete` | Removes the block’s owned span, including its nested source (§3.1). |
 | `insert-before`, `insert-after` | Inserts one or more visible direct blocks, of any kind, at the corresponding edge of the span. |
-| `replace` | Substitutes one or more visible direct blocks, of any kind, for the span. A code target uses the code-specific rule below. |
+| `replace` | Substitutes one or more visible direct blocks, of any kind, for the block body. A code target uses the code-specific rule below. |
 
-Block payloads cannot introduce document headings.
+Block payloads cannot introduce document headings. They may include
+transparent content such as reference definitions and suppression comments
+alongside visible blocks. Added suppression comments are subject to §5.3.
 For code replacement, a single explicitly closed fenced code block spanning
 the normalized payload replaces the entire block, fences and info string
 included. Otherwise the payload replaces only the body of
@@ -180,22 +207,23 @@ enclosing fence.
 
 3.5. A list also accepts `append-item` and `insert-item INDEX`. The
 latter inserts at a zero-based gap through the original direct item count,
-inclusive. The last gap is append, at the end of the last item's line
-span within the list's physical extent. Other gaps are before the indexed
-item and its attached suppression comment. Appending before later document
-content retains the list's existing outer separator. A direct item accepts
-`replace` and `delete`.
-Replacement takes the item's physical lines, including nested material,
-and leaves external blank lines in place. Deletion follows §3.1, and
-deleting the only remaining item removes the list.
+inclusive. The last gap appends inside the list, after its last item.
+Other gaps precede the indexed item's owned span. Inserting at gap zero
+in a list whose first item has an attached suppression run is
+`invalid-target`. This preserves the existing directive and avoids
+splitting the list. A direct item accepts `replace` and `delete`.
+Replacement takes the item's physical content, including nested material,
+and retains its gap. Deletion follows §3.1.
 
 Item payloads supply Markdown content without the outer list marker. Inline
 markup is accepted. Continuation lines are re-indented to the generated
 content column while retaining their relative indentation. Replacement
-copies the target marker. Insertion copies the following marker or, at
-the end, the preceding marker. The marker includes its original bullet
+copies the target marker and its existing padding. Insertion copies the
+following marker or, at the end, the preceding marker. The marker includes its original bullet
 or ordered numeral and delimiter. Existing sibling markers are preserved.
-Synthesized marker padding and item separation are implementation-defined.
+An insertion can copy the indexed item’s gap, the last item’s gap on
+append, or the next inter-item gap when inserting at gap zero. In a tight
+list only the line terminator separates adjacent items.
 
 3.6. `replace-text` accepts any resolved node.
 The old text must have exactly one start position in the target's extent.
@@ -216,24 +244,39 @@ for its addresses, positions, and literal searches. A rename retains
 its old address throughout the batch. Inserted nodes become addressable on
 a later invocation. An empty script is an unchanged edit.
 
-4.2. Intersecting nonempty edit spans and insertions strictly inside them
-are `conflicting-edits`. The optional blank line of a deletion does not
-create an overlap with another edit. An insertion into a section or list
-also conflicts with replacement or deletion of that node or an ancestor,
-even at a span boundary. Insertions next to a replaced target are
-permitted. Insertions are ordered by original byte offset, then by
-instruction order, subject to §4.3.
+4.2. Conflicts are intersections of the original owned edit spans.
+Structural deletion and replacement use the target's owned span, rename
+uses the title span, and literal replacement uses the matched bytes.
+Two renames of the same empty title conflict. Touching spans are
+permitted. A zero-width insertion conflicts when its slot lies inside a
+deleted or replaced node, including at a shared byte offset for the
+opening or closing boundary. Insertions beside a deleted or replaced
+target are permitted. Choosing separators for the resulting seams leaves
+the conflict test unchanged.
+
+View the physical tree as opening and closing boundaries in document
+order, with a boundary between a section's preamble and child sections,
+even when either is empty. The root also has a preamble boundary.
+Unowned transparent source can separate neighbouring slots. Every
+insertion belongs to a slot between consecutive boundaries. That slot
+fixes the insertion's parent. Insertions follow slot order, with script
+order within a slot. For example, after the last preamble block of A,
+`insert-after` on that block shares a slot with `append-block` on A.
+This slot precedes an `append-child` insertion and a sibling inserted
+after A, even when all use the same byte offset.
 
 4.3. The result must have the requested physical structure, including
-headings that validation would prune for skipped levels. Untouched
-headings, visible direct blocks and direct items retain their order,
-kinds, parentage, source boundaries, and spelling. The path-root
-projection may change. Structural edits preserve the suppression
-attachments on untouched nodes. A literal replacement may change
-spelling inside its matched span while preserving the physical structure
-established by the other operations. A payload that absorbs a neighbor,
-merges lists intended as separate blocks, adds an unexpected heading, or
-reparents a later section fails with `invalid-payload`.
+headings that validation would prune for skipped levels. The check compares
+the parent of every inserted heading, block, and item with the parent
+selected by its slot, including for inserted subtrees. Untouched nodes
+retain their order, kinds, parentage, source boundaries, and spelling.
+The path-root projection may change. Structural edits preserve the
+suppression attachments on untouched nodes. A literal replacement may
+change spelling inside its matched span while preserving the physical
+structure established by the other operations. An operation that absorbs
+a neighbour, merges lists intended as separate blocks, adds an unexpected
+heading, or reparents a later section fails with `invalid-payload` and
+reason `candidate-structure`, including when the operation has no payload.
 
 The check includes the frontmatter boundary. Inline rendering and
 reference resolution may change when the underlying Markdown changes.
@@ -243,9 +286,9 @@ Equivalence at ambiguous parser boundaries is implementation-defined.
 
 5.1. By default the command uses the discovery walk of
 [validator §11.2](outlint-spec.md#112-document-checking-and-schema-selection).
-If no schema is found, the edit is ungated. `--schema FILE` selects an
-explicit schema and `--ignore-schema` disables the gate. These options
-are mutually exclusive. An unreadable or invalid selected schema or
+If no schema is found, the edit skips schema validation. `--schema FILE`
+selects an explicit schema and `--ignore-schema` skips schema validation.
+These options are mutually exclusive. An unreadable or invalid selected schema or
 linked resource is an operational error, including with `--force`.
 
 5.2. With a schema, the gate validates both versions under that schema's
@@ -265,10 +308,21 @@ identify the subject or operands precisely is implementation-defined.
 In particular, changed frontmatter may cause delegated JSON Schema or
 frontmatter-dependent findings to be counted as new.
 
-5.3. Existing findings may persist or disappear. New findings cause a
+5.3. An `outlint-disable` or `outlint-disable-file` comment in the
+candidate counts as a new diagnostic unless paired with an unused original
+comment with the same scope and diagnostic ids. Inline comment pairing
+requires correspondence through the edit. File-wide comments may pair
+across locations. Repeated comments count separately, even when the extra
+copies would suppress the same findings. The diagnostic id is
+`added-suppression`, with the candidate comment's position, a document
+target, and no schema location. This rule also applies when schema
+validation is skipped.
+
+5.4. Existing findings may persist or disappear. New findings cause a
 `new-diagnostics` refusal unless `--force` is supplied. Force reports
-the new diagnostics and bypasses only this comparison. Preview and apply
-use the same candidate and gate.
+the new diagnostics and leaves structural verification, destination checks,
+and schema loading in effect. Preview and apply use the same candidate
+and gate.
 
 ## 6. File IO
 
@@ -277,7 +331,8 @@ from Markdown parsing and path coordinates and preserved on output. An
 input document with bare carriage returns is an operational error.
 Both preview and apply require write access to the destination and refuse
 read-only files, symlinks, non-regular files, and files with multiple hard
-links as operational errors.
+links as operational errors. Read-only and multiple-link refusals name
+the destination and its condition.
 
 6.2. A changed candidate is applied by atomic replacement, retaining
 the original permissions. If replacement fails, the original stays
@@ -327,11 +382,11 @@ Failures attributable only to the batch omit the individual attribution.
 | `ambiguous-path` | Multiple matching sections at an unindexed step | Resolved prefix, failing step, all canonical candidates, and empty suggestions |
 | `invalid-script` | Malformed script instruction | `line` and `column` |
 | `invalid-target` | Operation, heading style, or insertion position unavailable at the target | |
-| `invalid-payload` | Payload or candidate violates the operation's requirements | `reason` is `payload-form`, `candidate-structure`, or `bare-carriage-return` |
+| `invalid-payload` | Payload or contextual structure violates the operation's requirements | `reason` is `payload-form`, `candidate-structure`, or `bare-carriage-return` |
 | `conflicting-edits` | Incompatible batch edits under §4.2 | |
 | `text-not-found` | Old text has no start position in the extent | |
 | `ambiguous-text` | Old text has more than one start position in the extent | `count` in JSON and in the text message |
-| `new-diagnostics` | Schema gate finds new diagnostics and force is absent | Candidate diagnostics |
+| `new-diagnostics` | The gate finds new diagnostics or added suppressions and force is absent | Candidate diagnostics |
 
 7.4. On a gate refusal or forced success, diagnostic document positions
 refer to the candidate, including when it was never written. Human
@@ -391,4 +446,4 @@ outlint edit guide.md insert-section '$.setup' append-child 'Troubleshooting' --
 ```
 
 The refusal reports `new-diagnostics` and locates the unexpected section
-at `guide.md:7:1 (candidate)`.
+at `guide.md:6:1 (candidate)`.

@@ -1,0 +1,6 @@
+insert-after $.good/p[0] <<E
+x
+
+<!-- outlint-disable-file unexpected-section -->
+E
+rename $.good "Nope"

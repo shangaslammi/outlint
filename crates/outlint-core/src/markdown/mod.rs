@@ -5,7 +5,6 @@
 //! while this module owns Outlint's section tree and suppression metadata.
 
 mod body;
-pub use body::atx_heading;
 mod error;
 pub use error::MarkdownParseError;
 mod frontmatter;
@@ -20,7 +19,7 @@ pub use model::{
     Block, BlockKind, BlockLocation, Document, DocumentFrontmatter, FrontmatterAnchor,
     FrontmatterAnchors, FrontmatterLocation, Heading, HeadingLocation, ItemLocation, ItemText,
     LeafBlock, ListBlock, ListItem, ListKind, MarkdownOptions, Preamble, Section,
-    SuppressedDiagnostic, Suppressions,
+    SuppressedDiagnostic, SuppressionDirective, Suppressions,
 };
 
 use body::ParsedBody;
@@ -66,6 +65,7 @@ pub fn parse_markdown(
         preamble,
         sections,
         file_suppressions,
+        suppression_directives,
     } = body::parse(source, &parser_source, options, &line_index)?;
 
     Ok(Document {
@@ -73,5 +73,6 @@ pub fn parse_markdown(
         preamble,
         sections,
         file_suppressions,
+        suppression_directives,
     })
 }

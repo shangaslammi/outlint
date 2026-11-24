@@ -19,6 +19,14 @@ output shape, and the library API may all change in a minor release. See
   layered on the validator's document model, outside the validator's
   specification and stability promises, and available only in the full
   edition or with the `edit` Cargo feature.
+- **Provisional edit library.** `outlint-edit` exposes pure script parsing
+  and candidate generation with physical node correspondence.
+- **Provisional Markdown and path APIs.** `outlint-core` exposes
+  `resolve_document_target`, `Block::kind`, `Block::suppressions`, and
+  `markdown_line_ending` for source-aware document tooling.
+- **Breaking Rust API change:** `HeadingLocation` includes an optional
+  single-line title range and `Document` includes positioned
+  `SuppressionDirective` occurrences, including repeated comments.
 
 ## [0.2.0] - 2026-11-01
 

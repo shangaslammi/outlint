@@ -39,10 +39,11 @@ pub use loader::{
     load_schema_with_label, load_schema_with_resources,
 };
 pub use markdown::{
-    atx_heading, markdown_line_ending, parse_markdown, Block, BlockKind, BlockLocation, Document,
+    markdown_line_ending, parse_markdown, Block, BlockKind, BlockLocation, Document,
     DocumentFrontmatter, FrontmatterAnchor, FrontmatterAnchors, FrontmatterLocation, Heading,
     HeadingLocation, ItemLocation, ItemText, LeafBlock, ListBlock, ListItem, ListKind,
-    MarkdownOptions, MarkdownParseError, Preamble, Section, SuppressedDiagnostic, Suppressions,
+    MarkdownOptions, MarkdownParseError, Preamble, Section, SuppressedDiagnostic,
+    SuppressionDirective, Suppressions,
 };
 pub use schema::{
     AtLeastTwo, BlockMatcher, BoundRuleStep, CanonicalFloat, CanonicalInteger, CaptureName,

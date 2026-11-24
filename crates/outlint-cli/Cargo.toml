@@ -23,18 +23,16 @@ outlint-core = { path = "../outlint-core", version = "0.2.0" }
 serde_json = "1"
 outlint-search = { path = "../outlint-search", version = "0.2.0", optional = true }
 
+outlint-edit = { path = "../outlint-edit", version = "0.2.0", optional = true }
 tempfile = { version = "3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = { version = "0.1", optional = true }
 
-[dev-dependencies]
-proptest = "1"
-
 [features]
 search = ["dep:outlint-search"]
 read = []
-edit = ["dep:tempfile", "dep:winapi-util"]
+edit = ["dep:outlint-edit", "dep:tempfile", "dep:winapi-util"]
 full = ["search", "read", "edit"]
 
 [package.metadata.dist]

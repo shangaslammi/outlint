@@ -904,12 +904,29 @@ proptest! {
     ) {
         let hashes = "#".repeat(closing_hashes);
         let line = format!("{}{}  {title}{closing_gap}{hashes}  ", " ".repeat(indent), "#".repeat(level));
-        let (lexed_level, range) = crate::atx_heading(&line).unwrap();
         let expected = if closing_gap.ends_with(' ') { title } else { format!("{title}{closing_gap}{hashes}") };
         let doc = parse_markdown(&format!("{line}{ending}"), MarkdownOptions::default()).unwrap();
         let heading = &doc.sections[0].heading;
-        prop_assert_eq!(lexed_level, heading.level);
-        prop_assert_eq!(line.get(range), Some(expected.as_str()));
+        let range = heading.location.title_range.unwrap();
+        prop_assert_eq!(heading.level as usize, level);
+        prop_assert_eq!(line.get(range.start.0..range.end.0), Some(expected.as_str()));
         prop_assert_eq!(&heading.source_text, &expected);
+    }
+}
+
+proptest! {
+    #[test]
+    fn single_line_setext_title_ranges_preserve_source_coordinates(
+        indent in 0usize..4,
+        title in "[a-zé界]{1,12}",
+        ending in prop_oneof![Just("\n"), Just("\r\n"), Just("\r")],
+    ) {
+        let source = format!("lead{ending}{ending}{}{title}  {ending}===={ending}", " ".repeat(indent));
+        let doc = parse_markdown(&source, MarkdownOptions::default()).unwrap();
+        let heading = &doc.sections[0].heading;
+        let range = heading.location.title_range.unwrap();
+        prop_assert_eq!(range.start.0, 4 + ending.len() * 2 + indent);
+        prop_assert_eq!(source.get(range.start.0..range.end.0), Some(title.as_str()));
+        prop_assert_eq!(&heading.source_text, &title);
     }
 }

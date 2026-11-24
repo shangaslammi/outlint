@@ -12,29 +12,34 @@ pub(super) struct Destination<'a> {
     pub source: String,
 }
 
+pub(super) enum DestinationError {
+    ReadOnly,
+    HardLinked,
+    Open(io::Error),
+}
+
+impl From<io::Error> for DestinationError {
+    fn from(error: io::Error) -> Self {
+        Self::Open(error)
+    }
+}
+
 impl<'a> Destination<'a> {
-    pub fn read(path: &'a Path) -> io::Result<Self> {
+    pub fn read(path: &'a Path) -> Result<Self, DestinationError> {
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "must be a regular file",
-            ));
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidInput, "must be a regular file").into(),
+            );
         }
         if metadata.permissions().readonly() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "is read-only",
-            ));
+            return Err(DestinationError::ReadOnly);
         }
         // Check effective write access in preview and apply without truncating the file.
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let metadata = file.metadata()?;
         if hard_linked(&file, &metadata)? {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "has more than one hard link",
-            ));
+            return Err(DestinationError::HardLinked);
         }
         let mut source = String::new();
         file.read_to_string(&mut source)?;

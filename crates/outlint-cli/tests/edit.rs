@@ -126,7 +126,7 @@ fn scripts_resolve_inputs_locally_and_preserve_error_detail() {
     assert!(run(&dir, &args).status.success());
     assert_eq!(
         fs::read(dir.path().join("doc")).unwrap(),
-        b"new\r\ncontinued\r\n\r\n> a\r\n"
+        b"new\r\ncontinued\r\n> a\r\n"
     );
     dir.write("scripts/change", "\nreplace $/p <<END\nmissing end");
     let out = run(&dir, &args);
@@ -308,12 +308,30 @@ fn edit_fixtures_match_exact_bytes_or_refuse_without_writing() {
             ],
         );
         let written = fs::read(dir.path().join("input.md")).unwrap();
+        assert!(
+            output.stderr.is_empty(),
+            "{name}: {}",
+            common::stderr(&output)
+        );
         let value = common::json_output(&output);
         if case.join("expected.json").is_file() {
             let expected: serde_json::Value =
                 serde_json::from_slice(&fs::read(case.join("expected.json")).unwrap()).unwrap();
             assert_eq!(output.status.code(), Some(1), "{name}: {value}");
-            assert_eq!(value["error"]["id"], expected["id"], "{name}: {value}");
+            for field in ["id", "line", "other_line"] {
+                if let Some(expected) = expected.get(field) {
+                    assert_eq!(&value["error"][field], expected, "{name}: {value}");
+                }
+            }
+            if let Some(expected) = expected.get("diagnostics") {
+                let ids: Vec<_> = value["error"]["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|diagnostic| &diagnostic["id"])
+                    .collect();
+                assert_eq!(serde_json::json!(ids), *expected, "{name}: {value}");
+            }
             assert_eq!(written, original, "{name}");
         } else {
             assert!(output.status.success(), "{name}: {value}");
@@ -420,7 +438,10 @@ fn edit_refuses_read_only_and_hard_linked_destinations() {
     let output = run(&dir, &args);
     fs::set_permissions(&path, original).unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert!(common::stderr(&output).contains("read-only"));
+    assert_eq!(
+        common::stderr(&output),
+        "outlint: destination doc.md is read-only\n"
+    );
     assert_eq!(fs::read(&path).unwrap(), b"old\n");
 
     let alias = dir.path().join("alias.md");
@@ -428,7 +449,10 @@ fn edit_refuses_read_only_and_hard_linked_destinations() {
     for options in [&args[..], &[&args[..], &["--dry-run"]].concat()] {
         let output = run(&dir, options);
         assert_eq!(output.status.code(), Some(2));
-        assert!(common::stderr(&output).contains("hard link"));
+        assert_eq!(
+            common::stderr(&output),
+            "outlint: destination doc.md has more than one hard link\n"
+        );
     }
     assert_eq!(fs::read(&path).unwrap(), b"old\n");
     assert_eq!(fs::read(&alias).unwrap(), b"old\n");
@@ -493,4 +517,271 @@ fn edit_rejects_invalid_source_and_non_regular_destinations() {
         assert!(common::stderr(&output).contains("regular file"));
     }
     assert!(run(&dir, &["edit", "missing", "--help"]).status.success());
+}
+
+#[test]
+fn schema_selection_flags_and_json_member_order() {
+    let dir = TempDir::new("edit-schema-selection");
+    dir.write("doc.md", "old\n");
+    dir.write("doc.outlint.yml", "invalid schema");
+    let args = ["edit", "doc.md", "replace", "$/p", "--payload", "new"];
+    let ignored = run(
+        &dir,
+        &[
+            &args[..],
+            &[
+                "--ignore-schema",
+                "--dry-run",
+                "--format",
+                "compact",
+                "--format",
+                "json",
+            ],
+        ]
+        .concat(),
+    );
+    assert!(ignored.status.success(), "{}", common::stderr(&ignored));
+    assert!(stdout(&ignored).starts_with(
+        "{\"version\":1,\"file\":\"doc.md\",\"result\":\"changed\",\"paths\":[\"$/p[0]\"],\"schema\":null,\"diff\":"
+    ));
+    let conflict = run(
+        &dir,
+        &[
+            &args[..],
+            &["--ignore-schema", "--schema", "doc.outlint.yml"],
+        ]
+        .concat(),
+    );
+    assert_eq!(conflict.status.code(), Some(2));
+    assert!(common::stderr(&conflict).contains("choose --schema or --ignore-schema"));
+}
+
+fn with_input(dir: &TempDir, arguments: &[&str], input: &[u8]) -> std::process::Output {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_outlint"))
+        .current_dir(dir.path())
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn flag_payloads_read_stdin_once() {
+    let dir = TempDir::new("edit-stdin");
+    dir.write("doc.md", "old\n");
+    let result = with_input(
+        &dir,
+        &["edit", "doc.md", "replace", "$/p", "--payload", "-"],
+        b"\xef\xbb\xbfnews\n",
+    );
+    assert!(result.status.success(), "{}", common::stderr(&result));
+    let result = with_input(
+        &dir,
+        &[
+            "edit",
+            "doc.md",
+            "replace-text",
+            "$/p",
+            "--old",
+            "-",
+            "--payload",
+            "good",
+        ],
+        b"news",
+    );
+    assert!(result.status.success(), "{}", common::stderr(&result));
+    let result = run(
+        &dir,
+        &[
+            "edit",
+            "doc.md",
+            "replace-text",
+            "$/p",
+            "--old",
+            "-",
+            "--payload",
+            "-",
+        ],
+    );
+    assert_eq!(result.status.code(), Some(2));
+    assert!(common::stderr(&result).contains("stdin already used"));
+    assert_eq!(fs::read(dir.path().join("doc.md")).unwrap(), b"good\n");
+}
+
+#[test]
+fn edit_options_reject_repetition_and_script_mixing() {
+    let dir = TempDir::new("edit-exclusive");
+    dir.write("doc.md", "old\n");
+    dir.write("script", "replace $/p new\n");
+    for (arguments, message) in [
+        (
+            &[
+                "replace",
+                "$/p",
+                "--payload",
+                "new",
+                "--payload-file",
+                "other",
+            ][..],
+            "repeated payload source",
+        ),
+        (
+            &["--script", "script", "--force", "--force"],
+            "repeated option --force",
+        ),
+        (
+            &["--script", "script", "--script", "script"],
+            "repeated option --script",
+        ),
+        (
+            &["--script", "script", "delete", "$/p"],
+            "--script cannot be combined",
+        ),
+        (
+            &["--script", "script", "--old", "old"],
+            "--script cannot be combined",
+        ),
+    ] {
+        let result = run(&dir, &[&["edit", "doc.md"][..], arguments].concat());
+        assert_eq!(result.status.code(), Some(2));
+        assert!(stdout(&result).is_empty());
+        assert!(common::stderr(&result).contains(message));
+    }
+    assert_eq!(fs::read(dir.path().join("doc.md")).unwrap(), b"old\n");
+}
+
+#[test]
+fn invalid_targets_and_missing_text_have_distinct_refusals() {
+    let dir = TempDir::new("edit-target-errors");
+    dir.write("doc.md", "old\n");
+    let invalid = run(
+        &dir,
+        &["edit", "doc.md", "rename", "$/p", "bad", "--format", "json"],
+    );
+    assert_eq!(invalid.status.code(), Some(1));
+    assert_eq!(
+        common::json_output(&invalid)["error"]["id"],
+        "invalid-target"
+    );
+    assert!(stdout(&invalid).starts_with(
+        "{\"version\":1,\"file\":\"doc.md\",\"error\":{\"id\":\"invalid-target\",\"message\":"
+    ));
+    let missing = run(
+        &dir,
+        &[
+            "edit",
+            "doc.md",
+            "replace-text",
+            "$/p",
+            "--old",
+            "else",
+            "--payload",
+            "new",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        common::json_output(&missing)["error"]["id"],
+        "text-not-found"
+    );
+    dir.write("script", "# comment\n\nrename $/p bad\n");
+    let script = run(
+        &dir,
+        &["edit", "doc.md", "--script", "script", "--format", "human"],
+    );
+    assert_eq!(script.status.code(), Some(1));
+    assert!(common::stderr(&script).starts_with("invalid-target\tline 3: $/p[0]: "));
+    assert!(stdout(&script).is_empty());
+}
+
+#[test]
+fn suppression_occurrences_are_reported_and_force_can_admit_them() {
+    let dir = TempDir::new("edit-suppression-gate");
+    let original = "old\n\n<!-- outlint-disable-file unexpected-section -->\n";
+    dir.write("doc.md", original);
+    let payload = "<!-- outlint-disable unexpected-block -->\nnew\n\n<!-- outlint-disable-file unexpected-section -->";
+    for format in ["human", "compact", "json"] {
+        for force in [false, true] {
+            let mut args = vec![
+                "edit",
+                "doc.md",
+                "append-block",
+                "$",
+                "--payload",
+                payload,
+                "--ignore-schema",
+                "--format",
+                format,
+                "--dry-run",
+            ];
+            if force {
+                args.push("--force");
+            }
+            let result = run(&dir, &args);
+            assert_eq!(
+                result.status.code(),
+                Some(if force { 0 } else { 1 }),
+                "{}",
+                common::stderr(&result)
+            );
+            if format == "json" {
+                let value = common::json_output(&result);
+                let gate = if force { &value } else { &value["error"] };
+                assert_eq!(gate["diagnostic_source"], "candidate");
+                let diagnostics = gate["diagnostics"].as_array().unwrap();
+                assert_eq!(diagnostics.len(), 2);
+                assert!(diagnostics
+                    .iter()
+                    .all(|d| d["id"] == "added-suppression" && d.get("schema_location").is_none()));
+                assert!(result.stderr.is_empty());
+            } else {
+                let stderr = common::stderr(&result);
+                assert_eq!(stderr.matches("added-suppression").count(), 2);
+                assert_eq!(stderr.starts_with("new-diagnostics\t"), !force);
+                assert!(stderr.contains(if format == "compact" {
+                    "candidate\tdoc.md\t"
+                } else {
+                    " (candidate) added-suppression "
+                }));
+                assert_eq!(stdout(&result).starts_with("--- doc.md\n"), force);
+            }
+            assert_eq!(
+                fs::read(dir.path().join("doc.md")).unwrap(),
+                original.as_bytes()
+            );
+        }
+    }
+    let forced = run(
+        &dir,
+        &[
+            "edit",
+            "doc.md",
+            "append-block",
+            "$",
+            "--payload",
+            payload,
+            "--force",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(forced.status.success());
+    let written = fs::read_to_string(dir.path().join("doc.md")).unwrap();
+    assert!(written.contains("<!-- outlint-disable unexpected-block -->\nnew\n"));
+    assert_eq!(
+        written
+            .matches("outlint-disable-file unexpected-section")
+            .count(),
+        2
+    );
 }
