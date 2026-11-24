@@ -891,3 +891,25 @@ fn arbitrary_frontmatter_documents_reach_textless_entries() {
         "only {required} written entries were required to keep an anchor"
     );
 }
+
+proptest! {
+    #[test]
+    fn atx_title_range_agrees_with_parsed_source_text(
+        indent in 0usize..4,
+        level in 1usize..7,
+        title in "[a-zé界]{1,12}",
+        closing_gap in prop_oneof![Just(" "), Just("\t"), Just("\t ")],
+        closing_hashes in 1usize..8,
+        ending in prop_oneof![Just("\n"), Just("\r\n"), Just("\r")],
+    ) {
+        let hashes = "#".repeat(closing_hashes);
+        let line = format!("{}{}  {title}{closing_gap}{hashes}  ", " ".repeat(indent), "#".repeat(level));
+        let (lexed_level, range) = crate::atx_heading(&line).unwrap();
+        let expected = if closing_gap.ends_with(' ') { title } else { format!("{title}{closing_gap}{hashes}") };
+        let doc = parse_markdown(&format!("{line}{ending}"), MarkdownOptions::default()).unwrap();
+        let heading = &doc.sections[0].heading;
+        prop_assert_eq!(lexed_level, heading.level);
+        prop_assert_eq!(line.get(range), Some(expected.as_str()));
+        prop_assert_eq!(&heading.source_text, &expected);
+    }
+}

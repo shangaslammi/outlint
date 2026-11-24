@@ -8,7 +8,7 @@ use crate::{Block, BlockKind, Document, Section};
 use super::model::{
     CanonicalDocumentPath, CanonicalSectionStep, DocumentNode, DocumentPathTerminal,
 };
-use super::resolution::{block_kind, Parent};
+use super::resolution::Parent;
 
 /// Enumerates every addressable node of `document` with its canonical path.
 ///
@@ -87,7 +87,7 @@ fn push_preamble<'d>(
 ) {
     let mut ordinals: HashMap<BlockKind, usize> = HashMap::new();
     for block in blocks {
-        let kind = block_kind(block);
+        let kind = block.kind();
         let ordinal = ordinals.entry(kind).or_default();
         let index = *ordinal;
         *ordinal += 1;

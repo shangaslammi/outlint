@@ -9,7 +9,6 @@ expect breaking changes before 1.0.
     crates/outlint-core    schema model, schema loader, validator (library)
     crates/outlint-cli     the `outlint` binary
     crates/outlint-search  indexing for the experimental search extension
-    crates/outlint-edit    pure Markdown editing and schema gating
     spec/outlint-spec.md   the specification (normative)
     spec/*-spec.md         search, read, and edit (experimental extensions),
                            document paths (provisional)
@@ -51,10 +50,10 @@ invariant failure; ordinary CommonMark recovery remains successful.
 `matcher.rs` and `case_fold.rs` are private helpers. The provisional
 `document_read/` API selects content and lists typed document-path rows,
 including failure context and suggestions, without IO or presentation labels.
-The optional `outlint-edit` crate plans Markdown edits against concrete
-document paths, verifies the resulting structure, and compares schema
-diagnostics. The CLI loads payloads and schemas and handles preview and
-atomic file replacement.
+The optional edit engine in `crates/outlint-cli/src/edit/engine/` plans
+Markdown edits against concrete document paths, verifies the resulting
+structure, and compares schema diagnostics. The surrounding CLI code loads
+payloads and schemas and handles preview and atomic file replacement.
 
 Preamble blocks and direct list items extend the parsed tree without changing
 schema version 1 or JSON envelope version 2. `Document` and `Section` own
@@ -229,7 +228,13 @@ Current in core: `saphyr-parser` (the YAML parser — pure Rust, pinned
 exactly because every `0.0.z` release is a breaking change under Cargo's
 semver rules), `serde`/`serde_json`, `jsonschema`, `regex`,
 `pulldown-cmark`, `casefold`, `num-bigint`, `unicode-normalization`.
-The CLI adds only `serde_json`. YAML is read directly from
+The check-only CLI adds only `serde_json`. The optional edit shell uses
+`tempfile` for exclusive same-directory temporary file creation, automatic
+cleanup on failed writes or replacement, and portable atomic persistence.
+On Windows it uses `winapi-util` for a safe link-count query because stable
+std does not expose that metadata there. The CLI uses the workspace's
+existing `proptest` dev dependency to exercise edit boundary preservation.
+YAML is read directly from
 `saphyr-parser` events; if the loader needs a different YAML crate,
 raise it rather than working around it.
 

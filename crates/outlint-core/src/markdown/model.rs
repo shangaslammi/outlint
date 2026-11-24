@@ -177,6 +177,32 @@ pub enum Block {
     Break(LeafBlock),
 }
 
+impl Block {
+    /// The visible kind used by block selectors and validators.
+    pub fn kind(&self) -> BlockKind {
+        match self {
+            Self::Paragraph(_) => BlockKind::Paragraph,
+            Self::List(_) => BlockKind::List,
+            Self::Code(_) => BlockKind::Code,
+            Self::Quote(_) => BlockKind::Quote,
+            Self::Html(_) => BlockKind::Html,
+            Self::Break(_) => BlockKind::Break,
+        }
+    }
+
+    /// Suppressions attached to the block's anchor.
+    pub fn suppressions(&self) -> &Suppressions {
+        match self {
+            Self::Paragraph(leaf)
+            | Self::Code(leaf)
+            | Self::Quote(leaf)
+            | Self::Html(leaf)
+            | Self::Break(leaf) => &leaf.suppressions,
+            Self::List(list) => &list.suppressions,
+        }
+    }
+}
+
 /// The stable kind of a visible preamble block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockKind {

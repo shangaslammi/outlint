@@ -1,0 +1,2 @@
+delete $/p[1]
+append-block $ "x"

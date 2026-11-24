@@ -5,10 +5,12 @@
 //! while this module owns Outlint's section tree and suppression metadata.
 
 mod body;
+pub use body::atx_heading;
 mod error;
 pub use error::MarkdownParseError;
 mod frontmatter;
 mod lines;
+pub use lines::markdown_line_ending;
 mod model;
 
 #[cfg(test)]

@@ -1,0 +1,3 @@
+rename $.old "**New**"
+insert-section $.old before "Use `code`"
+insert-section $.old after "*Later*"

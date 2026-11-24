@@ -1,78 +1,51 @@
-//! Compare validator findings using the original coordinates retained by a candidate.
-use super::*;
-use std::collections::BTreeMap;
-/// A verified candidate with the original splice correspondence for a schema gate.
-pub struct Candidate<'a> {
-    original: &'a str,
-    /// Exact bytes to preview or apply, including the original BOM.
-    text: String,
-    changes: Vec<Change>,
-}
-/// Plan once so preview, validation and writing use the same bytes.
-pub fn candidate<'a>(source: &'a str, edits: &[Edit]) -> Result<Candidate<'a>, Error> {
-    let clean = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let (mut text, mut changes) = prepare(clean, edits)?;
-    // A byte-identical replacement leaves any diagnostic anchor inside it in place.
-    changes.retain(|change| clean.get(change.range.clone()) != Some(&change.replacement));
-    if clean.len() != source.len() {
-        text.insert(0, '\u{feff}')
-    }
-    Ok(Candidate {
-        original: clean,
-        text,
-        changes,
-    })
-}
-impl Candidate<'_> {
-    /// Exact verified source, including its original BOM when present.
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-    pub(super) fn into_text(self) -> String {
-        self.text
-    }
+//! Compare validator findings on subjects retained by structural verification.
+use super::batch::Candidate;
+use outlint_core::*;
+use std::fmt;
 
-    /// One-to-one multiset subtraction with unproven subject correspondence treated as new.
-    pub fn introduced_diagnostics(&self, schema: &Schema) -> Result<Vec<Diagnostic>, String> {
-        let v = PreparedValidator::new(schema).map_err(|e| e.to_string())?;
-        let validate = |s: &str| {
-            let doc = parse_markdown(
-                s,
-                MarkdownOptions {
-                    strip_inline_markup: schema.options.strip_inline_markup,
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            Ok::<_, String>((v.validate(&doc).map_err(|e| e.to_string())?, doc))
+#[derive(Debug)]
+pub(in crate::edit) enum GateError {
+    Parse(MarkdownParseError),
+    Prepare(PrepareValidationError),
+    Validate(ValidationOperationalError),
+}
+
+impl fmt::Display for GateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(e) => e.fmt(f),
+            Self::Prepare(e) => e.fmt(f),
+            Self::Validate(e) => e.fmt(f),
+        }
+    }
+}
+impl std::error::Error for GateError {}
+
+impl Candidate<'_> {
+    pub(in crate::edit) fn introduced_diagnostics(
+        &self,
+        schema: &Schema,
+    ) -> Result<Vec<Diagnostic>, GateError> {
+        let validator = PreparedValidator::new(schema).map_err(GateError::Prepare)?;
+        let options = MarkdownOptions {
+            strip_inline_markup: schema.options.strip_inline_markup,
         };
-        let (mut before, old_doc) = validate(self.original)?;
-        let edited = self.text.strip_prefix('\u{feff}').unwrap_or(&self.text);
+        let edited = self.clean_text();
+        let alternate;
+        let (old_doc, new_doc) = if options == MarkdownOptions::default() {
+            (&self.original_doc, &self.edited_doc)
+        } else {
+            alternate = (
+                parse_markdown(self.original, options).map_err(GateError::Parse)?,
+                parse_markdown(edited, options).map_err(GateError::Parse)?,
+            );
+            (&alternate.0, &alternate.1)
+        };
+        let mut before = validator.validate(old_doc).map_err(GateError::Validate)?;
         if edited == self.original {
             return Ok(Vec::new());
         }
-        let (after, new_doc) = validate(edited)?;
-        let list_owners = |doc: &Document| {
-            let mut owners = BTreeMap::new();
-            for (_, node) in document_paths(doc) {
-                if let DocumentNode::Block(Block::List(list)) = node {
-                    for item in list.items.iter() {
-                        owners.insert(
-                            item.location.line_range.start.0,
-                            list.location.line_range.start.0,
-                        );
-                    }
-                }
-            }
-            owners
-        };
-        let post_lists = list_owners(&new_doc);
-        let lists: BTreeMap<_, _> = list_owners(&old_doc)
-            .into_iter()
-            .filter_map(|(item, list)| {
-                let new = self.surviving_offset(item)?;
-                Some((list, *post_lists.get(&new)?))
-            })
-            .collect();
+        let after = validator.validate(new_doc).map_err(GateError::Validate)?;
         let same_root = match &schema.document {
             DocumentShape::Title(
                 TitleSlot::Spelled { .. } | TitleSlot::ImpliedBySections { .. },
@@ -86,7 +59,7 @@ impl Candidate<'_> {
                         .map(|s| s.heading.location.line_range.start.0)
                         .collect::<Vec<_>>()
                 };
-                match (titles(&old_doc).as_slice(), titles(&new_doc).as_slice()) {
+                match (titles(old_doc).as_slice(), titles(new_doc).as_slice()) {
                     ([], []) => true,
                     ([a], [b]) => self.surviving_offset(*a) == Some(*b),
                     _ => false,
@@ -107,7 +80,7 @@ impl Candidate<'_> {
             .into_iter()
             .filter(|new| {
                 if let Some(i) = before.iter().position(|old| {
-                    self.same(old, new, &lists, same_root)
+                    self.same(old, new, same_root)
                         && (same_fm
                             || (new.id != DiagnosticId::FrontmatterSchema
                                 && !new.references.iter().any(|r| {
@@ -130,22 +103,9 @@ impl Candidate<'_> {
         self.surviving_offset(a.range.start.0) == Some(b.range.start.0)
     }
     fn surviving_offset(&self, old: usize) -> Option<usize> {
-        if self
-            .changes
-            .iter()
-            .any(|c| c.range.contains(&old) && c.kind != ChangeKind::Rename)
-        {
-            return None;
-        }
-        mapped(old, &self.changes)
+        self.subjects.anchors.get(&old).copied()
     }
-    fn same(
-        &self,
-        a: &Diagnostic,
-        b: &Diagnostic,
-        lists: &BTreeMap<usize, usize>,
-        same_root: bool,
-    ) -> bool {
+    fn same(&self, a: &Diagnostic, b: &Diagnostic, same_root: bool) -> bool {
         use DiagnosticTarget::*;
         if a.id != b.id
             || a.schema_node != b.schema_node
@@ -160,7 +120,8 @@ impl Candidate<'_> {
             return false;
         }
         let anchored = self.anchor(&a.location, &b.location);
-        let same_list = lists.get(&a.location.range.start.0) == Some(&b.location.range.start.0);
+        let same_list =
+            self.subjects.lists.get(&a.location.range.start.0) == Some(&b.location.range.start.0);
         match (&a.target, &b.target) {
             (Document, Document) => same_root,
             (Frontmatter { block: x }, Frontmatter { block: y }) => {

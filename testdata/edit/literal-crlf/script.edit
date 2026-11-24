@@ -1,0 +1,6 @@
+replace-text $/p <<OLD <<NEW
+old
+line
+OLD
+new
+NEW

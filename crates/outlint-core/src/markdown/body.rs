@@ -1244,26 +1244,35 @@ fn is_eligible_heading(
 }
 
 fn physical_atx_level(line: &str) -> Option<HeaderLevel> {
-    let bytes = line.as_bytes();
-    let indent = bytes.iter().take_while(|byte| **byte == b' ').count();
+    atx_opening(line).map(|(level, _)| level)
+}
+
+fn atx_opening(line: &str) -> Option<(HeaderLevel, &str)> {
+    let opening = line.trim_start_matches(' ');
+    let indent = line.len() - opening.len();
     if indent > 3 {
         return None;
     }
-    let hashes = bytes
-        .get(indent..)?
-        .iter()
-        .take_while(|byte| **byte == b'#')
-        .count();
-    if !(1..=6).contains(&hashes) {
-        return None;
-    }
-    let after = indent + hashes;
-    if bytes.get(after).is_some_and(|byte| *byte != b' ') {
-        return None;
-    }
-    u8::try_from(hashes)
-        .ok()
-        .and_then(|level| HeaderLevel::try_from(level).ok())
+    let hashes = opening.bytes().take_while(|byte| *byte == b'#').count();
+    let level = HeaderLevel::try_from(u8::try_from(hashes).ok()?).ok()?;
+    let rest = opening.get(hashes..)?;
+    (rest.is_empty() || rest.starts_with(' ')).then_some((level, rest))
+}
+
+/// Returns the level and byte range of the title in one ATX heading line,
+/// excluding the opening marker, surrounding whitespace and closing hashes.
+/// Pass a line without its terminator.
+pub fn atx_heading(line: &str) -> Option<(HeaderLevel, std::ops::Range<usize>)> {
+    let (level, rest) = atx_opening(line)?;
+    let content = rest.trim_end();
+    let before_hashes = content.trim_end_matches('#');
+    let unclosed = if before_hashes.len() < content.len() && before_hashes.ends_with(' ') {
+        before_hashes
+    } else {
+        content
+    };
+    let start = line.len() - rest.trim_start().len();
+    Some((level, start..start + unclosed.trim().len()))
 }
 
 fn convert_level(level: HeadingLevel) -> HeaderLevel {
@@ -1280,43 +1289,17 @@ fn convert_level(level: HeadingLevel) -> HeaderLevel {
 fn extract_heading_source(block: &str) -> Result<String, ParseError> {
     let mut lines = physical_lines(block)?;
     let first_line = lines.first().copied().ok_or(ParseError::RANGE)?;
-    let trimmed_indent = first_line.trim_start_matches(' ');
-    let hash_count = trimmed_indent
-        .bytes()
-        .take_while(|byte| *byte == b'#')
-        .count();
-
-    if (1..=6).contains(&hash_count)
-        && trimmed_indent
-            .as_bytes()
-            .get(hash_count)
-            .is_none_or(|byte| *byte == b' ')
-    {
-        return Ok(strip_atx_closing_hashes(
-            trimmed_indent.get(hash_count..).ok_or(ParseError::RANGE)?,
-        )
-        .to_owned());
+    if let Some((_, title)) = atx_heading(first_line) {
+        return first_line
+            .get(title)
+            .map(str::to_owned)
+            .ok_or(ParseError::RANGE);
     }
 
     if lines.last().is_some_and(|line| is_setext_underline(line)) {
         lines.pop();
     }
     Ok(lines.join("\n").trim().to_owned())
-}
-
-fn strip_atx_closing_hashes(content: &str) -> &str {
-    let content = content.trim_end();
-    let without_hashes = content.trim_end_matches('#');
-    if without_hashes.len() != content.len()
-        && without_hashes
-            .as_bytes()
-            .last()
-            .is_some_and(|byte| *byte == b' ')
-    {
-        without_hashes.trim()
-    } else {
-        content.trim()
-    }
 }
 
 fn is_setext_underline(line: &str) -> bool {

@@ -126,7 +126,7 @@ pub(crate) fn render(
 pub(crate) fn edit_json(
     file: &str,
     fields: &[(&str, serde_json::Value)],
-    failure: Option<(&outlint_core::DocumentReadFailure, &str, usize)>,
+    failure: Option<(&outlint_core::DocumentReadFailure, &str, Option<usize>)>,
 ) -> String {
     use serde_json::json;
     let mut out = Vec::new();
@@ -147,7 +147,7 @@ pub(crate) fn edit_json(
                     ) {
                         error.value("message", &json!(failure.to_string()));
                     }
-                    if line > 0 {
+                    if let Some(line) = line {
                         error.value("line", &json!(line))
                     }
                     read::write_failure_members(error, failure)

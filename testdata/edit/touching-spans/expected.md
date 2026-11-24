@@ -1,0 +1,7 @@
+a
+
+first
+
+second
+
+replacement

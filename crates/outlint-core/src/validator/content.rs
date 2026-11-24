@@ -101,7 +101,7 @@ pub(super) fn block_ordinals(blocks: &[Block]) -> Result<Vec<usize>, SequenceExh
         .map_err(|_| SequenceExhausted)?;
     let mut counts = [0usize; 6];
     for block in blocks {
-        let slot = match block_kind(block) {
+        let slot = match block.kind() {
             BlockKind::Paragraph => 0,
             BlockKind::List => 1,
             BlockKind::Quote => 2,
@@ -116,17 +116,6 @@ pub(super) fn block_ordinals(blocks: &[Block]) -> Result<Vec<usize>, SequenceExh
         *count = count.checked_add(1).ok_or(SequenceExhausted)?;
     }
     Ok(ordinals)
-}
-
-pub(super) fn block_kind(block: &Block) -> BlockKind {
-    match block {
-        Block::Paragraph(_) => BlockKind::Paragraph,
-        Block::List(_) => BlockKind::List,
-        Block::Quote(_) => BlockKind::Quote,
-        Block::Code(_) => BlockKind::Code,
-        Block::Html(_) => BlockKind::Html,
-        Block::Break(_) => BlockKind::Break,
-    }
 }
 
 /// Test observer for §3.7 work; a zero-sized no-op in production.

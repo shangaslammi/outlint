@@ -1,0 +1,2 @@
+delete $.bad
+rename $.good "Nope"
