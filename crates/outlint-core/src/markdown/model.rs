@@ -351,6 +351,8 @@ pub struct SuppressionDirective {
     pub column: u64,
     /// Whether the directive applies to the whole document.
     pub file_wide: bool,
+    /// Whether the entire comment is on one line with only surrounding whitespace.
+    pub standalone: bool,
     /// The diagnostic identifiers named by this comment.
     pub ids: Suppressions,
 }

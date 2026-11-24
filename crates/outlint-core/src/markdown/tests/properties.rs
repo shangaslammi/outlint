@@ -612,12 +612,15 @@ proptest! {
     ) {
         let paragraph = format!("é{paragraph_tail}");
         let item = format!("界{item_tail}");
+        let directive = "<!-- outlint-disable unexpected-block -->";
         let source = format!(
-            "---\r\nname: 界\r---\n\n<!-- transparent -->\r{}{paragraph}\r\n\r  > quote 界\n\r\n   12. {item}\r\r# 標題\r\nsetext é\r---\r\n",
-            " ".repeat(indent),
+            "---\r\nname: 界\r---\n\n<!-- transparent -->\r{pad}{directive} \t\r{pad}{paragraph}\r\n\r  > quote 界\n\r\n   12. {item}\r\r# 標題\r\nsetext é\r---\r\n",
+            pad = " ".repeat(indent),
         );
         let document = parse_markdown(&source, MarkdownOptions::default()).expect("Markdown parsing succeeds");
         let root = document.preamble.as_slice();
+        prop_assert!(matches!(document.suppression_directives.as_slice(), [d] if d.standalone && !d.file_wide));
+        prop_assert!(root.first().is_some_and(|block| block.suppressions().contains("unexpected-block")));
         prop_assert_eq!(
             root.iter().map(block_kind).collect::<Vec<_>>(),
             [

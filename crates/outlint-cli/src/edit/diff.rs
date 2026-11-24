@@ -1,6 +1,6 @@
 /// Formats a unified diff using an already escaped filename for both headers.
 /// Identical inputs produce an empty string.
-pub fn diff(file: &str, a: &str, b: &str) -> String {
+pub(super) fn diff(file: &str, a: &str, b: &str) -> String {
     if a == b {
         return String::new();
     }

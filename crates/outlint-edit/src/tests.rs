@@ -724,13 +724,125 @@ fn section(path: &str, placement: Placement, title: &str) -> Edit {
 
 #[test]
 fn comments_at_item_indentation_follow_their_suppressed_item() {
-    let source = "- a\n  <!-- outlint-disable unexpected-item -->\n  <!-- outlint-disable misplaced-item -->\n- b\n- c\n";
-    let document = parse(source).unwrap();
-    let Some(Block::List(list)) = document.preamble.iter().next() else {
-        panic!("expected a list");
-    };
-    assert!(list.items.rest[0].suppressions.contains("misplaced-item"));
-    assert_eq!(one(source, "$/list/item[1]", Op::Delete), "- a\n- c\n");
+    for gap in ["", "\n", " \t\n\n"] {
+        let source = format!("- a\n{gap}  <!-- outlint-disable unexpected-item -->\n  <!-- outlint-disable misplaced-item -->\n- b\n- c\n");
+        let document = parse(&source).unwrap();
+        let Some(Block::List(list)) = document.preamble.iter().next() else {
+            panic!("expected a list");
+        };
+        assert!(list.items.rest[0].suppressions.contains("misplaced-item"));
+        assert_eq!(one(&source, "$/list/item[1]", Op::Delete), "- a\n- c\n");
+    }
+}
+
+#[test]
+fn insertion_after_a_dangling_inline_directive_leaves_it_detached() {
+    let directive = "<!-- outlint-disable unexpected-section -->";
+    let source = format!("{directive}\n");
+    assert_eq!(
+        edit(&source, &[section("$", Placement::AppendChild, "N")]),
+        Ok(format!("{directive}\n\n# N\n"))
+    );
+    let source = format!("# T\n- a\n  {directive}\n");
+    assert_eq!(
+        edit(&source, &[section("$", Placement::AppendChild, "N")]),
+        Ok(format!("{source}\n## N\n"))
+    );
+}
+
+#[test]
+fn changed_seams_separate_lazy_continuations_only_when_needed() {
+    for (source, expected) in [
+        ("- a\n\n***\nTitle\n===\n", "- a\n\nTitle\n===\n"),
+        ("> q\n\n***\nTitle\n===\n", "> q\n\nTitle\n===\n"),
+        ("- a\n\n***\n<custom-tag>\n", "- a\n\n<custom-tag>\n"),
+        ("> q\n\n***\n    code\n", "> q\n\n    code\n"),
+        ("para\n\n***\n2. ordered\n", "para\n\n2. ordered\n"),
+        ("para\n\n***\n- bullet\n", "para\n- bullet\n"),
+    ] {
+        assert_eq!(one(source, "$/break", Op::Delete), expected);
+    }
+    assert_eq!(
+        one("> q\n## H\n", "$/quote", Op::InsertAfter("    code".into())),
+        "> q\n\n    code\n## H\n"
+    );
+    assert_eq!(
+        one(
+            "- a\n## H\n",
+            "$/list",
+            Op::InsertAfter("<custom-tag>".into())
+        ),
+        "- a\n\n<custom-tag>\n\n## H\n"
+    );
+    let source = "para\n- a\n- b\n";
+    assert_eq!(one(source, "$/list/item[0]", Op::Delete), "para\n- b\n");
+    assert_eq!(
+        one(
+            source,
+            "$/list",
+            Op::InsertItem {
+                index: 0,
+                payload: "n".into()
+            }
+        ),
+        "para\n- n\n- a\n- b\n"
+    );
+    let source = "a\n<!-- outlint-disable unexpected-block -->\nb\n";
+    assert_eq!(
+        one(source, "$/p[0]", Op::InsertAfter("new".into())),
+        "a\n\nnew\n<!-- outlint-disable unexpected-block -->\nb\n"
+    );
+}
+
+#[test]
+fn insertion_gaps_come_from_siblings() {
+    let source = "# T\n\npara\n\n- a\n- b\n";
+    assert_eq!(
+        edit(source, &[section("$", Placement::AppendChild, "S")]),
+        Ok(format!("{source}\n## S\n"))
+    );
+    assert_eq!(
+        one(source, "$/list", Op::InsertAfter("```\ncode\n```".into())),
+        format!("{source}\n```\ncode\n```\n")
+    );
+    for gap in ["\n", " \t\n\n"] {
+        let source = format!("## A\n\npara\n{gap}## B\n");
+        assert_eq!(
+            edit(&source, &[section("$.a", Placement::Before, "N")]),
+            Ok(format!("## N\n{gap}{source}"))
+        );
+    }
+    assert_eq!(
+        one("a\n \t\n\nb", "$/p[0]", Op::InsertBefore("new".into())),
+        "new\n \t\n\na\n \t\n\nb"
+    );
+}
+
+#[test]
+fn deleting_a_first_item_removes_its_shared_list_directive() {
+    let source = "# T\n\n<!-- outlint-disable unexpected-block -->\n- a\n- b\n";
+    assert_eq!(one(source, "$/list/item[0]", Op::Delete), "# T\n\n- b\n");
+}
+
+#[test]
+fn a_literal_can_add_blank_lines_at_a_node_end() {
+    for (source, expected) in [
+        ("a\n\nb\n", "a\n\t\n\nb\n"),
+        ("a\r\n\r\nb", "a\r\n\t\r\n\r\nb"),
+        ("a\n", "a\n\t\n"),
+    ] {
+        assert_eq!(
+            one(
+                source,
+                "$",
+                Op::ReplaceText {
+                    old: "a\n".into(),
+                    new: "a\n\t\n".into()
+                }
+            ),
+            expected
+        );
+    }
 }
 
 proptest! {
@@ -740,21 +852,36 @@ proptest! {
         ending in prop_oneof![Just("\n"), Just("\r\n")],
         gap_lines in 1usize..4,
         loose in any::<bool>(),
-        trailing in 0usize..3,
+        trailing in 0usize..4,
+        transparent_comment in any::<bool>(),
+        attached_directive in any::<bool>(),
         word in "[a-z]{1,8}",
     ) {
         let chosen = |id| selection.contains_key(&id);
         let gap = format!("{ending} \t{ending}{}", ending.repeat(gap_lines - 1));
         let inter_item = if loose { gap.as_str() } else { ending };
         let alpha = format!("Alpha {word}");
-        let mut source = ["# T", "lead  ", "## A", &alpha, "beta", "- one"].join(&gap);
+        let mut prefix = vec!["# T", "lead  "];
+        if transparent_comment {
+            prefix.push("<!-- note -->");
+        }
+        let directive = "<!-- outlint-disable unexpected-block -->";
+        let mut source = prefix.join(&gap);
+        source.push_str(&gap);
+        source.push_str(&["## A", &alpha, "beta"].join(&gap));
+        source.push_str(&gap);
+        if attached_directive {
+            source.push_str(directive);
+            source.push_str(ending);
+        }
+        source.push_str("- one");
         source.push_str(inter_item);
         source.push_str("- two");
         for line in ["### Old", "## B", "end\t"] {
             source.push_str(&gap);
             source.push_str(line);
         }
-        source.push_str(&ending.repeat(trailing + 1));
+        source.push_str(&ending.repeat(trailing));
         let operation = |id| match id {
             0 => op("$.a/p[0]", Op::Delete),
             1 => op("$.a/p[0]", Op::InsertAfter("extra".into())),
@@ -826,10 +953,18 @@ proptest! {
                 if !exact.is_empty() {
                     exact.push_str(if item && inside_list { inter_item } else { &gap });
                 }
+                if *line == "## A" && transparent_comment {
+                    exact.push_str("<!-- note -->");
+                    exact.push_str(&gap);
+                }
+                if *line == "- one" && attached_directive {
+                    exact.push_str(directive);
+                    exact.push_str(ending);
+                }
                 exact.push_str(line);
                 inside_list = item;
             }
-            exact.push_str(&ending.repeat(trailing + 1));
+            exact.push_str(&ending.repeat(trailing));
             let text = normal.unwrap();
             prop_assert_eq!(&text, &exact);
             let parsed = parse(&text).unwrap();

@@ -637,11 +637,13 @@ behind the experimental `search` extension.
   document paths ([README](crates/outlint-core/README.md))
 - `crates/outlint-cli` — the `outlint` command-line tool
   ([README](crates/outlint-cli/README.md))
+- `crates/outlint-edit` — edit planning and structure verification
+  ([README](crates/outlint-edit/README.md))
 - `crates/outlint-search` — full-text indexing backing the `search`
   extension
 - `spec/` — the normative [Outlint specification](spec/outlint-spec.md)
-  plus the experimental [search](spec/search-spec.md) and
-  [read](spec/read-spec.md) specifications and provisional
+  plus the experimental [search](spec/search-spec.md),
+  [read](spec/read-spec.md), and [edit](spec/edit-spec.md) specifications and provisional
   [document paths](spec/document-path-spec.md)
 - `testdata/` — the conformance corpus, reusable by other implementations
   ([README](testdata/README.md))

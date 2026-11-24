@@ -10,11 +10,12 @@ use crate::{
 };
 use outlint_core::DocumentReadFailure;
 mod destination;
+mod diff;
 mod gate;
 use destination::{Destination, DestinationError};
+use diff::diff;
 use outlint_edit::{
-    candidate, diff, operation, parse_script, Edit, Error, Input, Instruction, Op, Refusal,
-    ScriptError,
+    candidate, operation, parse_script, Edit, Error, Input, Instruction, Refusal, ScriptError,
 };
 use serde_json::{json, Value};
 use std::{
@@ -228,36 +229,6 @@ fn instructions(
     Ok((parse_script(&bytes, script == "-"), base))
 }
 
-fn load_operation(op: Op<Input>, base: &Path) -> Result<Op, Failure> {
-    let load = |input| load_input(input, base);
-    Ok(match op {
-        Op::ReplaceText { old, new } => Op::ReplaceText {
-            old: load(old)?,
-            new: load(new)?,
-        },
-        Op::Rename(title) => Op::Rename(title),
-        Op::Delete => Op::Delete,
-        Op::InsertSection {
-            placement,
-            title,
-            preamble,
-        } => Op::InsertSection {
-            placement,
-            title,
-            preamble: preamble.map(load).transpose()?,
-        },
-        Op::AppendBlock(payload) => Op::AppendBlock(load(payload)?),
-        Op::Replace(payload) => Op::Replace(load(payload)?),
-        Op::InsertBefore(payload) => Op::InsertBefore(load(payload)?),
-        Op::InsertAfter(payload) => Op::InsertAfter(load(payload)?),
-        Op::AppendItem(payload) => Op::AppendItem(load(payload)?),
-        Op::InsertItem { index, payload } => Op::InsertItem {
-            index,
-            payload: load(payload)?,
-        },
-    })
-}
-
 fn load_input(input: Input, base: &Path) -> Result<String, Failure> {
     let mut text = match input {
         Input::Literal(text) => return Ok(text),
@@ -430,7 +401,9 @@ fn execute(file: &str, mut o: Options, fmt: Format) -> Result<u8, Failure> {
         .map(|instruction| {
             Ok(Edit {
                 path: instruction.path,
-                op: load_operation(instruction.op, &base)?,
+                op: instruction
+                    .op
+                    .map_inputs(|input| load_input(input, &base))?,
             })
         })
         .collect::<Result<Vec<_>, Failure>>()?;
@@ -446,36 +419,36 @@ fn execute(file: &str, mut o: Options, fmt: Format) -> Result<u8, Failure> {
         find_schema(target)?
     };
     let schema_label = schema.as_deref().map(display_path);
-    let mut diagnostics = if let Some((path, name)) = schema.as_deref().zip(schema_label.as_deref())
-    {
+    let diagnostics = if let Some((path, name)) = schema.as_deref().zip(schema_label.as_deref()) {
         let loaded = read_and_load_schema(path, name)?
             .map_err(|invalid| format!("invalid schema {name}: {invalid}"))?;
-        gate::introduced_diagnostics(&c, &loaded.schema)?
+        let mut diagnostics = gate::introduced_diagnostics(&c, &loaded.schema)?
             .iter()
             .map(|diagnostic| render_document_diagnostic(file, diagnostic, &loaded))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        diagnostics.extend(gate::added_suppressions(&c).into_iter().map(|directive| {
+            let scope = if directive.file_wide {
+                "a file-wide"
+            } else {
+                "an inline"
+            };
+            RenderedDiagnostic {
+                id: "added-suppression".into(),
+                message: format!("the edit adds {scope} suppression comment"),
+                source_path: file.into(),
+                line: directive.line,
+                column: directive.column,
+                target: Some(crate::diagnostics::RenderedTarget::Document),
+                schema_node: None,
+                schema_location: None,
+                involved_headers: Vec::new(),
+                references: Vec::new(),
+            }
+        }));
+        diagnostics
     } else {
         Vec::new()
     };
-    diagnostics.extend(gate::added_suppressions(&c).into_iter().map(|directive| {
-        let scope = if directive.file_wide {
-            "file-wide"
-        } else {
-            "inline"
-        };
-        RenderedDiagnostic {
-            id: "added-suppression".into(),
-            message: format!("the edit adds a {scope} suppression comment"),
-            source_path: file.into(),
-            line: directive.line,
-            column: directive.column,
-            target: Some(crate::diagnostics::RenderedTarget::Document),
-            schema_node: None,
-            schema_location: None,
-            involved_headers: Vec::new(),
-            references: Vec::new(),
-        }
-    }));
     if !diagnostics.is_empty() && fmt != Format::Json {
         if !o.force {
             crate::write_stderr(&format!(

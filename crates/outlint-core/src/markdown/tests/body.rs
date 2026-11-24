@@ -387,6 +387,11 @@ fn requires_header_suppression_to_occupy_its_whole_line() {
     assert!(headings(&document)
         .iter()
         .all(|heading| !heading.suppressions.contains("skipped-level")));
+    assert_eq!(document.suppression_directives.len(), 2);
+    assert!(document
+        .suppression_directives
+        .iter()
+        .all(|directive| !directive.standalone));
 }
 
 #[test]
@@ -406,6 +411,7 @@ fn bare_cr_delimits_locations_and_suppression_lines() {
     assert_eq!(found[0].location.column, 4);
     assert_eq!(found[0].location.line_range, text_range(39, 50));
     assert!(found[0].suppressions.contains("skipped-level"));
+    assert!(document.suppression_directives[0].standalone);
     assert_eq!(found[1].location.line, 3);
     assert_eq!(found[1].location.line_range, text_range(51, 57));
 }

@@ -117,7 +117,7 @@ descendants. Read extents remain as defined by the document-path specification.
 | --- | --- |
 | Section | Its leading gap, attached suppression lines, heading lines, and descendants through the end of its last child or preamble block. |
 | Direct block other than a list | Its leading gap, attached suppression lines, and all its physical lines, including nested source. |
-| List | Its outer leading gap, the attached suppression lines above its first marker, and the spans of its direct items. |
+| List | Its outer leading gap and the spans of its direct items. Suppression lines shared by the list and its first item belong to the first item's span and are removed when that item is deleted. |
 | Direct list item | Its marker line and all content lines, including nested source. A tight item has no leading gap. In a loose list, each item after the first owns the blank-line run before it, if present. An attached suppression run follows the item it precedes, including when indented as part of the preceding item. The first item's attached suppression run is also at the start of the list body. |
 
 A leading gap is the entire contiguous run of blank lines, including
@@ -139,11 +139,16 @@ list can become tight when its separating blank lines are deleted.
 Deletion removes the owned span and replacement retains its gap and
 attached suppression lines. An insertion before a node goes at the start
 of its span. An insertion after a node goes at the end of its span.
-Inserted content carries a copy of a neighbouring gap. At the start of a
-sequence the copied gap follows the first inserted node. Consecutive inserts may
-each copy the same gap. A copied gap is widened when the new neighbours
-need a separator. If deletion leaves the successor with too small a gap,
-retain a sufficient gap from the deleted span when available, or synthesize
+Inserted content copies the following node's gap at a shared boundary,
+or the last sibling's gap at the insertion depth at the end of a sequence.
+At file start, an insertion before the first node copies the next sibling's
+gap and places it after the inserted content. Consecutive inserts may each
+copy the same gap. A gap is widened when the new neighbours need a
+separator to keep the requested structure or to keep a standalone inline
+directive on the left detached. An empty gap stays empty when the new
+neighbours still parse separately with the intended attachments. If
+deletion leaves the successor with too small a gap, retain a sufficient
+gap from the deleted span when available, or synthesize
 the separator. For example, deleting a code block or thematic break
 between paragraphs must keep the paragraphs distinct. A separator includes
 the terminator of the preceding line before any whitespace-only blank line.
@@ -273,8 +278,9 @@ retain their order, kinds, parentage, source boundaries, and spelling.
 The path-root projection may change. Structural edits preserve the
 suppression attachments on untouched nodes. A literal replacement may
 change spelling inside its matched span while preserving the physical
-structure established by the other operations. An operation that absorbs
-a neighbour, merges lists intended as separate blocks, adds an unexpected
+structure established by the other operations, including adding blank lines
+after a node's last line. An operation that absorbs a neighbour, merges
+lists intended as separate blocks, adds an unexpected
 heading, or reparents a later section fails with `invalid-payload` and
 reason `candidate-structure`, including when the operation has no payload.
 
@@ -286,8 +292,8 @@ Equivalence at ambiguous parser boundaries is implementation-defined.
 
 5.1. By default the command uses the discovery walk of
 [validator §11.2](outlint-spec.md#112-document-checking-and-schema-selection).
-If no schema is found, the edit skips schema validation. `--schema FILE`
-selects an explicit schema and `--ignore-schema` skips schema validation.
+If no schema is found, the edit skips the schema gate. `--schema FILE`
+selects an explicit schema and `--ignore-schema` skips the gate.
 These options are mutually exclusive. An unreadable or invalid selected schema or
 linked resource is an operational error, including with `--force`.
 
@@ -308,15 +314,14 @@ identify the subject or operands precisely is implementation-defined.
 In particular, changed frontmatter may cause delegated JSON Schema or
 frontmatter-dependent findings to be counted as new.
 
-5.3. An `outlint-disable` or `outlint-disable-file` comment in the
-candidate counts as a new diagnostic unless paired with an unused original
+5.3. When the schema gate runs, an `outlint-disable` or `outlint-disable-file`
+comment in the candidate counts as a new diagnostic unless paired with an unused original
 comment with the same scope and diagnostic ids. Inline comment pairing
 requires correspondence through the edit. File-wide comments may pair
 across locations. Repeated comments count separately, even when the extra
 copies would suppress the same findings. The diagnostic id is
 `added-suppression`, with the candidate comment's position, a document
-target, and no schema location. This rule also applies when schema
-validation is skipped.
+target, and no schema location.
 
 5.4. Existing findings may persist or disappear. New findings cause a
 `new-diagnostics` refusal unless `--force` is supplied. Force reports

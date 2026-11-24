@@ -43,11 +43,11 @@ impl Candidate<'_> {
 #[derive(Debug, Default)]
 pub struct SubjectMap {
     /// Retained headings, ordinary blocks, and direct items.
-    pub anchors: BTreeMap<usize, usize>,
+    pub anchors: BTreeMap<ByteOffset, ByteOffset>,
     /// Retained lists, whose first marker may have moved or been removed.
-    pub lists: BTreeMap<usize, usize>,
+    pub lists: BTreeMap<ByteOffset, ByteOffset>,
     /// Surviving suppression comment starts, for occurrence matching in the gate.
-    pub directives: BTreeMap<usize, usize>,
+    pub directives: BTreeMap<ByteOffset, ByteOffset>,
 }
 
 impl SubjectMap {
@@ -58,7 +58,12 @@ impl SubjectMap {
             let anchor = expected
                 .original
                 .and_then(|index| original.get(index))
-                .map(|original| (original.lines.start, row.lines.start));
+                .map(|original| {
+                    (
+                        ByteOffset(original.lines.start),
+                        ByteOffset(row.lines.start),
+                    )
+                });
             match row.token.kind {
                 Kind::Block(BlockKind::List) => list = anchor,
                 Kind::Item => {
@@ -385,7 +390,7 @@ pub fn candidate<'a>(source: &'a str, edits: &[Edit]) -> Result<Candidate<'a>, R
             return Err(failure(Error::BareCr));
         }
         let (new_doc, after) = parse_rows(&new_text)?;
-        if !same_shape(&shape, &after, &offsets) {
+        if !same_shape(&shape, &after, &offsets, &new_text) {
             return Err(failure(Error::Structure));
         }
         text = new_text;
@@ -398,12 +403,12 @@ pub fn candidate<'a>(source: &'a str, edits: &[Edit]) -> Result<Candidate<'a>, R
         .suppression_directives
         .iter()
         .filter_map(|directive| {
-            let old = directive.range.start.0;
+            let old = directive.range.start;
             offsets
-                .map(old)
+                .map(old.0)
                 .and_then(|offset| interior_offsets.map(offset))
                 .and_then(|offset| literal_offsets.map(offset))
-                .map(|new| (old, new))
+                .map(|new| (old, ByteOffset(new)))
         })
         .collect();
     let has_bom = source.len() != clean.len();
@@ -427,16 +432,19 @@ fn parse_rows(text: &str) -> Result<(Document, Vec<Row>), Error> {
     Ok((doc, rows))
 }
 
-fn same_shape(before: &[Row], after: &[Row], offsets: &OffsetMap) -> bool {
+fn same_shape(before: &[Row], after: &[Row], offsets: &OffsetMap, text: &str) -> bool {
     before.len() == after.len()
         && before.iter().zip(after).all(|(old, new)| {
             old.token.kind == new.token.kind
                 && old.token.parent == new.token.parent
-                && [
-                    (old.lines.start, new.lines.start),
-                    (old.lines.end, new.lines.end),
-                ]
-                .into_iter()
-                .all(|(a, b)| offsets.map(a).is_none_or(|mapped| mapped == b))
+                && offsets
+                    .map(old.lines.start)
+                    .is_none_or(|start| start == new.lines.start)
+                && offsets.map(old.lines.end).is_none_or(|end| {
+                    end == new.lines.end
+                        || text
+                            .get(new.lines.end..end)
+                            .is_some_and(super::model::blank)
+                })
         })
 }

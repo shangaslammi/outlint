@@ -709,6 +709,7 @@ fn suppression_occurrences_are_reported_and_force_can_admit_them() {
     let dir = TempDir::new("edit-suppression-gate");
     let original = "old\n\n<!-- outlint-disable-file unexpected-section -->\n";
     dir.write("doc.md", original);
+    dir.write("doc.outlint.yml", "version: 1\ntitle: null\n");
     let payload = "<!-- outlint-disable unexpected-block -->\nnew\n\n<!-- outlint-disable-file unexpected-section -->";
     for format in ["human", "compact", "json"] {
         for force in [false, true] {
@@ -719,7 +720,6 @@ fn suppression_occurrences_are_reported_and_force_can_admit_them() {
                 "$",
                 "--payload",
                 payload,
-                "--ignore-schema",
                 "--format",
                 format,
                 "--dry-run",
@@ -747,6 +747,7 @@ fn suppression_occurrences_are_reported_and_force_can_admit_them() {
             } else {
                 let stderr = common::stderr(&result);
                 assert_eq!(stderr.matches("added-suppression").count(), 2);
+                assert!(stderr.contains("the edit adds an inline suppression comment"));
                 assert_eq!(stderr.starts_with("new-diagnostics\t"), !force);
                 assert!(stderr.contains(if format == "compact" {
                     "candidate\tdoc.md\t"
@@ -784,4 +785,39 @@ fn suppression_occurrences_are_reported_and_force_can_admit_them() {
             .count(),
         2
     );
+}
+
+#[test]
+fn added_suppressions_are_allowed_when_the_schema_gate_is_skipped() {
+    let dir = TempDir::new("edit-suppression-without-schema");
+    let original = "old\n";
+    let payload = "<!-- outlint-disable unexpected-block -->\nnew";
+    let args = [
+        "edit",
+        "doc.md",
+        "append-block",
+        "$",
+        "--payload",
+        payload,
+        "--format",
+        "json",
+    ];
+    for ignore in [false, true] {
+        dir.write("doc.md", original);
+        let mut args = args.to_vec();
+        if ignore {
+            dir.write("doc.outlint.yml", "version: 1\ntitle: null\n");
+            args.push("--ignore-schema");
+        }
+        let output = run(&dir, &args);
+        assert!(output.status.success(), "{}", common::stderr(&output));
+        let value = common::json_output(&output);
+        assert_eq!(value["result"], "changed");
+        assert!(value["schema"].is_null());
+        assert!(value.get("diagnostics").is_none());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("doc.md")).unwrap(),
+            format!("{original}\n{payload}\n")
+        );
+    }
 }

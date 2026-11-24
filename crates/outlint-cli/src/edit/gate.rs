@@ -53,7 +53,7 @@ pub(super) fn introduced_diagnostics(
                 doc.sections
                     .iter()
                     .filter(|s| s.heading.level == HeaderLevel::H1)
-                    .map(|s| s.heading.location.line_range.start.0)
+                    .map(|s| s.heading.location.line_range.start)
                     .collect::<Vec<_>>()
             };
             match (titles(old_doc).as_slice(), titles(new_doc).as_slice()) {
@@ -118,8 +118,8 @@ pub(super) fn added_suppressions<'a>(
                 old.file_wide == new.file_wide
                     && old.ids == new.ids
                     && (old.file_wide
-                        || candidate.subjects.directives.get(&old.range.start.0)
-                            == Some(&new.range.start.0))
+                        || candidate.subjects.directives.get(&old.range.start)
+                            == Some(&new.range.start))
             });
             if let Some(previous) = previous {
                 before.swap_remove(previous);
@@ -137,10 +137,7 @@ struct Comparison<'a> {
 
 impl Comparison<'_> {
     fn anchor(&self, a: &DiagnosticLocation, b: &DiagnosticLocation) -> bool {
-        self.surviving_offset(a.range.start.0) == Some(b.range.start.0)
-    }
-    fn surviving_offset(&self, old: usize) -> Option<usize> {
-        self.candidate.subjects.anchors.get(&old).copied()
+        self.candidate.subjects.anchors.get(&a.range.start) == Some(&b.range.start)
     }
     fn same(&self, a: &Diagnostic, b: &Diagnostic, same_root: bool) -> bool {
         use DiagnosticTarget::*;
@@ -157,8 +154,8 @@ impl Comparison<'_> {
             return false;
         }
         let anchored = self.anchor(&a.location, &b.location);
-        let same_list = self.candidate.subjects.lists.get(&a.location.range.start.0)
-            == Some(&b.location.range.start.0);
+        let same_list = self.candidate.subjects.lists.get(&a.location.range.start)
+            == Some(&b.location.range.start);
         match (&a.target, &b.target) {
             (Document, Document) => same_root,
             (Frontmatter { block: x }, Frontmatter { block: y }) => {

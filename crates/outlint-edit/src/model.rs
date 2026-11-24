@@ -94,21 +94,22 @@ impl Builder<'_> {
                 body_start = previous;
             }
             if body_start < self.previous_end {
+                let end = lower + blank_start(cut(self.source, lower..body_start)?);
                 for row in self
                     .rows
                     .iter_mut()
                     .rev()
                     .take_while(|row| row.end == self.previous_end)
                 {
-                    row.end = body_start;
+                    row.end = end;
                     if row.token.kind == Kind::Item {
-                        row.lines.end = body_start;
+                        row.lines.end = end;
                         row.token.spelling = cut(self.source, row.lines.clone())?
                             .trim_end_matches(['\r', '\n'])
                             .to_owned();
                     }
                 }
-                self.previous_end = body_start;
+                self.previous_end = end;
             }
         }
         let gap_start = if first_item || kind == Kind::Frontmatter {
@@ -218,12 +219,8 @@ impl Builder<'_> {
 pub(super) fn rows(source: &str, doc: &Document) -> Result<Vec<Row>, Error> {
     let mut inline = BTreeSet::new();
     for directive in &doc.suppression_directives {
-        if !directive.file_wide {
-            let comment = cut(source, directive.range.start.0..directive.range.end.0)?;
-            let lines = line_span(source, directive.range)?;
-            if !comment.contains('\n') && cut(source, lines.clone())?.trim() == comment {
-                inline.insert(lines.start);
-            }
+        if !directive.file_wide && directive.standalone {
+            inline.insert(line_span(source, directive.range)?.start);
         }
     }
     let mut builder = Builder {

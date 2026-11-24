@@ -1,12 +1,13 @@
 //! Assemble original source pieces and planned edits, repairing only new seams.
 use super::{
     cut,
-    model::{blank, is_list, Kind, Row},
+    model::{blank, is_list, line_span, rows, Kind, Row, Token},
+    parse,
     plan::{Action, Context, Plan},
     Error,
 };
 use outlint_core::BlockKind;
-use std::ops::Range;
+use std::{collections::BTreeSet, ops::Range};
 
 struct Change {
     range: Range<usize>,
@@ -63,7 +64,7 @@ struct Physical<'a> {
     first_item: bool,
 }
 
-impl Physical<'_> {
+impl<'a> Physical<'a> {
     fn start(&self) -> usize {
         if self.first_item {
             self.list
@@ -82,51 +83,68 @@ impl Physical<'_> {
         }
     }
 
-    fn neighbor(&self) -> Neighbor {
-        Neighbor::new(&self.row.token, self.list.map(|(index, _)| index))
+    fn neighbor(&self, source: &'a str) -> Result<Neighbor<'a>, Error> {
+        Ok(Neighbor {
+            leading: cut(source, self.body_start()..self.row.lines.start)?,
+            ..Neighbor::new(&self.row.token, self.list.map(|(index, _)| index))
+        })
     }
 }
 
 #[derive(Clone, Copy)]
-struct Neighbor {
-    kind: Kind,
+struct Neighbor<'a> {
+    token: &'a Token,
     list: Option<usize>,
-    setext: bool,
+    leading: &'a str,
 }
 
-impl Neighbor {
-    fn new(token: &super::model::Token, list: Option<usize>) -> Self {
+impl<'a> Neighbor<'a> {
+    fn new(token: &'a Token, list: Option<usize>) -> Self {
         Self {
-            kind: token.kind,
+            token,
             list,
-            setext: matches!(token.kind, Kind::Heading(_)) && token.spelling.contains('\n'),
+            leading: "",
         }
     }
 
     fn block(self) -> Kind {
-        if self.kind == Kind::Item {
+        if self.token.kind == Kind::Item {
             Kind::Block(BlockKind::List)
         } else {
-            self.kind
+            self.token.kind
         }
     }
 }
 
-fn minimum(left: Neighbor, right: Neighbor) -> bool {
+fn minimum(left: Neighbor<'_>, right: Neighbor<'_>) -> Result<bool, Error> {
     use BlockKind::*;
     if left.list.is_some() && left.list == right.list {
-        return false;
+        return Ok(false);
     }
-    (left.block() == Kind::Block(Paragraph) && right.setext)
-        || matches!(
-            (left.block(), right.block()),
-            (
-                Kind::Block(Paragraph),
-                Kind::Block(Paragraph | List | Code | Break | Html)
-            ) | (Kind::Block(List | Quote), Kind::Block(Paragraph))
-                | (Kind::Block(Quote), Kind::Block(Quote))
-                | (Kind::Block(Html), _)
-        )
+    let can_continue = matches!(left.block(), Kind::Block(Paragraph | List | Quote))
+        && match right.block() {
+            Kind::Heading(_) => right.token.spelling.contains('\n'),
+            Kind::Block(Paragraph | List | Code | Break | Html) => true,
+            _ => false,
+        };
+    let can_merge = matches!(
+        (left.block(), right.block()),
+        (Kind::Block(Quote), Kind::Block(Quote)) | (Kind::Block(Html), _)
+    );
+    if !can_continue && !can_merge {
+        return Ok(false);
+    }
+    // Parse the empty seam in body context. A distinct right node at that
+    // boundary means a blank is unnecessary, even for the same block kinds.
+    // This lets CommonMark decide interruption for Setext, indented code,
+    // HTML and list markers, including lazy continuations inside containers.
+    let mut probe = format!("# context\n\n{}\n{}", left.token.spelling, right.leading);
+    let seam = probe.len();
+    probe.push_str(&right.token.spelling);
+    let parsed = parse(&probe)?;
+    Ok(!rows(&probe, &parsed)?
+        .iter()
+        .any(|row| row.lines.start == seam && row.token.kind == right.block()))
 }
 
 enum Gap {
@@ -147,22 +165,27 @@ struct Layout<'a> {
     source: &'a str,
     ending: &'a str,
     out: Emitter<'a>,
-    last: Option<Neighbor>,
+    last: Option<Neighbor<'a>>,
+    inline_ends: BTreeSet<usize>,
+    last_inline: bool,
+    start_gap: Option<Range<usize>>,
     changed_seam: bool,
     beginning: bool,
     removed_gap: Option<Range<usize>>,
     inserted_item_gap: Option<Range<usize>>,
 }
 
-impl Layout<'_> {
+impl<'a> Layout<'a> {
     fn opaque(&mut self, range: Range<usize>) -> Result<(), Error> {
         if !range.is_empty() {
             if self.changed_seam {
                 self.terminate();
             }
             self.beginning &= blank(cut(self.source, range.clone())?);
+            self.last_inline = self.inline_ends.contains(&range.end);
             self.out.keep(range)?;
             self.last = None;
+            self.start_gap = None;
             self.changed_seam = false;
             self.removed_gap = None;
             self.inserted_item_gap = None;
@@ -176,22 +199,25 @@ impl Layout<'_> {
         }
     }
 
-    fn before(&mut self, neighbor: Neighbor, mut gap: Gap, new: bool) -> Result<(), Error> {
+    fn before(&mut self, neighbor: Neighbor<'a>, mut gap: Gap, new: bool) -> Result<(), Error> {
         let changed = new || self.changed_seam;
         if changed {
             self.terminate();
-            if let Some(left) = self.last {
-                if minimum(left, neighbor) && gap.is_empty() {
+            if self.beginning {
+                // The first node in the file has no leading gap.
+                gap = Gap::Copied(0..0);
+            } else if gap.is_empty() {
+                if let Some(start_gap) = self.start_gap.take().filter(|gap| !gap.is_empty()) {
+                    gap = Gap::Copied(start_gap);
+                } else if self.last_inline
+                    || self.last.map(|left| minimum(left, neighbor)).transpose()? == Some(true)
+                {
                     if let Some(removed) = self.removed_gap.take() {
                         gap = Gap::Original(removed);
                     } else {
                         self.out.text.push_str(self.ending);
                     }
                 }
-            } else if self.beginning {
-                // The first node in the file has no leading gap.
-                self.removed_gap = None;
-                gap = Gap::Copied(0..0);
             }
         }
         match gap {
@@ -202,11 +228,13 @@ impl Layout<'_> {
         self.inserted_item_gap = None;
         self.changed_seam = new;
         self.last = Some(neighbor);
+        self.last_inline = false;
+        self.start_gap = None;
         self.beginning = false;
         Ok(())
     }
 
-    fn item_gap(&self, list: &Row, neighbor: Neighbor, inner: Gap) -> Gap {
+    fn item_gap(&self, list: &Row, neighbor: Neighbor<'_>, inner: Gap) -> Gap {
         if self.last.and_then(|last| last.list) == neighbor.list {
             inner
         } else {
@@ -214,8 +242,8 @@ impl Layout<'_> {
         }
     }
 
-    fn existing(&mut self, physical: &Physical<'_>) -> Result<(), Error> {
-        let neighbor = physical.neighbor();
+    fn existing(&mut self, physical: &Physical<'a>) -> Result<(), Error> {
+        let neighbor = physical.neighbor(self.source)?;
         let inner = if physical.first_item {
             Gap::Copied(self.inserted_item_gap.clone().unwrap_or(0..0))
         } else {
@@ -226,21 +254,22 @@ impl Layout<'_> {
             |(_, list)| self.item_gap(list, neighbor, inner),
         );
         self.before(neighbor, gap, false)?;
+        self.last_inline = self.inline_ends.contains(&physical.row.lines.end);
         self.out.keep(physical.body_start()..physical.row.lines.end)
     }
 
-    fn inserted(&mut self, plan: &Plan, rows: &[Row]) -> Result<(), Error> {
+    fn inserted(&mut self, plan: &'a Plan, rows: &[Row]) -> Result<(), Error> {
         let Action::Insert(slot) = plan.action else {
-            unreachable!()
+            return Err(Error::Range);
         };
-        let first = plan.expected.first().ok_or(Error::Range)?;
-        let last = plan
-            .expected
-            .iter()
-            .rfind(|token| token.parent.is_none())
-            .ok_or(Error::Range)?;
-        let list = slot.parent.filter(|_| first.kind == Kind::Item);
+        let (first, last) = payload_edges(plan)?;
+        let list = slot.parent.filter(|_| {
+            plan.expected
+                .first()
+                .is_some_and(|token| token.kind == Kind::Item)
+        });
         let neighbor = Neighbor::new(first, list);
+        let at_start = self.beginning && list.is_none();
         let mut gap = Gap::Copied(plan.gap.clone());
         if let Some(list) = list {
             gap = self.item_gap(rows.get(list).ok_or(Error::Range)?, neighbor, gap);
@@ -248,24 +277,26 @@ impl Layout<'_> {
         self.before(neighbor, gap, true)?;
         self.out.text.push_str(&plan.body);
         self.last = Some(Neighbor::new(last, list));
+        if at_start {
+            self.start_gap = Some(plan.gap.clone());
+        }
         if list.is_some() {
             self.inserted_item_gap = Some(plan.gap.clone());
         }
         Ok(())
     }
 
-    fn replaced(&mut self, plan: &Plan, physical: &Physical<'_>) -> Result<(), Error> {
-        let first = plan.expected.first().ok_or(Error::Range)?;
-        let last = plan
-            .expected
-            .iter()
-            .rfind(|token| token.parent.is_none())
-            .ok_or(Error::Range)?;
-        let list = physical
-            .list
-            .map(|(index, _)| index)
-            .filter(|_| first.kind == Kind::Item);
-        let neighbor = Neighbor::new(first, list);
+    fn replaced(&mut self, plan: &'a Plan, physical: &Physical<'a>) -> Result<(), Error> {
+        let (first, last) = payload_edges(plan)?;
+        let list = physical.list.map(|(index, _)| index).filter(|_| {
+            plan.expected
+                .first()
+                .is_some_and(|token| token.kind == Kind::Item)
+        });
+        let neighbor = Neighbor {
+            leading: physical.neighbor(self.source)?.leading,
+            ..Neighbor::new(first, list)
+        };
         let inner = Gap::Original(physical.start()..physical.body_start());
         let gap = if let Some((_, row)) = physical.list {
             let inner = if physical.first_item {
@@ -297,6 +328,12 @@ impl Layout<'_> {
             self.removed_gap = Some(plan.gap.clone());
         }
     }
+}
+
+fn payload_edges(plan: &Plan) -> Result<(&Token, &Token), Error> {
+    let mut physical = plan.expected.iter().filter(|token| !is_list(token.kind));
+    let first = physical.next().ok_or(Error::Range)?;
+    Ok((first, physical.next_back().unwrap_or(first)))
 }
 
 pub(super) fn assembly_start(plan: &Plan, rows: &[Row]) -> usize {
@@ -343,11 +380,21 @@ pub(super) fn assemble<'a>(
             )
         })
         .peekable();
+    let inline_ends = context
+        .doc
+        .suppression_directives
+        .iter()
+        .filter(|directive| directive.standalone && !directive.file_wide)
+        .map(|directive| line_span(context.source, directive.range).map(|span| span.end))
+        .collect::<Result<_, _>>()?;
     let mut layout = Layout {
         source: context.source,
         ending: context.ending,
         out: Emitter::new(context.source),
         last: None,
+        inline_ends,
+        last_inline: false,
+        start_gap: None,
         changed_seam: false,
         beginning: true,
         removed_gap: None,
@@ -377,7 +424,7 @@ pub(super) fn assemble<'a>(
                 cursor = plan.owned.end;
                 while pieces.next_if(|piece| piece.start() < cursor).is_some() {}
             }
-            Action::Literal | Action::Rename | Action::Rewrite => unreachable!(),
+            Action::Literal | Action::Rename | Action::Rewrite => return Err(Error::Range),
         }
         pending.next();
     }

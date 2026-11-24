@@ -3,14 +3,12 @@ use outlint_core::*;
 use std::ops::Range;
 
 mod batch;
-mod diff;
 mod model;
 mod plan;
 mod script;
 mod splice;
 
 pub use batch::{candidate, Candidate, SubjectMap};
-pub use diff::diff;
 pub use plan::{Op, Placement};
 pub use script::{operation, parse_script, Input, Instruction, ScriptError};
 

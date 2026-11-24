@@ -1435,14 +1435,14 @@ fn collect_suppressions(
             .checked_add(comment_start)
             .ok_or(ParseError::RANGE)?;
         let line = lines.line_number(absolute_start);
-        let is_entire_line = lines
+        let standalone = lines
             .line_text(source, line)
             .ok_or(ParseError::RANGE)?
             .trim()
             == comment;
         if file_wide {
             file.0.extend(suppressions.0.iter().cloned());
-        } else if is_entire_line {
+        } else if standalone {
             per_line
                 .entry(line)
                 .or_default()
@@ -1454,6 +1454,7 @@ fn collect_suppressions(
             line: line as u64,
             column: byte_column(lines.line_start(line)?, absolute_start)?,
             file_wide,
+            standalone,
             ids: suppressions,
         });
     }

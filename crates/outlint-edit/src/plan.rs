@@ -289,7 +289,7 @@ impl Context<'_> {
                 boundary: target.row.preamble_close,
                 ..target.inside_end()
             };
-            (target.row.end, slot, self.neighbour_gap(slot.index, target))
+            (target.row.end, slot, self.neighbour_gap(slot, target))
         } else {
             let (offset, slot, gap) = self.root_end();
             (
@@ -329,14 +329,36 @@ impl Context<'_> {
         )
     }
 
-    fn neighbour_gap(&self, index: usize, target: Located<'_>) -> Range<usize> {
-        // Among equal-byte slots a following node supplies its separator.
-        // At EOF or across transparent source, use the last neighbour in the target's subtree.
+    fn neighbour_gap(&self, slot: Slot, target: Located<'_>) -> Range<usize> {
+        // At a shared boundary, copy the next node's gap. Otherwise use
+        // the last sibling at the insertion depth, even if it has descendants.
         self.rows
-            .get(index)
+            .get(slot.index)
             .filter(|next| next.gap_start == target.row.end)
-            .or_else(|| self.rows.get(target.row.subtree_end - 1))
+            .or_else(|| {
+                self.rows
+                    .get(target.index + 1..slot.index)?
+                    .iter()
+                    .rfind(|row| row.token.parent == slot.parent)
+            })
             .map_or_else(|| target.gap(), |row| row.gap_start..row.body_start)
+    }
+
+    fn before_gap(&self, target: Located<'_>) -> Range<usize> {
+        if target.index == 0 && self.source.get(..target.row.gap_start).is_some_and(blank) {
+            self.rows
+                .get(target.row.subtree_end..)
+                .and_then(|rows| {
+                    rows.iter().find(|row| {
+                        row.token.parent == target.row.token.parent
+                            && matches!(row.token.kind, Kind::Heading(_))
+                                == matches!(target.row.token.kind, Kind::Heading(_))
+                    })
+                })
+                .map_or_else(|| target.gap(), |row| row.gap_start..row.body_start)
+        } else {
+            target.gap()
+        }
     }
 
     fn insert_section(
@@ -364,19 +386,22 @@ impl Context<'_> {
                             target.row.end,
                             slot,
                             level + 1,
-                            self.neighbour_gap(slot.index, target),
+                            self.neighbour_gap(slot, target),
                         )
                     }
-                    Placement::Before if !root => {
-                        (target.row.gap_start, target.before(), level, target.gap())
-                    }
+                    Placement::Before if !root => (
+                        target.row.gap_start,
+                        target.before(),
+                        level,
+                        self.before_gap(target),
+                    ),
                     Placement::After if !root => {
                         let slot = target.after();
                         (
                             target.row.end,
                             slot,
                             level,
-                            self.neighbour_gap(slot.index, target),
+                            self.neighbour_gap(slot, target),
                         )
                     }
                     _ => return Err(Error::Target),
@@ -473,10 +498,14 @@ impl Context<'_> {
         let body = block_body(payload, self.ending)?;
         let expected = blocks(&body)?;
         let (offset, slot, gap) = if before {
-            (target.row.gap_start, target.before(), target.gap())
+            (
+                target.row.gap_start,
+                target.before(),
+                self.before_gap(target),
+            )
         } else {
             let slot = target.after();
-            (target.row.end, slot, self.neighbour_gap(slot.index, target))
+            (target.row.end, slot, self.neighbour_gap(slot, target))
         };
         Ok(Plan::insert(offset, slot, body, expected, gap))
     }
@@ -796,10 +825,8 @@ fn whole_fence(body: &str) -> Result<bool, Error> {
         && matches!(fragment(body)?.as_slice(), [token] if token.kind == Kind::Block(BlockKind::Code) && token.spelling == body))
 }
 impl<T> Op<T> {
-    pub(super) fn map_inputs<U, E>(
-        self,
-        mut load: impl FnMut(T) -> Result<U, E>,
-    ) -> Result<Op<U>, E> {
+    /// Convert every payload in operation order, stopping at the first error.
+    pub fn map_inputs<U, E>(self, mut load: impl FnMut(T) -> Result<U, E>) -> Result<Op<U>, E> {
         Ok(match self {
             Self::ReplaceText { old, new } => Op::ReplaceText {
                 old: load(old)?,
