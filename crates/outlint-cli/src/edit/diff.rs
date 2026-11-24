@@ -1,47 +1,22 @@
+use similar::TextDiff;
+
 /// Formats a unified diff using an already escaped filename for both headers.
 /// Identical inputs produce an empty string.
-pub(super) fn diff(file: &str, a: &str, b: &str) -> String {
-    if a == b {
+pub(super) fn diff(file: &str, original: &str, candidate: &str) -> String {
+    if original == candidate {
         return String::new();
     }
-    let a: Vec<_> = a.split_inclusive('\n').collect();
-    let b: Vec<_> = b.split_inclusive('\n').collect();
-    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    let suffix = a
-        .iter()
-        .rev()
-        .take(a.len() - prefix)
-        .zip(b.iter().rev().take(b.len() - prefix))
-        .take_while(|(x, y)| x == y)
-        .count();
-    let start = prefix.saturating_sub(3);
-    let end_a = a.len() - suffix;
-    let end_b = b.len() - suffix;
-    let context = suffix.min(3);
-    let range = |end: usize| {
-        let count = end + context - start;
-        format!("{},{}", start + usize::from(count > 0), count)
-    };
-    let mut out = format!(
-        "--- {file}\n+++ {file}\n@@ -{} +{} @@\n",
-        range(end_a),
-        range(end_b)
-    );
-    for (marker, lines, offset, count) in [
-        (' ', &a, start, prefix - start),
-        ('-', &a, prefix, end_a - prefix),
-        ('+', &b, prefix, end_b - prefix),
-        (' ', &a, end_a, context),
-    ] {
-        for line in lines.iter().skip(offset).take(count) {
-            out.push(marker);
-            out.push_str(line);
-            if !line.ends_with('\n') {
-                out.push_str("\n\\ No newline at end of file\n");
-            }
-        }
-    }
-    out
+
+    // patch uses a tab to delimit filenames that contain spaces.
+    let delimiter = if file.contains(' ') { "\t" } else { "" };
+    TextDiff::from_lines(original, candidate)
+        .unified_diff()
+        .context_radius(3)
+        .header(
+            &format!("a/{file}{delimiter}"),
+            &format!("b/{file}{delimiter}"),
+        )
+        .to_string()
 }
 
 #[cfg(test)]
@@ -49,20 +24,64 @@ mod tests {
     use super::diff;
 
     #[test]
-    fn empty_changes_and_missing_terminators() {
+    fn unchanged_and_empty_original() {
         assert_eq!(diff("file", "same", "same"), "");
         assert_eq!(
-            diff("file", "", "new"),
-            "--- file\n+++ file\n@@ -0,0 +1,1 @@\n+new\n\\ No newline at end of file\n"
+            diff("file", "", "new\n"),
+            "--- a/file\n+++ b/file\n@@ -0,0 +1 @@\n+new\n"
         );
     }
 
     #[test]
-    fn keeps_crlf_context_and_bounds_the_hunk() {
-        let before = "0\r\n1\r\n2\r\n3\r\nold\r\n5\r\n6\r\n7\r\n8\r\n";
+    fn splits_changes_separated_by_seven_lines() {
         assert_eq!(
-            diff("file", before, &before.replace("old", "new")),
-            "--- file\n+++ file\n@@ -2,7 +2,7 @@\n 1\r\n 2\r\n 3\r\n-old\r\n+new\r\n 5\r\n 6\r\n 7\r\n"
+            diff(
+                "file",
+                "old top\n1\n2\n3\n4\n5\n6\n7\nold bottom\n",
+                "new top\n1\n2\n3\n4\n5\n6\n7\nnew bottom\n",
+            ),
+            concat!(
+                "--- a/file\n+++ b/file\n",
+                "@@ -1,4 +1,4 @@\n-old top\n+new top\n 1\n 2\n 3\n",
+                "@@ -6,4 +6,4 @@\n 5\n 6\n 7\n-old bottom\n+new bottom\n",
+            )
+        );
+    }
+
+    #[test]
+    fn merges_changes_separated_by_six_lines() {
+        assert_eq!(
+            diff(
+                "file",
+                "old top\n1\n2\n3\n4\n5\n6\nold bottom\n",
+                "new top\n1\n2\n3\n4\n5\n6\nnew bottom\n",
+            ),
+            concat!(
+                "--- a/file\n+++ b/file\n",
+                "@@ -1,8 +1,8 @@\n-old top\n+new top\n",
+                " 1\n 2\n 3\n 4\n 5\n 6\n-old bottom\n+new bottom\n",
+            )
+        );
+    }
+
+    #[test]
+    fn marks_the_side_missing_a_final_newline() {
+        assert_eq!(
+            diff("file", "line", "line\n"),
+            "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-line\n\\ No newline at end of file\n+line\n"
+        );
+        assert_eq!(
+            diff("file", "line\n", "line"),
+            "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-line\n+line\n\\ No newline at end of file\n"
+        );
+    }
+
+    #[test]
+    fn keeps_mixed_line_endings_in_changes_and_context() {
+        let before = "0\r\n1\r\n2\n3\r\nold\r\n5\r\n6\n7\r\n8\r\n";
+        assert_eq!(
+            diff("file", before, &before.replace("old\r\n", "new\n")),
+            "--- a/file\n+++ b/file\n@@ -2,7 +2,7 @@\n 1\r\n 2\n 3\r\n-old\r\n+new\n 5\r\n 6\n 7\r\n"
         );
     }
 }

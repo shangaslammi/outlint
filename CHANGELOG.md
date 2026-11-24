@@ -18,7 +18,8 @@ output shape, and the library API may all change in a minor release. See
   discovery ([edit specification](spec/edit-spec.md)). This optional command is
   layered on the validator's document model, outside the validator's
   specification and stability promises, and available only in the full
-  edition or with the `edit` Cargo feature.
+  edition or with the `edit` Cargo feature. Dry runs emit unified patches
+  with three lines of context for each group of nearby changes.
 - **Provisional edit library.** `outlint-edit` exposes pure script parsing
   and candidate generation with physical node correspondence.
 - **Provisional Markdown and path APIs.** `outlint-core` exposes

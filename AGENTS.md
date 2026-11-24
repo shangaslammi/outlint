@@ -233,6 +233,8 @@ semver rules), `serde`/`serde_json`, `jsonschema`, `regex`,
 The check-only CLI adds only `serde_json`. The optional edit shell uses
 `tempfile` for exclusive same-directory temporary file creation, automatic
 cleanup on failed writes or replacement, and portable atomic persistence.
+It uses `similar` to compute line diffs and render standard unified patches
+with bounded context and missing-newline markers.
 On Windows it uses `winapi-util` for a safe link-count query because stable
 std does not expose that metadata there. `outlint-edit` uses the workspace's
 existing `proptest` dev dependency to exercise edit boundary preservation.
