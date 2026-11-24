@@ -117,10 +117,18 @@ NEW
 
     dir.write("CHANGELOG.md", initial);
     dir.write("release.patch", preview);
-    // Use Git's patch parser when installed. The fallback only needs to
-    // interpret the two LF-terminated, nonempty ranges asserted above.
+    // Use Git's patch parser when installed. Git for Windows defaults to
+    // `core.autocrlf=true`, which would rewrite the patched file with CRLF,
+    // so turn conversion off. The fallback only needs to interpret the two
+    // LF-terminated, nonempty ranges asserted above.
     let patched = match Command::new("git")
-        .args(["apply", "--whitespace=nowarn", "release.patch"])
+        .args([
+            "-c",
+            "core.autocrlf=false",
+            "apply",
+            "--whitespace=nowarn",
+            "release.patch",
+        ])
         .current_dir(dir.path())
         .output()
     {
